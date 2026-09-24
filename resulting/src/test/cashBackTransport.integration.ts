@@ -142,7 +142,7 @@ afterAll(async () => {
   }
 });
 
-const seed = async (live = false) => {
+const seed = async (live = false, approved = true) => {
   const eventId = randomUUID();
   const slipId = randomUUID();
   const time = new Date(Date.now() + (live ? -60_000 : 60_000)).toISOString();
@@ -168,7 +168,7 @@ const seed = async (live = false) => {
       } : {}),
     }),
   ]);
-  await resulting.command("place", {
+  const placement = {
     userId: "owner", userName: "Owner", slipId, wager: 100, betKind: live ? "LIVE" : "PRE_MATCH",
     rows: [{
       id: "row", eventId, eventName: "A - B", eventTime: time, oddsId: "home", oddsValue: 3,
@@ -177,12 +177,13 @@ const seed = async (live = false) => {
       ...(live ? { marketId, marketType: "NEXT_CORNER", marketVersion: 1, quoteVersion: 1,
         selectionId, side: "HOME", selectedAt: new Date().toISOString(), quoteValidUntil } : {}),
     }],
-  });
+  };
+  await resulting.command(approved ? "place" : "place-pending", placement);
   await until(() => bet.command("bet-state", { slipId }), value =>
-    Boolean(value && typeof value === "object" && "status" in value && value.status === "CONFIRMED"));
+    Boolean(value && typeof value === "object" && "status" in value && value.status === (approved ? "CONFIRMED" : "PENDING")));
   await until(() => resulting.command("bet-state", { slipId }), value =>
-    Boolean(value && typeof value === "object" && "status" in value && value.status === "BET_APPROVED"));
-  return { eventId, slipId };
+    Boolean(value && typeof value === "object" && "status" in value && value.status === (approved ? "BET_APPROVED" : "BET_PENDING")));
+  return { eventId, slipId, placement };
 };
 const offer = async (slipId: string, clientOperationId: string, stakeMinor?: number) => {
   const initial = await api(bet, `/api/bet/${slipId}/cash-back/quote`, {
@@ -233,6 +234,56 @@ it("runs repeated partial/full HTTP flows through real RabbitMQ and two independ
   });
   const history = await api(bet, `/api/bet/${fixture.slipId}/cash-back/history`);
   expect(history.body.items).toHaveLength(3);
+});
+
+it.each(["read", "retry"])("fences an independent approval %s against a replacement inserted after full archival", async stage => {
+  const fixture = await seed(false, false);
+  await resulting.command("pause-placement", fixture);
+  const placement = resulting.command("replay-placement", { placement: fixture.placement });
+  await resulting.paused();
+  await resultingPeer.command(`pause-approval-${stage}`, fixture);
+  const approval = resultingPeer.command("replay-approval", fixture);
+  await resultingPeer.paused();
+  try {
+    await resulting.command("approve", { slipId: fixture.slipId, betKind: "PRE_MATCH" });
+    await until(() => bet.command("bet-state", fixture), value =>
+      Boolean(value && typeof value === "object" && "status" in value && value.status === "CONFIRMED"));
+    await until(() => resulting.command("bet-state", fixture), value =>
+      Boolean(value && typeof value === "object" && "status" in value && value.status === "BET_APPROVED"));
+    const quote = await offer(fixture.slipId, `archive-${stage}`);
+    const outcome = await confirm(fixture.slipId, quote);
+    expect(outcome.body.state).toBe("ACCEPTED");
+    const identity = { slipId: fixture.slipId, operationId: quote.operationId };
+    const before = await until(() => resulting.command("archive-state", identity), value =>
+      Boolean(value && typeof value === "object" && "active" in value && value.active === null
+        && "archiveHash" in value && typeof value.archiveHash === "string"));
+    expect(before).toMatchObject({
+      active: null, normalSettlements: 0,
+      financial: { remainingStakeMinor: 0, cumulativeClosedStakeMinor: 10000, cumulativeReturnMinor: 10000 },
+    });
+    await resulting.command("pause-placement-after-resume", fixture);
+    await resulting.paused();
+    expect(await resulting.command("archive-state", identity)).toMatchObject({ active: { status: "BET_PENDING" } });
+    await resultingPeer.command("resume");
+    await approval;
+    await resulting.command("resume");
+    await placement;
+    const finalScore = {
+      eventId: fixture.eventId, occurredAt: new Date().toISOString(),
+      home: "A", away: "B", homeScore: 1, awayScore: 0, correctScoreResult: "1 - 0", oneCrossTwoResult: "A",
+    };
+    await Promise.all([
+      resulting.command("replay-result", { finalScore }),
+      resultingPeer.command("replay-result", { finalScore }),
+    ]);
+    expect(await resulting.command("archive-state", identity)).toEqual(before);
+    expect(await resultingPeer.command("archive-state", identity)).toEqual(before);
+    expect((await api(bet, `/api/bet/${fixture.slipId}/cash-back/operations/${quote.operationId}`)).body.receipt)
+      .toEqual(outcome.body.receipt);
+  } finally {
+    await Promise.all([resulting.command("resume"), resultingPeer.command("resume")]);
+    await Promise.all([placement, approval]);
+  }
 });
 
 it("keeps the winning random quote ID across two paused producer processes, retries and late confirmation recovery", async () => {

@@ -78,6 +78,17 @@ const getOffer = async ({ partial } = {}) => {
   return within(card()).findByRole('button', { name: partial === undefined ? 'Confirm full cash back' : 'Confirm partial cash back' });
 };
 
+// A server quote/receipt is not a readiness signal for the local restoration effect.
+const findRestoredPartialInput = async (amount) => {
+  const input = await screen.findByLabelText('Stake to close (Stanbucks)');
+  await waitFor(() => {
+    expect(input).toBeInTheDocument();
+    expect(input).toHaveValue(amount);
+    expect(screen.getByRole('button', { name: 'Partial stake' })).toHaveAttribute('aria-pressed', 'true');
+  });
+  return input;
+};
+
 beforeEach(() => {
   let nextId = 0;
   Object.defineProperty(window, 'crypto', { configurable: true, value: { randomUUID: () => `test-operation-${++nextId}` } });
@@ -207,7 +218,7 @@ it('recovers a lost initial quote response on reload by retrying the identical P
   await screen.findByRole('button', { name: 'Confirm partial cash back' });
   expect(axios.post.mock.calls[1][1]).toEqual(original);
   expect(axios.get.mock.calls.some(([url]) => url.includes('/operations/'))).toBe(false);
-  expect(screen.getByLabelText('Stake to close (Stanbucks)')).toHaveValue(40);
+  await findRestoredPartialInput(40);
 });
 
 it('keeps uncertain consent locked past browser expiry and recovers its accepted receipt after reload', async () => {
@@ -234,6 +245,7 @@ it('keeps uncertain consent locked past browser expiry and recovers its accepted
   first.unmount();
   mount();
   await screen.findByText('Cash back recorded. The receipt below is authoritative.');
+  await findRestoredPartialInput(40);
   expect(axios.post.mock.calls.filter(([url]) => url.endsWith('/accept'))).toHaveLength(1);
   expect(card()).toHaveTextContent('Remaining stake: 60.00');
   expect(localStorage.length).toBe(0);
@@ -254,7 +266,8 @@ it('replays the saved confirmation after reload of an ambiguous unsubmitted POST
   mount();
   await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(3));
   expect(axios.post.mock.calls[2][1]).toEqual(consent);
-  expect(screen.getByText(/Confirmation pending/)).toBeInTheDocument();
+  expect(await screen.findByText(/Confirmation pending/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Full remainder' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.queryByText('Cash back recorded. The receipt below is authoritative.')).not.toBeInTheDocument();
 });
 
@@ -410,10 +423,7 @@ it('pins a restored offer instead of adopting another tab offer, and keeps the f
   localStorage.setItem(storageKey(currentUser.id, record), JSON.stringify(record));
   mount();
   await screen.findByRole('button', { name: 'Confirm partial cash back' });
-  // The server quote can render before the effect restores the local partial form.
-  const input = await screen.findByLabelText('Stake to close (Stanbucks)');
-  expect(input).toHaveValue(40);
-  expect(screen.getByRole('button', { name: 'Partial stake' })).toHaveAttribute('aria-pressed', 'true');
+  const input = await findRestoredPartialInput(40);
   input.focus();
   const otherRequest = { action: 'QUOTE', clientOperationId: 'other-tab', portion: { mode: 'PARTIAL', stakeMinor: 2000 } };
   const other = quoted(otherRequest);

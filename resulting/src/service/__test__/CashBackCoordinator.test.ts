@@ -20,7 +20,7 @@ const publishers = () => ({
   settleSlipRowPublisher: new SettleSlipRowPublisher(messengerWrapper.connection),
 });
 
-const setup = async (eventCount = 1, cutoffMs = 60_000, betKind = BetKind.PRE_MATCH) => {
+const setup = async (eventCount = 1, cutoffMs = 60_000, betKind = BetKind.PRE_MATCH, approved = true) => {
   const cutoff = new Date(Date.now() + cutoffMs).toISOString();
   const kickoff = betKind === BetKind.LIVE ? new Date(Date.now() - 60_000).toISOString() : cutoff;
   const rows = Array.from({ length: eventCount }, (_, index) =>
@@ -32,7 +32,7 @@ const setup = async (eventCount = 1, cutoffMs = 60_000, betKind = BetKind.PRE_MA
   });
   const settlementPublishers = publishers();
   await upsertPlaceBet(place, settlementPublishers);
-  await applyModerationResult(createModerationEvent("slip", ModerationStatus.APPROVED), settlementPublishers);
+  if (approved) await applyModerationResult(createModerationEvent("slip", ModerationStatus.APPROVED), settlementPublishers);
   const requests: CashBackSourceRequest[] = [];
   const outcomes: ICashBackOutcomeEvent["data"][] = [];
   const generations = new Map<string, number>();
@@ -519,38 +519,141 @@ it("retains removed-void original legs and denies a new offer despite surviving 
     .toMatchObject({ outcome: "UNAVAILABLE", reason: "SELECTION_RESOLVED" });
 });
 
-it("does not resurrect exposure when a duplicate placement races canonical archival", async () => {
-  const state = await setup();
-  let reached!: () => void;
-  let resume!: () => void;
-  const observed = new Promise<void>(resolve => { reached = resolve; });
-  const paused = new Promise<void>(resolve => { resume = resolve; });
+it.each(["aggregate read", "CAS retry"])("does not resurrect exposure when duplicate placement and approval race archival at the %s", async stage => {
+  const state = await setup(1, 60_000, BetKind.PRE_MATCH, false);
+  const original = await Bet.findOne({ slipId: "slip" });
+  const barrier = () => {
+    let signal!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>(resolve => { signal = resolve; });
+    const released = new Promise<void>(resolve => { resume = resolve; });
+    return { reached, resume: () => resume(), pause: async () => { signal(); await released; } };
+  };
+  const beforePlacement = barrier();
+  const beforeApproval = barrier();
+  const afterPlacement = barrier();
   const exists = BetArchive.exists.bind(BetArchive);
   const archiveRead = jest.spyOn(BetArchive, "exists").mockImplementationOnce(filter => {
     const query = exists(filter);
     const execute = query.exec.bind(query);
     jest.spyOn(query, "exec").mockImplementationOnce(async () => {
       const value = await execute();
-      reached();
-      await paused;
+      await beforePlacement.pause();
       return value;
     });
     return query;
   });
   const duplicate = upsertPlaceBet(state.place, state.settlementPublishers);
-  await observed;
+  await beforePlacement.reached;
+  let approvalPaused = false;
+  const findOne = Bet.findOne.bind(Bet);
+  const approvalRead = jest.spyOn(Bet, "findOne").mockImplementation((...args) => {
+    const query = findOne(...args);
+    if (stage === "aggregate read" && !approvalPaused) {
+      approvalPaused = true;
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        await beforeApproval.pause();
+        return execute();
+      });
+    }
+    return query;
+  });
+  const updateOne = Bet.updateOne.bind(Bet);
+  const approvalWrite = jest.spyOn(Bet, "updateOne").mockImplementation((...args) => {
+    const query = updateOne(...args);
+    const changes = args[1];
+    const first = Array.isArray(changes) ? changes[0] : undefined;
+    if (stage === "CAS retry" && !approvalPaused && first && "$set" in first
+      && first.$set.status === ResultingStatus.BET_APPROVED) {
+      approvalPaused = true;
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        await beforeApproval.pause();
+        return execute();
+      });
+    }
+    return query;
+  });
+  const upsert = Bet.findOneAndUpdate.bind(Bet);
+  const placementWrite = jest.spyOn(Bet, "findOneAndUpdate").mockImplementation((...args) => {
+    const query = upsert(...args);
+    if (args[2]?.upsert) {
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        const placed = await execute();
+        await afterPlacement.pause();
+        return placed;
+      });
+    }
+    return query;
+  });
+  const approval = applyModerationResult(createModerationEvent("slip"), state.settlementPublishers);
+  await beforeApproval.reached;
   try {
+    await applyModerationResult(createModerationEvent("slip"), state.settlementPublishers);
     const quote = await state.quote("retirement");
     await state.confirm("retirement", quote.quoteId);
     await state.pump();
     expect(await Bet.countDocuments()).toBe(0);
+    const archive = JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean());
+    const receipt = JSON.stringify((await CashBackOperation.findOne({ operationId: "retirement" }))?.outcome);
+    beforePlacement.resume();
+    await afterPlacement.reached;
+    const replacement = await Bet.findOne({ slipId: "slip" });
+    expect(replacement?._id.toString()).not.toBe(original?._id.toString());
+    expect(replacement?.status).toBe(ResultingStatus.BET_PENDING);
+    beforeApproval.resume();
+    await approval;
+    afterPlacement.resume();
+    await duplicate;
+    const activeAfterCleanup = await Bet.findOne({ slipId: "slip" });
+    await processFinalScore(createFinalScoreEvent({
+      eventId: "event-0", home: "Home", away: "Away", homeScore: 1, awayScore: 0,
+    }), state.settlementPublishers);
+    expect(activeAfterCleanup).toBeNull();
+    expect(await Bet.countDocuments()).toBe(0);
+    expect(JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean())).toBe(archive);
+    expect(JSON.stringify((await CashBackOperation.findOne({ operationId: "retirement" }))?.outcome)).toBe(receipt);
+    expect(state.settlementPublishers.settleSlipPublisher.publishWithConfirm).not.toHaveBeenCalled();
+    expect(state.settlementPublishers.settleSlipRowPublisher.publishWithConfirm).not.toHaveBeenCalled();
   } finally {
-    resume();
+    beforePlacement.resume();
+    beforeApproval.resume();
+    afterPlacement.resume();
+    try {
+      await Promise.all([duplicate, approval]);
+    } finally {
+      archiveRead.mockRestore();
+      approvalRead.mockRestore();
+      approvalWrite.mockRestore();
+      placementWrite.mockRestore();
+    }
   }
-  await duplicate;
-  archiveRead.mockRestore();
+});
+
+it("surfaces an archived-placement cleanup miss and removes the pending replacement on redelivery", async () => {
+  const state = await setup(1, 60_000, BetKind.PRE_MATCH, false);
+  const pending = await Bet.findOne({ slipId: "slip" }).lean();
+  if (!pending) throw new Error("Missing original pending placement");
+  await applyModerationResult(createModerationEvent("slip"), state.settlementPublishers);
+  const quote = await state.quote("cleanup");
+  await state.confirm("cleanup", quote.quoteId);
+  await state.pump();
+  const archive = JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean());
+  const replacement = await Bet.create({ ...pending, _id: undefined });
+  const removal = jest.spyOn(Bet, "deleteOne").mockResolvedValueOnce({ acknowledged: true, deletedCount: 0 });
+  try {
+    await expect(upsertPlaceBet(state.place, state.settlementPublishers))
+      .rejects.toThrow("Archived slip retains a mutable placement");
+    expect((await Bet.findById(replacement._id))?.status).toBe(ResultingStatus.BET_PENDING);
+  } finally {
+    removal.mockRestore();
+  }
+  await upsertPlaceBet(state.place, state.settlementPublishers);
   expect(await Bet.countDocuments()).toBe(0);
-  expect((await BetArchive.findOne({ slipId: "slip" }))?.status).toBe(ResultingStatus.BET_CASH_BACK);
+  expect(JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean())).toBe(archive);
+  expect((await CashBackOperation.findOne({ operationId: "cleanup" }))?.outcome?.outcome).toBe("ACCEPTED");
 });
 
 it("prices original live selections from exact current quote identities without changing accepted odds", async () => {

@@ -28,7 +28,7 @@ import {
   PendingModerationReplayOutcome,
   recoverPendingModerationForSlip,
 } from "./pendingModeration";
-import { cashBackPlacementState, mutateCashBackBet } from "./cashBackState";
+import { CashBackBet, cashBackPlacementState, mutateCashBackBet } from "./cashBackState";
 
 const PRE_MATCH_PRODUCTS = new Set(["1X2", "Correct Score"]);
 const SETTLED_BET_STATUS_VALUES = [
@@ -513,7 +513,7 @@ async function applyRowDecision(
 ): Promise<boolean> {
   if (bet.cashBackFinancial) {
     return mutateCashBackBet(
-      bet.slipId,
+      bet._id,
       current => current.status === ResultingStatus.BET_APPROVED
         && current.rows.some(candidate => candidate.id === row.id && candidate.result === ResultingStatus.ROW_NO_RESULT),
       current => {
@@ -654,7 +654,7 @@ async function cleanupPublishedManualVoidRows(slipId: string): Promise<boolean> 
   const current = await Bet.findOne({ slipId });
   if (current?.cashBackFinancial) {
     return mutateCashBackBet(
-      slipId,
+      current._id,
       bet => bet.status === ResultingStatus.BET_APPROVED && bet.rows.some(
         row => row.pendingRemoval && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED
       ),
@@ -722,7 +722,7 @@ async function finalizeApprovedSlipIfReady(slipId: string): Promise<boolean> {
 
   if (bet.cashBackFinancial) {
     return mutateCashBackBet(
-      slipId,
+      bet._id,
       current => current.status === ResultingStatus.BET_APPROVED && current.rows.every(
         row => row.result !== ResultingStatus.ROW_NO_RESULT && !row.pendingRemoval
           && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED
@@ -1275,6 +1275,18 @@ async function replayStoredSettlementsForSlip(
   await reconcileSlip(slipId, publishers);
 }
 
+async function discardArchivedPlacement(placedBet: CashBackBet | null): Promise<void> {
+  if (!placedBet) return;
+  await Bet.deleteOne({
+    _id: placedBet._id, slipId: placedBet.slipId, status: ResultingStatus.BET_PENDING,
+    cashBackPending: { $exists: false }, cashBackArchiving: { $ne: true },
+  });
+  const remaining = await Bet.findOne({ slipId: placedBet.slipId });
+  if (remaining && !TERMINAL_BET_STATUSES.has(remaining.status)) {
+    throw new Error("Archived slip retains a mutable placement");
+  }
+}
+
 export async function upsertPlaceBet(
   event: IPlaceBetEvent,
   publishers: SettlementPublishers
@@ -1282,6 +1294,7 @@ export async function upsertPlaceBet(
   const { data } = event;
 
   if (await BetArchive.exists({ slipId: data.slipId })) {
+    await discardArchivedPlacement(await Bet.findOne({ slipId: data.slipId }));
     await clearPendingModerationResult(data.slipId);
     return;
   }
@@ -1321,10 +1334,7 @@ export async function upsertPlaceBet(
   // A duplicate may have observed no archive before the original was retired.
   // Never let that late upsert establish a second authoritative placement.
   if (await BetArchive.exists({ slipId: data.slipId })) {
-    if (placedBet) await Bet.deleteOne({
-      _id: placedBet._id, slipId: data.slipId, status: ResultingStatus.BET_PENDING,
-      cashBackPending: { $exists: false }, cashBackArchiving: { $ne: true },
-    });
+    await discardArchivedPlacement(placedBet);
     await clearPendingModerationResult(data.slipId);
     return;
   }
@@ -1354,16 +1364,9 @@ export async function replayPendingModerationResult(
 ): Promise<PendingModerationReplayOutcome> {
   const { data } = event;
 
-  if (await BetArchive.exists({ slipId: data.slipId })) return "RESOLVED";
   const bet = await Bet.findOne({ slipId: data.slipId });
-
-  if (!bet) {
-    if (await BetArchive.exists({ slipId: data.slipId })) {
-      return "RESOLVED";
-    }
-
-    return "MISSING_AGGREGATE";
-  }
+  if (await BetArchive.exists({ slipId: data.slipId })) return "RESOLVED";
+  if (!bet) return "MISSING_AGGREGATE";
 
   if (TERMINAL_BET_STATUSES.has(bet.status)) {
     return "RESOLVED";
@@ -1379,7 +1382,7 @@ export async function replayPendingModerationResult(
       throw new Error("Moderation cannot change a cash-back-aware placement kind");
     }
     await mutateCashBackBet(
-      data.slipId,
+      bet._id,
       current => [ResultingStatus.BET_PENDING, ResultingStatus.BET_APPROVED].includes(current.status)
         && current.status !== nextStatus,
       () => ({
@@ -1410,7 +1413,7 @@ export async function replayPendingModerationResult(
   );
 
   if (!updatedBet) {
-    const currentBet = await Bet.findOne({ slipId: data.slipId });
+    const currentBet = await Bet.findById(bet._id);
     return !currentBet || TERMINAL_BET_STATUSES.has(currentBet.status)
       ? "RESOLVED"
       : "MISSING_AGGREGATE";

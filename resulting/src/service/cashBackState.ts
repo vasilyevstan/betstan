@@ -114,13 +114,13 @@ export const rejectionReceiptExpression = (
  * changes. The operation collection is never a competing decision authority.
  */
 export const mutateCashBackBet = async (
-  slipId: string,
+  aggregateId: CashBackBet["_id"],
   eligible: (bet: CashBackBet) => boolean,
   changes: (bet: CashBackBet) => { fields: Record<string, unknown>; status: ResultingStatus; resolved?: boolean },
   rejectionReason: CashBackUnavailableReason = "SELECTION_RESOLVED"
 ): Promise<boolean> => {
   for (let attempt = 0; attempt < 5; attempt++) {
-    let bet = await Bet.findOne({ slipId });
+    let bet = await Bet.findById(aggregateId);
     if (!bet || bet.status === ResultingStatus.BET_CASH_BACK || !eligible(bet)) return false;
     if (bet.__v === undefined || bet.__v === null) {
       await Bet.updateOne(

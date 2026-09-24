@@ -2,12 +2,16 @@ import { createRequire } from "module";
 import { resolve } from "path";
 import { Server } from "http";
 import { createHash } from "crypto";
-import type { APublisher, IAmqpConnection, IEvent, QueueNames } from "@betstan/common";
+import type { APublisher, IAmqpConnection, IEvent, IEventResultEvent, IPlaceBetEvent, QueueNames } from "@betstan/common";
 import type { Application } from "express";
 
 interface Listener { init(): Promise<void>; listen(): void }
 interface Worker { init?(): Promise<void>; start(): Promise<void>; stop(): Promise<void> }
-interface Command { id: number; action: string; data?: Record<string, unknown> }
+interface Command {
+  id: number;
+  action: string;
+  data?: Record<string, unknown> & { placement?: IPlaceBetEvent["data"]; finalScore?: IEventResultEvent["data"] };
+}
 
 const root = resolve(__dirname, "../../..");
 const role = process.env.CASH_BACK_TEST_ROLE;
@@ -32,8 +36,15 @@ let pausedDecisionOperation: string | undefined;
 let pausedQuoteClientOperation: string | undefined;
 let pausedLiveEvent: string | undefined;
 let pausedLedgerEvent: string | undefined;
+let pausedPlacementSlip: string | undefined;
+let pausePlacementAfter = false;
+let pausedApprovalSlip: string | undefined;
+let pausedApprovalAggregate: string | undefined;
+let approvalPauseClaimed = false;
 let resumePublication: (() => void) | undefined;
 let publicationGate: Promise<void> | undefined;
+let replayPublishers: import("../service/resulting").SettlementPublishers | undefined;
+const normalSettlements = new Map<string, number>();
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -50,6 +61,10 @@ common.APublisher.prototype.publishWithConfirm = async function (this: APublishe
     await publicationGate;
   }
   await originalPublish.call(this, event);
+  if (role === "resulting" && typeof data?.slipId === "string"
+    && (this.queue === common.QueueNames.SETTLE_SLIP || this.queue === common.QueueNames.SETTLE_SLIP_ROW)) {
+    normalSettlements.set(data.slipId, (normalSettlements.get(data.slipId) ?? 0) + 1);
+  }
   if (role === "gamemaster" && data?.eventId === pausedLiveEvent && typeof data?.sequence === "number" && publicationGate) {
     process.send?.({ type: "paused", role });
     await publicationGate;
@@ -114,10 +129,46 @@ const start = async () => {
       return quoteUpdate(filter, changes, options);
     };
     const models: typeof import("../model/Bet") = load("./src/model/Bet");
+    models.Bet.collection.findOneAndUpdate = new Proxy(models.Bet.collection.findOneAndUpdate, {
+      apply: async (target, receiver, args) => {
+        const filter: unknown = args[0];
+        const options: unknown = args[2];
+        const placement = pausedPlacementSlip && object(filter) && filter.slipId === pausedPlacementSlip
+          && object(options) && options.upsert === true;
+        if (placement && !pausePlacementAfter && publicationGate) {
+          process.send?.({ type: "paused", role });
+          await publicationGate;
+        }
+        const stored: unknown = await Reflect.apply(target, receiver, args);
+        if (placement && pausePlacementAfter && publicationGate) {
+          process.send?.({ type: "paused", role });
+          await publicationGate;
+        }
+        return stored;
+      },
+    });
+    models.Bet.collection.findOne = new Proxy(models.Bet.collection.findOne, {
+      apply: async (target, receiver, args) => {
+        const filter: unknown = args[0];
+        if (pausedApprovalSlip && !approvalPauseClaimed && object(filter)
+          && filter.slipId === pausedApprovalSlip && publicationGate) {
+          approvalPauseClaimed = true;
+          process.send?.({ type: "paused", role });
+          await publicationGate;
+        }
+        return Reflect.apply(target, receiver, args);
+      },
+    });
     const update = models.Bet.collection.updateOne.bind(models.Bet.collection);
     models.Bet.collection.updateOne = async (filter, changes, options) => {
       const first = Array.isArray(changes) && object(changes[0]) ? changes[0] : undefined;
       const set = object(first?.$set) ? first.$set : undefined;
+      if (pausedApprovalAggregate && !approvalPauseClaimed && String(filter._id) === pausedApprovalAggregate
+        && set?.status === common.ResultingStatus.BET_APPROVED && publicationGate) {
+        approvalPauseClaimed = true;
+        process.send?.({ type: "paused", role });
+        await publicationGate;
+      }
       if (
         pausedDecisionOperation && filter["cashBackPending.operation.operationId"] === pausedDecisionOperation
         && set?.["cashBackPending.state"] === "ACCEPTED" && publicationGate
@@ -144,6 +195,16 @@ const start = async () => {
       connectDb: async () => {}, connectBroker: async () => {},
       logger: { log: () => {}, error: (...args) => console.error(...args) },
     });
+    const slipPublisher: typeof import("../event/publisher/SettleSlipPublisher") = load("./src/event/publisher/SettleSlipPublisher");
+    const rowPublisher: typeof import("../event/publisher/SettleSlipRowPublisher") = load("./src/event/publisher/SettleSlipRowPublisher");
+    replayPublishers = {
+      settleSlipPublisher: new slipPublisher.default(common.messengerWrapper.connection),
+      settleSlipRowPublisher: new rowPublisher.default(common.messengerWrapper.connection),
+    };
+    await Promise.all([
+      replayPublishers.settleSlipPublisher.initConfirmChannel(),
+      replayPublishers.settleSlipRowPublisher.initConfirmChannel(),
+    ]);
   } else if (role === "bet") {
     const module: { getCashBackFacade(connection: IAmqpConnection): Worker } = load("./src/service/CashBackFacade");
     const facade = module.getCashBackFacade(common.messengerWrapper.connection);
@@ -179,6 +240,15 @@ const start = async () => {
 };
 
 const handle = async ({ action, data = {} }: Command): Promise<unknown> => {
+  if (action === "pause-placement-after-resume") {
+    if (role !== "resulting") throw new Error("Wrong placement owner");
+    const previous = resumePublication;
+    pausedPlacementSlip = String(data.slipId);
+    pausePlacementAfter = true;
+    publicationGate = new Promise<void>(resolveGate => { resumePublication = resolveGate; });
+    previous?.();
+    return true;
+  }
   if (action === "pause-decision-after-resume") {
     if (role !== "resulting") throw new Error("Wrong decision owner");
     const previous = resumePublication;
@@ -187,13 +257,26 @@ const handle = async ({ action, data = {} }: Command): Promise<unknown> => {
     previous?.();
     return true;
   }
-  if (["pause-result", "pause-grant", "pause-decision", "pause-quote", "pause-after-live", "pause-ledger"].includes(action)) {
+  if (["pause-result", "pause-grant", "pause-decision", "pause-quote", "pause-after-live", "pause-ledger",
+    "pause-placement", "pause-approval-read", "pause-approval-retry"].includes(action)) {
     pausedResultEvent = action === "pause-result" ? String(data.eventId) : undefined;
     pausedGrantOperation = action === "pause-grant" ? String(data.operationId) : undefined;
     pausedDecisionOperation = action === "pause-decision" ? String(data.operationId) : undefined;
     pausedQuoteClientOperation = action === "pause-quote" ? String(data.clientOperationId) : undefined;
     pausedLiveEvent = action === "pause-after-live" ? String(data.eventId) : undefined;
     pausedLedgerEvent = action === "pause-ledger" ? String(data.eventId) : undefined;
+    pausedPlacementSlip = action === "pause-placement" ? String(data.slipId) : undefined;
+    pausePlacementAfter = false;
+    pausedApprovalSlip = action === "pause-approval-read" ? String(data.slipId) : undefined;
+    pausedApprovalAggregate = undefined;
+    approvalPauseClaimed = false;
+    if (action === "pause-approval-retry") {
+      if (role !== "resulting") throw new Error("Wrong moderation owner");
+      const models: typeof import("../model/Bet") = load("./src/model/Bet");
+      const selected = await models.Bet.findOne({ slipId: data.slipId });
+      if (!selected) throw new Error("Missing selected moderation aggregate");
+      pausedApprovalAggregate = selected._id.toString();
+    }
     publicationGate = new Promise<void>(resolveGate => { resumePublication = resolveGate; });
     return true;
   }
@@ -204,6 +287,11 @@ const handle = async ({ action, data = {} }: Command): Promise<unknown> => {
     pausedQuoteClientOperation = undefined;
     pausedLiveEvent = undefined;
     pausedLedgerEvent = undefined;
+    pausedPlacementSlip = undefined;
+    pausePlacementAfter = false;
+    pausedApprovalSlip = undefined;
+    pausedApprovalAggregate = undefined;
+    approvalPauseClaimed = false;
     resumePublication?.();
     publicationGate = undefined;
     return true;
@@ -277,8 +365,42 @@ const handle = async ({ action, data = {} }: Command): Promise<unknown> => {
       pending: pending ? { state: pending.state, operationId: operation?.operationId } : null,
     } : null;
   }
-  if (action === "place") {
+  if (action === "archive-state") {
+    if (role !== "resulting") throw new Error("Wrong archive owner");
+    const models: typeof import("../model/Bet") = load("./src/model/Bet");
+    const operations: typeof import("../model/CashBackOperation") = load("./src/model/CashBackOperation");
+    const active = await models.Bet.findOne({ slipId: data.slipId }).lean();
+    const archived = await models.BetArchive.findOne({ slipId: data.slipId }).lean();
+    const operation = await operations.CashBackOperation.findOne({ operationId: data.operationId }).lean();
+    return {
+      active: active ? { id: active._id.toString(), status: active.status } : null,
+      archiveHash: archived ? createHash("sha256").update(JSON.stringify(archived)).digest("hex") : null,
+      receiptHash: operation?.outcome ? createHash("sha256").update(JSON.stringify(operation.outcome)).digest("hex") : null,
+      financial: archived?.cashBackFinancial, normalSettlements: normalSettlements.get(String(data.slipId)) ?? 0,
+    };
+  }
+  if (["replay-placement", "replay-approval", "replay-result"].includes(action)) {
+    if (role !== "resulting" || !replayPublishers) throw new Error("Wrong replay owner");
+    const service: typeof import("../service/resulting") = load("./src/service/resulting");
+    if (action === "replay-placement") {
+      if (!data.placement) throw new Error("Missing replay placement");
+      await service.upsertPlaceBet({ data: data.placement }, replayPublishers);
+    } else if (action === "replay-approval") {
+      if (typeof data.slipId !== "string") throw new Error("Missing replay slip identity");
+      await service.applyModerationResult({
+        data: { slipId: data.slipId, result: common.ModerationStatus.APPROVED, betKind: common.BetKind.PRE_MATCH },
+      }, replayPublishers);
+    } else {
+      if (!data.finalScore) throw new Error("Missing replay final score");
+      await service.processFinalScore({ data: data.finalScore }, replayPublishers);
+    }
+    return true;
+  }
+  if (action === "place" || action === "place-pending") {
     await publish(common.QueueNames.SLIP_BET, data);
+    if (action === "place-pending") return true;
+  }
+  if (action === "place" || action === "approve") {
     await publish(common.QueueNames.MODERATION_RESULT, {
       slipId: data.slipId, result: common.ModerationStatus.APPROVED, betKind: data.betKind,
     });
