@@ -597,6 +597,25 @@ body {
   border-color: color-mix(in srgb, var(--border-subtle) 86%, var(--accent) 14%);
 }
 
+.my-bets-toolbar .btn,
+.my-bets-toolbar .form-control,
+.my-bets-toolbar .form-select {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.my-bets-board .my-bets-toolbar .btn {
+  border-color: var(--text-subtle);
+}
+
+.my-bets-toolbar .btn:focus-visible,
+.my-bets-toolbar .form-control:focus-visible,
+.my-bets-toolbar .form-select:focus-visible {
+  outline: 3px solid var(--text-main);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+
 .my-bets-filter {
   border-color: var(--border-subtle);
   color: var(--text-main);
@@ -683,6 +702,264 @@ body {
 
 .my-bets-load-more {
   font-weight: 700;
+}
+
+/* Cash back stays in the existing full-width My Bets card, not an auth-width
+   modal. Stronger token borders identify actionable controls in both themes. */
+.my-bets-board > *,
+.my-bets-row > *,
+.cash-back,
+.cash-back > * {
+  min-width: 0;
+}
+
+.my-bets-event-name,
+.cash-back-selections,
+.cash-back-values dd {
+  overflow-wrap: anywhere;
+}
+
+.my-bets-status,
+.cash-back-badge,
+.cash-back-status,
+.my-bets-outcome {
+  word-break: normal;
+  overflow-wrap: normal;
+  hyphens: none;
+}
+
+.cash-back-status,
+.cash-back-badge {
+  color: var(--text-main);
+  border-bottom: 2px solid var(--accent);
+}
+
+.cash-back-badge {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.cash-back {
+  display: grid;
+  gap: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 1rem;
+}
+
+.cash-back h3,
+.cash-back h4,
+.cash-back p {
+  margin: 0;
+}
+
+.cash-back-help {
+  color: var(--text-subtle);
+  font-size: 0.88rem;
+}
+
+.cash-back-error {
+  color: var(--danger);
+}
+
+.cash-back-message,
+.my-bets-feedback:not(:empty) {
+  background: var(--surface-elevated);
+  padding: 0.75rem;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 0.5rem;
+}
+
+.cash-back-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.cash-back-control {
+  min-height: 44px;
+  min-width: 44px;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: normal;
+  border-color: var(--text-subtle);
+}
+
+.btn.cash-back-control {
+  font-weight: 600;
+  color: var(--text-main);
+  background: var(--surface-soft);
+}
+
+.btn-primary.cash-back-control {
+  color: var(--accent-contrast);
+  background: var(--accent);
+}
+
+.cash-back-control:disabled,
+.cash-back-control[aria-disabled='true'] {
+  opacity: 1;
+  background: var(--surface-elevated);
+  border-color: var(--text-subtle);
+  color: var(--text-subtle);
+}
+
+.cash-back-control:focus-visible,
+.my-bets-feedback:focus {
+  outline: 3px solid var(--text-main);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+
+.my-bets-board .btn.cash-back-control,
+.my-bets-board .cash-back-control:focus,
+.my-bets-board .cash-back-control:hover {
+  border-color: var(--text-subtle);
+}
+
+.cash-back-amount {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(7rem, 12rem);
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.cash-back-amount input {
+  width: 100%;
+  color: var(--text-main);
+  background: var(--surface-elevated);
+}
+
+.cash-back-amount .cash-back-help {
+  grid-column: 1 / -1;
+}
+
+.cash-back-offer,
+.cash-back-history__body {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.cash-back-offer {
+  padding: 0.75rem;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+}
+
+.cash-back-offer > .btn {
+  justify-self: start;
+}
+
+.cash-back-selections {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+
+.cash-back-values {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 0.75rem 1rem;
+  margin: 0;
+}
+
+.cash-back-values > div {
+  min-width: 0;
+}
+
+.cash-back-values dt {
+  color: var(--text-subtle);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.cash-back-values dd {
+  margin: 0.15rem 0 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.cash-back-history {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 0.75rem;
+}
+
+.cash-back-history__body {
+  padding-top: 0.75rem;
+}
+
+.cash-back-receipts {
+  display: grid;
+  gap: 0.75rem;
+  padding-left: 1.5rem;
+  margin: 0;
+}
+
+.cash-back-receipts li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.cash-back-receipts time {
+  display: block;
+  color: var(--text-subtle);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
+/* Variant accents remain unchanged. Text-token boundaries/focus provide 3:1
+   on light surfaces where a decorative accent alone cannot. The v3 light
+   elevated surface also needs a small token-based increase in muted-text
+   contrast; keep this exception local to the new decision/receipt content. */
+:root[data-bs-theme='light'] .ui-variant-v3 .cash-back-help,
+:root[data-bs-theme='light'] .ui-variant-v3 .cash-back-values dt,
+:root[data-bs-theme='light'] .ui-variant-v3 .cash-back-receipts time {
+  color: color-mix(in srgb, var(--text-subtle) 90%, var(--text-main));
+}
+
+:root[data-bs-theme='light'] .ui-variant-v3 .cash-back-error {
+  color: color-mix(in srgb, var(--danger) 90%, var(--text-main));
+}
+
+@media (max-width: 767.98px) {
+  .my-bets-row--header {
+    display: none;
+  }
+
+  .my-bets-row:not(.my-bets-row--header) {
+    display: grid;
+    gap: 0.5rem;
+    padding-block: 0.75rem;
+  }
+
+  .my-bets-row > [data-label] {
+    width: 100%;
+    text-align: left !important;
+    overflow-wrap: anywhere;
+  }
+
+  .my-bets-row > [data-label]::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--text-subtle);
+    font-size: 0.76rem;
+  }
+}
+
+@media (max-width: 575.98px) {
+  .cash-back-amount {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cash-back-actions {
+    flex-direction: column;
+  }
+
+  .cash-back-offer > .btn {
+    justify-self: stretch;
+  }
 }
 
 .backoffice-board {

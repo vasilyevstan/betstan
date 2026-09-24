@@ -7,11 +7,16 @@ import {
 
 import { Event } from "../../model/Event";
 import { EventArchive } from "../../model/EventArchive";
-import { LiveResultSource } from "../../model/liveStateFields";
+import { cashBackAuthorityWritable, LiveResultSource } from "../../model/liveStateFields";
 
 class EventResultListener extends AListener<IEventResultEvent> {
   serviceName: string = "gamemaster_result_set";
   queue: QueueNames.EVENT_RESULT = QueueNames.EVENT_RESULT;
+
+  async init() {
+    await super.init();
+    await this.channel.prefetch(1);
+  }
 
   async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
     const { data } = event;
@@ -28,8 +33,11 @@ class EventResultListener extends AListener<IEventResultEvent> {
         eventId: data.eventId,
         resultPublishedAt: null,
         "pendingResult.source": { $ne: LiveResultSource.MANUAL },
+        $and: [cashBackAuthorityWritable],
       },
       {
+        $inc: { cashBackAuthorityRevision: 1 },
+        $currentDate: { cashBackAuthorityAt: true },
         $set: {
           homeResult: data.homeScore,
           awayResult: data.awayScore,
@@ -47,6 +55,19 @@ class EventResultListener extends AListener<IEventResultEvent> {
     );
 
     if (!updatedEvent) {
+      const fenced = await Event.exists({
+        eventId: data.eventId,
+        $or: [
+          { cashBackHold: { $exists: true } },
+          { cashBackAuthorityIntent: { $exists: true } },
+        ],
+      });
+      if (fenced) {
+        console.warn("gamemaster_result_waiting_for_authority", { eventId: data.eventId });
+        await new Promise(resolve => setTimeout(resolve, 100));
+        this.channel.nack(msg, false, true);
+        return;
+      }
       const [eventExists, archivedExists] = await Promise.all([
         Event.exists({ eventId: data.eventId }),
         EventArchive.exists({ eventId: data.eventId }),

@@ -2,7 +2,17 @@ import { MongoMemoryServer } from "mongodb-memory-server";
 import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 
-jest.mock("@betstan/common");
+jest.mock("@betstan/common", () => {
+  const mocked = jest.createMockFromModule<typeof import("@betstan/common")>("@betstan/common");
+  class AListener<T> {
+    ack = jest.fn();
+    channel = { prefetch: jest.fn(), nack: jest.fn() };
+    constructor(public connection: unknown) {}
+    async init() {}
+    listen = jest.fn();
+  }
+  return { ...mocked, AListener };
+});
 jest.setTimeout(60000);
 
 let mongo: any;

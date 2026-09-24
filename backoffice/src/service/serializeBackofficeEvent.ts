@@ -1,4 +1,9 @@
 const INTERNAL_EVENT_FIELDS = [
+  "cashBackGeneration",
+  "cashBackAuthorityRevision",
+  "cashBackAuthorityAt",
+  "cashBackFenceAt",
+  "cashBackHold",
   "creationRequestId",
   "creationRequestFingerprint",
   "newEventPublicationPending",

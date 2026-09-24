@@ -4,6 +4,7 @@ import { currentUser, errorHandler } from "@betstan/common";
 import cookieSession from "cookie-session";
 import { ShowBets } from "./route/ShowBets";
 import { ShowStats } from "./route/ShowStats";
+import { CashBack } from "./route/CashBack";
 
 const cors = require("cors");
 const app = express();
@@ -21,6 +22,7 @@ app.use(currentUser);
 
 app.use(ShowBets);
 app.use(ShowStats);
+app.use(CashBack);
 
 app.use(errorHandler);
 

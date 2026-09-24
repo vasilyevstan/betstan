@@ -15,6 +15,7 @@ import {
 } from "@betstan/common";
 import { BetPlacementConflict } from "../model/BetPlacementConflict";
 import { Bet, BetDocument, BetRecord, BetRowRecord } from "../model/Bet";
+import { applyCashBackFinancial } from "./cashBackFinancial";
 import {
   PendingBetUpdate,
   PendingBetUpdateDocument,
@@ -114,6 +115,7 @@ const TERMINAL_BET_STATUSES = new Set<BetStatus>([
   BetStatus.LOSS,
   BetStatus.VOID,
   BetStatus.WIN,
+  BetStatus.CASH_BACK,
 ]);
 
 const TERMINAL_ROW_STATUSES = new Set<SlipRowStatus>([
@@ -411,6 +413,7 @@ const mergePlaceRow = (
 };
 
 const ensureBetDefaults = (bet: BetDocument) => {
+  if (bet.status === BetStatus.CASH_BACK) return false;
   let changed = false;
 
   if (!bet.status) {
@@ -439,6 +442,7 @@ const ensureBetDefaults = (bet: BetDocument) => {
 };
 
 const mergePlaceBet = (bet: BetDocument, event: IPlaceBetEvent) => {
+  if (bet.status === BetStatus.CASH_BACK) return false;
   let changed = ensureBetDefaults(bet);
   const incomingBetKind = inferBetKind(event.data);
 
@@ -915,6 +919,7 @@ export const applyModerationResult = (
   bet: BetDocument,
   event: IModerationResultEvent
 ) => {
+  if (bet.status === BetStatus.CASH_BACK) return false;
   let changed = ensureBetDefaults(bet);
   changed = updateBetKind(bet, event.data.betKind) || changed;
 
@@ -995,6 +1000,21 @@ export const applySettleSlip = (
   bet: BetDocument,
   event: ISettleSlipEvent
 ) => {
+  if (bet.status === BetStatus.CASH_BACK) return false;
+  if (event.data.cashBack) {
+    const evidence = event.data.cashBack;
+    if (
+      !Number.isFinite(Date.parse(evidence.occurredAt)) || !evidence.settlementId
+      || evidence.settlementBasisStakeMinor !== evidence.financial.remainingStakeMinor
+      || ![BetStatus.WIN, BetStatus.LOSS, BetStatus.VOID].includes(evidence.financial.status)
+      || evidence.financial.status !== mapBetResultToStatus(event.data.result)
+    ) throw new Error("Invalid remaining-principal settlement evidence");
+    return applyCashBackFinancial(bet, evidence.financial);
+  }
+  if (bet.cashBackFinancial?.cumulativeClosedStakeMinor) {
+    console.warn("bet_legacy_settlement_missing_remaining_basis");
+    return false;
+  }
   let changed = ensureBetDefaults(bet);
   changed = updateBetKind(bet, event.data.betKind) || changed;
 
@@ -1011,6 +1031,7 @@ export const applySettleSlipRow = (
   bet: BetDocument,
   event: ISettleSlipRowEvent
 ) => {
+  if (bet.status === BetStatus.CASH_BACK) return false;
   let changed = ensureBetDefaults(bet);
   changed = updateBetKind(bet, event.data.betKind) || changed;
 

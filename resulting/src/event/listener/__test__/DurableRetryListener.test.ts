@@ -125,7 +125,7 @@ it.each(listenerCases)(
 );
 
 it.each(listenerCases)(
-  "$title leaves the message unacked when durable parking itself fails",
+  "$title leaves the message unacked and invokes the process failure path when durable parking fails",
   async ({ createEvent, createListener, processSpy }) => {
     processSpy();
     jest
@@ -133,7 +133,7 @@ it.each(listenerCases)(
       .mockRejectedValue(new Error("parking failed"));
     const listener = await createListener();
 
-    await listener.onMessage(createEvent() as never, createMessage());
+    await expect(listener.onMessage(createEvent() as never, createMessage())).rejects.toThrow("parking failed");
 
     expect(listener.ack).not.toHaveBeenCalled();
   }
