@@ -15,6 +15,11 @@ class PlaceBetListener extends AListener<IModerationResultEvent> {
   serviceName: string = "bet_moderation_result";
   queue: QueueNames.MODERATION_RESULT = QueueNames.MODERATION_RESULT;
 
+  async init() {
+    await super.init();
+    await this.channel.prefetch(1);
+  }
+
   async onMessage(event: IModerationResultEvent, msg: ConsumeMessage) {
     const { data } = event;
 

@@ -28,50 +28,90 @@ Telemetry also observes `slip:bet`, `resulting:slip:settle`, and
 `gamemaster:event:live`; these stable topics are distinct from its
 `telemetry:events:v1` consumer queue name.
 
-### Cash-back topics — reserved, not wired
+### Cash-back flow - runtime candidate, not active
 
-Cash-back is **not active**. These four additive `QueueNames` values belong
-to the Common source candidate described in [[Architecture]], not the current
-topic catalog above. Directions are intended contract boundaries, not
-implemented publishers or consumers.
+The four Common feature topics are now wired in the runtime source candidate,
+but cash-back is **not yet deployed or active in production**. They are kept
+separate from the established topic catalog above to distinguish source
+implementation from current production availability.
 
-| Reserved topic | Intended direction | Contract phase |
+| Candidate topic | Publisher -> consumers | Phase |
 |---|---|---|
 | `bet:cash-back:request` | Bet -> Resulting | Non-reserving `QUOTE`; `CONFIRM` of one stored quote |
 | `resulting:cash-back:outcome` | Resulting -> Bet | `QUOTED`, `UNAVAILABLE`, or durable `ACCEPTED` / `REJECTED` receipt |
 | `resulting:cash-back:source:request` | Resulting -> Backoffice / Gamemaster | `SNAPSHOT`, `RESERVE`, `RELEASE` |
 | `cash-back:source:reply` | Backoffice / Gamemaster -> Resulting | `SNAPSHOT`, `GRANTED`, `RELEASED`, `FENCED`, `DENIED` |
 
-Bet is the intended authenticated request and history-projection boundary;
-Resulting owns quotes and the canonical terminal decision. Both source owners
-participate for each selected event: Backoffice proves its lifecycle, not
-Gamemaster prices; Gamemaster proves its own lifecycle and quote authority.
-The contract ends `PRE_MATCH` eligibility before the earliest trusted kickoff;
-it cannot reopen as `LIVE`. Any resolved original leg, including a removed
-void leg, disables further cash-back. Live eligibility requires every exact
-selected market to remain unresolved, not merely an unfinished match.
+The browser uses Bet's authenticated singular `/cash-back/quote` and
+`/cash-back/accept` routes, then operation lookup and bounded receipt history;
+the full HTTP contract is in [[Application Processes]]. Resulting has no
+business HTTP route and never treats a browser timestamp or a transport
+acknowledgement as acceptance.
 
-The [source request/reply contract](https://github.com/vasilyevstan/betstan/blob/master/common/src/event/ICashBackSourceEvent.ts)
-defines generation-bound holds. A snapshot observes an empty hold at base
-generation `b`; a grant binds the exact reserve obligation to predetermined
-`b+1`. Release binds the operation, participant, original reserve request,
-both generations, and `CashBackTerminalDecision`, even without a received
-grant acknowledgement. `RELEASED` removes only the matching hold, leaving
-`b+2`; `FENCED` proves that target generation is consumed, not that a different
-newer hold is absent or released.
+1. Bet durably records the owned request and publishes `QUOTE`. Resulting
+   stores snapshot obligations for both Backoffice and Gamemaster for every
+   selected event, grouping selections by event. Snapshots do not reserve.
+2. Resulting validates the complete original manifest and current authority,
+   computes the offer, and publishes `QUOTED` or `UNAVAILABLE`. Bet stores the
+   public offer without exposing internal source proofs.
+3. Explicit confirmation names that exact stored quote. Bet persists and
+   republishes the same `CONFIRM` until reconciled. Resulting binds one
+   `UNDECIDED` Bet slot to the operation, expected revision, quote, manifest,
+   and source obligations before sending reservations.
+4. Each source atomically grants only against matching authority and an empty
+   hold. Backoffice proves lifecycle; Gamemaster proves its own lifecycle and
+   exact market/quote identity. Resulting requires every grant and an eligible
+   canonical Bet before its exclusive-deadline acceptance.
+5. Acceptance, expiry/rejection, and result-first rejection compete for the
+   same canonical slot and revision. The winner stores the immutable receipt
+   with the financial transition; other workers read that winner. A partial
+   leaves the parent active, while a full closure is terminal.
+6. Resulting persists receipt history, confirms outcome publication, and
+   releases every requested source participant, even if its grant reply was
+   lost. Publication and release obligations are replayable. Slot reuse and
+   archive wait for their completion; Bet projects the receipt without
+   rewinding a newer financial revision.
 
-Only Resulting's canonical accepted/rejected winner for the same undecided
-Bet slot and revision may authorize release, not an independent history
-record. Holds have no autonomous TTL or worker-lease expiry. All source
-authority writers would need to honor them; **source fencing and decision
-enforcement are not implemented in this slice**.
+All four topics use confirmed persistent messages and durable queues.
+Consumers acknowledge after their durable handling succeeds. Retries retain
+operation/request/decision identity; duplicate and out-of-order delivery does
+not create a second closure. No cross-queue ordering is assumed. HTTP `202`
+continues to mean durable pending, not a successful decision.
+
+#### Source holds and release
+
+A source snapshot observes an empty hold at generation `b`; a matching
+`RESERVE` grants predetermined `b+1`. `RELEASE` binds the original reservation,
+participant, operation, both generations, and the canonical terminal decision.
+It is constructible from the durable obligation even without a grant reply.
+Releasing the matching hold advances to `b+2`; cancellation arriving before
+reserve also consumes that target generation, preventing a delayed reserve
+from creating an orphan hold.
+
+`RELEASED` concerns only the exact matching hold. `FENCED` proves that the
+target generation is consumed, not that a different newer hold is absent or
+released. Generation state is retained rather than reset during recovery or
+archive. See the [source message contract](https://github.com/vasilyevstan/betstan/blob/master/common/src/event/ICashBackSourceEvent.ts).
+
+Source-authority writers conflict with holds. Gamemaster records its exact
+authority-change intent before publication/cursor advancement, preventing a
+new grant while a transition's delivery is unresolved. An outstanding hold has
+no autonomous TTL, worker-lease expiry, or timeout override: canonical
+decision recovery precedes release. A coordinator outage can therefore block
+affected source progress. This availability cost is intentional; no browser
+timeout or independent history record can release authority.
+
+#### Domain time and replay
 
 Domain times in `data`, including `requestedAt`, `issuedAt` / `expiresAt`,
-source `occurredAt`, and grant/receipt `decisionTime`, must survive replay
+source `occurredAt`, and grant/receipt `decisionTime`, survive replay
 unchanged. The existing publisher refreshes envelope `timestamp` / `sender`;
 these cannot replace domain evidence or extend a quote's validity.
 `requestedAt` is audit time, not late-acceptance authority; terminal
 `decisionTime` denotes database-domain decision time, not physical commit time.
+The shared-clock and compatible-writer assumptions are explicit in
+[[Architecture]]. An uncertain confirmation still reconciles its original
+decision after the browser offer expires; it never silently becomes a new offer.
 
 ## Event creation and publication
 

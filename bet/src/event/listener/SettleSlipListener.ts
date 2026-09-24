@@ -15,6 +15,11 @@ class SettleSlipListener extends AListener<ISettleSlipEvent> {
   serviceName: string = "bet_settle_slip";
   queue: QueueNames.SETTLE_SLIP = QueueNames.SETTLE_SLIP;
 
+  async init() {
+    await super.init();
+    await this.channel.prefetch(1);
+  }
+
   async onMessage(event: ISettleSlipEvent, msg: ConsumeMessage) {
     const { data } = event;
 

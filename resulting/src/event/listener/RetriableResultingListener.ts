@@ -13,6 +13,7 @@ abstract class RetriableResultingListener<T extends IEvent> extends AListener<T>
 
   async init() {
     await super.init();
+    await this.channel.prefetch(1);
     this.settleSlipRowPublisher = new SettleSlipRowPublisher(this.connection);
     await this.settleSlipRowPublisher.init();
     await this.settleSlipRowPublisher.initConfirmChannel();
@@ -33,6 +34,7 @@ abstract class RetriableResultingListener<T extends IEvent> extends AListener<T>
         this.ack(msg);
       } catch (parkingError) {
         console.error(`Error parking retry for ${this.serviceName}:`, parkingError);
+        throw parkingError;
       }
     }
   }

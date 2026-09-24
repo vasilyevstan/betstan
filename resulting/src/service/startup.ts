@@ -8,6 +8,9 @@ import { replayPendingModerationResult } from "./resulting";
 import { PendingModerationReplayWorker } from "./pendingModeration";
 import { RetryWorker } from "./retry";
 import { TerminalSettlementSweepWorker } from "./terminalSettlementSweep";
+import { getCashBackCoordinator } from "./CashBackCoordinator";
+import { CashBackRequestListener } from "../event/listener/CashBackRequestListener";
+import { CashBackSourceReplyListener } from "../event/listener/CashBackSourceReplyListener";
 
 export interface ResultingServiceConfig {
   mongoUri: string;
@@ -97,6 +100,8 @@ function createDefaultDependencies(): Required<StartupDependencies> {
       new ModerationResultListener(connection),
       new EventResultListener(connection),
       new LiveEventUpdateListener(connection),
+      new CashBackRequestListener(connection),
+      new CashBackSourceReplyListener(connection),
     ],
     createWorkers: (connection: IAmqpConnection) => [
       new RetryWorker(connection),
@@ -105,6 +110,7 @@ function createDefaultDependencies(): Required<StartupDependencies> {
         replayPendingModerationResult
       ),
       new TerminalSettlementSweepWorker(connection),
+      getCashBackCoordinator(connection),
     ],
     disconnectDb: async () => {
       await mongoose.disconnect();
@@ -161,6 +167,10 @@ export class ResultingServiceRuntime {
       this.dependencies.logger.log("Connected to database");
 
       const connection = this.dependencies.getBrokerConnection();
+      if ("on" in connection && typeof connection.on === "function") {
+        connection.on("close", () => { void this.shutdown(1); });
+        connection.on("error", this.handleUncaughtException);
+      }
       this.listeners = this.dependencies.createListeners(connection);
 
       for (const listener of this.listeners) {
@@ -201,6 +211,7 @@ export class ResultingServiceRuntime {
       "uncaughtException",
       this.handleUncaughtException
     );
+    this.dependencies.processLike.on("unhandledRejection", this.handleUncaughtException);
     this.dependencies.processLike.on("SIGINT", this.handleSigint);
     this.dependencies.processLike.on("SIGTERM", this.handleSigterm);
     this.handlersRegistered = true;
@@ -219,6 +230,7 @@ export class ResultingServiceRuntime {
 
     if (remover) {
       remover("uncaughtException", this.handleUncaughtException);
+      remover("unhandledRejection", this.handleUncaughtException);
       REGISTERED_SIGNALS.forEach((signal) => {
         remover(signal, signal === "SIGINT" ? this.handleSigint : this.handleSigterm);
       });

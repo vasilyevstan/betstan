@@ -5,6 +5,7 @@ jest.mock("@betstan/common", () => {
   const actual = jest.requireActual("@betstan/common");
   const ack = jest.fn();
   const channel = {
+    prefetch: jest.fn(),
     ack,
     nack: jest.fn(),
     assertExchange: jest.fn(),

@@ -1,6 +1,7 @@
 import {
   BetKind,
   BetStatus,
+  CashBackFinancialSnapshot,
   LiveMarketStatus,
   ModerationDeclineReason,
   SlipRowStatus,
@@ -52,6 +53,7 @@ export interface BetRecord {
   betKind?: BetKind;
   declineReason?: ModerationDeclineReason;
   rows: BetRowRecord[];
+  cashBackFinancial?: CashBackFinancialSnapshot;
 }
 
 export type BetDocument = HydratedDocument<BetRecord>;
@@ -184,6 +186,17 @@ const betRowSchema = new Schema<BetRowRecord>({
 
 const betSchema = new Schema<BetRecord>(
   {
+    cashBackFinancial: {
+      type: new Schema<CashBackFinancialSnapshot>({
+        revision: { type: Number, required: true },
+        status: { type: String, enum: Object.values(BetStatus), required: true },
+        originalStakeMinor: { type: Number, required: true },
+        remainingStakeMinor: { type: Number, required: true },
+        cumulativeClosedStakeMinor: { type: Number, required: true },
+        cumulativeReturnMinor: { type: Number, required: true },
+      }, { _id: false }),
+      required: false,
+    },
     userId: {
       type: String,
       required: true,

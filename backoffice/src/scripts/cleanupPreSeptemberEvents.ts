@@ -615,6 +615,8 @@ const deleteJournaledEvents = async (
             $and: [
               { eventId },
               { time },
+              { cashBackGeneration: { $exists: false } },
+              { cashBackHold: { $exists: false } },
               ...safeMarkerClauses(),
             ],
           },

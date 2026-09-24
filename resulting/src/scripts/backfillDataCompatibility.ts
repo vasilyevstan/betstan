@@ -52,6 +52,9 @@ const inferBetKind = (document: RawDocument): BetKind => {
 };
 
 const buildUpdateSet = (document: RawDocument): Record<string, unknown> => {
+  if (["cashBackFinancial", "cashBackPending", "cashBackOriginalManifest"].some(
+    field => Object.prototype.hasOwnProperty.call(document, field)
+  )) return {};
   const updateSet: Record<string, unknown> = {};
   const normalizedKind = inferBetKind(document);
   const rowFallbackKind = explicitBetKind(document.betKind) ?? normalizedKind;
@@ -94,6 +97,9 @@ async function processCollection(
           _id: 1,
           betKind: 1,
           rows: 1,
+          cashBackFinancial: 1,
+          cashBackPending: 1,
+          cashBackOriginalManifest: 1,
         },
       })
       .sort({ _id: 1 })
@@ -120,7 +126,10 @@ async function processCollection(
       if (apply) {
         operations.push({
           updateOne: {
-            filter: { _id: document._id },
+            filter: {
+              _id: document._id, cashBackFinancial: { $exists: false },
+              cashBackPending: { $exists: false }, cashBackOriginalManifest: { $exists: false },
+            },
             update: { $set: updateSet },
           },
         });
@@ -128,8 +137,9 @@ async function processCollection(
     }
 
     if (apply && operations.length > 0) {
-      await collection.bulkWrite(operations, { ordered: true });
-      report.changed += operations.length;
+      const result = await collection.bulkWrite(operations, { ordered: true });
+      report.changed += result.modifiedCount;
+      report.skipped += operations.length - result.modifiedCount;
     }
   }
 }

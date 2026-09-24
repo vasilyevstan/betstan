@@ -13,7 +13,10 @@ import { Event } from "../model/Event";
 import { EventArchive } from "../model/EventArchive";
 import LiveEventUpdatePublisher from "../event/publisher/LiveEventUpdatePublisher";
 import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
-import { LiveResultSource } from "../model/liveStateFields";
+import {
+  cashBackAuthorityWritable, GamemasterAuthorityIntent, LiveResultSource,
+} from "../model/liveStateFields";
+import { Types } from "mongoose";
 import {
   buildPreKickoffMarkets,
   LiveIncidentType,
@@ -39,6 +42,17 @@ const LIVE_KICKOFF_CUTOVER_WINDOW_MS = 10 * 60 * 1000;
 const LIVE_PRE_KICKOFF_WINDOW_MS = 10 * 60 * 1000;
 const MAX_EVENTS_PER_TICK = 100;
 const MAX_SIMULATION_FAILURES = 3;
+const CASH_BACK_AUTHORITY_FIELDS =
+  "+cashBackAuthorityIntent +cashBackAuthorityRevision +cashBackGeneration "
+  + "+cashBackAuthorityAt +cashBackAuthoritySnapshot +cashBackArchived +cashBackArchivePending";
+
+interface ClaimedAuthorityEvent {
+  _id: Types.ObjectId;
+  processingLease?: { token: string } | null;
+  liveConfirmedReplayCursor?: number | null;
+  cashBackAuthorityRevision?: number | null;
+  cashBackAuthorityIntent?: GamemasterAuthorityIntent | null;
+}
 
 type TimerHandle = unknown;
 type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
@@ -374,6 +388,16 @@ export class GamemasterWorker {
 
     return (
       await this.claimEvent(
+        { cashBackAuthorityIntent: { $exists: true }, cashBackArchived: { $ne: true } },
+        { "cashBackAuthorityIntent.createdAt": 1, time: 1 },
+        now
+      )
+      ?? await this.claimEvent(
+        { cashBackArchivePending: true, cashBackArchived: { $ne: true } },
+        { time: 1 },
+        now
+      )
+      ?? await this.claimEvent(
         {
           status: EventStatus.NO_RESULT,
           "pendingResult.source": LiveResultSource.MANUAL,
@@ -441,6 +465,7 @@ export class GamemasterWorker {
       {
         $and: [
           criteria,
+          { cashBackHold: { $exists: false }, cashBackArchived: { $ne: true } },
           {
             $or: [
               { "processingLease.expiresAt": { $exists: false } },
@@ -463,7 +488,7 @@ export class GamemasterWorker {
         sort,
         new: true,
       }
-    );
+    ).select(CASH_BACK_AUTHORITY_FIELDS);
   }
 
   private async releaseLease(id: any, token: string) {
@@ -486,6 +511,14 @@ export class GamemasterWorker {
       event.processingLease?.token
     );
     if (!current) {
+      return;
+    }
+    if (current.cashBackAuthorityIntent) {
+      current = await this.completeAuthorityChange(current);
+      if (!current) return;
+    }
+    if (current.cashBackArchivePending) {
+      await this.archiveAndDelete(current, { status: EventStatus.RESULTED });
       return;
     }
 
@@ -570,30 +603,13 @@ export class GamemasterWorker {
       throw error;
     }
 
-    return (
-      await Event.findOneAndUpdate(
-        {
-          _id: event._id,
-          "processingLease.token": event.processingLease?.token,
-          status: EventStatus.NO_RESULT,
-          "pendingResult.source": { $ne: LiveResultSource.MANUAL },
-          "liveTransitions.0": { $exists: false },
-        },
-        {
-          $set: this.simulationPersistenceUpdate(
-            kickoffAt,
-            simulation,
-            persistencePlan.confirmedSequence,
-            persistencePlan.liveEndedAt,
-            seed
-          ),
-          $unset: {
-            simulationFailure: "",
-          },
-        },
-        { new: true }
+    return this.persistAuthorityChange(
+      event,
+      { kind: "STATE" },
+      this.simulationPersistenceUpdate(
+        kickoffAt, simulation, persistencePlan.confirmedSequence,
+        persistencePlan.liveEndedAt, seed
       )
-      ?? await this.refreshClaimedEvent(event._id, event.processingLease?.token)
     );
   }
 
@@ -623,11 +639,14 @@ export class GamemasterWorker {
         "processingLease.token": event.processingLease?.token,
         status: EventStatus.NO_RESULT,
         "liveTransitions.0": { $exists: false },
+        $and: [cashBackAuthorityWritable],
       },
       {
         $inc: {
           "simulationFailure.attemptCount": 1,
+          cashBackAuthorityRevision: 1,
         },
+        $currentDate: { cashBackAuthorityAt: true },
         $set: {
           "simulationFailure.lastFailedAt": failedAt,
         },
@@ -645,11 +664,14 @@ export class GamemasterWorker {
           _id: failedEvent._id,
           "processingLease.token": event.processingLease?.token,
           "simulationFailure.quarantinedAt": null,
+          $and: [cashBackAuthorityWritable],
         },
         {
           $set: {
             "simulationFailure.quarantinedAt": failedAt,
           },
+          $inc: { cashBackAuthorityRevision: 1 },
+          $currentDate: { cashBackAuthorityAt: true },
         }
       );
     }
@@ -775,20 +797,11 @@ export class GamemasterWorker {
         return current;
       }
 
-      await this.init();
-      await this.livePublisher.publishWithConfirm(
-        this.buildLiveUpdatePayload(current, nextTransition, occurredAt)
-      );
-
-      const now = this.clock.now();
-      const updated = await Event.findOneAndUpdate(
+      const message = this.buildLiveUpdatePayload(current, nextTransition, occurredAt);
+      const updated = await this.persistAuthorityChange(
+        current,
+        { kind: "LIVE", message },
         {
-          _id: current._id,
-          "processingLease.token": current.processingLease?.token,
-          liveConfirmedReplayCursor: confirmedReplayCursor(current),
-        },
-        {
-          $set: {
             phase: nextTransition.phase,
             liveSequence: nextTransition.sequence,
             liveConfirmedReplayCursor: nextTransition.sequence,
@@ -804,17 +817,12 @@ export class GamemasterWorker {
               nextTransition.phase === EventPhase.FULL_TIME
                 ? occurredAt
                 : current.liveEndedAt,
-            processingLease: {
-              token: current.processingLease?.token,
-              acquiredAt: now,
-              expiresAt: new Date(now.getTime() + this.leaseDurationMs),
-            },
-          },
+            cashBackAuthoritySnapshot: message.data,
         },
-        { new: true }
+        occurredAt
       );
 
-      current = updated ?? await Event.findById(current._id);
+      current = updated;
       if (!current) {
         return null;
       }
@@ -905,28 +913,20 @@ export class GamemasterWorker {
     const kickoffAt = this.kickoffAt(event);
     const now = this.clock.now();
 
-    if (kickoffAt.getTime() > now.getTime()) {
-      await this.init();
-      await this.livePublisher.publishWithConfirm(
-        this.buildPreKickoffLiveUpdatePayload(event, kickoffAt, now)
-      );
-    }
+    const message = kickoffAt.getTime() > now.getTime()
+      ? this.buildPreKickoffLiveUpdatePayload(event, kickoffAt, now) : undefined;
     // If kickoff has already passed (e.g. the worker was unavailable for the
     // entire pre-kickoff window), there is no pre-kickoff snapshot left to
     // publish -- but the marker still must be set so this event is not
     // reclaimed for this step indefinitely.
 
-    return (
-      await Event.findOneAndUpdate(
-        {
-          _id: event._id,
-          "processingLease.token": event.processingLease?.token,
-          livePreKickoffPublishedAt: null,
-        },
-        { $set: { livePreKickoffPublishedAt: now } },
-        { new: true }
-      )
-      ?? await this.refreshClaimedEvent(event._id, event.processingLease?.token)
+    return this.persistAuthorityChange(
+      event,
+      message ? { kind: "LIVE", message } : { kind: "STATE" },
+      {
+        livePreKickoffPublishedAt: now,
+        ...(message ? { cashBackAuthoritySnapshot: message.data } : {}),
+      }
     );
   }
 
@@ -987,19 +987,12 @@ export class GamemasterWorker {
       return;
     }
 
-    await this.init();
     const liveUpdate = this.buildManualLiveUpdatePayload(event);
-    await this.livePublisher.publishWithConfirm(liveUpdate);
-
     const now = this.clock.now();
-    const updated = await Event.findOneAndUpdate(
+    const updated = await this.persistAuthorityChange(
+      event,
+      { kind: "LIVE", message: liveUpdate },
       {
-        _id: event._id,
-        "processingLease.token": event.processingLease?.token,
-        "pendingResult.source": LiveResultSource.MANUAL,
-      },
-      {
-        $set: {
           phase: EventPhase.FULL_TIME,
           liveSequence: liveUpdate.data.sequence,
           liveConfirmedReplayCursor: liveUpdate.data.sequence,
@@ -1010,14 +1003,8 @@ export class GamemasterWorker {
           liveEndedAt: asDate(liveUpdate.data.occurredAt),
           "pendingResult.publishedSequence": liveUpdate.data.sequence,
           "pendingResult.publishedAt": now,
-          processingLease: {
-            token: event.processingLease?.token,
-            acquiredAt: now,
-            expiresAt: new Date(now.getTime() + this.leaseDurationMs),
-          },
-        },
+          cashBackAuthoritySnapshot: liveUpdate.data,
       },
-      { new: true }
     );
 
     if (!updated) {
@@ -1157,21 +1144,11 @@ export class GamemasterWorker {
 
     const finalScore = deriveSimulationFinalScore(event);
     if (!event.resultPublishedAt) {
-      await this.init();
-      await this.resultPublisher.publishWithConfirm(
-        this.buildResultEvent(event, finalScore.home, finalScore.away)
-      );
-
       const now = this.clock.now();
-      const updated = await Event.findOneAndUpdate(
+      const updated = await this.persistAuthorityChange(
+        event,
+        { kind: "RESULT", message: this.buildResultEvent(event, finalScore.home, finalScore.away) },
         {
-          _id: event._id,
-          "processingLease.token": event.processingLease?.token,
-          resultPublishedAt: null,
-          "pendingResult.source": { $ne: LiveResultSource.MANUAL },
-        },
-        {
-          $set: {
             homeResult: finalScore.home,
             awayResult: finalScore.away,
             resultPublishedAt: now,
@@ -1184,14 +1161,7 @@ export class GamemasterWorker {
             liveNextTransitionAt: null,
             liveHomeScore: finalScore.home,
             liveAwayScore: finalScore.away,
-            processingLease: {
-              token: event.processingLease?.token,
-              acquiredAt: now,
-              expiresAt: new Date(now.getTime() + this.leaseDurationMs),
-            },
-          },
         },
-        { new: true }
       );
 
       if (!updated) {
@@ -1248,6 +1218,21 @@ export class GamemasterWorker {
     event: any,
     overrides: Record<string, unknown>
   ) {
+    const terminal = await Event.findOneAndUpdate(
+      {
+        _id: event._id,
+        "processingLease.token": event.processingLease?.token,
+        $and: [cashBackAuthorityWritable],
+      },
+      {
+        $set: { status: EventStatus.RESULTED, cashBackArchivePending: true },
+        $inc: { cashBackAuthorityRevision: 1 },
+        $currentDate: { cashBackAuthorityAt: true },
+      },
+      { new: true }
+    ).select(CASH_BACK_AUTHORITY_FIELDS);
+    if (!terminal) return;
+    event = terminal;
     await EventArchive.updateOne(
       { eventId: event.eventId },
       {
@@ -1277,13 +1262,42 @@ export class GamemasterWorker {
           pendingResult: event.pendingResult,
           simulationFailure: event.simulationFailure,
           resultPublishedAt: event.resultPublishedAt,
+          cashBackGeneration: event.cashBackGeneration,
+          cashBackAuthorityRevision: event.cashBackAuthorityRevision,
+          cashBackAuthorityAt: event.cashBackAuthorityAt,
+          cashBackAuthoritySnapshot: event.cashBackAuthoritySnapshot,
+          cashBackArchived: true,
           ...overrides,
         },
       },
       { upsert: true }
     );
 
-    await Event.deleteOne({ _id: event._id });
+    if (event.cashBackGeneration !== undefined) {
+      await Event.updateOne(
+        {
+          _id: event._id, status: EventStatus.RESULTED,
+          cashBackGeneration: event.cashBackGeneration,
+          cashBackHold: { $exists: false },
+          cashBackAuthorityIntent: { $exists: false },
+        },
+        {
+          $set: { cashBackArchived: true },
+          $unset: {
+            liveSeed: 1, liveTimeline: 1, liveTransitions: 1,
+            cashBackAuthoritySnapshot: 1, processingLease: 1,
+            cashBackArchivePending: 1,
+          },
+        }
+      );
+    } else {
+      await Event.deleteOne({
+        _id: event._id, status: EventStatus.RESULTED,
+        cashBackGeneration: { $exists: false },
+        cashBackHold: { $exists: false },
+        cashBackAuthorityIntent: { $exists: false },
+      });
+    }
   }
 
   private async refreshClaimedEvent(
@@ -1297,7 +1311,102 @@ export class GamemasterWorker {
     return Event.findOne({
       _id: id,
       "processingLease.token": token,
-    });
+    }).select(CASH_BACK_AUTHORITY_FIELDS);
+  }
+
+  private async persistAuthorityChange(
+    event: ClaimedAuthorityEvent,
+    publication:
+      | { kind: "STATE" }
+      | { kind: "LIVE"; message: ILiveEventUpdateEvent }
+      | { kind: "RESULT"; message: IEventResultEvent },
+    changes: Record<string, unknown>,
+    dueAt?: Date
+  ) {
+    const token = event.processingLease?.token;
+    if (!token) throw new Error("Gamemaster authority change has no processing claim");
+    const expectedCursor = event.liveConfirmedReplayCursor ?? 0;
+    const revision = event.cashBackAuthorityRevision === undefined ? 0 : event.cashBackAuthorityRevision;
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+      throw new Error("Gamemaster authority revision is invalid");
+    }
+    // Persist the same JSON shape AMQP sends, not BSON nulls for omitted fields.
+    const message: IEventResultEvent | ILiveEventUpdateEvent | undefined =
+      "message" in publication ? JSON.parse(JSON.stringify(publication.message)) : undefined;
+    const prepared = await Event.findOneAndUpdate(
+      {
+        _id: event._id,
+        "processingLease.token": token,
+        $and: [
+          cashBackAuthorityWritable,
+          {
+            $expr: {
+              $and: [
+                { $eq: [{ $ifNull: ["$cashBackAuthorityRevision", 0] }, revision] },
+                { $eq: [{ $ifNull: ["$liveConfirmedReplayCursor", 0] }, expectedCursor] },
+                ...(dueAt ? [{ $gte: ["$$NOW", dueAt] }] : []),
+              ],
+            },
+          },
+        ],
+      },
+      [{
+        $set: {
+          cashBackAuthorityRevision: revision + 1,
+          cashBackAuthorityAt: "$$NOW",
+          cashBackAuthorityIntent: {
+            id: randomUUID(),
+            kind: publication.kind,
+            expectedCursor,
+            createdAt: "$$NOW",
+            changes: {
+              $literal: {
+                ...changes,
+                ...(publication.kind === "LIVE" ? { cashBackAuthoritySnapshot: message!.data } : {}),
+              },
+            },
+            ...(message ? { message: { $literal: message } } : {}),
+          },
+          __v: { $ifNull: ["$__v", 0] },
+        },
+      }],
+      { new: true }
+    ).select(CASH_BACK_AUTHORITY_FIELDS);
+    return prepared ? this.completeAuthorityChange(prepared) : null;
+  }
+
+  private async completeAuthorityChange(event: ClaimedAuthorityEvent) {
+    const intent = event.cashBackAuthorityIntent;
+    const token = event.processingLease?.token;
+    if (!intent || !token) throw new Error("Gamemaster authority recovery lacks its exact intent/claim");
+    if (intent.kind !== "STATE") {
+      await this.init();
+      if (intent.kind === "LIVE") await this.livePublisher.publishWithConfirm(intent.message);
+      else await this.resultPublisher.publishWithConfirm(intent.message);
+    }
+    const now = this.clock.now();
+    return Event.findOneAndUpdate(
+      {
+        _id: event._id,
+        "processingLease.token": token,
+        "cashBackAuthorityIntent.id": intent.id,
+        cashBackHold: { $exists: false },
+      },
+      {
+        $set: {
+          ...intent.changes,
+          processingLease: {
+            token, acquiredAt: now,
+            expiresAt: new Date(now.getTime() + this.leaseDurationMs),
+          },
+        },
+        $unset: {
+          cashBackAuthorityIntent: 1,
+          ...(intent.kind === "STATE" ? { simulationFailure: 1 } : {}),
+        },
+      },
+      { new: true }
+    ).select(CASH_BACK_AUTHORITY_FIELDS);
   }
 
   private kickoffAt(event: any): Date {

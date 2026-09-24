@@ -3,6 +3,7 @@ import { app } from "./app";
 import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./event/listener/NewEventListener";
 import EventResultListener from "./event/listener/EventResultListener";
+import { CashBackSourceListener } from "./event/listener/CashBackSourceListener";
 import {
   BackofficePublicationService,
   getBackofficePublicationService,
@@ -22,6 +23,15 @@ const startUp = async () => {
   try {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);
     await messengerWrapper.connect(process.env.RABBITMQ_URI);
+    const connection = messengerWrapper.connection;
+    if ("on" in connection && typeof connection.on === "function") {
+      const brokerFailed = () => {
+        console.error("backoffice_broker_failed");
+        process.exit(1);
+      };
+      connection.on("close", brokerFailed);
+      connection.on("error", brokerFailed);
+    }
 
     const newEventListener = new NewEventListener(messengerWrapper.connection);
     await newEventListener.init();
@@ -35,6 +45,10 @@ const startUp = async () => {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
+
+    const cashBackSourceListener = new CashBackSourceListener(messengerWrapper.connection);
+    await cashBackSourceListener.init();
+    cashBackSourceListener.listen();
 
     publicationService = getBackofficePublicationService(
       messengerWrapper.connection
@@ -90,5 +104,10 @@ const startUp = async () => {
     }
   });
 };
+
+process.on("unhandledRejection", () => {
+  console.error("backoffice_unhandled_rejection");
+  process.exit(1);
+});
 
 startUp();

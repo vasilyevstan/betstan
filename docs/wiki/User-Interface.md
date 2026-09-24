@@ -48,6 +48,93 @@ My Bets provides independent status and bet-type filters. **All types**,
 sort order; older records without an explicit kind retain the compatible
 pre-match interpretation.
 
+## Cash back in My Bets - runtime candidate, not active
+
+The source candidate implements this interaction, but it is **not yet deployed
+or active in production**. Cash-back stays inline in the existing My Bets card,
+not in a separate wallet screen or modal. The same controls serve singles and
+accumulators across the three variants and both themes.
+
+### Review and explicit confirmation
+
+Choose **Full remainder** or **Partial stake**, then **Get cash-back offer**.
+A partial uses whole-cent nominal Stanbucks input and must leave at least
+`0.01`. Zero, negative, over-precise, or excessive amounts produce visible
+errors; the client neither rounds/clamps the input nor switches it to full.
+A confirmed label alone does not guarantee availability: the server checks
+every original selection and its cutoff.
+
+The offer shows original selections and accepted odds, stake to close,
+quoted nominal return, original wager, accepted total odds, remaining stake
+after closure, and possible return on that remainder. The browser does not
+price the cash-back itself. **Confirm full cash back** or
+**Confirm partial cash back** is a separate action on the displayed offer.
+Editing the amount, an authoritative revision change, or expiry makes that
+offer unconfirmable; **Get new offer** creates a new identity and requires
+review again. The entered amount is preserved, not silently substituted.
+
+The countdown is informational and never restarts on a poll or render.
+**Getting an offer**, unavailable reasons, and **Confirmation pending** remain
+distinct from success. `202` never produces an optimistic success message.
+Once confirmation is pending or uncertain, the card prevents another closure
+and offers **Check confirmation status**, even after the displayed expiry.
+Only the durable receipt produces **Cash back recorded**. A rejection or
+unsupported legacy precision is shown explicitly; neither is a network-error
+fallback.
+
+### Exposure and permanent history
+
+Full closure displays **CASH BACK**, has its own status filter, and shows zero
+remaining and active exposure. Rows say **Exposure closed by cash back**,
+not pending result or an invented win/loss. Later refreshes cannot replace the
+closed rows or winner metadata.
+
+A partial stays under `CONFIRMED` with **PARTIAL CASH BACK** until further
+closure or normal settlement. Original wager and accepted odds remain visible
+alongside remaining stake, possible remainder return, cumulative closed
+principal, and cumulative recorded nominal return. After normal settlement,
+**Remainder stake that settled** is historical principal, while
+**Active exposure** is zero. The partial badge and receipts remain available.
+All copy describes nominal Stanbucks, not money paid, wallet credit, or balance.
+
+**Cash-back history** remains discoverable on fully closed and normally
+settled cards, not only while a new offer is available. Opening it reads a
+bounded page of up to 20 immutable accepted receipts, newest first; **Load
+earlier receipts** follows the opaque cursor. Loading, empty, failure, and
+**Retry history page** states are explicit. Newer receipts can refresh the
+open first page without rewinding exposure. A loaded page or **End of
+available history** is not a new completeness attestation.
+
+### Pending recovery, ownership, and layout
+
+The browser saves owner-scoped request identity/content and explicit
+confirmation before sending HTTP. Browser storage is therefore required for
+lost-response recovery across reloads and tabs. It is not a cache of
+authoritative quotes, receipts, or credentials. If storage cannot preserve
+retry data, the UI reports the problem rather than starting an untracked
+operation; the server's durable outcome remains authoritative.
+
+A lost initial response retries the identical request. An uncertain
+confirmation retains the same consent and identity until the server resolves
+it, including when the saved confirmation must be resent after browser
+expiry. Focus and same-owner tab updates trigger reconciliation, not automatic
+consent to another tab's quote. Permission failure clears the rendered account
+state and stops stale work; returning to the same account can recover its
+pending requests. Another account never adopts them.
+
+Refresh and status/history failures remain visible while previously loaded
+cards and input are retained where appropriate. Filters, sorting, expanded
+selections, and sibling forms are preserved. If an updated card leaves the
+current filter and removes the focused control, focus moves to completion
+feedback instead of disappearing; the filter is not changed automatically.
+
+Native labelled controls have visible focus and at least 44-by-44 CSS-pixel
+targets. Offer values wrap, controls stack on small screens, and narrow
+selection rows retain their labels. Status text, pressed states, and error
+messages do not rely on color alone. See [[Application Processes]] for
+eligibility/pricing and [[Architecture]] for server authority and availability
+limits.
+
 ## UI variants
 
 The `ui` query parameter selects a supported variant:

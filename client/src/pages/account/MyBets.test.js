@@ -61,7 +61,7 @@ describe('MyBets', () => {
       ],
     });
 
-    render(<MyBets />);
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
 
     await screen.findByText('Live Derby');
 
@@ -104,7 +104,7 @@ describe('MyBets', () => {
       ],
     });
 
-    render(<MyBets />);
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
 
     await screen.findByText('Raptors - Sharks');
 
@@ -139,7 +139,7 @@ describe('MyBets', () => {
       ],
     });
 
-    render(<MyBets />);
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
     await screen.findByText('Live Derby');
 
     const liveFilter = screen.getByRole('button', { name: 'LIVE' });

@@ -17,7 +17,12 @@ export const BET_STATUS = Object.freeze({
   WIN: 'WIN',
   LOSS: 'LOSS',
   VOID: 'VOID',
+  CASH_BACK: 'CASH_BACK',
 });
+
+export const isTerminalBetStatus = (status) => (
+  [BET_STATUS.DECLINED, BET_STATUS.WIN, BET_STATUS.LOSS, BET_STATUS.VOID, BET_STATUS.CASH_BACK].includes(status)
+);
 
 export const SLIP_ROW_STATUS = Object.freeze({
   NOT_SETTLED: 'NOT_SETTLED',
@@ -814,7 +819,11 @@ export const formatLegacyLiveSelectionLabel = (value, row, perspective = 'select
   return selectionLabel || marketLabel || value;
 };
 
-export const formatRowOutcome = (row) => {
+export const formatRowOutcome = (row, parentStatus) => {
+  if (parentStatus === BET_STATUS.CASH_BACK) {
+    return 'Exposure closed by cash back';
+  }
+
   if (row?.status === SLIP_ROW_STATUS.NOT_SETTLED) {
     return 'Pending result';
   }

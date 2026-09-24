@@ -15,6 +15,7 @@ import {
   isInCountdownWindow,
   isLiveMarketSelectable,
   isTerminalMarketStatus,
+  isTerminalBetStatus,
   LIVE_MARKET_STATUS,
   mergeAuthoritativeEventList,
   SLIP_ROW_STATUS,
@@ -46,6 +47,15 @@ const buildMarket = (overrides = {}) => ({
     { selectionId: 'away', side: 'AWAY', odds: 1.9 },
   ],
   ...overrides,
+});
+
+it('treats CASH_BACK as terminal exposure without inventing a selection result or changing row identity', () => {
+  const row = { status: 'NOT_SETTLED', selectionId: 'exact-selection', winningSelection: '' };
+  expect(isTerminalBetStatus('CASH_BACK')).toBe(true);
+  expect(isTerminalBetStatus('CONFIRMED')).toBe(false);
+  expect(formatRowOutcome(row, 'CASH_BACK')).toBe('Exposure closed by cash back');
+  expect(row).toEqual({ status: 'NOT_SETTLED', selectionId: 'exact-selection', winningSelection: '' });
+  expect(formatRowOutcome(row)).toBe('Pending result');
 });
 
 describe('countdown window boundaries', () => {

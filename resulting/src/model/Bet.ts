@@ -1,8 +1,12 @@
 import {
   BetKind,
+  BetStatus,
+  CashBackFinancialSnapshot,
+  CashBackOriginalManifest,
   ResultingStatus,
 } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import { cashBackPendingSchema } from "./CashBackOperation";
 import {
   LiveMarketType,
   LiveSettlementReason,
@@ -132,7 +136,27 @@ const rowSchema = new Schema({
   },
 });
 
+const financialSchema = new Schema<CashBackFinancialSnapshot>({
+  revision: { type: Number, required: true },
+  status: { type: String, enum: Object.values(BetStatus), required: true },
+  originalStakeMinor: { type: Number, required: true },
+  remainingStakeMinor: { type: Number, required: true },
+  cumulativeClosedStakeMinor: { type: Number, required: true },
+  cumulativeReturnMinor: { type: Number, required: true },
+}, { _id: false });
+
+const manifestSchema = new Schema<CashBackOriginalManifest>({
+  fingerprint: { type: String, required: true },
+  selections: { type: [Schema.Types.Mixed], required: true },
+}, { _id: false });
+
 const betSchema = new Schema({
+  cashBackFinancial: { type: financialSchema, required: false },
+  cashBackOriginalManifest: { type: manifestSchema, required: false },
+  cashBackAnySelectionResolved: { type: Boolean, required: false },
+  cashBackUnavailableReason: { type: String, required: false },
+  cashBackPending: { type: cashBackPendingSchema, required: false },
+  cashBackArchiving: { type: Boolean, required: false },
   userId: {
     type: String,
     required: true,
@@ -188,6 +212,7 @@ const betSchema = new Schema({
 });
 
 betSchema.index({ slipId: 1 }, { unique: true });
+betSchema.index({ "cashBackPending.state": 1, "cashBackPending.quote.expiresAt": 1 });
 betSchema.index({
   status: 1,
   "rows.eventId": 1,

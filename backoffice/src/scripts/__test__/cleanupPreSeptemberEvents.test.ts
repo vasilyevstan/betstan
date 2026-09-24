@@ -93,6 +93,20 @@ const applyCleanup = (
     ...overrides,
   });
 
+it("preserves source generations and holds instead of deleting their cancellation fence", async () => {
+  await events().insertOne(eventDocument("cash-back-event", "2026-08-31T23:59:59.999Z", {
+    cashBackGeneration: 3,
+    cashBackHold: { requestFingerprint: "held-request" },
+  }));
+  const report = await applyCleanup();
+  expect(report.counts.deletedCount).toBe(0);
+  expect(report.reasonCodes.length).toBeGreaterThan(0);
+  expect(await events().findOne({ eventId: "cash-back-event" })).toMatchObject({
+    cashBackGeneration: 3,
+    cashBackHold: { requestFingerprint: "held-request" },
+  });
+});
+
 it.each([
   ["2026-08-31T23:59:59.999Z", true],
   ["2026-09-01T01:59:59.999+02:00", true],

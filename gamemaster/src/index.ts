@@ -5,6 +5,7 @@ import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./event/listener/NewEventListener";
 import { GamemasterWorker } from "./worker/GamemasterWorker";
 import EventResultListener from "./event/listener/EventResultListener";
+import { CashBackSourceListener } from "./event/listener/CashBackSourceListener";
 
 export const startWorkerProbeServer = async (
   port = Number(process.env.PORT ?? 3000)
@@ -55,6 +56,9 @@ export const installGamemasterProcessHandlers = (
   runtimeProcess.on("uncaughtException", () => {
     void shutdown(1, "gamemaster_uncaught_exception");
   });
+  runtimeProcess.on("unhandledRejection", () => {
+    void shutdown(1, "gamemaster_unhandled_rejection");
+  });
   const handleSignal = () => {
     void shutdown(0, "gamemaster_signal");
   };
@@ -84,15 +88,10 @@ export const startUp = async (listenForProbes = false) => {
     messengerWrapper.connection
   );
   await eventResultListener.init();
+  const cashBackSourceListener = new CashBackSourceListener(messengerWrapper.connection);
+  await cashBackSourceListener.init();
   const gameMaster = new GamemasterWorker();
   await gameMaster.init();
-
-  newEventListener.listen();
-  eventResultListener.listen();
-  gameMaster.work();
-  if (listenForProbes) {
-    probeServer = await startWorkerProbeServer();
-  }
 
   const closeResources = async () => {
     gameMaster.stop();
@@ -101,7 +100,20 @@ export const startUp = async (listenForProbes = false) => {
     await mongoose.disconnect();
   };
 
-  installGamemasterProcessHandlers(closeResources);
+  const handlers = installGamemasterProcessHandlers(closeResources);
+  const connection = messengerWrapper.connection;
+  if ("on" in connection && typeof connection.on === "function") {
+    connection.on("close", () => { void handlers.shutdown(1, "gamemaster_broker_closed"); });
+    connection.on("error", () => { void handlers.shutdown(1, "gamemaster_broker_failed"); });
+  }
+
+  newEventListener.listen();
+  eventResultListener.listen();
+  cashBackSourceListener.listen();
+  gameMaster.work();
+  if (listenForProbes) {
+    probeServer = await startWorkerProbeServer();
+  }
 
   return { gameMaster, probeServer };
 };

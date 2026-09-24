@@ -3,6 +3,7 @@ import { Event } from "../model/Event";
 import { EventVisibility, messengerWrapper } from "@betstan/common";
 import { getBackofficePublicationService } from "../service/BackofficePublicationService";
 import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
+import { cashBackAuthorityWritable } from "../service/CashBackSourceService";
 
 const router = express.Router();
 
@@ -31,6 +32,7 @@ router.post(
           eventId,
           visibility: { $ne: requestedVisibility },
           visibilityPublicationPending: { $ne: true },
+          $and: [cashBackAuthorityWritable],
         },
         {
           $set: {
@@ -38,16 +40,25 @@ router.post(
             visibilityPublicationPending: true,
             visibilityPublicationTarget: requestedVisibility,
           },
+          $inc: { cashBackAuthorityRevision: 1 },
+          $currentDate: { cashBackAuthorityAt: true },
         },
         { new: true }
       ).select(
         "+visibilityPublicationPending +visibilityPublicationTarget"
       )
       : await Event.findOneAndUpdate(
-        { eventId, visibilityPublicationPending: { $ne: true } },
+        {
+          eventId, visibilityPublicationPending: { $ne: true },
+          $and: [cashBackAuthorityWritable],
+        },
         [
           {
             $set: {
+              cashBackAuthorityRevision: {
+                $add: [{ $ifNull: ["$cashBackAuthorityRevision", 0] }, 1],
+              },
+              cashBackAuthorityAt: "$$NOW",
               visibility: {
                 $cond: [
                   { $eq: ["$visibility", EventVisibility.ONLINE] },
@@ -85,10 +96,17 @@ router.post(
 
     if (!event) {
       const existingEvent = await Event.findOne({ eventId }).select(
-        "+visibilityPublicationPending +visibilityPublicationTarget"
+        "+visibilityPublicationPending +visibilityPublicationTarget +cashBackHold"
       );
       if (!existingEvent) {
         res.status(404).send({ message: "Event not found" });
+        return;
+      }
+      if (
+        existingEvent.cashBackHold
+        && (!requestedVisibility || requestedVisibility !== existingEvent.visibility)
+      ) {
+        res.status(409).send({ message: "Event is reserved for cash-back" });
         return;
       }
 

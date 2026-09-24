@@ -8,6 +8,8 @@ import PlaceBetListener from "./event/listener/PlaceBetListener";
 import SettleSlipRowListener from "./event/listener/SettleSlipRowListener";
 import SettleSlipListener from "./event/listener/SettleSlipListener";
 import { PendingBetUpdateWorker } from "./service/PendingBetUpdateWorker";
+import { getCashBackFacade } from "./service/CashBackFacade";
+import { CashBackOutcomeListener } from "./event/listener/CashBackOutcomeListener";
 
 const closeServer = (server: Server) =>
   new Promise<void>((resolve, reject) => {
@@ -43,17 +45,19 @@ export const startUp = async () => {
 
   const pendingBetUpdateWorker = new PendingBetUpdateWorker();
   await pendingBetUpdateWorker.start();
+  const cashBackFacade = getCashBackFacade(messengerWrapper.connection);
+  await cashBackFacade.init();
 
   const listeners = [
     new PlaceBetListener(messengerWrapper.connection),
     new ModerationResultListener(messengerWrapper.connection),
     new SettleSlipRowListener(messengerWrapper.connection),
     new SettleSlipListener(messengerWrapper.connection),
+    new CashBackOutcomeListener(messengerWrapper.connection),
   ];
 
   for (const listener of listeners) {
     await listener.init();
-    listener.listen();
   }
 
   const server = app.listen(3000, () => {
@@ -69,6 +73,7 @@ export const startUp = async () => {
 
     shuttingDownPromise = (async () => {
       await pendingBetUpdateWorker.stop();
+      await cashBackFacade.stop();
       await closeServer(server);
       await mongoose.connection.close();
       await mongoose.disconnect();
@@ -110,7 +115,25 @@ export const startUp = async () => {
     }
   });
 
-  return { pendingBetUpdateWorker, server, shutDown };
+  process.on("unhandledRejection", () => {
+    console.error("bet_unhandled_rejection");
+    void shutDown(1);
+  });
+  const connection = messengerWrapper.connection;
+  if ("on" in connection && typeof connection.on === "function") {
+    connection.on("close", () => {
+      console.error("bet_broker_closed");
+      void shutDown(1);
+    });
+    connection.on("error", () => {
+      console.error("bet_broker_failed");
+      void shutDown(1);
+    });
+  }
+  for (const listener of listeners) listener.listen();
+  await cashBackFacade.start();
+
+  return { pendingBetUpdateWorker, cashBackFacade, server, shutDown };
 };
 
 if (process.env.NODE_ENV !== "test") {

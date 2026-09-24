@@ -11,6 +11,11 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
   serviceName: string = "bet_place_bet";
   queue: QueueNames.SLIP_BET = QueueNames.SLIP_BET;
 
+  async init() {
+    await super.init();
+    await this.channel.prefetch(1);
+  }
+
   async onMessage(event: IPlaceBetEvent, msg: ConsumeMessage) {
     await upsertPlaceBet(event);
     await requestPendingBetUpdateReplay(event.data.slipId);
