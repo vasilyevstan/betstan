@@ -4,6 +4,7 @@ import { isTerminalBetStatus } from './liveBettingUtils';
 export const CASH_BACK_POLL_MS = 2000;
 export const CASH_BACK_RETRY_MS = 10000;
 export const CASH_BACK_STORAGE_PREFIX = 'betstan.cash-back.v1:';
+export const CASH_BACK_RECOVERY_ERROR = 'Saved cash-back recovery data could not be verified. Keep this browser data and refresh My Bets to check the slip. Do not start another cash back until the original operation is resolved.';
 
 export const cashBackReason = (reason) => ({
   BET_NOT_CONFIRMED: 'Only a confirmed slip with open exposure can request cash back. Refresh My Bets.',
@@ -86,6 +87,7 @@ const referenceMatches = (reference, attempt) => reference
 const validQuote = (quote, attempt) => Boolean(quote
   && referenceMatches(quote.operation, attempt)
   && typeof quote.quoteId === 'string' && quote.quoteId
+  && (!attempt.confirmRequest || quote.quoteId === attempt.confirmRequest.quoteId)
   && quote.mode === attempt.quoteRequest.portion.mode
   && validFinancial(quote.financial) && quote.financial.status === 'CONFIRMED'
   && [quote.closedStakeMinor, quote.returnMinor].every((value) => Number.isSafeInteger(value) && value >= 1)
@@ -225,21 +227,34 @@ export const createCashBackId = () => {
 export const storageOwnerPrefix = (ownerId) => `${CASH_BACK_STORAGE_PREFIX}${encodeURIComponent(ownerId)}:`;
 export const storageKey = (ownerId, attempt) => `${storageOwnerPrefix(ownerId)}${encodeURIComponent(attempt.clientOperationId)}`;
 
+const recoveryIdentifier = (value) => typeof value === 'string'
+  && value.length > 0 && value.length <= 256 && value.trim() === value;
+const recoveryObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
 export const readCashBackAttempts = (ownerId) => {
   const attempts = {};
   const prefix = storageOwnerPrefix(ownerId);
   for (let index = 0; index < window.localStorage.length; index += 1) {
     const key = window.localStorage.key(index);
     if (!key?.startsWith(prefix)) continue;
-    const item = JSON.parse(window.localStorage.getItem(key));
-    if (!item || typeof item.slipId !== 'string' || typeof item.clientOperationId !== 'string'
-      || item.quoteRequest?.action !== 'QUOTE' || item.quoteRequest.clientOperationId !== item.clientOperationId
+    let item;
+    try { item = JSON.parse(window.localStorage.getItem(key)); } catch { throw new Error(CASH_BACK_RECOVERY_ERROR); }
+    if (!recoveryObject(item) || !recoveryIdentifier(item.slipId) || !recoveryIdentifier(item.clientOperationId)
+      || key !== storageKey(ownerId, item)
+      || (item.operationId !== undefined && !recoveryIdentifier(item.operationId))
+      || (item.createdAt !== undefined && (!Number.isFinite(item.createdAt) || item.createdAt < 0))
+      || !recoveryObject(item.quoteRequest) || item.quoteRequest.action !== 'QUOTE'
+      || item.quoteRequest.clientOperationId !== item.clientOperationId
+      || !recoveryObject(item.quoteRequest.portion)
       || !['FULL', 'PARTIAL'].includes(item.quoteRequest.portion?.mode)
       || (item.quoteRequest.portion.mode === 'PARTIAL'
         && (!Number.isSafeInteger(item.quoteRequest.portion.stakeMinor) || item.quoteRequest.portion.stakeMinor < 1))
-      || (item.confirmRequest && (item.confirmRequest.action !== 'CONFIRM'
-        || item.confirmRequest.clientOperationId !== item.clientOperationId || typeof item.confirmRequest.quoteId !== 'string'))) {
-      throw new Error('Saved cash-back recovery data could not be read. Keep this browser data and log in again before confirming another operation.');
+      // Consent may recover only an already-established server operation, never
+      // create a new quote and then treat stored content as its confirmation.
+      || (item.confirmRequest !== undefined && (!recoveryIdentifier(item.operationId)
+        || !recoveryObject(item.confirmRequest) || item.confirmRequest.action !== 'CONFIRM'
+        || item.confirmRequest.clientOperationId !== item.clientOperationId || !recoveryIdentifier(item.confirmRequest.quoteId)))) {
+      throw new Error(CASH_BACK_RECOVERY_ERROR);
     }
     // Reconstruct only allowlisted retry content, never replay extra stored fields.
     attempts[item.clientOperationId] = {

@@ -74,7 +74,9 @@ const startActor = async (role: string): Promise<Actor> => {
   };
 };
 
-const token = jwt.sign({ id: "owner", email: "owner@example.test", role: "USER" }, "cashback-isolated-test");
+const token = jwt.sign({
+  id: "owner", email: "owner@example.test", role: "USER", timestamp: new Date().toISOString(),
+}, "cashback-isolated-test");
 const cookie = `session=${Buffer.from(JSON.stringify({ jwt: token })).toString("base64")}`;
 interface Reply {
   status: number;
@@ -231,6 +233,50 @@ it("runs repeated partial/full HTTP flows through real RabbitMQ and two independ
   });
   const history = await api(bet, `/api/bet/${fixture.slipId}/cash-back/history`);
   expect(history.body.items).toHaveLength(3);
+});
+
+it("keeps the winning random quote ID across two paused producer processes, retries and late confirmation recovery", async () => {
+  const fixture = await seed();
+  const quoteRequest = {
+    action: "QUOTE", clientOperationId: "quote-identity-race", portion: { mode: "PARTIAL", stakeMinor: 1000 },
+  };
+  await Promise.all([
+    resulting.command("pause-quote", { clientOperationId: quoteRequest.clientOperationId }),
+    resultingPeer.command("pause-quote", { clientOperationId: quoteRequest.clientOperationId }),
+  ]);
+  try {
+    const initial = await api(bet, `/api/bet/${fixture.slipId}/cash-back/quote`, quoteRequest);
+    expect(initial.status).toBe(202);
+    await Promise.all([resulting.paused(), resultingPeer.paused()]);
+    const statusPath = `/api/bet/${fixture.slipId}/cash-back/operations/${initial.body.operationId}`;
+    expect((await api(bet, statusPath)).body.state).toBe("QUOTE_PENDING");
+    await resultingPeer.command("resume");
+    const winner = await until(() => api(bet, statusPath), value => value.body.state === "QUOTED");
+    if (!winner.body.operationId || !winner.body.clientOperationId || !winner.body.quote) {
+      throw new Error("Missing persisted winning quote");
+    }
+    const operation = {
+      operationId: winner.body.operationId, clientOperationId: winner.body.clientOperationId, quote: winner.body.quote,
+    };
+    expect(operation.quote.quoteId).toMatch(/^[a-f0-9]{64}$/);
+    await resulting.command("resume");
+    const retries = await Promise.all([
+      api(bet, `/api/bet/${fixture.slipId}/cash-back/quote`, quoteRequest),
+      api(bet, `/api/bet/${fixture.slipId}/cash-back/quote`, quoteRequest),
+    ]);
+    expect(retries.map(reply => reply.body.quote)).toEqual([operation.quote, operation.quote]);
+    const confirmed = await confirm(fixture.slipId, operation);
+    expect(confirmed.body.state).toBe("ACCEPTED");
+    await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, Date.parse(operation.quote.expiresAt) - Date.now()) + 25));
+    const recovered = await confirm(fixture.slipId, operation);
+    expect(recovered.body.receipt).toEqual(confirmed.body.receipt);
+    expect(recovered.body.quote).toEqual(operation.quote);
+    expect(await resulting.command("bet-state", fixture)).toMatchObject({
+      financial: { remainingStakeMinor: 9000, cumulativeClosedStakeMinor: 1000 },
+    });
+  } finally {
+    await Promise.all([resulting.command("resume"), resultingPeer.command("resume")]);
+  }
 });
 
 it("rejects source-result-before-publication while downstream ledgers still lag", async () => {

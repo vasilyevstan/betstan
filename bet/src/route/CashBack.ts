@@ -9,10 +9,21 @@ const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const pending = (state: string) => state === "QUOTE_PENDING" || state === "CONFIRM_PENDING";
 
+// Match Auth's signed-timestamp policy without changing other Bet routes.
+const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const isSessionTimestampFresh = (timestamp: unknown, nowMs = Date.now()): boolean => {
+  if (typeof timestamp !== "string" && !(timestamp instanceof Date)) return false;
+  const timestampMs = new Date(timestamp).getTime();
+  return Number.isFinite(timestampMs)
+    && timestampMs <= nowMs + MAX_CLOCK_SKEW_MS
+    && nowMs <= timestampMs + SESSION_MAX_AGE_MS;
+};
+
 const route = (handler: (request: Request, response: Response, userId: string) => Promise<void>) =>
   (request: Request, response: Response) => {
     response.setHeader("Cache-Control", "no-store");
-    if (!request.currentUser) {
+    if (!object(request.currentUser) || !isSessionTimestampFresh(request.currentUser.timestamp)) {
       response.status(401).send({ errors: [{ code: "AUTHENTICATION_REQUIRED", message: "Authentication required" }] });
       return;
     }

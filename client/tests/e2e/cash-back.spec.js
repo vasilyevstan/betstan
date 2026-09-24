@@ -226,10 +226,50 @@ const measureLayout = (page) => page.evaluate(() => {
     const box = node.getBoundingClientRect();
     return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height };
   };
-  const visible = (node) => node.getClientRects().length && rect(node).height > 0;
-  const overflow = [...root.querySelectorAll('.my-bets-card, .my-bets-row, .cash-back, .cash-back-offer, .cash-back-history__body, .cash-back-values, .cash-back-actions')]
-    .filter(visible).filter((node) => node.scrollWidth > node.clientWidth + 1)
-    .map((node) => ({ className: node.className, client: node.clientWidth, scroll: node.scrollWidth }));
+  const visible = (node) => node.getClientRects().length && rect(node).height > 0
+    && getComputedStyle(node).visibility !== 'hidden';
+  const describe = (node) => ({
+    slipId: node.closest('[data-slip-id]')?.dataset.slipId ?? null,
+    element: node.tagName.toLowerCase(), className: node.className,
+  });
+  const containerWidths = [root, ...root.querySelectorAll('.my-bets-toolbar, .my-bets-card, .card-body, .my-bets-row, .my-bets-row > [data-label], .my-bets-footer, .cash-back, .cash-back-amount, .cash-back-offer, .cash-back-history, .cash-back-history__body, .cash-back-values, .cash-back-values > div, .cash-back-actions, .cash-back-receipts')]
+    .filter(visible).map((node) => ({ ...describe(node), client: node.clientWidth, scroll: node.scrollWidth }));
+  const overflow = containerWidths.filter((entry) => entry.scroll > entry.client);
+  const contains = (outer, inner) => inner.left >= outer.left && inner.right <= outer.right
+    && inner.top >= outer.top && inner.bottom <= outer.bottom;
+  const measurePairs = (nodes) => nodes.flatMap((left, index) => nodes.slice(index + 1).flatMap((right, offset) => {
+    // Compare independent controls, not a legitimate interactive ancestor with
+    // its descendant. Labels/text are measured separately, not as controls.
+    if (left.contains(right) || right.contains(left)) return [];
+    const a = rect(left); const b = rect(right);
+    return [{
+      left: index, right: index + offset + 1,
+      sameActionGroup: Boolean(left.closest('.cash-back-actions')
+        && left.closest('.cash-back-actions') === right.closest('.cash-back-actions')),
+      overlapWidth: Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)),
+      overlapHeight: Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)),
+    }];
+  }));
+  const overlaps = (pair) => pair.overlapWidth > 0 && pair.overlapHeight > 0;
+  const cardNodes = [...root.querySelectorAll('.my-bets-card')].filter(visible);
+  const cards = cardNodes.map((node) => ({ ...describe(node), bounds: rect(node) }));
+  const cardPairs = measurePairs(cardNodes);
+  const controlNodes = [...root.querySelectorAll('button, input, select, textarea, a[href], [role="button"]')].filter(visible);
+  const controls = controlNodes.map((node) => {
+    const bounds = rect(node);
+    const parent = node.parentElement;
+    const card = node.closest('.my-bets-card, .my-bets-toolbar');
+    const parentBounds = rect(parent); const cardBounds = rect(card);
+    return {
+      ...describe(node),
+      label: node.getAttribute('aria-label') || node.labels?.[0]?.textContent || node.textContent.trim(),
+      bounds, parent: { ...describe(parent), bounds: parentBounds }, cardBounds,
+      insideParent: contains(parentBounds, bounds), insideCard: contains(cardBounds, bounds),
+    };
+  });
+  const containmentFailures = controls.filter((control) => !control.insideParent || !control.insideCard);
+  const controlPairs = measurePairs(controlNodes);
+  const collisions = controlPairs.filter(overlaps);
   const escapedText = [];
   root.querySelectorAll('.cash-back-values dt, .cash-back-values dd, .cash-back-control, .cash-back-amount label').forEach((element) => {
     if (!visible(element)) return;
@@ -247,22 +287,20 @@ const measureLayout = (page) => page.evaluate(() => {
       text = walker.nextNode();
     }
   });
-  const collisions = [];
   const unequalRows = [];
   root.querySelectorAll('.cash-back-actions').forEach((group) => {
     const buttons = [...group.children].filter(visible).map(rect);
     buttons.forEach((left, index) => buttons.slice(index + 1).forEach((right) => {
-      if (Math.min(left.right, right.right) - Math.max(left.left, right.left) > 1
-        && Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top) > 1) collisions.push('action overlap');
       if (Math.abs(left.top - right.top) < 1 && Math.abs(left.height - right.height) > 1) unequalRows.push([left.height, right.height]);
     }));
   });
   const targets = [...root.querySelectorAll('.cash-back-control, .my-bets-filter-group button')].filter(visible).map(rect);
   return {
-    viewport: window.innerWidth,
+    viewport: window.innerWidth, viewportHeight: window.innerHeight,
     document: { scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth },
     rootWidth: rect(root).width, mainWidth: rect(root.closest('main')).width,
-    overflow, escapedText, collisions, unequalRows,
+    containerWidths, overflow, cards, cardPairs, cardCollisions: cardPairs.filter(overlaps),
+    controls, controlPairs, containmentFailures, escapedText, collisions, unequalRows,
     minimumTargetWidth: Math.min(...targets.map((box) => box.width)),
     minimumTargetHeight: Math.min(...targets.map((box) => box.height)),
   };
@@ -370,6 +408,13 @@ test('cash-back geometry at three viewports and measured shared-token contrast i
     geometry.push(metrics);
     expect(metrics.document.scroll).toBeLessThanOrEqual(metrics.document.client);
     expect(metrics.overflow).toEqual([]);
+    expect(metrics.cards).toHaveLength(2);
+    expect(metrics.cardPairs).toHaveLength(1);
+    expect(metrics.cardCollisions).toEqual([]);
+    expect(metrics.controls.length).toBeGreaterThan(0);
+    expect(metrics.containmentFailures).toEqual([]);
+    expect(metrics.controlPairs.some((pair) => pair.sameActionGroup)).toBe(true);
+    expect(metrics.controlPairs.some((pair) => !pair.sameActionGroup)).toBe(true);
     expect(metrics.escapedText).toEqual([]);
     expect(metrics.collisions).toEqual([]);
     expect(metrics.unequalRows).toEqual([]);

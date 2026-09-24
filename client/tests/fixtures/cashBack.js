@@ -1,7 +1,7 @@
 // Source-aligned public DTO fixtures: bet/src/route/CashBack.ts and
 // CashBackFacade.ts publicQuote/publicReceipt/cashBackOperationDto/history.
 // Deliberately no internal ownership proofs, grants, fingerprints or source IDs.
-const { createHash } = require('crypto');
+const { createHash, randomUUID } = require('crypto');
 
 const financial = (overrides = {}) => ({
   revision: 1, status: 'CONFIRMED', originalStakeMinor: 10000,
@@ -33,7 +33,7 @@ const quoted = (request, options = {}) => {
   return {
     ...operation, state: 'QUOTED',
     quote: {
-      operation, quoteId: `quote-${request.clientOperationId}`, mode: request.portion.mode,
+      operation, quoteId: options.quoteId ?? randomUUID(), mode: request.portion.mode,
       policyVersion: 'cash-back-v1', issuer: 'RESULTING',
       issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + (options.lifetime ?? 7000)).toISOString(),
       financial: before, closedStakeMinor: closed, remainingStakeMinorAfter: before.remainingStakeMinor - closed,

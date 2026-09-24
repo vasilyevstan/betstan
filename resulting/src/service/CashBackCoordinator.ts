@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { isDeepStrictEqual } from "util";
 import {
   APublisher, BetKind, BetStatus, CashBackFinancialSnapshot, CashBackOperationIdentity,
@@ -310,9 +311,15 @@ export class CashBackCoordinator {
         const obligation = pending.obligations.find(item => item.releaseRequest?.requestId === request.requestId);
         if (!obligation || !isDeepStrictEqual(obligation.releaseRequest, request)) throw new Error("Release reply binding mismatch");
         if (data.outcome === "RELEASED" || data.outcome === "FENCED") {
+          const domainTime = data.outcome === "FENCED" ? data.observedAt : data.decisionTime;
           if (
-            data.fenceGeneration !== request.baseGeneration + 2
-            || (data.outcome === "FENCED" && data.observedGeneration < data.fenceGeneration)
+            !Number.isSafeInteger(data.fenceGeneration)
+            || data.fenceGeneration !== request.baseGeneration + 2
+            || typeof domainTime !== "string" || !Number.isFinite(Date.parse(domainTime))
+            || new Date(domainTime).toISOString() !== domainTime
+            || (data.outcome === "FENCED" && (
+              !Number.isSafeInteger(data.observedGeneration) || data.observedGeneration < data.fenceGeneration
+            ))
           ) throw new Error("Invalid source cancellation fence");
           await root.model.updateOne(
             { _id: root.bet._id, "cashBackPending.operation.operationId": op.operationId },
@@ -456,7 +463,7 @@ export class CashBackCoordinator {
       const currentCombinedOdds = combinedOdds(currentQuotes.map(quote => quote.odds));
       const amounts = priceCashBack(financial, op.request.portion, acceptedCombinedOdds, currentCombinedOdds);
       const common = {
-        operation: reference(op.operation), quoteId: cashBackHash([op.operationId, "quote"]),
+        operation: reference(op.operation), quoteId: randomBytes(32).toString("hex"),
         policyVersion: "cash-back-v1", issuer: "RESULTING" as const,
         issuedAt: issuedAt.toISOString(), expiresAt: expiresAt.toISOString(),
         financial: { ...financial, status: BetStatus.CONFIRMED as const },

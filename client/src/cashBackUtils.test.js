@@ -10,6 +10,7 @@ const ownerId = 'owner';
 const list = (bets, sequence = 1) => ({ type: 'LIST', ownerId, bets, sequence });
 
 describe('cash-back exact display and fixed DTO boundary', () => {
+  afterEach(() => localStorage.clear());
   it.each(['', '0', '0.001', '1.001', '-1', '1e2', ' 1', '1 ', '+1', 'Infinity', 'NaN', '1,01', '90071992547409.92'])(
     'refuses %p without rounding or converting it', (input) => expect(parseStakeMinor(input)).toBeNull(),
   );
@@ -49,6 +50,30 @@ describe('cash-back exact display and fixed DTO boundary', () => {
     expect(readCashBackAttempts('owner').first).toEqual(expect.objectContaining(attempt));
     expect(readCashBackAttempts('owner').first.extra).toBeUndefined();
     localStorage.clear();
+  });
+  it.each([
+    ['confirmation without a server operation', { operationId: undefined }],
+    ['empty server operation', { operationId: '' }],
+    ['malformed server operation', { operationId: {} }],
+    ['empty slip identity', { slipId: '' }],
+    ['null confirmation', { confirmRequest: null }],
+    ['empty quote identity', { confirmRequest: { action: 'CONFIRM', clientOperationId: 'first', quoteId: '' } }],
+    ['mismatched confirmation identity', { confirmRequest: { action: 'CONFIRM', clientOperationId: 'another', quoteId: 'reviewed-token' } }],
+  ])('rejects %s in untrusted recovery data', (_, changes) => {
+    const record = { ...attempt, operationId: 'server-operation',
+      confirmRequest: { action: 'CONFIRM', clientOperationId: 'first', quoteId: 'reviewed-token' }, ...changes };
+    localStorage.setItem(storageKey(ownerId, attempt), JSON.stringify(record));
+    expect(() => readCashBackAttempts(ownerId)).toThrow('Saved cash-back recovery data');
+  });
+  it('binds saved content to its owner-scoped storage key', () => {
+    localStorage.setItem(storageKey(ownerId, { clientOperationId: 'another' }), JSON.stringify(attempt));
+    expect(() => readCashBackAttempts(ownerId)).toThrow('Saved cash-back recovery data');
+  });
+  it('does not substitute a newly returned quote identity for saved consent', () => {
+    const dto = quoted(request);
+    const saved = { ...attempt, operationId: dto.operationId,
+      confirmRequest: { action: 'CONFIRM', clientOperationId: request.clientOperationId, quoteId: 'different-reviewed-token' } };
+    expect(() => readOperationResponse({ status: 200, data: dto }, saved, Date.now())).toThrow('could not be verified');
   });
 });
 

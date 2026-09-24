@@ -1,19 +1,37 @@
 import request from "supertest";
+import express from "express";
+import cookieSession from "cookie-session";
+import jwt from "jsonwebtoken";
 import {
   BetKind, BetStatus, BettingStatus, CashBackAcceptedReceipt, CashBackQuote,
-  CashBackQuoteEvidence, EventPhase, EventStatus, EventVisibility, ICashBackOutcomeEvent,
+  CashBackQuoteEvidence, CashBackRejectedReceipt, EventPhase, EventStatus, EventVisibility, ICashBackOutcomeEvent,
   messengerWrapper, ModerationStatus, ResultingStatus, SlipRowStatus,
 } from "@betstan/common";
 import { app } from "../../app";
+import { CashBack } from "../CashBack";
 import { Bet } from "../../model/Bet";
 import { CashBackOperation } from "../../model/CashBackOperation";
 import { CashBackFacade, getCashBackFacade } from "../../service/CashBackFacade";
-import { cashBackReceiptHash } from "../../service/cashBackFinancial";
+import * as cashBackFacadeModule from "../../service/CashBackFacade";
+import { applyCashBackFinancial, cashBackReceiptHash } from "../../service/cashBackFinancial";
 import { applyBetEventWithRetry, applyModerationResult, applySettleSlip, applySettleSlipRow } from "../../service/betHistory";
 
-const owner = JSON.stringify({ id: "owner" });
-const other = JSON.stringify({ id: "other" });
+const owner = JSON.stringify({ id: "owner", timestamp: new Date().toISOString() });
+const other = JSON.stringify({ id: "other", timestamp: new Date().toISOString() });
 const prefix = "/api/bet/slip/cash-back";
+const actualCommon = jest.requireActual<typeof import("@betstan/common")>("@betstan/common");
+const authenticatedApp = express();
+authenticatedApp.use(express.json());
+authenticatedApp.use(cookieSession({ signed: false, secure: false }));
+authenticatedApp.use(actualCommon.currentUser);
+authenticatedApp.use(CashBack);
+
+const sessionCookie = (payload: Record<string, unknown>, validSignature = true): string => {
+  const key = process.env.JWT_KEY;
+  if (!key) throw new Error("Missing synthetic test signing key");
+  const token = jwt.sign(payload, validSignature ? key : "cash-back-invalid-test-signature");
+  return `session=${Buffer.from(JSON.stringify({ jwt: token })).toString("base64")}`;
+};
 
 beforeAll(async () => { await CashBackOperation.init(); });
 
@@ -107,6 +125,77 @@ const accept = async (full = false) => {
   };
   return { ...prepared, receipt, outcome };
 };
+
+it.each<[string, number, boolean]>([
+  ["fresh normal", 0, false],
+  ["fresh legacy without exp or role", 0, true],
+  ["legacy exactly twelve hours old", -12 * 60 * 60 * 1000, true],
+  ["timestamp at the five-minute clock-skew boundary", 5 * 60 * 1000, false],
+])("accepts a %s signed session through real Common middleware on all four routes", async (_name, offset, legacy) => {
+  await createBet();
+  const prepared = await createQuote();
+  const nowMs = Date.now();
+  const clock = jest.spyOn(Date, "now").mockReturnValue(nowMs);
+  try {
+    const cookie = sessionCookie({
+      id: "owner", email: "owner@example.test", timestamp: new Date(nowMs + offset).toISOString(),
+      ...(!legacy ? { role: "USER", exp: Math.floor(nowMs / 1000) + 12 * 60 * 60 } : {}),
+    });
+    await request(authenticatedApp).post(`${prefix}/quote`).set("Cookie", cookie).send({
+      action: "QUOTE", clientOperationId: "partial", portion: { mode: "PARTIAL", stakeMinor: 4000 },
+    }).expect(200);
+    await request(authenticatedApp).post(`${prefix}/accept`).set("Cookie", cookie).send({
+      action: "CONFIRM", clientOperationId: "partial", quoteId: prepared.quote.quoteId,
+    }).expect(202);
+    await request(authenticatedApp).get(`${prefix}/operations/${prepared.operation.operationId}`)
+      .set("Cookie", cookie).expect(202);
+    await request(authenticatedApp).get(`${prefix}/history`).set("Cookie", cookie).expect(200);
+    expect((await CashBackOperation.findOne({ operationId: prepared.operation.operationId }))?.state)
+      .toBe("CONFIRM_PENDING");
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+it.each<[string, (nowMs: number) => Record<string, unknown>, boolean]>([
+  ["legacy thirteen hours old", nowMs => ({ timestamp: new Date(nowMs - 13 * 60 * 60 * 1000).toISOString() }), true],
+  ["legacy one millisecond beyond twelve hours", nowMs => ({ timestamp: new Date(nowMs - 12 * 60 * 60 * 1000 - 1).toISOString() }), true],
+  ["timestamp one millisecond beyond allowed future skew", nowMs => ({ timestamp: new Date(nowMs + 5 * 60 * 1000 + 1).toISOString() }), true],
+  ["missing timestamp", () => ({}), true],
+  ["invalid timestamp", () => ({ timestamp: "not-a-time" }), true],
+  ["null timestamp", () => ({ timestamp: null }), true],
+  ["numeric timestamp", nowMs => ({ timestamp: nowMs }), true],
+  ["array timestamp", nowMs => ({ timestamp: [new Date(nowMs).toISOString()] }), true],
+  ["expired exp despite fresh timestamp", nowMs => ({
+    timestamp: new Date(nowMs).toISOString(), exp: Math.floor(nowMs / 1000) - 1,
+  }), true],
+  ["invalid signature despite fresh timestamp", nowMs => ({ timestamp: new Date(nowMs).toISOString() }), false],
+])("rejects a %s before the facade on all four routes through real Common middleware", async (_name, claims, validSignature) => {
+  const nowMs = Date.now();
+  const clock = jest.spyOn(Date, "now").mockReturnValue(nowMs);
+  const facade = jest.spyOn(cashBackFacadeModule, "getCashBackFacade");
+  try {
+    const cookie = sessionCookie({ id: "owner", email: "owner@example.test", ...claims(nowMs) }, validSignature);
+    const responses = await Promise.all([
+      request(authenticatedApp).post(`${prefix}/quote`).set("Cookie", cookie)
+        .send({ action: "QUOTE", clientOperationId: "untrusted", portion: { mode: "FULL" } }),
+      request(authenticatedApp).post(`${prefix}/accept`).set("Cookie", cookie)
+        .send({ action: "CONFIRM", clientOperationId: "untrusted", quoteId: "untrusted-quote" }),
+      request(authenticatedApp).get(`${prefix}/operations/untrusted-operation`).set("Cookie", cookie),
+      request(authenticatedApp).get(`${prefix}/history`).set("Cookie", cookie),
+    ]);
+    for (const response of responses) {
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ errors: [{ code: "AUTHENTICATION_REQUIRED", message: "Authentication required" }] });
+      expect(response.headers["cache-control"]).toBe("no-store");
+    }
+    expect(facade).not.toHaveBeenCalled();
+    expect(await CashBackOperation.countDocuments()).toBe(0);
+  } finally {
+    facade.mockRestore();
+    clock.mockRestore();
+  }
+});
 
 it("requires authentication and isolates every operation and history by owner", async () => {
   await createBet();
@@ -204,4 +293,117 @@ it("freezes full status and row winner metadata against moderation and all settl
   expect(bet?.cashBackFinancial?.remainingStakeMinor).toBe(0);
   await request(app).post(`${prefix}/accept`).set("currentUser", owner)
     .send({ action: "CONFIRM", clientOperationId: "full", quoteId: prepared.quote.quoteId }).expect(200);
+});
+
+it("projects and replays a canonical rejection without closing principal or adding a history portion", async () => {
+  await createBet();
+  const prepared = await accept();
+  const receipt: CashBackRejectedReceipt = {
+    outcome: "REJECTED", operation: prepared.quote.operation, quoteId: prepared.quote.quoteId,
+    expectedRevision: prepared.quote.financial.revision, decisionId: "rejected-decision",
+    decisionTime: new Date().toISOString(), reason: "RESERVATION_DENIED",
+    financial: { ...prepared.quote.financial, revision: 2 },
+  };
+  const outcome: ICashBackOutcomeEvent["data"] = {
+    outcome: "REJECTED", operation: prepared.operation.operation, receipt,
+    receiptFingerprint: cashBackReceiptHash(receipt),
+  };
+  await prepared.facade.receiveOutcome(outcome);
+  await prepared.facade.receiveOutcome(outcome);
+  const response = await request(app).get(`${prefix}/operations/${prepared.operation.operationId}`)
+    .set("currentUser", owner).expect(200);
+  expect(response.body).toMatchObject({
+    state: "REJECTED", receipt: {
+      operation: prepared.quote.operation, quoteId: prepared.quote.quoteId,
+      expectedRevision: 1, reason: "RESERVATION_DENIED",
+    },
+  });
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+    revision: 2, remainingStakeMinor: 10000, cumulativeClosedStakeMinor: 0, cumulativeReturnMinor: 0,
+  });
+  const history = await request(app).get(`${prefix}/history`).set("currentUser", owner).expect(200);
+  expect(history.body.items).toEqual([]);
+  expect(JSON.stringify(response.body)).not.toContain(outcome.receiptFingerprint);
+  await request(app).post(`${prefix}/accept`).set("currentUser", owner)
+    .send({ action: "CONFIRM", clientOperationId: "partial", quoteId: prepared.quote.quoteId }).expect(200);
+});
+
+it("retains an accepted receipt while placement is missing and repairs its projection on recovery", async () => {
+  const original = await createBet();
+  const prepared = await accept();
+  await Bet.deleteOne({ _id: original._id });
+  await prepared.facade.receiveOutcome(prepared.outcome);
+  await prepared.facade.runOnce();
+  expect(await Bet.countDocuments()).toBe(0);
+  expect(await CashBackOperation.findOne({ operationId: prepared.operation.operationId }))
+    .toMatchObject({ state: "ACCEPTED", projectionPending: true, receipt: prepared.receipt });
+  await Bet.create(original.toObject());
+  await prepared.facade.runOnce();
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+    revision: 2, remainingStakeMinor: 6000, cumulativeClosedStakeMinor: 4000,
+  });
+  expect((await CashBackOperation.findOne({ operationId: prepared.operation.operationId }))?.projectionPending).toBe(false);
+  expect((await Bet.findOne({ slipId: "slip" }))?.wager).toBe(100);
+});
+
+it("treats equal financial revisions as exact retries and rejects a conflicting same-revision snapshot", async () => {
+  await createBet();
+  const prepared = await accept();
+  await prepared.facade.receiveOutcome(prepared.outcome);
+  const before = await Bet.findOne({ slipId: "slip" });
+  await applyBetEventWithRetry("slip", applyCashBackFinancial, prepared.receipt.financial);
+  expect((await Bet.findOne({ slipId: "slip" }))?.get("__v")).toBe(before?.get("__v"));
+  await expect(applyBetEventWithRetry("slip", applyCashBackFinancial, {
+    ...prepared.receipt.financial, remainingStakeMinor: 7000, cumulativeClosedStakeMinor: 3000,
+  })).rejects.toThrow("Conflicting cash-back snapshots at the same revision");
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial)
+    .toMatchObject({ revision: 2, remainingStakeMinor: 6000, cumulativeClosedStakeMinor: 4000 });
+});
+
+it("preserves an unversioned terminal status when a delayed partial receipt supplies its financial evidence", async () => {
+  await createBet();
+  const prepared = await accept();
+  await applyBetEventWithRetry("slip", applySettleSlip, {
+    data: { slipId: "slip", result: ResultingStatus.BET_WIN },
+  });
+  await prepared.facade.receiveOutcome(prepared.outcome);
+  expect(await Bet.findOne({ slipId: "slip" })).toMatchObject({
+    status: BetStatus.WIN, wager: 100,
+    cashBackFinancial: { revision: 2, remainingStakeMinor: 6000, cumulativeClosedStakeMinor: 4000 },
+  });
+});
+
+it("rejects attempts to reopen full closure or change its frozen return at a higher revision", async () => {
+  await createBet();
+  const prepared = await accept(true);
+  await prepared.facade.receiveOutcome(prepared.outcome);
+  await expect(applyBetEventWithRetry("slip", applyCashBackFinancial, {
+    ...prepared.receipt.financial, revision: 3, status: BetStatus.CONFIRMED,
+  })).rejects.toThrow("Cash-back terminal exposure cannot be reopened");
+  await expect(applyBetEventWithRetry("slip", applyCashBackFinancial, {
+    ...prepared.receipt.financial, revision: 3, cumulativeReturnMinor: 10001,
+  })).rejects.toThrow("Full cash-back financial amounts are immutable");
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+    revision: 2, status: BetStatus.CASH_BACK, remainingStakeMinor: 0, cumulativeReturnMinor: 10000,
+  });
+});
+
+it("rejects an active financial snapshot newer than an authoritative terminal settlement", async () => {
+  await createBet();
+  const prepared = await accept();
+  await applyBetEventWithRetry("slip", applySettleSlip, {
+    data: {
+      slipId: "slip", result: ResultingStatus.BET_WIN,
+      cashBack: {
+        settlementId: "settlement", occurredAt: new Date().toISOString(), settlementBasisStakeMinor: 6000,
+        financial: { ...prepared.receipt.financial, revision: 3, status: BetStatus.WIN },
+      },
+    },
+  });
+  await expect(applyBetEventWithRetry("slip", applyCashBackFinancial, {
+    ...prepared.receipt.financial, revision: 4,
+  })).rejects.toThrow("A newer cash-back snapshot conflicts with terminal settlement");
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+    revision: 3, status: BetStatus.WIN, remainingStakeMinor: 6000,
+  });
 });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-  CASH_BACK_POLL_MS, CASH_BACK_RETRY_MS, cashBackReason, createCashBackId,
+  CASH_BACK_POLL_MS, CASH_BACK_RECOVERY_ERROR, CASH_BACK_RETRY_MS, cashBackReason, createCashBackId,
   initialMyBetsState, isFinalOperation, isPendingOperation, myBetsReducer,
   readCashBackAttempts, readOperationResponse, storageKey, storageOwnerPrefix,
 } from '../cashBackUtils';
@@ -109,6 +109,10 @@ const useMyBets = ({ ownerId, onAuthRefresh, onBeforeUpdate, onDecision }) => {
     const context = scope.current;
     const id = record.clientOperationId;
     if (!context.ownerId || !isCurrent(context) || runtime.current[id]?.busy) return;
+    if (record.confirmRequest && !record.operationId) {
+      setStorageError(CASH_BACK_RECOVERY_ERROR);
+      return;
+    }
     const previousRuntime = runtime.current[id] ?? {};
     runtime.current[id] = { ...previousRuntime, busy: true };
     setNetwork((old) => ({ ...old, [id]: { ...old[id], busy: true } }));
@@ -306,6 +310,7 @@ const useMyBets = ({ ownerId, onAuthRefresh, onBeforeUpdate, onDecision }) => {
       && entry.clientOperationId !== clientOperationId && entry.confirmRequest
       && !isFinalOperation(serverRef.current.operations[entry.clientOperationId]));
     if (!record || !isCurrent(context) || competing || operation?.state !== 'QUOTED'
+      || record.operationId !== operation.operationId
       || operation.deadline <= Date.now()
       || runtime.current[clientOperationId]?.invalidOffer
       || bet?.status !== 'CONFIRMED'

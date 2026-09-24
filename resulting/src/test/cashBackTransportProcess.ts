@@ -29,6 +29,7 @@ let runtime: { shutdown(code: number): Promise<void> } | undefined;
 let pausedResultEvent: string | undefined;
 let pausedGrantOperation: string | undefined;
 let pausedDecisionOperation: string | undefined;
+let pausedQuoteClientOperation: string | undefined;
 let pausedLiveEvent: string | undefined;
 let pausedLedgerEvent: string | undefined;
 let resumePublication: (() => void) | undefined;
@@ -97,6 +98,21 @@ const start = async () => {
   await mongo.connect(uri);
   await common.messengerWrapper.connect(broker);
   if (role === "resulting") {
+    const operations: typeof import("../model/CashBackOperation") = load("./src/model/CashBackOperation");
+    const quoteUpdate = operations.CashBackOperation.collection.updateOne.bind(operations.CashBackOperation.collection);
+    operations.CashBackOperation.collection.updateOne = async (filter, changes, options) => {
+      const set = !Array.isArray(changes) && object(changes.$set) ? changes.$set : undefined;
+      const quote = object(set?.quote) ? set.quote : undefined;
+      const operation = object(quote?.operation) ? quote.operation : undefined;
+      if (
+        pausedQuoteClientOperation && filter.stage === "SNAPSHOTS" && set?.stage === "QUOTED"
+        && operation?.clientOperationId === pausedQuoteClientOperation && publicationGate
+      ) {
+        process.send?.({ type: "paused", role });
+        await publicationGate;
+      }
+      return quoteUpdate(filter, changes, options);
+    };
     const models: typeof import("../model/Bet") = load("./src/model/Bet");
     const update = models.Bet.collection.updateOne.bind(models.Bet.collection);
     models.Bet.collection.updateOne = async (filter, changes, options) => {
@@ -171,10 +187,11 @@ const handle = async ({ action, data = {} }: Command): Promise<unknown> => {
     previous?.();
     return true;
   }
-  if (["pause-result", "pause-grant", "pause-decision", "pause-after-live", "pause-ledger"].includes(action)) {
+  if (["pause-result", "pause-grant", "pause-decision", "pause-quote", "pause-after-live", "pause-ledger"].includes(action)) {
     pausedResultEvent = action === "pause-result" ? String(data.eventId) : undefined;
     pausedGrantOperation = action === "pause-grant" ? String(data.operationId) : undefined;
     pausedDecisionOperation = action === "pause-decision" ? String(data.operationId) : undefined;
+    pausedQuoteClientOperation = action === "pause-quote" ? String(data.clientOperationId) : undefined;
     pausedLiveEvent = action === "pause-after-live" ? String(data.eventId) : undefined;
     pausedLedgerEvent = action === "pause-ledger" ? String(data.eventId) : undefined;
     publicationGate = new Promise<void>(resolveGate => { resumePublication = resolveGate; });
@@ -184,6 +201,7 @@ const handle = async ({ action, data = {} }: Command): Promise<unknown> => {
     pausedResultEvent = undefined;
     pausedGrantOperation = undefined;
     pausedDecisionOperation = undefined;
+    pausedQuoteClientOperation = undefined;
     pausedLiveEvent = undefined;
     pausedLedgerEvent = undefined;
     resumePublication?.();
