@@ -36,5 +36,10 @@
     "legacy-common": "npm:@betstan/common@1.0.54",
     "predecessor-common": "npm:@betstan/common@1.1.0-rc.1",
     "typescript": "^5.3.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vasilyevstan/betstan.git",
+    "directory": "common"
   }
 }
