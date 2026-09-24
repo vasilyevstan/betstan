@@ -1006,6 +1006,7 @@ export const applySettleSlip = (
     if (
       !Number.isFinite(Date.parse(evidence.occurredAt)) || !evidence.settlementId
       || evidence.settlementBasisStakeMinor !== evidence.financial.remainingStakeMinor
+      || ![BetStatus.WIN, BetStatus.LOSS, BetStatus.VOID].includes(evidence.financial.status)
       || evidence.financial.status !== mapBetResultToStatus(event.data.result)
     ) throw new Error("Invalid remaining-principal settlement evidence");
     return applyCashBackFinancial(bet, evidence.financial);

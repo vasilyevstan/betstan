@@ -4,7 +4,7 @@ import cookieSession from "cookie-session";
 import jwt from "jsonwebtoken";
 import {
   BetKind, BetStatus, BettingStatus, CashBackAcceptedReceipt, CashBackQuote,
-  CashBackQuoteEvidence, CashBackRejectedReceipt, EventPhase, EventStatus, EventVisibility, ICashBackOutcomeEvent,
+  CashBackQuoteEvidence, CashBackRejectedReceipt, EventPhase, EventStatus, EventVisibility, ICashBackOutcomeEvent, ISettleSlipEvent,
   messengerWrapper, ModerationStatus, ResultingStatus, SlipRowStatus,
 } from "@betstan/common";
 import { app } from "../../app";
@@ -274,6 +274,57 @@ it("appends a late partial receipt after newer settlement without rewinding scal
   expect(history.body).not.toHaveProperty("complete");
 });
 
+it.each<[BetStatus, ResultingStatus, BetStatus.WIN | BetStatus.LOSS | BetStatus.VOID, ResultingStatus]>([
+  [BetStatus.PENDING, ResultingStatus.BET_PENDING, BetStatus.WIN, ResultingStatus.BET_WIN],
+  [BetStatus.CONFIRMED, ResultingStatus.BET_APPROVED, BetStatus.LOSS, ResultingStatus.BET_LOSS],
+  [BetStatus.DECLINED, ResultingStatus.BET_DECLINED, BetStatus.VOID, ResultingStatus.BET_VOID],
+])("rejects serialized %s cash-back settlements without consuming the terminal revision", async (invalidStatus, invalidResult, status, result) => {
+  await createBet();
+  const prepared = await accept();
+  await prepared.facade.receiveOutcome(prepared.outcome);
+  const before = await Bet.findOne({ slipId: "slip" }).lean();
+  expect(before).toMatchObject({
+    status: BetStatus.CONFIRMED,
+    cashBackFinancial: { revision: 2, remainingStakeMinor: 6000, cumulativeClosedStakeMinor: 4000 },
+  });
+  const settlement: ISettleSlipEvent = {
+    data: {
+      slipId: "slip", result,
+      cashBack: {
+        settlementId: "settlement", occurredAt: new Date().toISOString(), settlementBasisStakeMinor: 6000,
+        financial: { ...prepared.receipt.financial, revision: 3, status },
+      },
+    },
+  };
+  const malformed = JSON.parse(JSON.stringify({
+    data: {
+      ...settlement.data, result: invalidResult,
+      cashBack: {
+        ...settlement.data.cashBack,
+        financial: { ...prepared.receipt.financial, revision: 3, status: invalidStatus },
+      },
+    },
+  }));
+  await expect(applyBetEventWithRetry("slip", applySettleSlip, malformed))
+    .rejects.toThrow("Invalid remaining-principal settlement evidence");
+  expect(await Bet.findOne({ slipId: "slip" }).lean()).toEqual(before);
+  const mismatched = JSON.parse(JSON.stringify({ data: { ...settlement.data, result: invalidResult } }));
+  await expect(applyBetEventWithRetry("slip", applySettleSlip, mismatched))
+    .rejects.toThrow("Invalid remaining-principal settlement evidence");
+  expect(await Bet.findOne({ slipId: "slip" }).lean()).toEqual(before);
+  await applyBetEventWithRetry("slip", applySettleSlip, settlement);
+  const settled = await Bet.findOne({ slipId: "slip" }).lean();
+  expect(settled).toMatchObject({
+    status, wager: 100, rows: before?.rows,
+    cashBackFinancial: {
+      revision: 3, status, originalStakeMinor: 10000, remainingStakeMinor: 6000,
+      cumulativeClosedStakeMinor: 4000, cumulativeReturnMinor: 4000,
+    },
+  });
+  await applyBetEventWithRetry("slip", applySettleSlip, settlement);
+  expect(await Bet.findOne({ slipId: "slip" }).lean()).toEqual(settled);
+});
+
 it("freezes full status and row winner metadata against moderation and all settlement paths", async () => {
   await createBet();
   const prepared = await accept(true);
@@ -295,7 +346,16 @@ it("freezes full status and row winner metadata against moderation and all settl
     .send({ action: "CONFIRM", clientOperationId: "full", quoteId: prepared.quote.quoteId }).expect(200);
 });
 
-it("projects and replays a canonical rejection without closing principal or adding a history portion", async () => {
+it.each<[string, string | undefined, string | undefined]>([
+  ["matching unknown", "UNKNOWN", "UNKNOWN"],
+  ["matching missing", undefined, undefined],
+  ["unknown envelope", "UNKNOWN", "REJECTED"],
+  ["missing envelope", undefined, "REJECTED"],
+  ["unknown receipt", "REJECTED", "UNKNOWN"],
+  ["missing receipt", "REJECTED", undefined],
+  ["acceptance envelope with rejection receipt", "ACCEPTED", "REJECTED"],
+  ["rejection envelope with acceptance receipt", "REJECTED", "ACCEPTED"],
+])("rejects %s terminal discriminants before projecting and replaying a canonical rejection", async (_name, envelopeOutcome, receiptOutcome) => {
   await createBet();
   const prepared = await accept();
   const receipt: CashBackRejectedReceipt = {
@@ -308,6 +368,17 @@ it("projects and replays a canonical rejection without closing principal or addi
     outcome: "REJECTED", operation: prepared.operation.operation, receipt,
     receiptFingerprint: cashBackReceiptHash(receipt),
   };
+  const operationBefore = await CashBackOperation.findOne({ operationId: prepared.operation.operationId }).lean();
+  const betBefore = await Bet.findOne({ slipId: "slip" }).lean();
+  expect(operationBefore).toMatchObject({ state: "CONFIRM_PENDING", projectionPending: false });
+  expect(operationBefore?.receipt).toBeUndefined();
+  const malformed = JSON.parse(JSON.stringify({
+    ...outcome, outcome: envelopeOutcome, receipt: { ...receipt, outcome: receiptOutcome },
+  }));
+  malformed.receiptFingerprint = cashBackReceiptHash(malformed.receipt);
+  await expect(prepared.facade.receiveOutcome(malformed)).rejects.toThrow("Invalid cash-back terminal receipt binding");
+  expect(await CashBackOperation.findOne({ operationId: prepared.operation.operationId }).lean()).toEqual(operationBefore);
+  expect(await Bet.findOne({ slipId: "slip" }).lean()).toEqual(betBefore);
   await prepared.facade.receiveOutcome(outcome);
   await prepared.facade.receiveOutcome(outcome);
   const response = await request(app).get(`${prefix}/operations/${prepared.operation.operationId}`)

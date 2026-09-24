@@ -255,7 +255,9 @@ export class CashBackFacade {
     const receipt = data.receipt;
     const quote = operation.quote;
     if (
-      !quote || !operation.confirmRequest || receipt.outcome !== data.outcome
+      (data.outcome !== "ACCEPTED" && data.outcome !== "REJECTED")
+      || !receipt || (receipt.outcome !== "ACCEPTED" && receipt.outcome !== "REJECTED")
+      || !quote || !operation.confirmRequest || receipt.outcome !== data.outcome
       || !receipt.decisionId || !data.receiptFingerprint || !Number.isFinite(Date.parse(receipt.decisionTime))
       || data.receiptFingerprint !== cashBackReceiptHash(receipt)
       || receipt.financial.originalStakeMinor !== quote.financial.originalStakeMinor
