@@ -3,6 +3,7 @@ import { Event } from "../model/Event";
 import { EventStatus, messengerWrapper } from "@betstan/common";
 import { getBackofficePublicationService } from "../service/BackofficePublicationService";
 import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
+import { cashBackAuthorityWritable } from "../service/CashBackSourceService";
 
 const router = express.Router();
 const MAX_SCORE = 99;
@@ -49,6 +50,7 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
       eventId,
       status: { $ne: EventStatus.RESULTED },
       newEventPublicationPending: { $ne: true },
+      $and: [cashBackAuthorityWritable],
     },
     {
       $set: {
@@ -57,16 +59,22 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
         status: EventStatus.RESULTED,
         resultPublicationPending: true,
       },
+      $inc: { cashBackAuthorityRevision: 1 },
+      $currentDate: { cashBackAuthorityAt: true },
     },
     { new: true }
   ).select("+resultPublicationPending +newEventPublicationPending");
 
   if (!event) {
     const existingEvent = await Event.findOne({ eventId }).select(
-      "+resultPublicationPending +newEventPublicationPending"
+      "+resultPublicationPending +newEventPublicationPending +cashBackHold"
     );
     if (!existingEvent) {
       res.status(404).send({ message: "Event not found" });
+      return;
+    }
+    if (existingEvent.cashBackHold) {
+      res.status(409).send({ message: "Event is reserved for cash-back" });
       return;
     }
 

@@ -8,10 +8,16 @@ import {
 } from "@betstan/common";
 
 import { Event } from "../../model/Event";
+import { cashBackAuthorityWritable } from "../../service/CashBackSourceService";
 
 class EventResultListener extends AListener<IEventResultEvent> {
   serviceName: string = "backoffice_result_set";
   queue: QueueNames.EVENT_RESULT = QueueNames.EVENT_RESULT;
+
+  async init() {
+    await super.init();
+    await this.channel.prefetch(1);
+  }
 
   async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
     const { data } = event;
@@ -22,22 +28,25 @@ class EventResultListener extends AListener<IEventResultEvent> {
       return;
     }
 
-    const storedEvent = await Event.findOne({ eventId: data.eventId });
-
-    if (!storedEvent) {
-      console.log("event not found", event);
-      this.ack(msg);
+    const updated = await Event.updateOne(
+      { eventId: data.eventId, $and: [cashBackAuthorityWritable] },
+      {
+        $set: {
+          homeResult: data.homeScore,
+          awayResult: data.awayScore,
+          status: EventStatus.RESULTED,
+          visibility: EventVisibility.OFFLINE,
+        },
+        $inc: { cashBackAuthorityRevision: 1 },
+        $currentDate: { cashBackAuthorityAt: true },
+      }
+    );
+    if (updated.matchedCount === 0 && await Event.exists({ eventId: data.eventId })) {
+      console.warn("backoffice_result_waiting_for_cash_back", { eventId: data.eventId });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      this.channel.nack(msg, false, true);
       return;
     }
-
-    storedEvent.set({
-      homeResult: data.homeScore,
-      awayResult: data.awayScore,
-      status: EventStatus.RESULTED,
-      visibility: EventVisibility.OFFLINE,
-    });
-
-    await storedEvent.save();
     this.ack(msg);
   }
 }

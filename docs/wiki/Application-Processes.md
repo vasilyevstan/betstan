@@ -21,6 +21,7 @@ For the service map and message catalog, see [[Architecture]] and
 | Draft slip maintenance | Slip | Event, Client |
 | Placement and moderation | Slip, Moderation | Bet, Resulting |
 | Settlement and payout | Resulting | Bet, Event, Gamemaster |
+| Cash back (deployment-gated) | Resulting | Bet, Backoffice, Gamemaster, Client |
 | Public event projection | Event | Client |
 | Public operational summaries | Telemetry | Client, Auth, Slip, Resulting, Gamemaster |
 
@@ -293,13 +294,135 @@ Resulting tracks accepted rows until the authoritative outcome is known.
   market outcome.
 - Unreachable or explicitly closed outcomes can be voided according to the
   market result.
-- A slip reaches its final state only after all of its rows are terminal.
+- Normal settlement finalizes the slip after all of its rows are terminal.
 
 Resulting publishes row-level and slip-level settlement messages. Bet records
 the final row outcomes, aggregate result, and payout in the history shown on
 **My Bets**. Delivery ledgers, parked updates, and replay workers handle
 duplicates and the case where a settlement message reaches a consumer before
 the related placement is visible there.
+
+## Cash back - deployment-gated
+
+Availability depends on a verified, enabled deployed generation; see
+[[Release Orchestration]]. This process closes all or part of a confirmed bet's
+remaining exposure; it does not cancel the placement or transfer money.
+
+### Eligibility and quote lifetime
+
+The authenticated owner may request cash-back on a confirmed single or
+accumulator. Resulting retains the complete original accepted selection/odds
+manifest and checks every original leg. A resolved leg, including a removed
+void leg, makes the whole bet ineligible; a partial never removes a leg.
+Missing or incomplete historical authority is unavailable, not presumed safe.
+
+For `PRE_MATCH`, eligibility ends strictly before the earliest trusted kickoff
+and cannot reopen as `LIVE`. For `LIVE`, every exact selected market version
+and selection must remain unresolved and available. Backoffice and Gamemaster
+both participate for every selected event.
+
+A quote expires strictly before or at the earliest of its seven-second
+lifetime, relevant price validity, and authority cutoffs: acceptance requires
+decision time **strictly before** `expiresAt`. Equality is too late. A changed
+quote version invalidates the offer even when the displayed odds are unchanged.
+An offer observes authority without reserving it; explicit confirmation starts
+the reservation and decision process.
+
+### Authenticated HTTP contract
+
+The browser talks only to Bet for this feature; Resulting has no cash-back
+business HTTP endpoint. Each route is owner-scoped and returns `no-store`
+responses.
+
+| Purpose | Method and route | Request or result |
+|---|---|---|
+| Request an offer | `POST /api/bet/:slipId/cash-back/quote` | `{ action: "QUOTE", clientOperationId, portion }` |
+| Confirm the stored offer | `POST /api/bet/:slipId/cash-back/accept` | `{ action: "CONFIRM", clientOperationId, quoteId }` |
+| Reconcile an operation | `GET /api/bet/:slipId/cash-back/operations/:operationId` | Current operation state and available quote, receipt, or reason |
+| Read accepted portions | `GET /api/bet/:slipId/cash-back/history?cursor=...` | `{ items, nextCursor }`, at most 20 receipts per page |
+
+`portion` is exactly `{ "mode": "FULL" }` or an explicit
+`{ "mode": "PARTIAL", "stakeMinor": 4000 }`; the latter closes `40.00` nominal
+Stanbucks. Full means the exact quoted remainder. Confirmation cannot supply a
+replacement amount, price, owner, or revision.
+
+The public operation states are `QUOTE_PENDING`, `QUOTED`, `UNAVAILABLE`,
+`CONFIRM_PENDING`, `ACCEPTED`, and `REJECTED`. `202` means a durable pending
+request, **not** accepted cash-back. A `200` response still requires inspecting
+the state: an offer or rejection is not success. Only `ACCEPTED` with its
+immutable receipt records a completed closure. Public serialization excludes
+internal source evidence and authority proofs.
+
+Bet persists request identity and content before asynchronous delivery. An
+exact retry reuses the same `clientOperationId` and body; changed content under
+that identity conflicts with `409`. A genuinely new offer needs a new identity
+and fresh explicit confirmation. Authentication, ownership, malformed input,
+and unavailable service failures remain explicit errors, not successful empty
+responses.
+
+After an uncertain confirmation, retry or look up that same operation rather
+than submit another closure. Browser expiry does not settle the uncertainty:
+the original request may already have a durable decision, or the exact saved
+confirmation may still need delivery. Server decision time, not click time or
+HTTP arrival time, controls acceptance.
+
+### Deterministic nominal pricing
+
+One minor unit is `0.01` nominal Stanbucks. The server uses bounded fixed-point
+integer/decimal arithmetic, not binary-float rounding. For closed principal
+`C`, accepted combined odds `Oa`, and current combined odds `Oc` for the same
+original selections:
+
+```text
+nominalReturn = floorToMinorUnits(min(C * Oa / Oc, C * Oa))
+```
+
+Only the final offer is rounded down; individual legs are not rounded along
+the way. Closed stake and return must each be at least `0.01`, and a partial
+must leave at least `0.01`. Unrepresentable legacy wagers, overflow, or invalid
+evidence are rejected as unavailable rather than rounded into eligibility.
+Repeated partials have no count cap, but splitting an unchanged-price offer
+cannot create a rounding gain and can return less than one full operation.
+
+| Closed stake | Accepted odds | Current odds | Recorded nominal return |
+|---|---|---|---|
+| `40.00` | `3` | `6` | `20.00` |
+| `40.00` | `3` | `1.5` | `80.00` |
+
+With an original `100.00` stake, either example leaves `60.00` and a possible
+remainder return of `180.00` at the accepted odds of `3`. There is no extra
+fee or time haircut. Unchanged static pre-match prices return the closed stake;
+approaching kickoff changes eligibility, not that price. Accumulators retain
+the existing product-of-odds simulation convention, including same-event
+selections, not a new correlation-aware valuation engine. None of these
+amounts is a wallet credit, balance, or payment.
+
+### Closure, settlement, and retained history
+
+A full accepted closure sets `CASH_BACK`, reduces the remainder to zero, and
+freezes the closed exposure against moderation, settlement, and later row
+winner metadata. A partial keeps the parent `CONFIRMED`; normal settlement
+uses only the uncashed remainder. `ISettleSlipEvent.data.cashBack` supplies the
+revisioned snapshot and `settlementBasisStakeMinor`, not a second settlement
+of the original stake.
+
+The original wager and accepted selection identity remain unchanged, so
+cash-back neither creates extra placed bets nor changes original-wager
+statistics. After normal settlement the recorded remainder is the historical
+settlement basis; active exposure is zero for terminal parents.
+
+Accepted receipts are retained without an expiry, newest decision first,
+with bounded cursor pagination. They remain discoverable after full closure
+or remainder settlement. A late receipt may add history but cannot rewind a
+newer financial revision, double-count cumulative return, or reopen terminal
+exposure. `nextCursor: null` ends the available page sequence; it is not a new
+history-completeness attestation.
+
+The [Bet routes](https://github.com/vasilyevstan/betstan/blob/master/bet/src/route/CashBack.ts),
+[public facade](https://github.com/vasilyevstan/betstan/blob/master/bet/src/service/CashBackFacade.ts),
+and [Resulting pricing](https://github.com/vasilyevstan/betstan/blob/master/resulting/src/service/cashBackPricing.ts)
+define these interfaces and calculations. See [[Message Flows]] for the
+durable decision/release sequence.
 
 ## Live event propagation
 

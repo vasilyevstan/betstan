@@ -28,6 +28,17 @@ it("does not bind on import and explicitly starts, accepts, and closes", async (
   expect(server.listening).toBe(false);
 });
 
+it("closes resources and fails the process on rejected asynchronous message handlers", async () => {
+  const close = jest.fn(async () => {});
+  const processEmitter = new EventEmitter() as EventEmitter & GamemasterProcess;
+  processEmitter.exit = jest.fn();
+  installGamemasterProcessHandlers(close, processEmitter);
+  processEmitter.emit("unhandledRejection", new Error("message handler failed"));
+  await new Promise(resolve => setImmediate(resolve));
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(processEmitter.exit).toHaveBeenCalledWith(1);
+});
+
 it("keeps repeated signal handlers installed while one async cleanup completes", async () => {
   let resolveClose!: () => void;
   const close = jest.fn(

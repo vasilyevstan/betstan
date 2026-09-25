@@ -31,6 +31,11 @@ const isMissing = (value: unknown): value is null | undefined =>
   value === undefined || value === null;
 
 const buildUpdateSet = (document: RawDocument): Record<string, unknown> => {
+  if (["cashBackGeneration", "cashBackAuthorityRevision", "cashBackHold", "cashBackAuthorityIntent"].some(
+    field => Object.prototype.hasOwnProperty.call(document, field)
+  )) {
+    return {};
+  }
   if (!isMissing(document.phase)) {
     return {};
   }
@@ -72,6 +77,10 @@ async function processCollection(
           phase: 1,
           liveConfirmedReplayCursor: 1,
           resultPublishedAt: 1,
+          cashBackGeneration: 1,
+          cashBackAuthorityRevision: 1,
+          cashBackHold: 1,
+          cashBackAuthorityIntent: 1,
         },
       })
       .sort({ _id: 1 })
@@ -98,7 +107,13 @@ async function processCollection(
       if (apply) {
         operations.push({
           updateOne: {
-            filter: { _id: document._id },
+            filter: {
+              _id: document._id,
+              cashBackGeneration: { $exists: false },
+              cashBackAuthorityRevision: { $exists: false },
+              cashBackHold: { $exists: false },
+              cashBackAuthorityIntent: { $exists: false },
+            },
             update: { $set: updateSet },
           },
         });
@@ -106,8 +121,9 @@ async function processCollection(
     }
 
     if (apply && operations.length > 0) {
-      await collection.bulkWrite(operations, { ordered: true });
-      report.changed += operations.length;
+      const result = await collection.bulkWrite(operations, { ordered: true });
+      report.changed += result.modifiedCount;
+      report.skipped += operations.length - result.modifiedCount;
     }
   }
 }

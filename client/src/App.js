@@ -27,6 +27,7 @@ const getTheme = (search) => getParam(search, 'theme', 'dark', allowedThemes);
 const App = () => {
   const location = useLocation();
   const lastReportedPath = useRef(null);
+  const authRequestSequence = useRef(0);
   const routeIdentity = getRouteIdentity(location.pathname);
   const uiVariant = useMemo(() => getUiVariant(location.search), [location.search]);
   const theme = useMemo(() => getTheme(location.search), [location.search]);
@@ -51,14 +52,17 @@ const App = () => {
   }, [currentUser, location.search]);
 
   const fetchData = useCallback(async () => {
+    const requestSequence = ++authRequestSequence.current;
     setIsCurrentUserResolved(false);
     try {
       const response = await axios.get('/api/auth/currentuser');
+      if (requestSequence !== authRequestSequence.current) return undefined;
       setCurrentUser(response.data.currentUser);
+      return response.data.currentUser;
     } catch {
-      setCurrentUser();
+      if (requestSequence === authRequestSequence.current) setCurrentUser();
     } finally {
-      setIsCurrentUserResolved(true);
+      if (requestSequence === authRequestSequence.current) setIsCurrentUserResolved(true);
     }
   }, []);
 
@@ -139,7 +143,8 @@ const App = () => {
                   refreshToken={backofficeRefreshToken}
                 />}
               />
-              <Route path="/bets" element={<MyBets />} />
+              <Route path="/bets" element={<MyBets currentUser={currentUser}
+                isCurrentUserResolved={isCurrentUserResolved} onAuthRefresh={fetchData} />} />
               <Route path="/telemetry" element={<Telemetry />} />
               <Route
                 path="*"

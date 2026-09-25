@@ -345,6 +345,10 @@ run_deploy_segment() {
     MONGO_UPGRADE_STATE_FILE="$UPGRADE_STATE" \
     MONGO_UPGRADE_WAIT_ATTEMPTS=2 \
     MONGO_UPGRADE_SLEEP_SECONDS=0 \
+    SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    GITHUB_RUN_ID=123456 \
+    OUTPUT_DIR="$WORK_DIR/deploy-clock" \
+    FAKE_CLOCK_FAIL="${FAKE_CLOCK_FAIL:-0}" \
     bash -s -- "$ROOT_DIR" "$WORK_DIR/deploy-segment.sh" <<'SH'
 set -euo pipefail
 SCRIPT_DIR="$1/infra/oci/scripts"
@@ -367,6 +371,14 @@ apply_documents() {
   esac
 }
 verify_telemetry_ingress_routes() { printf 'verify_routes\n' >>"$KUBECTL_LOG"; }
+live_betting_check_mongo_clock() {
+  printf 'verify_clock\n' >>"$KUBECTL_LOG"
+  [[ "$2" == "$SOURCE_SHA" && "$3" == "$GITHUB_RUN_ID" && "$FAKE_CLOCK_FAIL" == 0 ]]
+}
+oci_verify_cash_back_source_flags() {
+  [[ "$1" == "$SOURCE_SHA" && "$3" == running ]]
+  printf 'verify_cash_back_flags\n' >>"$KUBECTL_LOG"
+}
 source "$2"
 [[ "$mongo_upgrade_recovery_required" == "true" ]] ||
   oci_die "failure recovery was disarmed before deployment completion"
@@ -407,6 +419,16 @@ for mode in aligned retained upgrade bad-finalize bad-ingress; do
   else
     [[ "$result" == "0" ]] || fail "$mode deployment failed: $(cat "$WORK_DIR/deploy-$mode.out")"
     grep -q '^verify_routes$' "$LOG" || fail "$mode did not establish Telemetry routes"
+    python3 - "$LOG" <<'PY'
+from pathlib import Path
+import sys
+rows = Path(sys.argv[1]).read_text().splitlines()
+clock = rows.index("verify_clock")
+resulting = next(i for i, row in enumerate(rows)
+                 if row == "apply_documents Deployment:^gaming-resulting-depl$")
+assert clock < resulting, "Resulting starts before clock validation"
+assert rows.index("verify_cash_back_flags") > resulting
+PY
     if [[ "$mode" == "aligned" ]] && grep -q '^scale ' "$LOG"; then
       fail "aligned deployment unnecessarily scaled workloads"
     fi
@@ -425,4 +447,13 @@ PY
     fi
   fi
 done
+write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+set +e
+FAKE_CLOCK_FAIL=1 run_deploy_segment >"$WORK_DIR/deploy-bad-clock.out" 2>&1
+result=$?
+set -e
+[[ "$result" != 0 ]] || fail "failed clock observation did not stop deployment"
+if grep -Fq 'apply_documents Deployment:^gaming-resulting-depl$' "$LOG"; then
+  fail "failed clock observation reached Resulting startup"
+fi
 echo "oci_mongo_upgrade_contract=PASS"

@@ -1,7 +1,22 @@
-import { EventStatus, EventVisibility } from "@betstan/common";
+import { CashBackSourceReply, EventStatus, EventVisibility } from "@betstan/common";
 import { Schema, model } from "mongoose";
 
+export interface BackofficeCashBackHold {
+  requestFingerprint: string;
+  grant: Extract<CashBackSourceReply, { outcome: "GRANTED" }>;
+}
+
+const cashBackHoldSchema = new Schema<BackofficeCashBackHold>({
+  requestFingerprint: { type: String, required: true },
+  grant: { type: Schema.Types.Mixed, required: true },
+}, { _id: false });
+
 const eventSchema = new Schema({
+  cashBackGeneration: { type: Number, required: false, select: false },
+  cashBackAuthorityRevision: { type: Number, required: false, select: false },
+  cashBackAuthorityAt: { type: Date, required: false, select: false },
+  cashBackFenceAt: { type: Date, required: false, select: false },
+  cashBackHold: { type: cashBackHoldSchema, required: false, select: false },
   eventId: {
     type: String,
     required: true,

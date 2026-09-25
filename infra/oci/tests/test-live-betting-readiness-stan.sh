@@ -15,6 +15,18 @@ assert_eq 0 "$RUN_RC" "OCI dark mode should accept the current ten services in a
 assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'OCI current service set should report GO'
 assert_contains "$RUN_SUMMARY_FILE" 'image_provenance_rows=10' 'OCI current service set should contain ten images'
 assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'OCI current service set should verify every deployment'
+assert_contains "$RUN_SUMMARY_FILE" 'mongo_clock_consistent=true' 'OCI readiness must observe the shared Mongo clock'
+assert_contains "$RUN_SUMMARY_FILE" 'mongo_clock_evidence_sha256=' 'OCI readiness must bind clock evidence'
+assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-clock.js" 'clockPerformance.now()' 'clock probe must use monotonic brackets'
+assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-clock.js" 'runCommand({hello: 1})' 'clock probe must read the actual Mongo clock'
+
+for clock_case in missing backward malformed identity-change process-change slow timeout; do
+  run_live_betting_scenario "oci-clock-$clock_case" "$SCRIPT" oci \
+    MODE=dark STUB_CLOCK_SCENARIO="$clock_case"
+  assert_eq 1 "$RUN_RC" "OCI readiness must reject $clock_case clock evidence"
+  assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_clock' 'clock failure must be explicit'
+  assert_contains "$RUN_SUMMARY_FILE" 'mongo_clock_consistent=false' 'failed clock observation must not look healthy'
+done
 
 run_live_betting_scenario oci-monitor "$SCRIPT" oci \
   MODE=monitor \

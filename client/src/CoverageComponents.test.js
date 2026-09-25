@@ -315,7 +315,7 @@ describe('coverage components', () => {
     });
     axios.get.mockResolvedValue({ data: bets });
 
-    render(<MyBets />);
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
 
     await screen.findByText('25 bets found');
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
@@ -383,18 +383,21 @@ describe('coverage components', () => {
     expect(screen.getByRole('button', { name: 'Oldest first' })).toBeInTheDocument();
   });
 
-  it('keeps My Bets empty when the response is malformed or unavailable', async () => {
+  it('shows actionable My Bets errors rather than an empty success for malformed or unavailable responses', async () => {
     axios.get.mockResolvedValueOnce({ data: null });
-    const first = render(<MyBets />);
+    const first = render(<MyBets currentUser={{ id: 'test-owner' }} />);
     expect(
-      await screen.findByText('No bets match the active filters.'),
+      await screen.findByRole('alert'),
+    ).toHaveTextContent('My Bets returned an unreadable response');
+    expect(
+      screen.getByRole('button', { name: 'Refresh bets' }),
     ).toBeInTheDocument();
     first.unmount();
 
     axios.get.mockRejectedValueOnce(new Error('offline'));
-    render(<MyBets />);
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
     expect(
-      await screen.findByText('No bets match the active filters.'),
-    ).toBeInTheDocument();
+      await screen.findByRole('alert'),
+    ).toHaveTextContent('My Bets could not be refreshed');
   });
 });

@@ -127,6 +127,7 @@ replace_lock_state() {
   local next_lease_until_epoch="${13}"
   local next_released_at_epoch="${14}"
   local next_fencing_generation="${15}"
+  local expected_uid="${16:-*}"
   kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" -o json |
     python3 -c '
 import json
@@ -148,9 +149,12 @@ import sys
     next_lease_until_epoch,
     next_released_at_epoch,
     next_fencing_generation,
+    expected_uid,
 ) = sys.argv[1:]
 document = json.load(sys.stdin)
 data = document.setdefault("data", {})
+if expected_uid != "*" and document.get("metadata", {}).get("uid") != expected_uid:
+    raise SystemExit("lock UID compare-and-swap precondition failed")
 
 checks = {
     "state": expected_state,
@@ -180,11 +184,30 @@ json.dump(document, sys.stdout)
       "$expected_fencing_generation" "$next_state" "$next_holder" \
       "$next_operation_id" "$next_source_sha" "$next_acquired_at_epoch" \
       "$next_lease_duration_seconds" "$next_lease_until_epoch" \
-      "$next_released_at_epoch" "$next_fencing_generation" |
+      "$next_released_at_epoch" "$next_fencing_generation" "$expected_uid" |
     kubectl replace -f - >/dev/null
 }
 
 case "$ACTION" in
+  acquire-released)
+    validate_identity
+    validate_lease
+    [[ "${EXPECTED_LOCK_UID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] ||
+      fail "EXPECTED_LOCK_UID is required for released-only acquisition"
+    [[ "${EXPECTED_FENCING_GENERATION:-}" =~ ^[1-9][0-9]{0,15}$ ]] ||
+      fail "EXPECTED_FENCING_GENERATION is required for released-only acquisition"
+    (( EXPECTED_FENCING_GENERATION < 9007199254740991 )) ||
+      fail "released-only fencing generation exceeds the safe increment range"
+    now_epoch="$(current_epoch)"
+    lease_until_epoch="$(( now_epoch + LOCK_LEASE_SECONDS ))"
+    next_fencing_generation="$(( EXPECTED_FENCING_GENERATION + 1 ))"
+    replace_lock_state released "" "*" "*" "*" "$EXPECTED_FENCING_GENERATION" \
+      active "$LOCK_TOKEN" "$OPERATION_ID" "$SOURCE_SHA" \
+      "$now_epoch" "$LOCK_LEASE_SECONDS" "$lease_until_epoch" "0" \
+      "$next_fencing_generation" "$EXPECTED_LOCK_UID" ||
+      fail "observed released database operation lock changed before acquisition"
+    echo "shared_mongo_lock=acquire-released status=PASS lease_until_epoch=$lease_until_epoch fencing_generation=$next_fencing_generation"
+    ;;
   acquire)
     validate_identity
     validate_lease
@@ -390,7 +413,7 @@ print("|".join([
     echo "shared_mongo_lock=force-release status=PASS released_at_epoch=$now_epoch"
     ;;
   *)
-    echo "usage: $0 {acquire|verify|renew|verify-released|release|force-release}" >&2
+    echo "usage: $0 {acquire|acquire-released|verify|renew|verify-released|release|force-release}" >&2
     exit 2
     ;;
 esac

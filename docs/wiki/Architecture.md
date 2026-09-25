@@ -184,43 +184,83 @@ wire contract therefore requires:
 Source appearing in the repository does not silently alter a deployed
 service.
 
-### Cash-back contracts — feature not active
+### Cash-back runtime - deployment-gated
 
-The `@betstan/common` source candidate `1.1.0-rc.2` adds
-structural cash-back wire DTOs, four topic names, status values, and contract
-tests. All eight backend consumer pins remain at `1.1.0-rc.1`. Defining or
-publishing these contracts does **not** enable cash-back: this slice has no
-cash-back handlers, pricing function, HTTP endpoints, persistence or source
-fencing, user UI, wallet, or activation.
+The runtime implements the published `@betstan/common`
+`1.1.0-rc.2` contracts; all eight backend manifests and lockfiles pin that exact
+version. Unlike the earlier contract-only slice, it includes service handlers,
+pricing, persistence, source fencing, and the My Bets UI. Availability depends
+on a verified, enabled deployed generation; see [[Release Orchestration]].
+Package publication and source repinning alone are not evidence of runtime
+availability.
 
-The declared semantics are for future implementations:
+| Owner | Cash-back responsibility in the candidate |
+|---|---|
+| Client | Explicit offer/confirmation interaction and owner-scoped retry metadata; never financial authority |
+| Bet | Authenticated HTTP facade, durable request delivery, immutable receipt history, and revision-safe public projection |
+| Resulting | Fixed-point pricing, complete original manifest, authoritative exposure, one canonical decision, and recovery |
+| Backoffice | Event lifecycle authority and generation-bound source holds |
+| Gamemaster | Exact live market/quote authority, generation-bound holds, and durable authority-change publication intent |
 
-- `CashBackMinorUnits` represents safe-integer nominal Stanbuck amounts:
-  one minor unit is `0.01` Stanbucks, not real funds or a wallet balance.
-  The TypeScript alias does not validate incoming JSON.
-- `BetStatus.CASH_BACK` / `ResultingStatus.BET_CASH_BACK` mean full closure
-  of the current remainder to zero, not cancellation or voiding. `PARTIAL`
-  keeps `CONFIRMED` / `BET_APPROVED` with a positive active remainder for
-  later cash-back or normal settlement; it does not settle or remove a leg.
-- Original wager, accepted odds, placement identity, and the complete original
-  selection manifest remain immutable. Pre-match selections retain exact
-  `productId` / `oddsId`; live selections additionally require `marketId`,
-  `marketVersion`, and `selectionId`, never just a side or array position.
-- Optional `ISettleSlipEvent.data.cashBack` adds settlement identity/domain
-  time, a revisioned financial snapshot, and the remaining-principal
-  settlement basis. Legacy payloads and `result: string` remain valid.
-  Absence of evidence cannot reset a reduced remainder to the original stake;
-  after normal settlement the recorded remainder is historical, not active.
+Each service uses its own database. Resulting remains a broker-driven worker
+with no business HTTP API; Bet does not read Resulting's collections to obtain
+a decision. The four feature topics reuse Common's RabbitMQ infrastructure,
+with confirmed persistent publication and durable consumer queues.
 
-Wire compatibility tests do not prove safe mixed-version writers after
-activation. Consumer repinning, runtime enforcement, persistence/recovery,
-and user-facing behavior remain separate work. Once cash-back state exists,
-pre-feature binaries are not a safe rollback target.
+Resulting retains the original accepted selection/odds manifest before any
+void-row removal. Pre-match identities include `productId` / `oddsId`; live
+identities also bind `marketId`, `marketVersion`, and `selectionId`. A side,
+label, or array position cannot substitute for that identity. Original wager,
+placement identity, and placed-bet statistics stay unchanged; separate
+revisioned snapshots track remaining principal, cumulative closed principal,
+and cumulative nominal return.
 
-See the [Common contract reference](https://github.com/vasilyevstan/betstan/blob/master/common/README.md#cash-back-candidate-contracts--feature-not-active)
-and [wire types](https://github.com/vasilyevstan/betstan/blob/master/common/src/event/CashBack.ts)
-for the detailed definitions; [[Message Flows]] describes their intended
-ownership and message boundaries.
+Confirmation occupies one `UNDECIDED` slot on the Resulting Bet, binding the
+stored quote, expected financial revision, original manifest, and participant
+obligations. Acceptance, rejection/expiry, and a competing result resolve that
+same slot atomically. Its immutable receipt is the decision authority; an
+operation/history record cannot decide independently.
+
+Both Backoffice and Gamemaster participate for **every** selected event.
+Backoffice proves its lifecycle, not Gamemaster prices. Gamemaster supplies
+current exact market authority without reading private future simulation
+outcomes for pricing. Quotes take non-reserving snapshots; confirmation
+requires matching source holds and all grants before acceptance.
+
+Source authority writers are fenced against those holds, including manual
+results, visibility changes, simulation advancement, replay, and archive
+paths. Gamemaster persists the exact authority-change intent before publishing
+or advancing its cursor, so restart replays the same transition instead of
+granting against an ambiguous publication. Generation state is preserved
+through archival; missing or archived events are not recreated for cash-back.
+
+The canonical receipt is durable before release. History, outcome publication,
+and every requested participant's release obligation survive crashes,
+including a lost grant acknowledgement. They must drain before slot reuse or
+archive. Bet applies newer financial revisions, rejects conflicting equal
+revisions, and permits late immutable history without rewinding settled state.
+Full `CASH_BACK` / `BET_CASH_BACK` freezes exposure and row winner metadata;
+partials remain `CONFIRMED` / `BET_APPROVED` and settle only the remainder.
+Optional `ISettleSlipEvent.data.cashBack` carries that revisioned settlement
+basis. Legacy payloads remain readable, but absent evidence cannot reset a
+reduced remainder to the original wager.
+
+Holds have no autonomous TTL or worker-lease release. A coordinator outage may
+block affected source progress until durable decision/release recovery. This
+is an explicit availability cost, not a bounded-time success promise or a
+reason to bypass the hold.
+
+Acceptance uses the same Mongo `$$NOW` in its conditional deadline check and
+stored `decisionTime`. This is database-domain logical decision time, not
+physical commit time or a monotonic-clock guarantee. A healthy shared Mongo
+clock and complete compatible-writer coverage are rollout prerequisites;
+downtime is acceptable. Once cash-back state exists, pre-feature binaries are
+not a safe rollback target. No wallet or payment integration is introduced.
+
+See the [Common wire types](https://github.com/vasilyevstan/betstan/blob/master/common/src/event/CashBack.ts)
+and [Resulting coordinator](https://github.com/vasilyevstan/betstan/blob/master/resulting/src/service/CashBackCoordinator.ts)
+for the source contracts and implementation, [[Application Processes]] for
+pricing/API behavior, and [[Message Flows]] for delivery and generation binding.
 
 ## Reliability patterns
 

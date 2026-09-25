@@ -307,13 +307,156 @@ oci_rabbitmq_queue_rows() {
         exit 2
       }
     {
-      print $1 "\t" $2 "\t" $3 "\t" $4
-    }
+        if (queue_seen[$1]++) {
+          exit 2
+        }
+        print $1 "\t" $2 "\t" $3 "\t" $4
+      }
   '
 }
 
+oci_application_rabbitmq_queue_names() {
+  cat <<'QUEUES'
+backoffice_cash_back_source
+backoffice_new_event
+backoffice_result_set
+bet_cash_back_outcome
+bet_moderation_result
+bet_place_bet
+bet_settle_slip
+bet_settle_slip_row
+event_event_visibility
+event_live_projection
+event_live_update.*
+event_new_event
+event_result
+gamemaster_cash_back_source
+gamemaster_new_event
+gamemaster_result_set
+moderation_event_result
+moderation_live_event_update
+moderation_place_bet
+resulting_cash_back_request
+resulting_cash_back_source_reply
+resulting_live_event_update
+resulting_moderation_result
+resulting_place_bet
+resulting_result
+slip_moderation_result
+slip_odds_clicked
+telemetry:events:v1
+QUEUES
+}
+
 oci_application_rabbitmq_queue_count() {
-  printf '23\n'
+  oci_application_rabbitmq_queue_names | awk 'END {print NR}'
+}
+
+oci_rabbitmq_queue_inventory_matches() {
+  local observed_names expected_names normalized expected_rows
+  normalized="$(oci_rabbitmq_queue_rows <<<"$1")" || return 1
+  observed_names="$(cut -f1 <<<"$normalized" | LC_ALL=C sort)"
+  if grep -Fxq 'event_live_update.*' <<<"$observed_names"; then
+    return 1
+  fi
+  # Only the current catalog uses a pod-scoped marker; captured baselines stay exact.
+  if grep -Fxq 'event_live_update.*' <<<"$2"; then
+    observed_names="$(
+      awk '/^event_live_update\.[A-Za-z0-9_.:-]+$/ {$0="event_live_update.*"} {print}' \
+        <<<"$observed_names" | LC_ALL=C sort
+    )"
+  fi
+  expected_rows="$(awk 'NF {print $0 "\t0\t0\t1"}' <<<"$2")"
+  normalized="$(oci_rabbitmq_queue_rows <<<"$expected_rows")" || return 1
+  expected_names="$(cut -f1 <<<"$normalized" | LC_ALL=C sort)"
+  [[ -n "$expected_names" && "$observed_names" == "$expected_names" ]]
+}
+
+oci_cash_back_source_flag() {
+  local source_sha="$1" service="$2" manifest
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$service" =~ ^(bet|resulting)$ ]] ||
+    oci_die "cash-back configuration requires an exact source and known service"
+  oci_require_command ruby
+  manifest="$(git show "${source_sha}:infra/k8s/${service}-depl.yaml")" ||
+    oci_die "cash-back source manifest is unavailable"
+  printf '%s\n' "$manifest" | ruby -ryaml -e '
+    service = ARGV.fetch(0)
+    documents = YAML.load_stream(STDIN.read)
+    deployments = documents.select { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "gaming-#{service}-depl" }
+    abort "cash-back source deployment is ambiguous" unless deployments.length == 1
+    containers = deployments.first.fetch("spec").fetch("template").fetch("spec").fetch("containers").select { |item| item["name"] == "gaming-#{service}" }
+    abort "cash-back source container is ambiguous" unless containers.length == 1
+    values = containers.first.fetch("env", []).select { |item| item["name"] == "CASH_BACK_ENABLED" }
+    abort "cash-back source flag is duplicated" if values.length > 1
+    if values.empty?
+      puts "absent"
+    else
+      entry = values.first
+      abort "cash-back source flag must be a literal boolean" if entry.key?("valueFrom") || !["true", "false"].include?(entry["value"])
+      puts entry["value"]
+    end
+  ' "$service"
+}
+
+oci_verify_cash_back_source_flags() {
+  local source_sha="$1" namespace="$2" phase="$3" service expected deployment_json pods_json
+  [[ "$phase" == deployment || "$phase" == running ]] ||
+    oci_die "cash-back configuration verification phase is invalid"
+  for service in bet resulting; do
+    expected="$(oci_cash_back_source_flag "$source_sha" "$service")" || return 1
+    deployment_json="$(
+      kubectl get deployment "gaming-${service}-depl" -n "$namespace" -o json
+    )" || return 1
+    pods_json=""
+    if [[ "$phase" == running ]]; then
+      pods_json="$(kubectl get pods -n "$namespace" -l "app=gaming-${service}" -o json)" ||
+        return 1
+    fi
+    printf '%s\n%s\n' "$deployment_json" "$pods_json" | python3 -c '
+import json
+import sys
+service, expected, phase = sys.argv[1:]
+decoder = json.JSONDecoder()
+text = sys.stdin.read()
+deployment, end = decoder.raw_decode(text.lstrip())
+containers = [item for item in deployment["spec"]["template"]["spec"]["containers"]
+              if item["name"] == "gaming-" + service]
+def verify(containers):
+    if len(containers) != 1:
+        raise SystemExit("cash-back workload container is ambiguous")
+    entries = [item for item in containers[0].get("env", []) if item["name"] == "CASH_BACK_ENABLED"]
+    if expected == "absent":
+        if entries:
+            raise SystemExit("historical cash-back flag absence was not restored")
+    elif len(entries) != 1 or entries[0].get("value") != expected or "valueFrom" in entries[0]:
+        raise SystemExit("cash-back workload flag differs from authenticated source")
+verify(containers)
+remainder = text.lstrip()[end:].strip()
+if phase == "running":
+    pods = json.loads(remainder)["items"]
+    if not pods:
+        raise SystemExit("cash-back serving pod configuration is unavailable")
+    for pod in pods:
+        verify([item for item in pod["spec"]["containers"] if item["name"] == "gaming-" + service])
+elif remainder:
+    raise SystemExit("unexpected cash-back configuration evidence")
+' "$service" "$expected" "$phase" || return 1
+  done
+}
+
+oci_restore_cash_back_source_flags() {
+  local source_sha="$1" namespace="$2" service expected
+  for service in bet resulting; do
+    expected="$(oci_cash_back_source_flag "$source_sha" "$service")" || return 1
+    if [[ "$expected" == absent ]]; then
+      kubectl set env "deployment/gaming-${service}-depl" -n "$namespace" \
+        -c "gaming-${service}" CASH_BACK_ENABLED- >/dev/null || return 1
+    else
+      kubectl set env "deployment/gaming-${service}-depl" -n "$namespace" \
+        -c "gaming-${service}" "CASH_BACK_ENABLED=$expected" >/dev/null || return 1
+    fi
+  done
+  oci_verify_cash_back_source_flags "$source_sha" "$namespace" deployment
 }
 
 oci_assert_repository_root() {

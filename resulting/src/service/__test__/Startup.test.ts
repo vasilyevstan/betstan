@@ -1,4 +1,5 @@
 import { IAmqpConnection } from "@betstan/common";
+import { EventEmitter } from "events";
 import {
   ManagedResultingListener,
   ManagedBackgroundWorker,
@@ -54,6 +55,22 @@ const createWorker = (): ManagedBackgroundWorker => ({
   init: jest.fn().mockResolvedValue(undefined),
   start: jest.fn().mockResolvedValue(undefined),
   stop: jest.fn().mockResolvedValue(undefined),
+});
+
+it("fails the process when a connected broker closes instead of keeping a healthy stuck worker", async () => {
+  const connection = Object.assign(new EventEmitter(), createConnection());
+  const { processLike } = createProcessLike();
+  const closed = jest.fn(async () => {});
+  await startResultingService(config, {
+    connectBroker: async () => {}, connectDb: async () => {},
+    getBrokerConnection: () => connection, createListeners: () => [], createWorkers: () => [],
+    closeBroker: closed, closeDb: async () => {}, disconnectDb: async () => {},
+    logger: { log: jest.fn(), error: jest.fn() }, processLike,
+  });
+  connection.emit("close");
+  await new Promise(resolve => setImmediate(resolve));
+  expect(closed).toHaveBeenCalledTimes(1);
+  expect(processLike.exit).toHaveBeenCalledWith(1);
 });
 
 it("resolves config and rejects missing required env variables", () => {
@@ -115,7 +132,7 @@ it("registers shutdown hooks before connecting and starts recovery before listen
     closeBroker: jest.fn().mockResolvedValue(undefined),
     closeDb: jest.fn().mockResolvedValue(undefined),
     connectBroker: jest.fn().mockImplementation(async () => {
-      expect(handlers.size).toEqual(3);
+      expect(handlers.size).toEqual(4);
       order.push("connectBroker");
     }),
     connectDb: jest.fn().mockImplementation(async () => {

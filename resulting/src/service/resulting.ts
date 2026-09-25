@@ -1,5 +1,6 @@
 import {
   BetKind,
+  BetStatus,
   IEventResultEvent,
   ILiveEventUpdateEvent,
   IModerationResultEvent,
@@ -27,6 +28,7 @@ import {
   PendingModerationReplayOutcome,
   recoverPendingModerationForSlip,
 } from "./pendingModeration";
+import { CashBackBet, cashBackPlacementState, mutateCashBackBet } from "./cashBackState";
 
 const PRE_MATCH_PRODUCTS = new Set(["1X2", "Correct Score"]);
 const SETTLED_BET_STATUS_VALUES = [
@@ -41,6 +43,7 @@ const ACTIVE_SETTLEMENT_STATUS_VALUES = [
 const TERMINAL_BET_STATUS_VALUES = [
   ...SETTLED_BET_STATUS_VALUES,
   ResultingStatus.BET_DECLINED,
+  ResultingStatus.BET_CASH_BACK,
 ] as const;
 const SETTLED_BET_STATUSES = new Set<ResultingStatus>(SETTLED_BET_STATUS_VALUES);
 const TERMINAL_BET_STATUSES = new Set<ResultingStatus>(
@@ -508,6 +511,43 @@ async function applyRowDecision(
   row: any,
   decision: RowDecision
 ): Promise<boolean> {
+  if (bet.cashBackFinancial) {
+    return mutateCashBackBet(
+      bet._id,
+      current => current.status === ResultingStatus.BET_APPROVED
+        && current.rows.some(candidate => candidate.id === row.id && candidate.result === ResultingStatus.ROW_NO_RESULT),
+      current => {
+        const resultingTimestamp = new Date().toISOString();
+        const loss = decision.result === ResultingStatus.ROW_LOSS;
+        const rows = current.rows.map(candidate => {
+          const original = candidate.toObject();
+          if (candidate.id === row.id) return {
+            ...original, result: decision.result,
+            winningSelection: decision.winningSelection ?? "",
+            ...(decision.winningSide !== undefined ? { winningSide: decision.winningSide } : {}),
+            ...(decision.settlementReason !== undefined ? { settlementReason: decision.settlementReason } : {}),
+            ...(decision.settlementSequence !== undefined ? { settlementSequence: decision.settlementSequence } : {}),
+            resultingTimestamp, settlementPublicationState: PUBLICATION_STATE_PENDING,
+            pendingRemoval: decision.removeRow === true,
+          };
+          if (loss && candidate.result === ResultingStatus.ROW_NO_RESULT) return {
+            ...original, result: ResultingStatus.ROW_VOID, winningSelection: "",
+            resultingTimestamp, settlementReason: LiveSettlementReason.ACCUMULATOR_SETTLED,
+            settlementPublicationState: PUBLICATION_STATE_PENDING, pendingRemoval: false,
+          };
+          return original;
+        });
+        return {
+          status: loss ? ResultingStatus.BET_LOSS : ResultingStatus.BET_APPROVED,
+          resolved: true,
+          fields: {
+            rows,
+            ...(loss ? { resultingTimestamp, terminalPublicationState: PUBLICATION_STATE_PENDING } : {}),
+          },
+        };
+      }
+    );
+  }
   if (decision.result === ResultingStatus.ROW_LOSS) {
     return applyLossDecision(bet, row, decision);
   }
@@ -565,6 +605,7 @@ async function publishPendingRowSettlements(
   bet: any,
   publishers: SettlementPublishers
 ): Promise<boolean> {
+  if (bet.status === ResultingStatus.BET_CASH_BACK) return false;
   let publishedAny = false;
 
   for (const row of bet.rows) {
@@ -582,8 +623,10 @@ async function publishPendingRowSettlements(
     await Bet.updateOne(
       {
         slipId: bet.slipId,
+        status: { $ne: ResultingStatus.BET_CASH_BACK },
       },
       {
+        $inc: { __v: 1 },
         $set: {
           "rows.$[target].settlementPublicationState":
             PUBLICATION_STATE_PUBLISHED,
@@ -608,9 +651,25 @@ async function publishPendingRowSettlements(
 }
 
 async function cleanupPublishedManualVoidRows(slipId: string): Promise<boolean> {
+  const current = await Bet.findOne({ slipId });
+  if (current?.cashBackFinancial) {
+    return mutateCashBackBet(
+      current._id,
+      bet => bet.status === ResultingStatus.BET_APPROVED && bet.rows.some(
+        row => row.pendingRemoval && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED
+      ),
+      bet => ({
+        status: bet.status, resolved: true,
+        fields: { rows: bet.rows.filter(
+          row => !(row.pendingRemoval && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED)
+        ).map(row => row.toObject()) },
+      })
+    );
+  }
   const result = await Bet.updateOne(
     {
       slipId,
+      cashBackFinancial: { $exists: false },
       status: ResultingStatus.BET_APPROVED,
       rows: {
         $elemMatch: {
@@ -660,6 +719,25 @@ async function finalizeApprovedSlipIfReady(slipId: string): Promise<boolean> {
     nonVoidRows.length === 0
       ? ResultingStatus.BET_VOID
       : ResultingStatus.BET_WIN;
+
+  if (bet.cashBackFinancial) {
+    return mutateCashBackBet(
+      bet._id,
+      current => current.status === ResultingStatus.BET_APPROVED && current.rows.every(
+        row => row.result !== ResultingStatus.ROW_NO_RESULT && !row.pendingRemoval
+          && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED
+      ),
+      current => ({
+        status: current.rows.some(row => row.result !== ResultingStatus.ROW_VOID)
+          ? ResultingStatus.BET_WIN : ResultingStatus.BET_VOID,
+        resolved: true,
+        fields: {
+          resultingTimestamp: new Date().toISOString(),
+          terminalPublicationState: PUBLICATION_STATE_PENDING,
+        },
+      })
+    );
+  }
 
   const updatedBet = await Bet.findOneAndUpdate(
     {
@@ -759,6 +837,28 @@ async function confirmTerminalSettlement(
     slipId: claimedBet.slipId,
     result: claimedBet.status,
   };
+  const financial = claimedBet.cashBackFinancial;
+  if (financial) {
+    if (![BetStatus.WIN, BetStatus.LOSS, BetStatus.VOID].includes(financial.status)) {
+      throw new Error("Terminal settlement has inconsistent cash-back financial status");
+    }
+    const status = financial.status;
+    if (status !== BetStatus.WIN && status !== BetStatus.LOSS && status !== BetStatus.VOID) {
+      throw new Error("Invalid remaining-principal settlement status");
+    }
+    data.cashBack = {
+      settlementId: `${claimedBet.slipId}:${financial.revision}`,
+      occurredAt: claimedBet.resultingTimestamp!,
+      financial: {
+        revision: financial.revision, status,
+        originalStakeMinor: financial.originalStakeMinor,
+        remainingStakeMinor: financial.remainingStakeMinor,
+        cumulativeClosedStakeMinor: financial.cumulativeClosedStakeMinor,
+        cumulativeReturnMinor: financial.cumulativeReturnMinor,
+      },
+      settlementBasisStakeMinor: financial.remainingStakeMinor,
+    };
+  }
   if (
     typeof claimedBet.resultingTimestamp === "string"
     && claimedBet.resultingTimestamp
@@ -814,9 +914,24 @@ async function confirmTerminalSettlement(
   return Boolean(updatedBet);
 }
 
-async function archiveBet(finalizedBet: any): Promise<void> {
+export async function archiveBet(finalizedBet: any): Promise<boolean> {
+  if (finalizedBet.cashBackPending) return false;
+  if (finalizedBet.cashBackFinancial && !finalizedBet.cashBackArchiving) {
+    const sealed = await Bet.findOneAndUpdate(
+      {
+        _id: finalizedBet._id, __v: finalizedBet.__v,
+        status: finalizedBet.status, terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
+        cashBackPending: { $exists: false }, cashBackArchiving: { $ne: true },
+      },
+      { $set: { cashBackArchiving: true }, $inc: { __v: 1 } },
+      { new: true }
+    );
+    if (!sealed) return false;
+    finalizedBet = sealed;
+  }
   const jsonBet = finalizedBet.toObject();
   delete jsonBet._id;
+  delete jsonBet.cashBackArchiving;
 
   await BetArchive.updateOne(
     { slipId: finalizedBet.slipId },
@@ -830,11 +945,14 @@ async function archiveBet(finalizedBet: any): Promise<void> {
 
   await clearPendingModerationResult(finalizedBet.slipId);
 
-  await Bet.deleteOne({
+  const deleted = await Bet.deleteOne({
     _id: finalizedBet._id,
     status: finalizedBet.status,
     terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
+    cashBackPending: { $exists: false },
+    ...(finalizedBet.cashBackFinancial ? { cashBackArchiving: true, __v: finalizedBet.__v } : {}),
   });
+  return deleted.deletedCount === 1;
 }
 
 async function archivePublishedBet(slipId: string): Promise<boolean> {
@@ -849,9 +967,9 @@ async function archivePublishedBet(slipId: string): Promise<boolean> {
   if (!bet) {
     return false;
   }
+  if (bet.cashBackPending) return false;
 
-  await archiveBet(bet);
-  return true;
+  return archiveBet(bet);
 }
 
 export async function reconcileSlip(
@@ -1157,6 +1275,18 @@ async function replayStoredSettlementsForSlip(
   await reconcileSlip(slipId, publishers);
 }
 
+async function discardArchivedPlacement(placedBet: CashBackBet | null): Promise<void> {
+  if (!placedBet) return;
+  await Bet.deleteOne({
+    _id: placedBet._id, slipId: placedBet.slipId, status: ResultingStatus.BET_PENDING,
+    cashBackPending: { $exists: false }, cashBackArchiving: { $ne: true },
+  });
+  const remaining = await Bet.findOne({ slipId: placedBet.slipId });
+  if (remaining && !TERMINAL_BET_STATUSES.has(remaining.status)) {
+    throw new Error("Archived slip retains a mutable placement");
+  }
+}
+
 export async function upsertPlaceBet(
   event: IPlaceBetEvent,
   publishers: SettlementPublishers
@@ -1164,6 +1294,7 @@ export async function upsertPlaceBet(
   const { data } = event;
 
   if (await BetArchive.exists({ slipId: data.slipId })) {
+    await discardArchivedPlacement(await Bet.findOne({ slipId: data.slipId }));
     await clearPendingModerationResult(data.slipId);
     return;
   }
@@ -1172,12 +1303,14 @@ export async function upsertPlaceBet(
   const rows = dedupeRows(data.rows, defaultBetKind);
   const betKind = inferBetKind(rows, data.betKind);
 
-  await Bet.findOneAndUpdate(
+  const placedBet = await Bet.findOneAndUpdate(
     {
       slipId: data.slipId,
     },
     {
       $setOnInsert: {
+        ...cashBackPlacementState(data),
+        __v: 0,
         status: ResultingStatus.BET_PENDING,
         userId: data.userId,
         slipId: data.slipId,
@@ -1197,6 +1330,14 @@ export async function upsertPlaceBet(
       setDefaultsOnInsert: true,
     }
   );
+
+  // A duplicate may have observed no archive before the original was retired.
+  // Never let that late upsert establish a second authoritative placement.
+  if (await BetArchive.exists({ slipId: data.slipId })) {
+    await discardArchivedPlacement(placedBet);
+    await clearPendingModerationResult(data.slipId);
+    return;
+  }
 
   if (
     await recoverPendingModerationForSlip(
@@ -1224,14 +1365,8 @@ export async function replayPendingModerationResult(
   const { data } = event;
 
   const bet = await Bet.findOne({ slipId: data.slipId });
-
-  if (!bet) {
-    if (await BetArchive.exists({ slipId: data.slipId })) {
-      return "RESOLVED";
-    }
-
-    return "MISSING_AGGREGATE";
-  }
+  if (await BetArchive.exists({ slipId: data.slipId })) return "RESOLVED";
+  if (!bet) return "MISSING_AGGREGATE";
 
   if (TERMINAL_BET_STATUSES.has(bet.status)) {
     return "RESOLVED";
@@ -1241,6 +1376,24 @@ export async function replayPendingModerationResult(
     data.result === ModerationStatus.APPROVED
       ? ResultingStatus.BET_APPROVED
       : ResultingStatus.BET_DECLINED;
+
+  if (bet.cashBackFinancial) {
+    if (data.betKind !== undefined && data.betKind !== bet.betKind) {
+      throw new Error("Moderation cannot change a cash-back-aware placement kind");
+    }
+    await mutateCashBackBet(
+      bet._id,
+      current => [ResultingStatus.BET_PENDING, ResultingStatus.BET_APPROVED].includes(current.status)
+        && current.status !== nextStatus,
+      () => ({
+        status: nextStatus, resolved: nextStatus === ResultingStatus.BET_DECLINED,
+        fields: { moderationTimestamp: event.timestamp ?? new Date().toISOString() },
+      }),
+      "BET_NOT_CONFIRMED"
+    );
+    if (nextStatus === ResultingStatus.BET_APPROVED) await replayStoredSettlementsForSlip(data.slipId, publishers);
+    return "RESOLVED";
+  }
 
   const updatedBet = await Bet.findOneAndUpdate(
     {
@@ -1260,7 +1413,7 @@ export async function replayPendingModerationResult(
   );
 
   if (!updatedBet) {
-    const currentBet = await Bet.findOne({ slipId: data.slipId });
+    const currentBet = await Bet.findById(bet._id);
     return !currentBet || TERMINAL_BET_STATUSES.has(currentBet.status)
       ? "RESOLVED"
       : "MISSING_AGGREGATE";

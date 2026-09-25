@@ -485,6 +485,10 @@ plan_value() {
 }
 
 # Pre-mutation gate: positively verify the expected fenced state.
+for service in bet resulting; do
+  oci_cash_back_source_flag "$TARGET_SHA" "$service" >/dev/null ||
+    oci_die "baseline cash-back configuration cannot be resolved"
+done
 oci_log "oci_fenced_recovery=preflight target_sha=$TARGET_SHA deployed_sha=$DEPLOYED_SOURCE_SHA"
 "$MAINTENANCE_SCRIPT" verify-held >"$WORK_DIR/fenced-verify-held.txt" 2>&1 ||
   oci_die "maintenance fence and writer quiescence are not intact"
@@ -749,6 +753,8 @@ esac
 
 # Mutation begins here. Every later failure re-holds maintenance.
 FENCED_MUTATION_STARTED=true
+oci_restore_cash_back_source_flags "$TARGET_SHA" "$OCI_K8S_NAMESPACE" ||
+  fenced_die "baseline cash-back configuration restoration failed"
 telemetry_mode="$(awk -F '=' '$1 == "mode" {print $2}' \
   "$OUTPUT_DIR/fenced-telemetry.env")"
 telemetry_pre_run_image="$(awk -F '=' '$1 == "image" {print $2}' \
@@ -785,6 +791,9 @@ for service in "${RESTORE_ORDER[@]}"; do
   [[ "$actual_image" == "$image" ]] ||
     fenced_die "exact digest verification failed for ${deployment}"
 done
+
+oci_verify_cash_back_source_flags "$TARGET_SHA" "$OCI_K8S_NAMESPACE" running ||
+  fenced_die "restored cash-back serving configuration differs from baseline"
 
 # Normalize Telemetry only after every legacy workload has been restored.
 if [[ "$telemetry_mode" == "retained" ]]; then

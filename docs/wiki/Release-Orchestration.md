@@ -398,6 +398,57 @@ Do not activate the producer change with a pre-compatibility rollback image.
 The rollback target for that activation is the compatibility baseline, so
 persisted transitions and historical rows remain readable after rollback.
 
+### Cash-back rollout
+
+Cash-back requires two separate immutable production releases:
+
+1. **B, compatible/OFF:** deploy the compatible runtime with
+   `CASH_BACK_ENABLED` explicitly `"false"` in both Bet and Resulting manifests.
+   Validate this generation before capturing it as the activation baseline.
+2. **A, enabled:** a later reviewed release changes both checked-in declarations
+   to `"true"` and passes protected active-mode acceptance against that exact
+   source. A pre-cash-back generation is not its compatible rollback target.
+
+Each facade/coordinator latches the flag at startup. Only literal `"true"`
+enables admission; missing or `"false"` means off, and invalid values stay
+disabled with a sanitized diagnostic. This is not a hot-switch control.
+Off mode refuses new quotes and first confirmations with HTTP `503`
+`AUTHORITY_UNAVAILABLE` after identity/conflict and existing-operation checks.
+Exact pending/terminal retries, readers, listeners, source acknowledgements,
+receipt/history publication, release, archive recovery, and ordinary
+remaining-stake settlement stay active. Resulting canonically rejects its own
+`UNDECIDED` slot with `AUTHORITY_UNAVAILABLE` before further reservation; its
+acceptance CAS also requires the latched enabled value. Off mode never
+substitutes a history-only rejection or autonomous hold expiry for a canonical
+decision.
+
+Both releases retain the full HTTP write fence, zero-pod seven-writer
+maintenance, shared operation lock, and Gamemaster-last startup order. Bet may
+start before Resulting; public admission reopens last. An enabled Resulting can
+process durable broker work while HTTP is fenced, so A's validated B baseline
+and healthy shared-clock evidence must precede Resulting startup, not merely
+public unfencing.
+
+The existing deployment/readiness path takes three MongoDB `hello` clock
+observations with 250 ms pauses, bracketed by local-process wall and monotonic
+time. It requires measured query round trips at most 500 ms and wall-clock
+consistency within 50 ms; one 30-second watchdog bounds the whole probe.
+Evidence binds the source/run and hashed pod, node, container, and Mongo
+process identities. Missing, malformed, backward, changed-identity, or timed-out
+observations fail closed. The check runs before Resulting starts and through
+shared OCI readiness before unfencing, activation, and final validation. It
+proves consistency only within the observed window, not UTC/NTP accuracy,
+physical commit time, perpetual monotonicity, or behavior between samples or
+after the probe.
+
+The cash-back-compatible queue catalog contains **28 queues**: 22 existing
+static queues, five cash-back queues, and one pod-scoped Event fanout queue.
+Readiness verifies names and consumers for every queue, not count alone.
+Only the current catalog permits the known Event dynamic prefix; authenticated
+historical baselines retain their exact captured names and count. Health uses
+the verified generation/baseline inventory, without queue deletion or a
+count override to make a mismatch pass.
+
 ## Activation
 
 User-facing live behavior is activated separately from image deployment.
@@ -411,6 +462,55 @@ User-facing live behavior is activated separately from image deployment.
 7. On failure, disable the feature and restore the known safe state.
 
 This separates "the code is deployed" from "the feature is safe to expose."
+
+Cash-back acceptance checks both source declarations against live Bet and
+Resulting deployments and serving pods. B must explicitly refuse new admission,
+keep history readable, and preserve ordinary placement/settlement; it does not
+seed a `CASH_BACK` record merely to prove baseline compatibility. Exact-candidate
+build and native off-mode recovery evidence establish its compatible recovery
+capability separately.
+
+A adds owned live full closure, UI-confirmed pre-match full closure and reload,
+repeated partials followed by normal remainder `WIN`, and full-closure
+immutability after results. A separate owned pending confirmation must recover
+across a protected zero-worker interval using the same Resulting source and
+template, immutable image, and replica count. Before pausing, a persisted,
+read-back-verified handoff binds the exact protected execution and workload to
+its physical-lock generation; private evidence must agree. Identity,
+resource-version, and expected-handoff checks govern phase changes, with
+bounded readback for ambiguous writes. The shared recovery routine rechecks
+ownership and the clock before restoring non-overlapping replacement workers.
+Early always-run workflow cleanup invokes that same routine after an arming or
+journey attempt, including failure, a killed acceptance process, or cancellation
+when the cleanup step can execute.
+
+Owned restoration failures use the existing maintenance hold and positive
+verification of the HTTP fence, all seven writers at zero pods, and the retained
+lock. Unknown, foreign, or expired ownership authorizes no further workload
+mutation; expired own leases are not automatically reclaimed. Persisted release
+intent and the exact released generation reconcile a lost release response
+without re-quiescing restored writers. Every activation, including compatibility
+mode, uses this handoff to persist and read back owner/source/workload-bound
+abort authority before live kickoffs, while current-source and readiness
+admission are valid. Both failure-disable paths require successful arming and
+fresh ownership, not renewed current-`master` admission or Resulting readiness.
+Abort-only cleanup does not restart workers, so compatibility/no-interruption
+failures can still stop new kickoffs. Reacquisition of the exact own released
+lineage tests the observed released state, lock identity, and generation inside
+the canonical CAS, leaving intervening or expired foreign owners untouched.
+Existing generic lock commands retain their semantics.
+Total runner loss can prevent cleanup: the durable handoff
+is evidence, not an autonomous executor, and unreadable ownership cannot
+guarantee fencing. This is neither a public restart facility nor
+failed-deployment recovery authority.
+
+Replaying the same operation must yield one canonical
+`ACCEPTED` receipt or `QUOTE_EXPIRED` rejection, with no principal reset or
+duplicate closure. Terminal history, outcome delivery, source release, and Bet
+projection must demonstrably drain and agree. Existing unexpected-restart and
+error checks remain in force. Exact-head revalidation checks the complete
+cash-back evidence before accepted-lease recording and final activation commit,
+under the existing evidence-hash authority.
 
 ## Rollback and recovery
 
@@ -493,6 +593,19 @@ fences, failure re-hold, and readiness checks. This does not enable
 ordinary unfenced rollback after a successful ten-application deployment.
 Data-preparation and deployment gates validate baseline evidence; they do not
 establish ordinary rollback capability.
+
+Cash-back configuration is part of that same eligible failed-deployment
+recovery, not an image-only restore. Baseline capture verifies both Bet and
+Resulting deployment and serving-pod flags against the authenticated source.
+Recovery resolves the two flags from that immutable source, restores their
+literal values (or removes them when the source declares none) while maintenance
+and the lock are held with writers at zero pods, and verifies replacement pods
+before release. Missing manifests, duplicate, indirect, malformed, or
+source-mismatched declarations fail closed. Existing baseline state, checksum,
+source, and image formats are unchanged. This does not make ordinary or partial
+nine-application rollback eligible for the cash-back generation, or authorize
+rollback of a successfully completed A release. When eligibility is not proven,
+retain maintenance and report the technical boundary to the release owner.
 
 Mongo maintenance resumes the ingress controller only after exact version,
 compatibility-version, and image verification, before applying the Telemetry

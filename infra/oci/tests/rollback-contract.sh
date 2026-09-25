@@ -554,6 +554,19 @@ cat >"$BIN_DIR/git" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
+  "show ${STUB_TARGET_SHA}:infra/k8s/bet-depl.yaml"|"show ${STUB_TARGET_SHA}:infra/k8s/resulting-depl.yaml")
+    flag="${STUB_TARGET_CASH_BACK_FLAG:-absent}"
+    [[ "$flag" != missing ]] || exit 1
+    service="${2##*/}"; service="${service%-depl.yaml}"
+    printf 'kind: Deployment\nmetadata:\n  name: gaming-%s-depl\nspec:\n  template:\n    spec:\n      containers:\n        - name: gaming-%s\n          env:\n            - name: UNRELATED\n              value: retained\n' "$service" "$service"
+    if [[ "$flag" == indirect ]]; then
+      printf '            - name: CASH_BACK_ENABLED\n              valueFrom:\n                configMapKeyRef: {name: flags, key: cashback}\n'
+    elif [[ "$flag" == duplicate ]]; then
+      printf '            - name: CASH_BACK_ENABLED\n              value: "false"\n            - name: CASH_BACK_ENABLED\n              value: "false"\n'
+    elif [[ "$flag" != absent ]]; then
+      printf '            - name: CASH_BACK_ENABLED\n              value: "%s"\n' "$flag"
+    fi
+    ;;
   "fetch --quiet origin master:refs/remotes/origin/master")
     exit 0
     ;;
@@ -1308,9 +1321,13 @@ EOF_STATE
         done
         if [[ "$output_mode" == "json" ]]; then
           jq -n --arg container "gaming-${service}" --arg image "$image" --arg revision "$revision" \
+            --arg cash_flag "${STUB_LIVE_CASH_BACK_FLAG:-absent}" \
             --arg shape "${STUB_TELEMETRY_DEPLOYMENT_SHAPE:-object}" '{
             metadata:{generation:8,annotations:{"deployment.kubernetes.io/revision":$revision}},
-            spec:{replicas:1,template:{spec:{containers:[{name:$container,image:$image}]}}},
+            spec:{replicas:1,template:{spec:{containers:[{name:$container,image:$image,
+              env: ([{name:"UNRELATED",value:"retained"}] +
+                (if ($container == "gaming-bet" or $container == "gaming-resulting") and $cash_flag != "absent"
+                 then [{name:"CASH_BACK_ENABLED",value:$cash_flag}] else [] end))}]}}},
             status:{observedGeneration:8,readyReplicas:1,availableReplicas:1,updatedReplicas:1}
           } | if $container == "gaming-telemetry" and $shape == "duplicate" then
             .spec.template.spec.containers += .spec.template.spec.containers
@@ -1459,6 +1476,10 @@ PY
           fi
         elif [[ -n "$selector" ]]; then
           service="${selector#app=gaming-}"
+          if [[ "$service" == auth-mongo ]]; then
+            printf '%s\n' '{"items":[{"metadata":{"name":"auth-mongo-0","uid":"fixture-mongo","labels":{"app":"gaming-auth-mongo"}},"spec":{"nodeName":"fixture-node"},"status":{"containerStatuses":[{"name":"gaming-auth-mongo","ready":true,"containerID":"fixture-mongo-container"}]}}]}'
+            exit 0
+          fi
           read_state "$service"
           digest="$(service_platform_digest_from_image "$image")"
           if [[ "${STUB_POD_IMAGE_ID_MODE:-platform}" == "manifest" ]]; then
@@ -1467,8 +1488,13 @@ PY
           if [[ -z "${MODE:-}" && "${STUB_BAD_DIGEST_SERVICE:-}" == "$service" ]]; then
             digest='sha256:9999999999999999999999999999999999999999999999999999999999999999'
           fi
-          jq -n --arg service "$service" --arg digest "$digest" '{
-            items:[{metadata:{name:($service + "-pod-0"),labels:{app:("gaming-" + $service)}},status:{containerStatuses:[{name:("gaming-" + $service),ready:true,imageID:("docker-pullable://fixture.invalid/namespace/" + $service + "@" + $digest)}]}}]
+          jq -n --arg service "$service" --arg digest "$digest" \
+            --arg cash_flag "${STUB_CASH_BACK_POD_FLAG:-${STUB_LIVE_CASH_BACK_FLAG:-absent}}" '{
+            items:[{metadata:{name:($service + "-pod-0"),labels:{app:("gaming-" + $service)}},
+              spec:{containers:[{name:("gaming-"+$service),
+                env: (if ($service == "bet" or $service == "resulting") and $cash_flag != "absent"
+                      then [{name:"CASH_BACK_ENABLED",value:$cash_flag}] else [] end)}]},
+              status:{containerStatuses:[{name:("gaming-" + $service),ready:true,imageID:("docker-pullable://fixture.invalid/namespace/" + $service + "@" + $digest)}]}}]
           }'
         else
           print_all_pods
@@ -1574,6 +1600,17 @@ EOF_QUEUES
         initialized="${STUB_TELEMETRY_DATABASE_INITIALIZED_AFTER_ROLLBACK:-$initialized}"
       fi
       printf '%s\n' "$initialized"
+    elif [[ "$*" == *"clockProbeSchema"* ]]; then
+      python3 - <<'PY'
+import json, time
+now = int(time.time() * 1000)
+samples = [{"databaseMs": now + offset + 1,
+            "wallBeforeMs": now + offset, "wallAfterMs": now + offset + 2,
+            "monotonicBeforeMs": offset, "monotonicAfterMs": offset + 2,
+            "processFingerprint": "a" * 64} for offset in (0, 250, 500)]
+time.sleep(0.51)
+print(json.dumps({"schemaVersion": "betstan.mongo-clock.v1", "samples": samples}))
+PY
     elif [[ "$*" == *"mongosh --quiet --norc --eval"* ]]; then
       printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
         "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
@@ -2069,6 +2106,8 @@ common_env=(
   "REPO=example/repo"
   "STUB_EVIDENCE_CREATED_AT=$RECENT_TIMESTAMP"
   "GITHUB_REF_NAME=master"
+  "GITHUB_SHA=$CURRENT_MASTER_SHA"
+  "CONTROL_RUN_ID=123456"
   "STUB_TARGET_SHA=$TARGET_SHA"
   "STUB_CURRENT_MASTER_SHA=$CURRENT_MASTER_SHA"
   "STUB_SOURCE_RUN_ID=$SOURCE_RUN_ID"
@@ -2188,6 +2227,24 @@ run_capture_expect_failure() {
 }
 
 current_capture_dir="$WORK_DIR/capture-current-ten"
+for flag in false true; do
+  run_capture "$WORK_DIR/capture-cash-back-$flag" \
+    STUB_CAPTURE_TEN=1 \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten" \
+    "STUB_TARGET_CASH_BACK_FLAG=$flag" "STUB_LIVE_CASH_BACK_FLAG=$flag" \
+    GITHUB_RUN_ID="$CAPTURE_RUN_ID" GITHUB_RUN_ATTEMPT=1 \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-cash-back-$flag.out" 2>&1 ||
+    fail "source-bound cash-back baseline capture rejected $flag"
+done
+run_capture_expect_failure capture-cash-back-mismatched-template \
+  STUB_TARGET_CASH_BACK_FLAG=false STUB_LIVE_CASH_BACK_FLAG=true
+run_capture_expect_failure capture-cash-back-stale-serving-pod \
+  STUB_TARGET_CASH_BACK_FLAG=false STUB_LIVE_CASH_BACK_FLAG=false STUB_CASH_BACK_POD_FLAG=true
+for flag in missing duplicate indirect invalid; do
+  run_capture_expect_failure "capture-cash-back-source-$flag" \
+    "STUB_TARGET_CASH_BACK_FLAG=$flag"
+done
+
 if ! run_capture "$current_capture_dir" \
     STUB_CAPTURE_TEN=1 \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten" \

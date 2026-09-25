@@ -1998,7 +1998,7 @@ it("covers claim selection and persistence planning helper branches", async () =
     .spyOn(replayOnlyWorker as any, "claimEvent")
     .mockResolvedValue(null);
   await expect((replayOnlyWorker as any).claimNextEvent()).resolves.toBeNull();
-  expect(replayClaimSpy).toHaveBeenCalledTimes(3);
+  expect(replayClaimSpy).toHaveBeenCalledTimes(5);
   replayClaimSpy.mockRestore();
 
   const defaultPlanWorker = new GamemasterWorker({ clock: baseClock });
@@ -2123,16 +2123,19 @@ it("covers claim selection and persistence planning helper branches", async () =
     processingLease: { token: "lease-token" },
     liveTransitions: [],
   };
+  const persistenceQuery = Event.findOneAndUpdate({}, {});
+  jest.spyOn(persistenceQuery, "exec").mockResolvedValueOnce(null);
   const findOneAndUpdateSpy = jest
     .spyOn(Event, "findOneAndUpdate")
-    .mockResolvedValueOnce(null as any);
+    .mockReturnValueOnce(persistenceQuery);
   const refreshSpy = jest
     .spyOn(persistenceWorker as any, "refreshClaimedEvent")
     .mockResolvedValue({ recovered: true });
 
   await expect(
     (persistenceWorker as any).ensureSimulationPersisted(recoveringEvent)
-  ).resolves.toEqual({ recovered: true });
+  ).resolves.toBeNull();
+  expect(refreshSpy).not.toHaveBeenCalled();
   expect(simulateSpy).toHaveBeenCalledWith({
     eventId: "recovering-event",
     seed: "a".repeat(64),
@@ -2237,21 +2240,21 @@ it("covers due-transition, manual-result, and final-result fallback branches", a
   const publishRefreshSpy = jest
     .spyOn(recoveryWorker as any, "refreshClaimedEvent")
     .mockResolvedValueOnce(dueTransitionEvent);
+  const publishQuery = Event.findOneAndUpdate({}, {});
+  jest.spyOn(publishQuery, "exec").mockResolvedValueOnce(null);
   const publishUpdateSpy = jest
     .spyOn(Event, "findOneAndUpdate")
-    .mockResolvedValueOnce(null as any);
-  const findByIdSpy = jest.spyOn(Event, "findById").mockResolvedValueOnce(null as any);
+    .mockReturnValueOnce(publishQuery);
 
   await expect(
     (recoveryWorker as any).publishDueTransitions(dueTransitionEvent)
   ).resolves.toBeNull();
   expect(
     (recoveryWorker as any).liveEventUpdatePublisher.publishWithConfirm
-  ).toHaveBeenCalledTimes(1);
+  ).not.toHaveBeenCalled();
 
   publishRefreshSpy.mockRestore();
   publishUpdateSpy.mockRestore();
-  findByIdSpy.mockRestore();
 
   const publishedManualWorker = new GamemasterWorker({ clock });
   const archiveSpy = jest
@@ -2277,9 +2280,11 @@ it("covers due-transition, manual-result, and final-result fallback branches", a
   const unpublishedArchiveSpy = jest
     .spyOn(unpublishedManualWorker as any, "archiveAndDelete")
     .mockResolvedValue(undefined);
+  const manualQuery = Event.findOneAndUpdate({}, {});
+  jest.spyOn(manualQuery, "exec").mockResolvedValueOnce(null);
   const manualUpdateSpy = jest
     .spyOn(Event, "findOneAndUpdate")
-    .mockResolvedValueOnce(null as any);
+    .mockReturnValueOnce(manualQuery);
 
   await (unpublishedManualWorker as any).processManualResult({
     _id: new mongoose.Types.ObjectId(),
@@ -2320,9 +2325,11 @@ it("covers due-transition, manual-result, and final-result fallback branches", a
   const processManualSpy = jest
     .spyOn(fallbackFinalWorker as any, "processManualResult")
     .mockResolvedValue(undefined);
+  const finalQuery = Event.findOneAndUpdate({}, {});
+  jest.spyOn(finalQuery, "exec").mockResolvedValueOnce(null);
   const finalUpdateSpy = jest
     .spyOn(Event, "findOneAndUpdate")
-    .mockResolvedValueOnce(null as any);
+    .mockReturnValueOnce(finalQuery);
   const finalRefreshSpy = jest
     .spyOn(fallbackFinalWorker as any, "refreshClaimedEvent")
     .mockResolvedValue({
@@ -2342,7 +2349,7 @@ it("covers due-transition, manual-result, and final-result fallback branches", a
   });
   expect(
     (fallbackFinalWorker as any).resultSetPublisher.publishWithConfirm
-  ).toHaveBeenCalledTimes(1);
+  ).not.toHaveBeenCalled();
   expect(processManualSpy).toHaveBeenCalled();
 
   finalUpdateSpy.mockRestore();

@@ -321,6 +321,10 @@ release_runtime() {
   wait_for_fence false
 }
 
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 case "$ACTION" in
   fence-writes)
     set_fence_config true

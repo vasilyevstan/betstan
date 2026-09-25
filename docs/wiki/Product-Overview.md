@@ -27,6 +27,50 @@ contain a deposit, withdrawal, card-payment, or external-wallet integration.
 | Backoffice | The event catalog and bounded create, visibility, and result controls are intentionally public in the current product. |
 | Responsive UI | The client supports three layout variants, light/dark themes, keyboard access, and desktop/tablet/mobile layouts. |
 
+## Cash back - deployment-gated
+
+Full and partial cash-back are implemented in source. Availability depends on
+a verified, enabled deployed generation; see [[Release Orchestration]]. The
+behavior below is not a claim of current production availability.
+
+Cash-back closes exposure on a confirmed bet owned by the signed-in player.
+It applies to both singles and accumulators, without removing or replacing
+selections:
+
+| Choice | Result |
+|---|---|
+| Full remainder | Closes the entire quoted remainder to zero. The bet becomes **CASH BACK** (`CASH_BACK`), not cancelled or voided. Later settlement or winner metadata cannot change the closed exposure. |
+| Partial stake | Closes the explicitly chosen part of the remaining stake. The bet stays `CONFIRMED` with **PARTIAL CASH BACK**; only its remainder can settle or be closed later. |
+
+Every **original** leg must still be unresolved. A won, lost, or voided leg,
+including a void leg removed from the active rows, disables further cash-back.
+Pre-match eligibility ends strictly before the earliest trusted kickoff and
+never turns into live cash-back. Live eligibility checks the exact selected
+market instance, not merely whether the match is unfinished. Missing authority
+or unsupported legacy wager precision produces an explicit unavailable state.
+
+Amounts are nominal Stanbucks in whole `0.01` units, not real funds. Closed
+stake and quoted return must each be at least `0.01`; a partial must also leave
+at least `0.01`. Repeated partials have no product count cap. The system never
+silently changes a partial amount or converts it to full closure.
+
+Offers last at most seven seconds and may expire sooner at an authority or
+price cutoff. A changed quote requires a newly displayed offer and explicit
+confirmation. Clicking before expiry is not a guarantee of acceptance;
+pending or uncertain confirmations must resolve to the server's durable
+decision, even after the browser countdown expires.
+
+The original wager, accepted odds, selection identity, and placed-bet
+statistics remain unchanged. For example, closing `40.00` of an original
+`100.00` stake leaves `60.00`; at accepted odds of `3`, that remainder has a
+possible nominal return of `180.00`. Cash-back history remains available after
+full closure or normal settlement of the remainder.
+
+Cash-back records nominal stake closure and return only. There is no wallet,
+balance credit, transfer, or claim that money was paid. See
+[[Application Processes]] for deterministic pricing and the API, and
+[[User Interface]] for the inline My Bets flow and recovery states.
+
 ## User journeys
 
 ### Visitor
@@ -58,6 +102,9 @@ event during validation. That privileged path is server-verified and is not a
 general customer feature.
 
 ## Event and bet lifecycle
+
+This diagram shows the established event and normal-settlement paths. The
+deployment-gated cash-back flow is described separately above.
 
 ```mermaid
 stateDiagram-v2

@@ -1,0 +1,974 @@
+import {
+  BetKind, BetStatus, BettingStatus, CashBackOperationIdentity, CashBackSourceReply,
+  CashBackSourceRequest, CashBackSourceEvidence, EventPhase, EventStatus, EventVisibility,
+  CashBackSelectionQuote, CashBackSourceDenialReason, CashBackUnavailableReason,
+  ICashBackOutcomeEvent, messengerWrapper, ModerationStatus, ResultingStatus,
+  LiveMarketStatus, LiveMarketType, LiveSettlementReason, TeamSide,
+} from "@betstan/common";
+import { Bet, BetArchive } from "../../model/Bet";
+import { CashBackOperation } from "../../model/CashBackOperation";
+import FinalScoreLedger from "../../model/FinalScoreLedger";
+import { createFinalScoreEvent, createLiveRow, createModerationEvent, createPlaceBetEvent, createPreMatchRow } from "../../test/resultingTestUtils";
+import SettleSlipPublisher from "../../event/publisher/SettleSlipPublisher";
+import SettleSlipRowPublisher from "../../event/publisher/SettleSlipRowPublisher";
+import { applyModerationResult, processFinalScore, processLiveUpdate, upsertPlaceBet } from "../resulting";
+import { CashBackCoordinator } from "../CashBackCoordinator";
+import { cashBackBeforeDeadline, cashBackHash } from "../cashBackState";
+
+const publishers = () => ({
+  settleSlipPublisher: new SettleSlipPublisher(messengerWrapper.connection),
+  settleSlipRowPublisher: new SettleSlipRowPublisher(messengerWrapper.connection),
+});
+
+const setup = async (eventCount = 1, cutoffMs = 60_000, betKind = BetKind.PRE_MATCH, approved = true) => {
+  const cutoff = new Date(Date.now() + cutoffMs).toISOString();
+  const kickoff = betKind === BetKind.LIVE ? new Date(Date.now() - 60_000).toISOString() : cutoff;
+  const rows = Array.from({ length: eventCount }, (_, index) =>
+    (betKind === BetKind.LIVE ? createLiveRow : createPreMatchRow)({
+      eventId: `event-${index}`, eventTime: kickoff, oddsValue: 3,
+    }));
+  const place = createPlaceBetEvent({
+    userId: "owner", slipId: "slip", wager: 100, betKind, rows,
+  });
+  const settlementPublishers = publishers();
+  await upsertPlaceBet(place, settlementPublishers);
+  if (approved) await applyModerationResult(createModerationEvent("slip", ModerationStatus.APPROVED), settlementPublishers);
+  const requests: CashBackSourceRequest[] = [];
+  const outcomes: ICashBackOutcomeEvent["data"][] = [];
+  const generations = new Map<string, number>();
+  const source = jest.fn(async (event: { data: CashBackSourceRequest }) => { requests.push(event.data); });
+  const outcome = jest.fn(async (event: ICashBackOutcomeEvent) => { outcomes.push(event.data); });
+  const coordinator = new CashBackCoordinator(messengerWrapper.connection, {
+    source: { initConfirmChannel: async () => {}, publishWithConfirm: source },
+    outcome: { initConfirmChannel: async () => {}, publishWithConfirm: outcome },
+  });
+  await coordinator.init();
+  const identity = (id: string): CashBackOperationIdentity => ({
+    operationId: id, clientOperationId: `client-${id}`, fingerprint: `fingerprint-${id}`,
+    userId: "owner", slipId: "slip", betKind,
+  });
+  const reply = (request: CashBackSourceRequest): CashBackSourceReply => {
+    const key = `${request.participant.eventId}:${request.participant.owner}`;
+    if (request.action === "SNAPSHOT") {
+      const base = {
+        eventId: request.participant.eventId, authorityFingerprint: key,
+        occurredAt: new Date().toISOString(), kickoffAt: kickoff, cutoffAt: cutoff,
+      };
+      let quoteEvidence: Extract<CashBackSourceEvidence, { owner: "GAMEMASTER" }>["quoteEvidence"] = {
+        kind: "PRE_MATCH_STATIC",
+      };
+      if (request.operation.betKind === BetKind.LIVE) {
+        const quotes = request.selections.map((selection): Extract<CashBackSelectionQuote, { betKind: BetKind.LIVE }> => {
+          if (selection.betKind !== BetKind.LIVE) throw new Error("Expected original live selection");
+          return {
+            ...selection, odds: "6", quoteFingerprint: `current-${selection.slipRowId}`,
+            quoteVersion: 2, quoteValidUntil: cutoff, marketStatus: LiveMarketStatus.OPEN,
+          };
+        });
+        const [first, ...rest] = quotes;
+        if (!first) throw new Error("Missing live selection");
+        quoteEvidence = { kind: "LIVE", quotes: [first, ...rest] };
+      }
+      const evidence: CashBackSourceEvidence = request.participant.owner === "BACKOFFICE"
+        ? {
+            ...base, owner: "BACKOFFICE" as const, cutoffAt: betKind === BetKind.LIVE ? null : cutoff,
+            lifecycle: { status: EventStatus.NO_RESULT as const, visibility: EventVisibility.ONLINE },
+            quoteEvidence: { kind: "LIFECYCLE_ONLY" as const },
+          }
+        : {
+            ...base, owner: "GAMEMASTER" as const,
+            lifecycle: { status: EventStatus.NO_RESULT as const,
+              phase: betKind === BetKind.LIVE ? EventPhase.FIRST_HALF : EventPhase.PRE_MATCH,
+              bettingStatus: BettingStatus.OPEN, sequence: 0 },
+            quoteEvidence,
+          };
+      return {
+        outcome: "SNAPSHOT", request,
+        snapshot: { baseGeneration: generations.get(key) ?? 0, observedAt: new Date().toISOString(), evidence },
+      };
+    }
+    if (request.action === "RESERVE") {
+      generations.set(key, request.grantedGeneration);
+      return {
+        outcome: "GRANTED", request, grantedGeneration: request.grantedGeneration,
+        decisionTime: new Date().toISOString(), evidence: request.expected.evidence,
+      };
+    }
+    generations.set(key, Math.max(generations.get(key) ?? 0, request.baseGeneration + 2));
+    return {
+      outcome: "FENCED", request, fenceGeneration: request.baseGeneration + 2,
+      observedGeneration: generations.get(key)!, observedAt: new Date().toISOString(),
+    };
+  };
+  const pump = async (drop?: (request: CashBackSourceRequest) => boolean, receiver = coordinator) => {
+    for (let count = 0; requests.length; count++) {
+      if (count > 100) throw new Error("Source protocol did not converge");
+      const request = requests.shift()!;
+      const response = reply(request);
+      if (!drop?.(request)) await receiver.receiveSourceReply(response);
+    }
+  };
+  const quote = async (id: string, stakeMinor?: number) => {
+    await coordinator.receiveRequest({
+      action: "QUOTE", operation: identity(id), requestedAt: new Date().toISOString(),
+      portion: stakeMinor === undefined ? { mode: "FULL" } : { mode: "PARTIAL", stakeMinor },
+    });
+    await pump();
+    const record = await CashBackOperation.findOne({ operationId: id });
+    if (!record?.quote) throw new Error("Missing quote");
+    return record.quote;
+  };
+  const confirm = async (id: string, quoteId: string) => coordinator.receiveRequest({
+    action: "CONFIRM", operation: identity(id), requestedAt: new Date().toISOString(), quoteId,
+  });
+  return { coordinator, requests, outcomes, source, outcome, generations, identity, reply, pump, quote, confirm, rows, place, settlementPublishers };
+};
+
+const coordinatorWithFlag = (state: Awaited<ReturnType<typeof setup>>, value: string | undefined) => {
+  if (value === undefined) delete process.env.CASH_BACK_ENABLED;
+  else process.env.CASH_BACK_ENABLED = value;
+  return new CashBackCoordinator(messengerWrapper.connection, {
+    source: { initConfirmChannel: async () => {}, publishWithConfirm: state.source },
+    outcome: { initConfirmChannel: async () => {}, publishWithConfirm: state.outcome },
+  });
+};
+
+const persistAllGrants = async (state: Awaited<ReturnType<typeof setup>>, id: string, quoteId: string) => {
+  await state.confirm(id, quoteId);
+  const first = state.requests.shift();
+  if (first?.action !== "RESERVE") throw new Error("Missing first reservation");
+  await state.coordinator.receiveSourceReply(state.reply(first));
+  const last = state.requests.shift();
+  if (last?.action !== "RESERVE") throw new Error("Missing final reservation");
+  const grant = state.reply(last);
+  if (grant.outcome !== "GRANTED") throw new Error("Missing durable grant");
+  await Bet.updateOne(
+    { slipId: "slip", "cashBackPending.state": "UNDECIDED" },
+    { $set: { "cashBackPending.obligations.$[target].grant": grant }, $inc: { __v: 1 } },
+    { arrayFilters: [{ "target.request.requestId": last.requestId }] }
+  );
+};
+
+it.each([
+  { name: "missing", value: undefined, diagnostic: false },
+  { name: "false", value: "false", diagnostic: false },
+  { name: "malformed", value: "not-a-boolean", diagnostic: true },
+  { name: "empty", value: "", diagnostic: true },
+])("keeps quote production off for a $name flag with a latched value and sanitized diagnostic", async ({ value, diagnostic }) => {
+  const state = await setup();
+  const log = jest.spyOn(console, "error").mockImplementation(() => {});
+  const disabled = coordinatorWithFlag(state, value);
+  process.env.CASH_BACK_ENABLED = "true";
+  try {
+    await disabled.receiveRequest({
+      action: "QUOTE", operation: state.identity("disabled-quote"),
+      requestedAt: new Date().toISOString(), portion: { mode: "FULL" },
+    });
+    expect(await CashBackOperation.findOne({ operationId: "disabled-quote" })).toMatchObject({
+      stage: "UNAVAILABLE", outcome: { outcome: "UNAVAILABLE", reason: "AUTHORITY_UNAVAILABLE" },
+    });
+    expect((await CashBackOperation.findOne({ operationId: "disabled-quote" }))?.quote).toBeUndefined();
+    expect((await Bet.findOne({ slipId: "slip" }))?.cashBackPending).toBeUndefined();
+    expect(state.source).not.toHaveBeenCalled();
+    expect(log.mock.calls).toEqual(diagnostic
+      ? [["resulting_cash_back_invalid_configuration", { variable: "CASH_BACK_ENABLED", disabled: true }]]
+      : []);
+  } finally {
+    log.mockRestore();
+  }
+});
+
+it("recovers unfinished snapshots as unavailable while off without replacing an existing quote", async () => {
+  const state = await setup();
+  const quote = await state.quote("existing", 1000);
+  await state.coordinator.receiveRequest({
+    action: "QUOTE", operation: state.identity("unfinished"), requestedAt: new Date().toISOString(),
+    portion: { mode: "FULL" },
+  });
+  const sent = state.source.mock.calls.length;
+  const disabled = coordinatorWithFlag(state, "false");
+  await disabled.runOnce();
+  expect((await CashBackOperation.findOne({ operationId: "unfinished" }))?.outcome)
+    .toMatchObject({ outcome: "UNAVAILABLE", reason: "AUTHORITY_UNAVAILABLE" });
+  await disabled.receiveRequest({
+    action: "QUOTE", operation: state.identity("existing"), requestedAt: new Date().toISOString(),
+    portion: { mode: "PARTIAL", stakeMinor: 1000 },
+  });
+  expect((await CashBackOperation.findOne({ operationId: "existing" }))?.quote).toEqual(quote);
+  expect(state.source.mock.calls.length).toBe(sent);
+});
+
+it.each(["no slot", "all grants stored"])("rejects disabled confirmation canonically with %s without consuming principal", async initial => {
+  const state = await setup();
+  const quote = await state.quote("disabled-confirmation", 1000);
+  if (initial === "all grants stored") await persistAllGrants(state, "disabled-confirmation", quote.quoteId);
+  const sent = state.source.mock.calls.length;
+  const disabled = coordinatorWithFlag(state, "false");
+  await disabled.receiveRequest({
+    action: "CONFIRM", operation: state.identity("disabled-confirmation"), quoteId: quote.quoteId,
+    requestedAt: new Date().toISOString(),
+  });
+  const pending = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending;
+  expect(pending).toMatchObject({
+    state: "REJECTED",
+    receipt: { outcome: "REJECTED", reason: "AUTHORITY_UNAVAILABLE", financial: {
+      revision: 2, remainingStakeMinor: 10000, cumulativeClosedStakeMinor: 0, cumulativeReturnMinor: 0,
+    } },
+  });
+  expect(pending?.obligations).toHaveLength(2);
+  expect(state.source.mock.calls.slice(sent).every(([event]) => event.data.action === "RELEASE")).toBe(true);
+  await state.pump(undefined, disabled);
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackPending).toBeUndefined();
+  expect((await CashBackOperation.findOne({ operationId: "disabled-confirmation" }))?.outcome)
+    .toMatchObject({ outcome: "REJECTED", receipt: pending?.receipt });
+  expect([...state.generations.values()]).toEqual([2, 2]);
+});
+
+it("keeps disabled confirmation pending when canonical authority is missing or another operation owns the slot", async () => {
+  const state = await setup();
+  const first = await state.quote("first-slot", 1000);
+  const second = await state.quote("second-slot", 1000);
+  await state.confirm("first-slot", first.quoteId);
+  const before = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending;
+  const sent = state.source.mock.calls.length;
+  const disabled = coordinatorWithFlag(state, "false");
+  const request = {
+    action: "CONFIRM" as const, operation: state.identity("second-slot"),
+    quoteId: second.quoteId, requestedAt: new Date().toISOString(),
+  };
+  await disabled.receiveRequest(request);
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackPending).toEqual(before);
+  expect((await CashBackOperation.findOne({ operationId: "second-slot" }))?.stage).toBe("CONFIRMING");
+  await Bet.deleteOne({ slipId: "slip" });
+  await expect(disabled.receiveRequest(request)).rejects.toThrow("Missing active and archived Bet is not rejection authority");
+  expect((await CashBackOperation.findOne({ operationId: "second-slot" }))?.stage).toBe("CONFIRMING");
+  expect(state.source.mock.calls.length).toBe(sent);
+});
+
+it("binds the immutable enabled literal and deadline in the actual Mongo acceptance CAS", async () => {
+  const state = await setup();
+  const quote = await state.quote("mongo-gate", 1000);
+  await persistAllGrants(state, "mongo-gate", quote.quoteId);
+  process.env.CASH_BACK_ENABLED = "false";
+  const updateOne = Bet.updateOne.bind(Bet);
+  let checked = false;
+  const acceptance = jest.spyOn(Bet, "updateOne").mockImplementation((...args) => {
+    const query = updateOne(...args);
+    const changes = args[1];
+    const first = Array.isArray(changes) ? changes[0] : undefined;
+    if (first && "$set" in first && first.$set["cashBackPending.state"] === "ACCEPTED") {
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        expect(args[0]?.$expr).toEqual({ $and: [{ $literal: true }, cashBackBeforeDeadline] });
+        const denied = await updateOne(
+          { ...args[0], $expr: { $and: [{ $literal: false }, cashBackBeforeDeadline] } }, changes, args[2]
+        );
+        expect(denied.modifiedCount).toBe(0);
+        expect((await Bet.findOne({ slipId: "slip" }))?.cashBackPending?.state).toBe("UNDECIDED");
+        checked = true;
+        return execute();
+      });
+    }
+    return query;
+  });
+  try {
+    await state.coordinator.advance("mongo-gate");
+    await state.pump();
+    expect(checked).toBe(true);
+    expect((await CashBackOperation.findOne({ operationId: "mongo-gate" }))?.outcome?.outcome).toBe("ACCEPTED");
+  } finally {
+    acceptance.mockRestore();
+  }
+});
+
+it("makes a losing off-mode rejection read the already-accepted canonical winner", async () => {
+  const state = await setup();
+  const quote = await state.quote("off-race");
+  await persistAllGrants(state, "off-race", quote.quoteId);
+  const disabled = coordinatorWithFlag(state, "false");
+  let reached!: () => void;
+  let resume!: () => void;
+  const observed = new Promise<void>(resolve => { reached = resolve; });
+  const paused = new Promise<void>(resolve => { resume = resolve; });
+  const updateOne = Bet.updateOne.bind(Bet);
+  const rejection = jest.spyOn(Bet, "updateOne").mockImplementationOnce((...args) => {
+    const query = updateOne(...args);
+    const execute = query.exec.bind(query);
+    jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+      reached();
+      await paused;
+      return execute();
+    });
+    return query;
+  });
+  const losing = disabled.advance("off-race");
+  await observed;
+  try {
+    await state.coordinator.advance("off-race");
+    await state.pump();
+    const winner = (await CashBackOperation.findOne({ operationId: "off-race" }))?.outcome;
+    expect(winner?.outcome).toBe("ACCEPTED");
+    resume();
+    await losing;
+    expect((await CashBackOperation.findOne({ operationId: "off-race" }))?.outcome).toEqual(winner);
+    expect((await BetArchive.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+      remainingStakeMinor: 0, cumulativeClosedStakeMinor: 10000, cumulativeReturnMinor: 10000,
+    });
+  } finally {
+    resume();
+    await losing;
+    rejection.mockRestore();
+  }
+});
+
+it.each(["ACCEPTED", "REJECTED"] as const)("drains %s receipt/history and lost release ACKs while off", async terminal => {
+  const state = await setup();
+  const quote = await state.quote("off-recovery");
+  await state.confirm("off-recovery", quote.quoteId);
+  if (terminal === "REJECTED") {
+    const reserve = state.requests.shift();
+    if (reserve?.action !== "RESERVE") throw new Error("Missing reservation");
+    await state.coordinator.receiveSourceReply({
+      outcome: "DENIED", request: reserve, reason: "CONTENDED", observedAt: new Date().toISOString(),
+    });
+  }
+  await state.pump(request => request.action === "RELEASE" && request.participant.owner === "GAMEMASTER");
+  const receipt = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending?.receipt;
+  expect(receipt?.outcome).toBe(terminal);
+  await CashBackOperation.updateOne({ operationId: "off-recovery" }, { $set: { outcomePending: true } });
+  const disabled = coordinatorWithFlag(state, "false");
+  await disabled.runOnce();
+  await state.pump(undefined, disabled);
+  expect((await CashBackOperation.findOne({ operationId: "off-recovery" }))?.outcome)
+    .toMatchObject({ outcome: terminal, receipt });
+  const retained = terminal === "ACCEPTED"
+    ? await BetArchive.findOne({ slipId: "slip" }).lean() : await Bet.findOne({ slipId: "slip" }).lean();
+  expect(retained?.cashBackPending).toBeUndefined();
+  expect(retained?.cashBackFinancial).toEqual(receipt?.financial);
+  expect([...state.generations.values()]).toEqual([2, 2]);
+});
+
+it("settles an accepted partial remainder normally while cash-back admission is off", async () => {
+  const state = await setup();
+  const quote = await state.quote("off-remainder", 4000);
+  await state.confirm("off-remainder", quote.quoteId);
+  await state.pump();
+  await coordinatorWithFlag(state, "false").runOnce();
+  await processFinalScore(createFinalScoreEvent({
+    eventId: "event-0", home: "Home", away: "Away", homeScore: 1, awayScore: 0,
+  }), state.settlementPublishers);
+  expect((await BetArchive.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+    status: BetStatus.WIN, remainingStakeMinor: 6000, cumulativeClosedStakeMinor: 4000, cumulativeReturnMinor: 4000,
+  });
+  expect(state.settlementPublishers.settleSlipPublisher.publishWithConfirm).toHaveBeenCalledWith({
+    data: expect.objectContaining({ cashBack: expect.objectContaining({ settlementBasisStakeMinor: 6000 }) }),
+  });
+});
+
+const prepareTerminalRelease = async () => {
+  const state = await setup();
+  const quote = await state.quote("release");
+  await state.confirm("release", quote.quoteId);
+  await state.pump(request => request.action === "RELEASE" && request.participant.owner === "GAMEMASTER");
+  const pending = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending;
+  const obligation = pending?.obligations.find(item => !item.released);
+  if (!pending?.receipt || !obligation?.releaseRequest) throw new Error("Missing terminal release obligation");
+  const request = obligation.releaseRequest;
+  const reply: Extract<CashBackSourceReply, { outcome: "FENCED" }> = {
+    outcome: "FENCED", request, fenceGeneration: request.baseGeneration + 2,
+    observedGeneration: request.baseGeneration + 2, observedAt: new Date().toISOString(),
+  };
+  return { state, request, reply, receipt: pending.receipt };
+};
+
+it("coordinates both owners in deterministic event order and conserves repeated partial/full principal", async () => {
+  const state = await setup(2);
+  const first = await state.quote("first", 4000);
+  expect(first.returnMinor).toBe(4000);
+  const snapshotRequests = state.source.mock.calls.map(([event]) => event.data)
+    .filter(request => request.action === "SNAPSHOT");
+  expect(snapshotRequests.map(request => request.participant)).toEqual([
+    { eventId: "event-0", owner: "BACKOFFICE" }, { eventId: "event-0", owner: "GAMEMASTER" },
+    { eventId: "event-1", owner: "BACKOFFICE" }, { eventId: "event-1", owner: "GAMEMASTER" },
+  ]);
+  await state.confirm("first", first.quoteId);
+  await state.pump();
+  let bet = await Bet.findOne({ slipId: "slip" });
+  expect(bet?.cashBackFinancial).toMatchObject({
+    status: BetStatus.CONFIRMED, originalStakeMinor: 10000, remainingStakeMinor: 6000,
+    cumulativeClosedStakeMinor: 4000, cumulativeReturnMinor: 4000,
+  });
+  expect(bet?.wager).toBe(100);
+  expect(bet?.rows.every(row => row.oddsValue === 3 && row.result === ResultingStatus.ROW_NO_RESULT)).toBe(true);
+  const second = await state.quote("second", 1000);
+  await state.confirm("second", second.quoteId);
+  await state.pump();
+  const full = await state.quote("full");
+  expect(full.closedStakeMinor).toBe(5000);
+  await state.confirm("full", full.quoteId);
+  await state.pump();
+  bet = await BetArchive.findOne({ slipId: "slip" });
+  expect(bet?.status).toBe(ResultingStatus.BET_CASH_BACK);
+  expect(bet?.cashBackFinancial).toMatchObject({
+    originalStakeMinor: 10000, remainingStakeMinor: 0, cumulativeClosedStakeMinor: 10000,
+    cumulativeReturnMinor: 10000,
+  });
+  expect(await Bet.countDocuments()).toBe(0);
+  expect(await CashBackOperation.countDocuments({ stage: "TERMINAL", "outcome.outcome": "ACCEPTED" })).toBe(3);
+});
+
+it("replays one immutable terminal receipt on concurrent exact confirmation retries", async () => {
+  const state = await setup();
+  const quote = await state.quote("repeat", 1000);
+  await Promise.all([state.confirm("repeat", quote.quoteId), state.confirm("repeat", quote.quoteId)]);
+  await state.pump();
+  const before = await CashBackOperation.findOne({ operationId: "repeat" });
+  const financial = (await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial;
+  await Promise.all([state.confirm("repeat", quote.quoteId), state.confirm("repeat", quote.quoteId)]);
+  await state.pump();
+  const after = await CashBackOperation.findOne({ operationId: "repeat" });
+  expect(after?.outcome).toEqual(before?.outcome);
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial).toEqual(financial);
+});
+
+it("persists one unpredictable quote identity when two coordinators race and publishes only the CAS winner", async () => {
+  const state = await setup();
+  const request = {
+    action: "QUOTE" as const, operation: state.identity("racing-quote"),
+    requestedAt: new Date().toISOString(), portion: { mode: "PARTIAL" as const, stakeMinor: 1000 },
+  };
+  await state.coordinator.receiveRequest(request);
+  const first = state.requests.shift();
+  if (first?.action !== "SNAPSHOT") throw new Error("Missing first snapshot request");
+  await state.coordinator.receiveSourceReply(state.reply(first));
+  const last = state.requests.shift();
+  if (last?.action !== "SNAPSHOT") throw new Error("Missing last snapshot request");
+  await CashBackOperation.updateOne(
+    { operationId: request.operation.operationId },
+    { $push: { snapshotReplies: state.reply(last) } }
+  );
+  const competitor = new CashBackCoordinator(messengerWrapper.connection, {
+    source: { initConfirmChannel: async () => {}, publishWithConfirm: state.source },
+    outcome: { initConfirmChannel: async () => {}, publishWithConfirm: state.outcome },
+  });
+  const candidates: string[] = [];
+  let reached!: () => void;
+  let resume!: () => void;
+  const bothReady = new Promise<void>(resolve => { reached = resolve; });
+  const paused = new Promise<void>(resolve => { resume = resolve; });
+  const updateOne = CashBackOperation.updateOne.bind(CashBackOperation);
+  const writes = jest.spyOn(CashBackOperation, "updateOne").mockImplementation((...args) => {
+    const query = updateOne(...args);
+    const update = args[1];
+    if (update && !Array.isArray(update) && update.$set?.stage === "QUOTED") {
+      const quote = update.$set.quote;
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        if (!quote || typeof quote.quoteId !== "string") throw new Error("Missing candidate quote identity");
+        candidates.push(quote.quoteId);
+        if (candidates.length === 2) reached();
+        await paused;
+        return execute();
+      });
+    }
+    return query;
+  });
+  const work = Promise.all([
+    state.coordinator.advance(request.operation.operationId),
+    competitor.advance(request.operation.operationId),
+  ]);
+  try {
+    await Promise.race([bothReady, work.then(() => { throw new Error("Quote producers did not both reach the CAS"); })]);
+    expect(new Set(candidates).size).toBe(2);
+    expect((await CashBackOperation.findOne({ operationId: request.operation.operationId }))?.quote).toBeUndefined();
+    expect(state.outcomes).toEqual([]);
+  } finally {
+    resume();
+    try {
+      await work;
+    } finally {
+      writes.mockRestore();
+    }
+  }
+  const stored = await CashBackOperation.findOne({ operationId: request.operation.operationId });
+  if (!stored?.quote) throw new Error("Missing winning quote");
+  expect(candidates).toContain(stored.quote.quoteId);
+  await Promise.all([state.coordinator.receiveRequest(request), competitor.receiveRequest(request)]);
+  expect(await CashBackOperation.countDocuments({ operationId: request.operation.operationId })).toBe(1);
+  expect((await CashBackOperation.findOne({ operationId: request.operation.operationId }))?.quote).toEqual(stored.quote);
+  expect(state.outcomes.length).toBeGreaterThan(0);
+  for (const outcome of state.outcomes) {
+    expect(outcome.outcome).toBe("QUOTED");
+    if (outcome.outcome === "QUOTED") expect(outcome.quote).toEqual(stored.quote);
+  }
+});
+
+it("gives distinct operations opaque quote identities that cannot be derived from their public operation IDs", async () => {
+  const state = await setup();
+  const first = await state.quote("first-unpredictable", 1000);
+  const second = await state.quote("second-unpredictable", 1000);
+  for (const quote of [first, second]) {
+    expect(quote.quoteId).toMatch(/^[a-f0-9]{64}$/);
+    expect(quote.quoteId).not.toBe(cashBackHash([quote.operation.operationId, "quote"]));
+  }
+  expect(first.quoteId).not.toBe(second.quoteId);
+});
+
+it("replays a lost confirmation after quote expiry without replacing its persisted identity or closing twice", async () => {
+  const state = await setup(1, 1000);
+  const quote = await state.quote("late-confirmation", 1000);
+  await state.confirm("late-confirmation", quote.quoteId);
+  await state.pump();
+  const before = await CashBackOperation.findOne({ operationId: "late-confirmation" });
+  expect(before?.outcome?.outcome).toBe("ACCEPTED");
+  const sourceCalls = state.source.mock.calls.length;
+  const outcomeCalls = state.outcome.mock.calls.length;
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(quote.expiresAt) - Date.now()) + 5));
+  const restarted = new CashBackCoordinator(messengerWrapper.connection, {
+    source: { initConfirmChannel: async () => {}, publishWithConfirm: state.source },
+    outcome: { initConfirmChannel: async () => {}, publishWithConfirm: state.outcome },
+  });
+  await restarted.receiveRequest({
+    action: "CONFIRM", operation: state.identity("late-confirmation"), quoteId: quote.quoteId,
+    requestedAt: new Date().toISOString(),
+  });
+  await restarted.receiveRequest({
+    action: "QUOTE", operation: state.identity("late-confirmation"), portion: { mode: "PARTIAL", stakeMinor: 1000 },
+    requestedAt: new Date().toISOString(),
+  });
+  const after = await CashBackOperation.findOne({ operationId: "late-confirmation" });
+  expect(after?.quote).toEqual(quote);
+  expect(after?.outcome).toEqual(before?.outcome);
+  expect(state.outcome.mock.calls.slice(outcomeCalls).map(([event]) => event.data))
+    .toEqual([before?.outcome, before?.outcome]);
+  expect(state.source.mock.calls.length).toBe(sourceCalls);
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+    revision: 2, remainingStakeMinor: 9000, cumulativeClosedStakeMinor: 1000,
+  });
+});
+
+it("checks the result ledger after exact grants, before deciding acceptance", async () => {
+  const state = await setup();
+  const quote = await state.quote("ledger", 1000);
+  await state.confirm("ledger", quote.quoteId);
+  await FinalScoreLedger.create({
+    eventId: "event-0", occurredAt: new Date().toISOString(), homeScore: 1, awayScore: 0,
+    home: "Home", away: "Away", correctScoreResult: "1 - 0", oneCrossTwoResult: "Home",
+  });
+  await state.pump();
+  const operation = await CashBackOperation.findOne({ operationId: "ledger" });
+  expect(operation?.outcome).toMatchObject({ outcome: "REJECTED", receipt: { reason: "SELECTION_RESOLVED" } });
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial?.remainingStakeMinor).toBe(10000);
+});
+
+it("normal result mutation consumes the same undecided slot and releases every requested participant", async () => {
+  const state = await setup(2);
+  const quote = await state.quote("result-first", 1000);
+  await state.confirm("result-first", quote.quoteId);
+  await processFinalScore(createFinalScoreEvent({
+    eventId: "event-0", home: "Home", away: "Away", homeScore: 0, awayScore: 1,
+  }), state.settlementPublishers);
+  const decided = await Bet.findOne({ slipId: "slip" });
+  expect(decided?.cashBackPending).toMatchObject({
+    state: "REJECTED", receipt: { outcome: "REJECTED", reason: "SELECTION_RESOLVED" },
+  });
+  await state.coordinator.runOnce();
+  await state.pump();
+  expect(state.source.mock.calls.filter(([event]) => event.data.action === "RELEASE")
+    .map(([event]) => event.data.participant)
+    .filter((value, index, all) => all.findIndex(candidate => JSON.stringify(candidate) === JSON.stringify(value)) === index)
+  ).toHaveLength(4);
+});
+
+it("settles only the remainder and keeps the original selection manifest", async () => {
+  const state = await setup();
+  const quote = await state.quote("partial", 4000);
+  await state.confirm("partial", quote.quoteId);
+  await state.pump();
+  await processFinalScore(createFinalScoreEvent({
+    eventId: "event-0", home: "Home", away: "Away", homeScore: 1, awayScore: 0,
+  }), state.settlementPublishers);
+  const archive = await BetArchive.findOne({ slipId: "slip" });
+  expect(archive?.status).toBe(ResultingStatus.BET_WIN);
+  expect(archive?.cashBackFinancial?.remainingStakeMinor).toBe(6000);
+  expect(archive?.cashBackOriginalManifest?.selections).toHaveLength(1);
+  expect(state.settlementPublishers.settleSlipPublisher.publishWithConfirm).toHaveBeenCalledWith({
+    data: expect.objectContaining({ cashBack: expect.objectContaining({ settlementBasisStakeMinor: 6000 }) }),
+  });
+});
+
+it("expires a held operation canonically and cancels the participant whose grant ACK was lost", async () => {
+  const state = await setup(1, 1_000);
+  const quote = await state.quote("lost-ack", 1000);
+  await state.confirm("lost-ack", quote.quoteId);
+  await state.pump(request => request.action === "RESERVE" && request.participant.owner === "GAMEMASTER");
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackPending?.state).toBe("UNDECIDED");
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(quote.expiresAt) - Date.now()) + 5));
+  await state.coordinator.runOnce();
+  await state.pump();
+  const record = await CashBackOperation.findOne({ operationId: "lost-ack" });
+  expect(record?.outcome).toMatchObject({ outcome: "REJECTED", receipt: { reason: "QUOTE_EXPIRED" } });
+  expect([...state.generations.values()]).toEqual([2, 2]);
+});
+
+it.each<[string, "FENCED" | "RELEASED", string, unknown]>([
+  ["missing observed generation", "FENCED", "observedGeneration", undefined],
+  ["nonnumeric observed generation", "FENCED", "observedGeneration", "not-a-generation"],
+  ["string observed generation", "FENCED", "observedGeneration", "2"],
+  ["fractional observed generation", "FENCED", "observedGeneration", 2.5],
+  ["unsafe observed generation", "FENCED", "observedGeneration", Number.MAX_SAFE_INTEGER + 1],
+  ["observed generation below the fence", "FENCED", "observedGeneration", 1],
+  ["missing fence generation", "FENCED", "fenceGeneration", undefined],
+  ["fractional fence generation", "FENCED", "fenceGeneration", 2.5],
+  ["unsafe fence generation", "RELEASED", "fenceGeneration", Number.MAX_SAFE_INTEGER + 1],
+  ["string fence generation", "RELEASED", "fenceGeneration", "2"],
+  ["missing observation time", "FENCED", "observedAt", undefined],
+  ["invalid observation time", "FENCED", "observedAt", "not-a-time"],
+  ["nonstring observation time", "FENCED", "observedAt", 0],
+  ["normalized invalid observation date", "FENCED", "observedAt", "2026-02-30T00:00:00.000Z"],
+  ["missing release decision time", "RELEASED", "decisionTime", undefined],
+  ["invalid release decision time", "RELEASED", "decisionTime", "not-a-time"],
+  ["nonstring release decision time", "RELEASED", "decisionTime", 0],
+  ["normalized invalid release decision date", "RELEASED", "decisionTime", "2026-02-30T00:00:00.000Z"],
+])("rejects a serialized release ACK with %s and retains durable recovery", async (_name, outcome, field, value) => {
+  const { state, request, reply, receipt } = await prepareTerminalRelease();
+  const valid: CashBackSourceReply = outcome === "FENCED" ? reply : {
+    outcome: "RELEASED", request, fenceGeneration: reply.fenceGeneration, decisionTime: reply.observedAt,
+  };
+  const malformed = JSON.parse(JSON.stringify({ ...valid, [field]: value }));
+  await expect(state.coordinator.receiveSourceReply(malformed)).rejects.toThrow("Invalid source cancellation fence");
+  const pending = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending;
+  expect(pending).toMatchObject({ state: "ACCEPTED", receipt });
+  expect(pending?.obligations.find(item => item.releaseRequest?.requestId === request.requestId)?.released).toBe(false);
+  expect(await BetArchive.countDocuments()).toBe(0);
+  const sent = state.source.mock.calls.length;
+  await state.coordinator.runOnce();
+  expect(state.source.mock.calls.slice(sent).map(([event]) => event.data)).toEqual([request]);
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackPending?.receipt).toEqual(receipt);
+  expect(await BetArchive.countDocuments()).toBe(0);
+  await state.coordinator.receiveSourceReply(JSON.parse(JSON.stringify(valid)));
+  expect(await Bet.countDocuments()).toBe(0);
+  expect(await BetArchive.countDocuments()).toBe(1);
+  expect((await CashBackOperation.findOne({ operationId: "release" }))?.outcome)
+    .toMatchObject({ outcome: "ACCEPTED", receipt });
+});
+
+it.each<[string, "FENCED" | "RELEASED", number]>([
+  ["released hold", "RELEASED", 0],
+  ["exact fence", "FENCED", 0],
+  ["newer generation belonging to another hold", "FENCED", 1],
+])("drains a valid %s ACK and replays it without another release", async (_name, outcome, generationOffset) => {
+  const { state, request, reply, receipt } = await prepareTerminalRelease();
+  const observedGeneration = reply.fenceGeneration + generationOffset;
+  const sourceKey = `${request.participant.eventId}:${request.participant.owner}`;
+  state.generations.set(sourceKey, observedGeneration);
+  const valid: CashBackSourceReply = outcome === "RELEASED"
+    ? { outcome: "RELEASED", request, fenceGeneration: reply.fenceGeneration, decisionTime: reply.observedAt }
+    : { ...reply, observedGeneration };
+  const sent = state.source.mock.calls.length;
+  await state.coordinator.receiveSourceReply(JSON.parse(JSON.stringify(valid)));
+  await state.coordinator.receiveSourceReply(JSON.parse(JSON.stringify(valid)));
+  expect(await Bet.countDocuments()).toBe(0);
+  expect(await BetArchive.countDocuments()).toBe(1);
+  expect((await BetArchive.findOne({ slipId: "slip" }))?.cashBackPending).toBeUndefined();
+  expect((await CashBackOperation.findOne({ operationId: "release" }))?.outcome)
+    .toMatchObject({ outcome: "ACCEPTED", receipt });
+  expect(state.source.mock.calls.length).toBe(sent);
+  expect(state.generations.get(sourceKey)).toBe(observedGeneration);
+});
+
+it("rejects valid fence evidence when its serialized request differs from the persisted terminal decision", async () => {
+  const { state, request, reply, receipt } = await prepareTerminalRelease();
+  const changed = JSON.parse(JSON.stringify(reply));
+  changed.request.decision.receiptFingerprint = "different-terminal-receipt";
+  await expect(state.coordinator.receiveSourceReply(changed)).rejects.toThrow("Release reply binding mismatch");
+  const pending = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending;
+  expect(pending?.receipt).toEqual(receipt);
+  expect(pending?.obligations.find(item => item.releaseRequest?.requestId === request.requestId)?.released).toBe(false);
+  expect(await BetArchive.countDocuments()).toBe(0);
+});
+
+it("recovers publication from the canonical winner after a failed confirm send", async () => {
+  const state = await setup();
+  const quote = await state.quote("publication", 1000);
+  await state.confirm("publication", quote.quoteId);
+  state.outcome.mockRejectedValueOnce(new Error("outcome unavailable"));
+  await expect(state.pump()).rejects.toThrow("outcome unavailable");
+  const canonical = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending?.receipt;
+  expect(canonical?.outcome).toBe("ACCEPTED");
+  const restarted = new CashBackCoordinator(messengerWrapper.connection, {
+    source: { initConfirmChannel: async () => {}, publishWithConfirm: state.source },
+    outcome: { initConfirmChannel: async () => {}, publishWithConfirm: state.outcome },
+  });
+  await restarted.runOnce();
+  await state.pump();
+  expect((await CashBackOperation.findOne({ operationId: "publication" }))?.outcome)
+    .toMatchObject({ outcome: "ACCEPTED", receipt: canonical });
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial?.remainingStakeMinor).toBe(9000);
+});
+
+it("recovers published-but-unarchived full closure without republishing or reopening it", async () => {
+  const state = await setup();
+  const quote = await state.quote("archive");
+  await state.confirm("archive", quote.quoteId);
+  const archiveFailure = jest.spyOn(BetArchive, "updateOne").mockRejectedValueOnce(new Error("archive unavailable"));
+  await expect(state.pump()).rejects.toThrow("archive unavailable");
+  archiveFailure.mockRestore();
+  const active = await Bet.findOne({ slipId: "slip" });
+  expect(active?.status).toBe(ResultingStatus.BET_CASH_BACK);
+  expect(active?.cashBackPending).toBeUndefined();
+  const sent = state.outcome.mock.calls.length;
+  await state.coordinator.runOnce();
+  expect(state.outcome.mock.calls.length).toBe(sent);
+  expect(await Bet.countDocuments()).toBe(0);
+  const archived = await BetArchive.findOne({ slipId: "slip" });
+  expect(archived?.cashBackFinancial?.remainingStakeMinor).toBe(0);
+  expect(archived?.cashBackArchiving).toBeUndefined();
+});
+
+it("retains removed-void original legs and denies a new offer despite surviving unresolved rows", async () => {
+  const state = await setup();
+  await Bet.deleteMany({});
+  const one = createLiveRow({ eventId: "live-one", marketType: LiveMarketType.NEXT_CORNER });
+  const two = createLiveRow({ eventId: "live-two", marketType: LiveMarketType.NEXT_CORNER });
+  const placed = createPlaceBetEvent({ userId: "owner", slipId: "slip", wager: 100, betKind: BetKind.LIVE, rows: [one, two] });
+  await upsertPlaceBet(placed, state.settlementPublishers);
+  await applyModerationResult(createModerationEvent("slip"), state.settlementPublishers);
+  await processLiveUpdate({ data: {
+    eventId: one.eventId, sequence: 1, occurredAt: new Date().toISOString(),
+    kickoffAt: new Date(Date.now() - 1000).toISOString(), minute: 1,
+    phase: EventPhase.FIRST_HALF, homeScore: 0, awayScore: 0, bettingStatus: BettingStatus.OPEN,
+    markets: [{
+      marketId: one.marketId!, marketType: LiveMarketType.NEXT_CORNER, marketVersion: 1,
+      quoteVersion: 1, status: LiveMarketStatus.SETTLED,
+      selections: [{ selectionId: one.selectionId!, side: TeamSide.HOME, odds: 2.2 }],
+    }],
+    settlements: [{
+      marketId: one.marketId!, marketVersion: 1, settlementSequence: 1,
+      settlementReason: LiveSettlementReason.MANUAL_VOID, winningSide: TeamSide.NONE,
+    }],
+  } }, state.settlementPublishers);
+  const bet = await Bet.findOne({ slipId: "slip" });
+  expect(bet?.rows).toHaveLength(1);
+  expect(bet?.cashBackOriginalManifest?.selections).toHaveLength(2);
+  expect(bet?.cashBackAnySelectionResolved).toBe(true);
+  await state.coordinator.receiveRequest({
+    action: "QUOTE", operation: { ...state.identity("removed"), betKind: BetKind.LIVE },
+    requestedAt: new Date().toISOString(), portion: { mode: "FULL" },
+  });
+  expect((await CashBackOperation.findOne({ operationId: "removed" }))?.outcome)
+    .toMatchObject({ outcome: "UNAVAILABLE", reason: "SELECTION_RESOLVED" });
+});
+
+it.each(["aggregate read", "CAS retry"])("does not resurrect exposure when duplicate placement and approval race archival at the %s", async stage => {
+  const state = await setup(1, 60_000, BetKind.PRE_MATCH, false);
+  const original = await Bet.findOne({ slipId: "slip" });
+  const barrier = () => {
+    let signal!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>(resolve => { signal = resolve; });
+    const released = new Promise<void>(resolve => { resume = resolve; });
+    return { reached, resume: () => resume(), pause: async () => { signal(); await released; } };
+  };
+  const beforePlacement = barrier();
+  const beforeApproval = barrier();
+  const afterPlacement = barrier();
+  const exists = BetArchive.exists.bind(BetArchive);
+  const archiveRead = jest.spyOn(BetArchive, "exists").mockImplementationOnce(filter => {
+    const query = exists(filter);
+    const execute = query.exec.bind(query);
+    jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+      const value = await execute();
+      await beforePlacement.pause();
+      return value;
+    });
+    return query;
+  });
+  const duplicate = upsertPlaceBet(state.place, state.settlementPublishers);
+  await beforePlacement.reached;
+  let approvalPaused = false;
+  const findOne = Bet.findOne.bind(Bet);
+  const approvalRead = jest.spyOn(Bet, "findOne").mockImplementation((...args) => {
+    const query = findOne(...args);
+    if (stage === "aggregate read" && !approvalPaused) {
+      approvalPaused = true;
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        await beforeApproval.pause();
+        return execute();
+      });
+    }
+    return query;
+  });
+  const updateOne = Bet.updateOne.bind(Bet);
+  const approvalWrite = jest.spyOn(Bet, "updateOne").mockImplementation((...args) => {
+    const query = updateOne(...args);
+    const changes = args[1];
+    const first = Array.isArray(changes) ? changes[0] : undefined;
+    if (stage === "CAS retry" && !approvalPaused && first && "$set" in first
+      && first.$set.status === ResultingStatus.BET_APPROVED) {
+      approvalPaused = true;
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        await beforeApproval.pause();
+        return execute();
+      });
+    }
+    return query;
+  });
+  const upsert = Bet.findOneAndUpdate.bind(Bet);
+  const placementWrite = jest.spyOn(Bet, "findOneAndUpdate").mockImplementation((...args) => {
+    const query = upsert(...args);
+    if (args[2]?.upsert) {
+      const execute = query.exec.bind(query);
+      jest.spyOn(query, "exec").mockImplementationOnce(async () => {
+        const placed = await execute();
+        await afterPlacement.pause();
+        return placed;
+      });
+    }
+    return query;
+  });
+  const approval = applyModerationResult(createModerationEvent("slip"), state.settlementPublishers);
+  await beforeApproval.reached;
+  try {
+    await applyModerationResult(createModerationEvent("slip"), state.settlementPublishers);
+    const quote = await state.quote("retirement");
+    await state.confirm("retirement", quote.quoteId);
+    await state.pump();
+    expect(await Bet.countDocuments()).toBe(0);
+    const archive = JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean());
+    const receipt = JSON.stringify((await CashBackOperation.findOne({ operationId: "retirement" }))?.outcome);
+    beforePlacement.resume();
+    await afterPlacement.reached;
+    const replacement = await Bet.findOne({ slipId: "slip" });
+    expect(replacement?._id.toString()).not.toBe(original?._id.toString());
+    expect(replacement?.status).toBe(ResultingStatus.BET_PENDING);
+    beforeApproval.resume();
+    await approval;
+    afterPlacement.resume();
+    await duplicate;
+    const activeAfterCleanup = await Bet.findOne({ slipId: "slip" });
+    await processFinalScore(createFinalScoreEvent({
+      eventId: "event-0", home: "Home", away: "Away", homeScore: 1, awayScore: 0,
+    }), state.settlementPublishers);
+    expect(activeAfterCleanup).toBeNull();
+    expect(await Bet.countDocuments()).toBe(0);
+    expect(JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean())).toBe(archive);
+    expect(JSON.stringify((await CashBackOperation.findOne({ operationId: "retirement" }))?.outcome)).toBe(receipt);
+    expect(state.settlementPublishers.settleSlipPublisher.publishWithConfirm).not.toHaveBeenCalled();
+    expect(state.settlementPublishers.settleSlipRowPublisher.publishWithConfirm).not.toHaveBeenCalled();
+  } finally {
+    beforePlacement.resume();
+    beforeApproval.resume();
+    afterPlacement.resume();
+    try {
+      await Promise.all([duplicate, approval]);
+    } finally {
+      archiveRead.mockRestore();
+      approvalRead.mockRestore();
+      approvalWrite.mockRestore();
+      placementWrite.mockRestore();
+    }
+  }
+});
+
+it("surfaces an archived-placement cleanup miss and removes the pending replacement on redelivery", async () => {
+  const state = await setup(1, 60_000, BetKind.PRE_MATCH, false);
+  const pending = await Bet.findOne({ slipId: "slip" }).lean();
+  if (!pending) throw new Error("Missing original pending placement");
+  await applyModerationResult(createModerationEvent("slip"), state.settlementPublishers);
+  const quote = await state.quote("cleanup");
+  await state.confirm("cleanup", quote.quoteId);
+  await state.pump();
+  const archive = JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean());
+  const replacement = await Bet.create({ ...pending, _id: undefined });
+  const removal = jest.spyOn(Bet, "deleteOne").mockResolvedValueOnce({ acknowledged: true, deletedCount: 0 });
+  try {
+    await expect(upsertPlaceBet(state.place, state.settlementPublishers))
+      .rejects.toThrow("Archived slip retains a mutable placement");
+    expect((await Bet.findById(replacement._id))?.status).toBe(ResultingStatus.BET_PENDING);
+  } finally {
+    removal.mockRestore();
+  }
+  await upsertPlaceBet(state.place, state.settlementPublishers);
+  expect(await Bet.countDocuments()).toBe(0);
+  expect(JSON.stringify(await BetArchive.findOne({ slipId: "slip" }).lean())).toBe(archive);
+  expect((await CashBackOperation.findOne({ operationId: "cleanup" }))?.outcome?.outcome).toBe("ACCEPTED");
+});
+
+it("prices original live selections from exact current quote identities without changing accepted odds", async () => {
+  const state = await setup(2, 60_000, BetKind.LIVE);
+  const quote = await state.quote("live", 4000);
+  expect(quote).toMatchObject({
+    acceptedCombinedOdds: "9", currentCombinedOdds: "36", returnMinor: 1000,
+    closedStakeMinor: 4000, remainingStakeMinorAfter: 6000,
+  });
+  const stored = await CashBackOperation.findOne({ operationId: "live" });
+  expect(stored?.evidence?.currentQuotes.map(selection => ({
+    slipRowId: selection.slipRowId, oddsId: selection.oddsId, odds: selection.odds,
+  }))).toEqual(state.rows.map(row => ({ slipRowId: row.id, oddsId: row.oddsId, odds: "6" })));
+  await state.confirm("live", quote.quoteId);
+  await state.pump();
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
+    status: BetStatus.CONFIRMED, remainingStakeMinor: 6000,
+    cumulativeClosedStakeMinor: 4000, cumulativeReturnMinor: 1000,
+  });
+  expect((await Bet.findOne({ slipId: "slip" }))?.rows.map(row => row.oddsValue)).toEqual([3, 3]);
+});
+
+it.each<[CashBackSourceDenialReason, CashBackUnavailableReason]>([
+  ["RESOLVED", "SELECTION_RESOLVED"],
+  ["DEADLINE_REACHED", "PRE_MATCH_CUTOFF"],
+  ["SUSPENDED", "MARKET_UNAVAILABLE"],
+  ["QUOTE_CHANGED", "MARKET_UNAVAILABLE"],
+  ["UNKNOWN_AUTHORITY", "AUTHORITY_UNAVAILABLE"],
+])("reports a %s snapshot as %s without registering an undecided operation", async (reason, expected) => {
+  const state = await setup();
+  await state.coordinator.receiveRequest({
+    action: "QUOTE", operation: state.identity("unavailable"),
+    requestedAt: new Date().toISOString(), portion: { mode: "FULL" },
+  });
+  const snapshot = state.requests.shift();
+  if (snapshot?.action !== "SNAPSHOT") throw new Error("Missing snapshot obligation");
+  await state.coordinator.receiveSourceReply({
+    outcome: "DENIED", request: snapshot, reason, observedAt: new Date().toISOString(),
+  });
+  expect((await CashBackOperation.findOne({ operationId: "unavailable" }))?.outcome)
+    .toMatchObject({ outcome: "UNAVAILABLE", reason: expected });
+  const bet = await Bet.findOne({ slipId: "slip" });
+  expect(bet?.cashBackPending).toBeUndefined();
+  expect(bet?.cashBackFinancial).toMatchObject({ revision: 1, remainingStakeMinor: 10000, cumulativeClosedStakeMinor: 0 });
+  expect(state.source.mock.calls.every(([event]) => event.data.action === "SNAPSHOT")).toBe(true);
+});
+
+it.each<[CashBackSourceDenialReason, CashBackUnavailableReason]>([
+  ["DEADLINE_REACHED", "QUOTE_CHANGED"],
+  ["AUTHORITY_CHANGED", "QUOTE_CHANGED"],
+  ["RESOLVED", "SELECTION_RESOLVED"],
+  ["SUSPENDED", "MARKET_UNAVAILABLE"],
+  ["MISSING", "AUTHORITY_UNAVAILABLE"],
+  ["CONTENDED", "RESERVATION_DENIED"],
+])("canonically rejects %s reservation denial as %s and drains every cancellation", async (reason, expected) => {
+  const state = await setup();
+  const quote = await state.quote("denied", 1000);
+  await state.confirm("denied", quote.quoteId);
+  const reserve = state.requests.shift();
+  if (reserve?.action !== "RESERVE") throw new Error("Missing durable reservation request");
+  await state.coordinator.receiveSourceReply({
+    outcome: "DENIED", request: reserve, reason, observedAt: new Date().toISOString(),
+  });
+  const bet = await Bet.findOne({ slipId: "slip" });
+  expect(bet?.cashBackPending).toMatchObject({
+    state: "REJECTED", receipt: { outcome: "REJECTED", reason: expected },
+  });
+  expect(bet?.cashBackFinancial).toMatchObject({
+    revision: 2, remainingStakeMinor: 10000, cumulativeClosedStakeMinor: 0, cumulativeReturnMinor: 0,
+  });
+  const receipt = bet?.cashBackPending?.receipt;
+  await state.pump();
+  expect((await Bet.findOne({ slipId: "slip" }))?.cashBackPending).toBeUndefined();
+  expect((await CashBackOperation.findOne({ operationId: "denied" }))?.outcome)
+    .toMatchObject({ outcome: "REJECTED", receipt });
+  expect([...state.generations.values()]).toEqual([2, 2]);
+});

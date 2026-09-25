@@ -1067,7 +1067,7 @@ describe('Slip', () => {
     expect(screen.getByLabelText('Wager for LIVE SLIP')).toHaveValue(33);
   });
 
-  it('clears pending state when approved history removes a submitted board', async () => {
+  it.each([BET_STATUS.CONFIRMED, BET_STATUS.CASH_BACK])('clears pending state when %s history removes a submitted board', async (historyStatus) => {
     boardsResponse = getBoardsPayload({
       [BET_KIND.LIVE]: getSubmittedBoard(BET_KIND.LIVE, { _id: 'live-submitted-1' }),
     });
@@ -1081,7 +1081,7 @@ describe('Slip', () => {
     boardsResponse = getBoardsPayload({
       [BET_KIND.LIVE]: null,
     });
-    betsResponse = [{ slipId: 'live-submitted-1', status: BET_STATUS.CONFIRMED }];
+    betsResponse = [{ slipId: 'live-submitted-1', status: historyStatus }];
 
     await advanceTime(POLL_INTERVAL_MS);
 
