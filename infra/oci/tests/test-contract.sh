@@ -601,7 +601,13 @@ for selection_contract in \
     "expect(preKickoffLiveBetAtPlacement.status).not.toBe('DECLINED');" \
     'preKickoffLiveBetAtPlacement.rows' \
     'preKickoffLiveBet.rows.map((row) => row.eventId).sort(),' \
-    '.filter({ hasText: `Slip ${preKickoffLiveSlipId}` });' \
+    'const betCard = (page, slipId) => page.locator(' \
+    '`.my-bets-card[data-slip-id="${slipId}"]`,' \
+    'const card = betCard(page, slipId);' \
+    "await expect(betCard(page, slipId)).toContainText('CASH BACK');" \
+    'const preKickoffLiveHistory = betCard(page, preKickoffLiveSlipId);' \
+    'const inPlayLiveHistory = betCard(page, liveSlipId);' \
+    'const preMatchHistory = betCard(page, preMatchSlipId);' \
     'preKickoffLiveRows: preKickoffLiveBet.rows.map((row) => ({' \
     'A single moving event clock keeps this in-play acceptance deterministic.' \
     'const response = await responsePromise;' \

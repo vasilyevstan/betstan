@@ -106,15 +106,39 @@ if (args[0] === 'get' && args[1] === 'configmap') {
     state.calls.push({ command: path.basename(command), args: [...args] });
     save();
     const ok = (value = '') => ({ status: 0, stdout: typeof value === 'string' ? value : JSON.stringify(value) });
-    if (command.endsWith('revalidate-live-activation-stan.sh')) return ok();
+    if (command.endsWith('revalidate-live-activation-stan.sh')) {
+      return state.masterAdvanced ? { status: 1 } : ok();
+    }
     if (command.endsWith('shared-mongo-operation-lock-stan.sh')) {
-      if (args[0] === 'release' && kind === 'release-false-success') makeForeign();
-      if (args[0] === 'release' && kind === 'release-not-committed') return { status: 1 };
+      const raceKind = kind.replace(/^reacquire-/, 'intervening-');
+      if (
+        args[0].startsWith('acquire') && raceKind.startsWith('intervening-') && !state.racedLock
+        && (!kind.startsWith('reacquire-') || state.deployment.metadata.annotations[annotation])
+      ) {
+        if (raceKind === 'intervening-expired-owner') makeForeign(true);
+        else {
+          const current = lock();
+          if (raceKind === 'intervening-uid') current.metadata.uid = 'replacement-lock';
+          else {
+            current.data['fencing-generation'] = String(Number(current.data['fencing-generation']) + 2);
+            current.data['operation-id'] = 'intervening-operation';
+            current.data['source-sha'] = 'b'.repeat(40);
+          }
+          current.metadata.resourceVersion = String(Number(current.metadata.resourceVersion) + 1);
+          setLock(current);
+        }
+        state.racedLock = lock();
+        state.racedPatches = state.calls.filter((call) => call.args.includes('patch')).length;
+        save();
+      }
+      if (args[0] === 'release') releasedReads = 0;
+      if (args[0] === 'release' && record().stopped && kind === 'release-false-success') makeForeign();
+      if (args[0] === 'release' && record().stopped && kind === 'release-not-committed') return { status: 1 };
       const result = execute(command, args, { ...options, env: { ...options.env, ...env,
         LOCK_TOKEN: options.env.LOCK_TOKEN, OPERATION_ID: options.env.OPERATION_ID,
         LOCK_LEASE_SECONDS: options.env.LOCK_LEASE_SECONDS,
       } });
-      if (args[0] === 'acquire' && kind === 'acquire-lost-response') {
+      if (args[0].startsWith('acquire') && kind === 'acquire-lost-response') {
         assert.equal(result.status, 0);
         return { status: 1 };
       }
@@ -150,6 +174,7 @@ if (args[0] === 'get' && args[1] === 'configmap') {
     }
     if (command === 'bash') {
       if (args[1].includes('wait_for_deployment')) {
+        if (state.resultingUnready) return { status: 1 };
         assert.equal(state.deployment.spec.replicas, Number(args.at(-1)));
         if (kind === 'lingering-pods' && Number(args.at(-1)) === 0 && !state.held) return { status: 1 };
       } else {
@@ -164,7 +189,7 @@ if (args[0] === 'get' && args[1] === 'configmap') {
         releasedReads += 1;
         if (
           (kind === 'post-release-read-failure' && releasedReads === 1)
-          || kind === 'post-release-unreadable'
+          || (kind === 'post-release-unreadable' && record().stopped)
         ) return { status: 1 };
       }
       return ok(lock());
@@ -212,7 +237,10 @@ if (args[0] === 'get' && args[1] === 'configmap') {
   const exported = context.module.exports;
   return {
     state, directory, env, lock, setLock, makeForeign, save, record, fixtureProcess,
-    interrupt: (checkpoint) => exported.withStoppedResulting(checkpoint, directory),
+    interrupt: async (checkpoint) => {
+      exported.recovery(directory).arm();
+      return exported.withStoppedResulting(checkpoint, directory);
+    },
     control: () => exported.recovery(directory),
   };
 }
@@ -228,11 +256,17 @@ async function main() {
   assert.equal(cleanupIndex, steps.findIndex((step) => step.id === 'journey') + 1);
   const cleanup = steps[cleanupIndex];
   assert.ok(cleanup.if.includes('always()') && cleanup.if.includes("'cancelled'"));
+  const armIndex = steps.findIndex((step) => step.id === 'cash_back_abort');
+  assert.ok(armIndex > steps.findIndex((step) => step.name === 'Revalidate current master before live mutation'));
+  assert.ok(armIndex < steps.findIndex((step) => step.id === 'activate'));
+  assert.equal(steps[armIndex].run, 'node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js arm');
+  assert.ok(cleanup.if.includes('steps.cash_back_abort.outcome'));
   assert.equal(cleanup.run, 'node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js recover');
   for (const id of ['failure_disable', 'final_disable']) {
     const step = steps.find((item) => item.id === id);
     assert.equal(step.run, 'node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js disable');
     assert.ok(step.if.includes('always()'));
+    assert.ok(step.if.includes("steps.cash_back_abort.outcome == 'success'"));
   }
   assert.equal(steps.find((step) => step.id === 'commit').run, './infra/oci/scripts/live-betting-control-stan.sh');
   const recoveryAction = cleanup.run.split(' ').at(-1);
@@ -275,7 +309,19 @@ async function main() {
     await assert.rejects(() => current.interrupt(async () => ({})));
     assert.equal(current.state.deployment.spec.replicas, 1);
     assert.equal(current.state.held, false);
-    assert.ok(!current.state.calls.some((call) => call.args.includes('acquire')));
+    assert.ok(!current.state.calls.some((call) => call.args[0]?.startsWith('acquire')));
+    cases += 1;
+  }
+  for (const kind of [
+    'intervening-expired-owner', 'intervening-generation', 'intervening-uid',
+    'reacquire-expired-owner', 'reacquire-generation', 'reacquire-uid',
+  ]) {
+    const current = fixture(kind);
+    await assert.rejects(() => current.interrupt(async () => ({})));
+    assert.deepEqual(current.lock(), current.state.racedLock, 'Rejected acquisition changed an intervening owner or generation');
+    assert.equal(current.state.deployment.spec.replicas, 1);
+    assert.equal(current.state.held, false);
+    assert.equal(current.state.calls.filter((call) => call.args.includes('patch')).length, current.state.racedPatches);
     cases += 1;
   }
   for (const kind of ['clock-failure', 'lingering-pods', 'template-drift']) {
@@ -343,6 +389,37 @@ async function main() {
   assert.throws(() => guarded.control().disable());
   assert.equal(guarded.state.calls.filter((call) => call.command === 'live-betting-control-stan.sh').length, before);
   cases += 1;
+  for (const failure of ['masterAdvanced', 'resultingUnready']) {
+    const current = fixture();
+    current.control().arm();
+    assert.equal(current.record().stopped, false);
+    current.state[failure] = true;
+    const admissionChecks = current.state.calls.filter((call) => (
+      call.command === 'revalidate-live-activation-stan.sh' || call.command === 'bash'
+    )).length;
+    current.control().restore();
+    current.control().disable();
+    assert.equal(current.state.kickoffsDisabled, true);
+    assert.equal(current.record().stopped, false);
+    assert.equal(current.state.deployment.spec.replicas, 1);
+    assert.equal(current.state.podGeneration, 1);
+    assert.equal(current.lock().data.state, 'released');
+    assert.equal(current.state.calls.filter((call) => (
+      call.command === 'revalidate-live-activation-stan.sh' || call.command === 'bash'
+    )).length, admissionChecks, 'Already-owned fail-dark cleanup repeated new admission or readiness checks');
+    cases += 1;
+  }
+  const unready = fixture();
+  unready.state.resultingUnready = true;
+  const initialLock = unready.lock();
+  assert.throws(() => unready.control().arm());
+  assert.deepEqual(unready.lock(), initialLock);
+  assert.equal(unready.state.deployment.metadata.annotations[annotation], undefined);
+  const unarmed = fixture();
+  assert.throws(() => unarmed.control().disable(), /previously armed/);
+  assert.equal(unarmed.state.kickoffsDisabled, undefined);
+  assert.equal(unarmed.lock().data.state, 'released');
+  cases += 2;
 
   for (const kind of ['killed-worker', 'killed-clock-failure']) {
     const initial = fixture(kind);

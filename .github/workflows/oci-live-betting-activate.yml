@@ -367,6 +367,14 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
+      - name: Arm owner-bound activation abort
+        id: cash_back_abort
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          OUTPUT_DIR: artifacts/live-control/abort
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js arm
+
       - name: Activate new live kickoffs
         id: activate
         env:
@@ -512,9 +520,9 @@ jobs:
         id: cash_back_recovery
         if: >-
           always() &&
-          (steps.journey.outcome == 'success' ||
-           steps.journey.outcome == 'failure' ||
-           steps.journey.outcome == 'cancelled')
+          (steps.cash_back_abort.outcome == 'success' ||
+           steps.cash_back_abort.outcome == 'failure' ||
+           steps.cash_back_abort.outcome == 'cancelled')
         env:
           OUTPUT_DIR: artifacts/live-control/acceptance
         run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js recover
@@ -703,6 +711,7 @@ jobs:
         id: failure_disable
         if: >-
           always() &&
+          steps.cash_back_abort.outcome == 'success' &&
           ((env.OCI_RUNTIME_MODE == 'oke' &&
             steps.oke_access.outcome == 'success') ||
            (env.OCI_RUNTIME_MODE == 'k3s' &&
@@ -762,6 +771,7 @@ jobs:
         id: final_disable
         if: >-
           always() &&
+          steps.cash_back_abort.outcome == 'success' &&
           ((env.OCI_RUNTIME_MODE == 'oke' &&
             steps.oke_access.outcome == 'success') ||
            (env.OCI_RUNTIME_MODE == 'k3s' &&

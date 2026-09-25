@@ -61,6 +61,7 @@ function recovery(outputDir) {
         const generation = Number(lock.data?.['fencing-generation']);
         if (
           !lock.metadata?.uid || !lock.metadata.resourceVersion
+          || !/^[1-9][0-9]*$/.test(lock.data?.['fencing-generation'] ?? '')
           || !Number.isSafeInteger(generation) || generation < 1
           || !['active', 'released'].includes(lock.data?.state)
         ) throw new Error('Protected cash-back lock evidence is malformed.');
@@ -128,6 +129,8 @@ function recovery(outputDir) {
       || !/^[1-9][0-9]*$/.test(data['lease-until-epoch'] ?? '')
       || !Number.isSafeInteger(leaseUntil) || !Number.isSafeInteger(acquiredAt) || acquiredAt < 1
       || !Number.isSafeInteger(leaseDuration) || leaseDuration < 60 || leaseDuration > 86400
+      || !/^[1-9][0-9]*$/.test(data['acquired-at-epoch'] ?? '')
+      || !/^[1-9][0-9]*$/.test(data['lease-duration-seconds'] ?? '')
       || leaseUntil <= Math.floor(Date.now() / 1000) + 300
     ) throw new Error('Cash-back lock ownership is foreign, expired or insufficient; no workload mutation is authorized.');
     return lock;
@@ -222,7 +225,10 @@ function recovery(outputDir) {
     }
     let acquisitionError;
     try {
-      call('physical lock acquisition', lockScript, ['acquire']);
+      call('physical lock acquisition', lockScript, ['acquire-released'], {
+        EXPECTED_LOCK_UID: previous.metadata.uid,
+        EXPECTED_FENCING_GENERATION: previous.data['fencing-generation'],
+      });
     } catch (error) {
       acquisitionError = error;
     }
@@ -244,7 +250,6 @@ function recovery(outputDir) {
         throw new Error('An unfinished cash-back interruption cannot be replaced.');
       }
     }
-    const lock = acquire(lockState());
     const original = deployment();
     const replicas = original.spec?.replicas;
     if (
@@ -256,6 +261,7 @@ function recovery(outputDir) {
     if (originalPods.length !== replicas || originalPods.some((pod) => !pod.metadata?.uid)) {
       throw new Error('Resulting pod identity evidence is incomplete.');
     }
+    const lock = acquire(lockState());
     return persist({
       version: 1, sourceSha, runId, runAttempt: '1', namespace,
       infrastructureRunId: env.INFRASTRUCTURE_RUN_ID,
@@ -269,7 +275,7 @@ function recovery(outputDir) {
     const current = lockState();
     const verifyRestored = () => {
       requireWorkload(record, deployment());
-      wait(record.replicas);
+      if (record.stopped) wait(record.replicas);
     };
     if (released(record, current)) {
       verifyRestored();
@@ -304,7 +310,13 @@ function recovery(outputDir) {
   };
   const restore = () => {
     let record = handoff();
-    if (!record) return null;
+    if (!record) {
+      const current = lockState();
+      if (current.data.state === 'active' && current.data.holder === env.LOCK_TOKEN) {
+        throw new Error('Owned pre-activation lock acquisition has no recoverable handoff.');
+      }
+      return null;
+    }
     const currentLock = lockState();
     if (released(record, currentLock)) return release(record);
     owned(record, currentLock);
@@ -338,8 +350,31 @@ function recovery(outputDir) {
     // A lost release response is not a failed writer restoration.
     return release(record);
   };
+  const arm = () => {
+    if (handoff()) throw new Error('Cash-back abort authority is already armed for this execution.');
+    const record = prepare();
+    return release(persist({
+      ...record, restored: true, stopped: false, afterPodIds: record.beforePodIds,
+    }, 'release-intent'));
+  };
   const pause = () => {
-    let record = prepare();
+    call('source revalidation', path.join(__dirname, 'revalidate-live-activation-stan.sh'), []);
+    let record = handoff();
+    if (!record?.restored || record.stopped || record.maintenanceHeld) {
+      throw new Error('Interruption requires unused pre-activation abort authority.');
+    }
+    requireWorkload(record, deployment());
+    wait(record.replicas);
+    if (JSON.stringify(pods().map((pod) => pod.metadata?.uid).sort())
+      !== JSON.stringify([...record.beforePodIds].sort())) {
+      throw new Error('Resulting workers changed after abort authority was armed.');
+    }
+    const current = lockState();
+    if (!released(record, current)) throw new Error('Interruption does not own the recorded released lock generation.');
+    const acquired = acquire(current);
+    record = persist({
+      ...record, restored: false, lockGeneration: Number(acquired.data['fencing-generation']),
+    }, 'prepared');
     record = persist(record, 'pause-intent');
     record = persist(record, 'paused', 0);
     wait(0);
@@ -348,12 +383,7 @@ function recovery(outputDir) {
   };
   const disable = () => {
     let record = handoff();
-    if (!record) {
-      record = prepare();
-      record = persist({
-        ...record, restored: true, stopped: false, afterPodIds: record.beforePodIds,
-      }, 'restored');
-    }
+    if (!record) throw new Error('Failure-disable requires previously armed activation authority.');
     const current = lockState();
     if (released(record, current)) {
       const acquired = acquire(current);
@@ -373,7 +403,7 @@ function recovery(outputDir) {
     record = persist(record, 'release-intent');
     release(record);
   };
-  return { pause, restore, disable };
+  return { arm, pause, restore, disable };
 }
 
 async function withStoppedResulting(checkpoint, outputDir) {
@@ -401,9 +431,10 @@ module.exports = { withStoppedResulting, recovery };
 if (require.main === module) {
   try {
     const control = recovery(process.env.OUTPUT_DIR);
-    if (process.argv[2] === 'recover') control.restore();
+    if (process.argv[2] === 'arm') control.arm();
+    else if (process.argv[2] === 'recover') control.restore();
     else if (process.argv[2] === 'disable') control.disable();
-    else throw new Error('Expected recover or disable action.');
+    else throw new Error('Expected arm, recover or disable action.');
     console.log(`cash_back_acceptance_recovery=${process.argv[2]} status=PASS`);
   } catch (error) {
     console.error(error.message);

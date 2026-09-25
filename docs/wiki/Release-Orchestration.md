@@ -480,17 +480,26 @@ its physical-lock generation; private evidence must agree. Identity,
 resource-version, and expected-handoff checks govern phase changes, with
 bounded readback for ambiguous writes. The shared recovery routine rechecks
 ownership and the clock before restoring non-overlapping replacement workers.
-Early workflow cleanup invokes that same routine after the journey, including
-a killed acceptance process or cancellation when the cleanup step can execute.
+Early always-run workflow cleanup invokes that same routine after an arming or
+journey attempt, including failure, a killed acceptance process, or cancellation
+when the cleanup step can execute.
 
 Owned restoration failures use the existing maintenance hold and positive
 verification of the HTTP fence, all seven writers at zero pods, and the retained
 lock. Unknown, foreign, or expired ownership authorizes no further workload
 mutation; expired own leases are not automatically reclaimed. Persisted release
 intent and the exact released generation reconcile a lost release response
-without re-quiescing restored writers. Later live-kickoff failure-disable steps
-use the same fresh ownership guard, reacquiring only their exact own released
-lineage when needed. Total runner loss can prevent cleanup: the durable handoff
+without re-quiescing restored writers. Every activation, including compatibility
+mode, uses this handoff to persist and read back owner/source/workload-bound
+abort authority before live kickoffs, while current-source and readiness
+admission are valid. Both failure-disable paths require successful arming and
+fresh ownership, not renewed current-`master` admission or Resulting readiness.
+Abort-only cleanup does not restart workers, so compatibility/no-interruption
+failures can still stop new kickoffs. Reacquisition of the exact own released
+lineage tests the observed released state, lock identity, and generation inside
+the canonical CAS, leaving intervening or expired foreign owners untouched.
+Existing generic lock commands retain their semantics.
+Total runner loss can prevent cleanup: the durable handoff
 is evidence, not an autonomous executor, and unreadable ownership cannot
 guarantee fencing. This is neither a public restart facility nor
 failed-deployment recovery authority.
