@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const { createHash, randomUUID } = require('crypto');
+const { randomUUID } = require('crypto');
 const { spawnSync } = require('child_process');
 const { test, expect } = require('@playwright/test');
+const { withStoppedResulting } = require('../scripts/cash-back-acceptance-recovery-stan');
 
 const ROTATING_LIVE_MARKETS = [
   { marketType: 'NEXT_YELLOW_CARD', label: 'Next Yellow Card' },
@@ -58,6 +59,10 @@ const board = (page, betKind) => page.locator(
   `section[aria-labelledby="slip-board-title-${betKind}"]`,
 );
 
+const betCard = (page, slipId) => page.locator(
+  `.my-bets-card[data-slip-id="${slipId}"]`,
+);
+
 const requiredEnv = (name) => {
   const value = process.env[name];
   if (!value) {
@@ -87,120 +92,6 @@ const operatorCommand = (stage, command, args, env = process.env) => {
     throw new Error(`Protected cash-back ${stage} failed (${result.error?.code ?? result.status}).`);
   }
   return result.stdout;
-};
-
-const withStoppedResulting = async (checkpoint, outputDir) => {
-  const sourceSha = requiredEnv('SOURCE_SHA');
-  const runId = requiredEnv('GITHUB_RUN_ID');
-  const namespace = requiredEnv('OCI_K8S_NAMESPACE');
-  if (
-    process.env.GITHUB_ACTIONS !== 'true'
-    || process.env.GITHUB_WORKFLOW !== 'oci-live-betting-activate'
-    || process.env.GITHUB_REF_NAME !== 'master'
-    || process.env.GITHUB_RUN_ATTEMPT !== '1'
-    || process.env.GITHUB_SHA !== sourceSha
-    || !/^[a-f0-9]{40}$/.test(sourceSha)
-    || !/^[1-9][0-9]*$/.test(runId)
-  ) throw new Error('Worker interruption requires the exact protected activation context.');
-  const maintenance = path.resolve(__dirname, '../scripts/live-data-maintenance-stan.sh');
-  const lock = path.resolve(__dirname, '../scripts/shared-mongo-operation-lock-stan.sh');
-  const readiness = path.resolve(__dirname, '../../azure/agents/live-betting-readiness-lib.sh');
-  const revalidate = path.resolve(__dirname, '../scripts/revalidate-live-activation-stan.sh');
-  const env = {
-    ...process.env, NAMESPACE: namespace, OCI_K8S_NAMESPACE: namespace,
-    LOCK_TOKEN: `cash-back-acceptance-${runId}-1`,
-    OPERATION_ID: 'cash-back-acceptance', LOCK_LEASE_SECONDS: '600',
-    WAIT_ATTEMPTS: '60', WAIT_SECONDS: '2',
-  };
-  operatorCommand('source revalidation', revalidate, [], env);
-  const kube = (stage, args) => operatorCommand(stage, 'kubectl', [
-    '--request-timeout=15s', ...args, '-n', namespace,
-  ], env);
-  const deployment = () => JSON.parse(kube('deployment read', [
-    'get', 'deployment', 'gaming-resulting-depl', '-o', 'json',
-  ]));
-  const pods = () => JSON.parse(kube('pod read', [
-    'get', 'pods', '-l', 'app=gaming-resulting', '-o', 'json',
-  ])).items;
-  const wait = (replicas) => operatorCommand('zero-pod/ready boundary', 'bash', [
-    '-c', 'source "$1" ""; wait_for_deployment resulting "$2"',
-    'cash-back-recovery', maintenance, String(replicas),
-  ], env);
-  const original = deployment();
-  const replicas = original.spec?.replicas;
-  const container = original.spec?.template?.spec?.containers?.find(
-    (item) => item.name === 'gaming-resulting',
-  );
-  if (
-    !original.metadata?.uid || !Number.isSafeInteger(replicas) || replicas < 1
-    || !/@sha256:[a-f0-9]{64}$/.test(container?.image ?? '')
-  ) throw new Error('Resulting interruption lacks an immutable ready workload.');
-  const originalPods = pods();
-  if (
-    originalPods.length !== replicas
-    || originalPods.some((pod) => !pod.metadata?.uid)
-  ) throw new Error('Resulting pod identity evidence is incomplete.');
-  const fingerprint = (value) => createHash('sha256').update(value).digest('hex');
-  const changeReplicas = (target, phase) => {
-    const current = deployment();
-    if (
-      current.metadata?.uid !== original.metadata.uid
-      || JSON.stringify(current.spec?.template) !== JSON.stringify(original.spec.template)
-    ) throw new Error('Resulting identity or template changed during recovery.');
-    const patch = [
-      { op: 'test', path: '/metadata/uid', value: original.metadata.uid },
-      { op: 'test', path: '/metadata/resourceVersion', value: current.metadata.resourceVersion },
-      { op: 'add', path: '/metadata/annotations', value: {
-        ...(current.metadata.annotations ?? {}),
-        'betstan.dev/cash-back-recovery': `${runId}:${phase}`,
-      } },
-      { op: 'replace', path: '/spec/replicas', value: target },
-    ];
-    kube(`replica ${phase}`, [
-      'patch', 'deployment', 'gaming-resulting-depl', '--type=json',
-      '--patch', JSON.stringify(patch),
-    ]);
-    wait(target);
-  };
-  operatorCommand('physical lock acquisition', lock, ['acquire'], env);
-  let checkpointResult;
-  let stopped = false;
-  let afterPods;
-  try {
-    operatorCommand('physical lock verification', lock, ['verify'], env);
-    changeReplicas(0, 'paused');
-    if (pods().length !== 0) throw new Error('Resulting interruption did not reach zero pods.');
-    stopped = true;
-    checkpointResult = await checkpoint();
-  } finally {
-    try {
-      operatorCommand('resume ownership', lock, ['verify'], env);
-      operatorCommand('clock before recovery', 'bash', [
-        '-c', 'source "$1"; live_betting_check_mongo_clock "$2" "$3" "$4" "$5"',
-        'cash-back-clock', readiness, namespace, sourceSha, runId,
-        path.join(outputDir, 'recovery-clock'),
-      ], env);
-      changeReplicas(replicas, 'resumed');
-      afterPods = pods();
-      const priorIds = new Set(originalPods.map((pod) => pod.metadata.uid));
-      if (
-        afterPods.length !== replicas
-        || afterPods.some((pod) => !pod.metadata?.uid || priorIds.has(pod.metadata.uid))
-      ) throw new Error('Resulting replacement was not observed.');
-      operatorCommand('physical lock release', lock, ['release'], env);
-      operatorCommand('released-lock verification', lock, ['verify-released'], env);
-    } catch (error) {
-      operatorCommand('retain maintenance after recovery failure', maintenance, ['hold'], env);
-      throw error;
-    }
-  }
-  return {
-    sourceSha, runId, stopped, restored: true, replicas,
-    deploymentFingerprint: fingerprint(original.metadata.uid),
-    beforePodFingerprints: originalPods.map((pod) => fingerprint(pod.metadata.uid)),
-    afterPodFingerprints: afterPods.map((pod) => fingerprint(pod.metadata.uid)),
-    checkpoint: checkpointResult,
-  };
 };
 
 const liveMarketSignature = async (marketCard) => {
@@ -393,7 +284,7 @@ const acceptCashBack = async (page, slipId, portion) => {
 
 const acceptFullCashBackThroughUI = async (page, slipId) => {
   await page.getByTitle('My bets').click();
-  const card = page.locator('.my-bets-card').filter({ hasText: `Slip ${slipId}` });
+  const card = betCard(page, slipId);
   await expect(card).toContainText('CONFIRMED');
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const quoteResponse = page.waitForResponse((response) => (
@@ -427,9 +318,7 @@ const acceptFullCashBackThroughUI = async (page, slipId) => {
     expect(decided.receipt.quote).toEqual(quoted.quote);
     expect(decided.receipt.financial.remainingStakeMinor).toBe(0);
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(page.locator('.my-bets-card').filter({
-      hasText: `Slip ${slipId}`,
-    })).toContainText('CASH BACK');
+    await expect(betCard(page, slipId)).toContainText('CASH BACK');
     return decided;
   }
   throw new Error('The reviewed full cash-back offer was not accepted.');
@@ -1407,22 +1296,18 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   }
 
   await page.getByTitle('My bets').click();
-  const preKickoffLiveHistory = page.locator('.my-bets-card')
-    .filter({ hasText: `Slip ${preKickoffLiveSlipId}` });
+  const preKickoffLiveHistory = betCard(page, preKickoffLiveSlipId);
   await expect(preKickoffLiveHistory).toContainText('Live');
   await expect(preKickoffLiveHistory).toContainText('Kickoff Team');
   await expect(preKickoffLiveHistory).toContainText(fixtures[0].name);
   await expect(preKickoffLiveHistory).toContainText(fixtures[1].name);
   await expect(preKickoffLiveHistory).toContainText(preKickoffLiveBet.status);
-  const inPlayLiveHistory = page.locator('.my-bets-card')
-    .filter({ hasText: `Slip ${liveSlipId}` });
+  const inPlayLiveHistory = betCard(page, liveSlipId);
   await expect(inPlayLiveHistory).toContainText('Live');
   await expect(inPlayLiveHistory).toContainText('Second Half Score');
   await expect(inPlayLiveHistory).toContainText(fixtures[0].name);
   await expect(inPlayLiveHistory).toContainText(liveBet.status);
-  const preMatchHistory = page.locator('.my-bets-card').filter({
-    hasText: `Slip ${preMatchSlipId}`,
-  });
+  const preMatchHistory = betCard(page, preMatchSlipId);
   await expect(preMatchHistory).toContainText('Pre-match');
   await expect(preMatchHistory).toContainText('WIN');
   if (cashBackMode === 'active') await expect(preMatchHistory).toContainText('PARTIAL CASH BACK');

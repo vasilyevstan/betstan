@@ -211,6 +211,8 @@ require_order(
     [
         "Verify declared cash-back generation mode",
         "Exercise complete production live journey",
+        "Reconcile protected cash-back worker interruption",
+        "Revoke and clean reusable validation account",
         "Revalidate release head before acceptance",
         "Write accepted activation lease evidence",
     ],

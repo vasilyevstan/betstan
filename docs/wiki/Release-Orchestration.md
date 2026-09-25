@@ -474,9 +474,28 @@ A adds owned live full closure, UI-confirmed pre-match full closure and reload,
 repeated partials followed by normal remainder `WIN`, and full-closure
 immutability after results. A separate owned pending confirmation must recover
 across a protected zero-worker interval using the same Resulting source and
-template. The existing operation lock, resource-version checks, and
-non-overlapping worker identities bound that interval; it is not a public
-restart facility. Replaying the same operation must yield one canonical
+template, immutable image, and replica count. Before pausing, a persisted,
+read-back-verified handoff binds the exact protected execution and workload to
+its physical-lock generation; private evidence must agree. Identity,
+resource-version, and expected-handoff checks govern phase changes, with
+bounded readback for ambiguous writes. The shared recovery routine rechecks
+ownership and the clock before restoring non-overlapping replacement workers.
+Early workflow cleanup invokes that same routine after the journey, including
+a killed acceptance process or cancellation when the cleanup step can execute.
+
+Owned restoration failures use the existing maintenance hold and positive
+verification of the HTTP fence, all seven writers at zero pods, and the retained
+lock. Unknown, foreign, or expired ownership authorizes no further workload
+mutation; expired own leases are not automatically reclaimed. Persisted release
+intent and the exact released generation reconcile a lost release response
+without re-quiescing restored writers. Later live-kickoff failure-disable steps
+use the same fresh ownership guard, reacquiring only their exact own released
+lineage when needed. Total runner loss can prevent cleanup: the durable handoff
+is evidence, not an autonomous executor, and unreadable ownership cannot
+guarantee fencing. This is neither a public restart facility nor
+failed-deployment recovery authority.
+
+Replaying the same operation must yield one canonical
 `ACCEPTED` receipt or `QUOTE_EXPIRED` rejection, with no principal reset or
 duplicate closure. Terminal history, outcome delivery, source release, and Bet
 projection must demonstrably drain and agree. Existing unexpected-restart and

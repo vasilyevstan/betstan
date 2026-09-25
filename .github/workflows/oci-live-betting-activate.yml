@@ -494,6 +494,7 @@ jobs:
           fi
 
       - name: Exercise complete production live journey
+        id: journey
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -506,6 +507,17 @@ jobs:
           NODE_PATH="$GITHUB_WORKSPACE/client/node_modules" \
             ./client/node_modules/.bin/playwright test \
               --config infra/oci/agents/playwright-live-acceptance.config.js
+
+      - name: Reconcile protected cash-back worker interruption
+        id: cash_back_recovery
+        if: >-
+          always() &&
+          (steps.journey.outcome == 'success' ||
+           steps.journey.outcome == 'failure' ||
+           steps.journey.outcome == 'cancelled')
+        env:
+          OUTPUT_DIR: artifacts/live-control/acceptance
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js recover
 
       - name: Revoke and clean reusable validation account
         if: always() && steps.account.outcome == 'success'
@@ -698,13 +710,15 @@ jobs:
           (steps.accepted.outcome != 'success' ||
             steps.accepted_evidence_upload.outcome != 'success')
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           ACTION: disable
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
           CONTROL_RUN_ID: ${{ github.run_id }}
           CONFIRMATION: DISABLE OCI LIVE BETTING
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
           OUTPUT_DIR: artifacts/live-control/failure-disable
-        run: ./infra/oci/scripts/live-betting-control-stan.sh
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js disable
 
       - name: Capture sanitized failure diagnostics
         if: failure() || cancelled()
@@ -757,13 +771,15 @@ jobs:
             steps.commit_preflight.outcome != 'success' ||
             steps.commit.outcome != 'success')
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           ACTION: disable
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
           CONTROL_RUN_ID: ${{ github.run_id }}
           CONFIRMATION: DISABLE OCI LIVE BETTING
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
           OUTPUT_DIR: artifacts/live-control/final-failure-disable
-        run: ./infra/oci/scripts/live-betting-control-stan.sh
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js disable
 
       - name: Revoke exact OKE runner rule
         id: revoke_runner

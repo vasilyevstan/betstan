@@ -3,6 +3,7 @@ const { createHash } = require('crypto');
 const { readFileSync } = require('fs');
 const { execFileSync } = require('child_process');
 const path = require('path');
+const { runInNewContext } = require('vm');
 const { installFakeEventSource } = require('./support/fakeEventSource');
 const { createShellMockState, installAppApiMocks } = require('./support/mockAppApi');
 const { bet, quoted, accepted, rejected } = require('../fixtures/cashBack');
@@ -133,6 +134,92 @@ const prepare = async (page, state) => {
     return send(operation, ['QUOTE_PENDING', 'CONFIRM_PENDING'].includes(operation.state) ? 202 : 200);
   });
 };
+
+for (const mode of ['compatibility', 'active']) {
+  test(`protected OCI bet-card helper selects the exact rendered slip in ${mode} mode across reload`, async ({ page }, testInfo) => {
+    const specPath = 'infra/oci/agents/oci-live-acceptance.spec.js';
+    const source = readFileSync(path.resolve(__dirname, '../../..', specPath), 'utf8');
+    // As in infra/oci/tests/test-contract.sh, register no production journey.
+    // Only the actual locator helper escapes this context; operational I/O is unavailable.
+    const betCard = runInNewContext(`${source}\nbetCard;`, {
+      process: { env: {} },
+      require: (name) => {
+        if (name === '@playwright/test') return { test: () => {}, expect };
+        if (name === 'fs' || name === 'child_process') return {};
+        if (name === '../scripts/cash-back-acceptance-recovery-stan') {
+          return {
+            withStoppedResulting: () => {
+              throw new Error('Protected recovery operations must not run in client locator tests');
+            },
+          };
+        }
+        if (name === 'path' || name === 'crypto') return require(name);
+        throw new Error(`Unexpected protected acceptance dependency: ${name}`);
+      },
+    }, { filename: specPath });
+    const state = createState();
+    const slipId = state.bets[1].slipId; // A second card catches accidental first-card selection.
+    const siblingId = state.bets[0].slipId;
+    await prepare(page, state);
+    if (mode === 'compatibility') {
+      await page.route('**/api/bet/*/cash-back/{quote,accept}', (route) => route.fulfill({
+        status: 503, contentType: 'application/json', headers: { 'cache-control': 'no-store' },
+        body: JSON.stringify({ errors: [{ code: 'AUTHORITY_UNAVAILABLE', message: 'AUTHORITY_UNAVAILABLE' }] }),
+      }));
+    }
+    await page.goto('/bets?ui=v1&theme=dark');
+    const snapshots = [];
+    const checkCards = async (stage, status) => {
+      const selected = betCard(page, slipId);
+      const sibling = betCard(page, siblingId);
+      await expect(selected).toHaveCount(1);
+      await expect(selected).toHaveAttribute('data-slip-id', slipId);
+      await expect(selected.locator('.my-bets-status')).toHaveText(status);
+      await expect(sibling).toHaveCount(1);
+      await expect(sibling).toHaveAttribute('data-slip-id', siblingId);
+      await expect(sibling.locator('.my-bets-status')).toHaveText('CONFIRMED');
+      // Negative control: the old protected selector cannot find this real card.
+      const oldTextSelector = page.locator('.my-bets-card').filter({ hasText: `Slip ${slipId}` });
+      await expect(oldTextSelector).toHaveCount(0);
+      snapshots.push({
+        stage, slipId: await selected.getAttribute('data-slip-id'),
+        status: await selected.locator('.my-bets-status').innerText(),
+        siblingId: await sibling.getAttribute('data-slip-id'),
+        siblingStatus: await sibling.locator('.my-bets-status').innerText(),
+        oldTextMatches: await oldTextSelector.count(),
+      });
+      return selected;
+    };
+    const selected = await checkCards('before-action', 'CONFIRMED');
+    await selected.getByRole('button', { name: 'Get cash-back offer', exact: true }).click();
+    if (mode === 'active') {
+      await selected.getByRole('button', { name: 'Confirm full cash back', exact: true }).click();
+    } else {
+      await expect(selected.getByRole('alert')).toContainText('Current market authority could not be verified');
+      await expect(selected.getByRole('button', { name: 'Confirm full cash back', exact: true })).toHaveCount(0);
+    }
+    const status = mode === 'active' ? 'CASH BACK' : 'CONFIRMED';
+    await checkCards('before-reload', status);
+    await page.reload();
+    const restored = await checkCards('after-reload', status);
+    await restored.getByRole('button', { name: 'Cash-back history', exact: true }).click();
+    await expect(restored).toContainText(mode === 'active'
+      ? '1 receipt loaded. End of available history.' : '0 receipts loaded. End of available history.');
+    await expect(restored.locator('.cash-back-receipts li')).toHaveCount(mode === 'active' ? 1 : 0);
+    await checkCards('history-loaded', status);
+    expect(state.cashRequests.filter((request) => request.path.endsWith('/accept')).map((request) => request.path))
+      .toEqual(mode === 'active' ? [`/api/bet/${slipId}/cash-back/accept`] : []);
+    await testInfo.attach('protected-bet-card-rendered-contract', {
+      contentType: 'application/json',
+      body: Buffer.from(JSON.stringify({
+        evidence: 'Real MyBets render with HTTP mocks; protected registration/operations are not executed',
+        mode, source: sourceBinding(),
+        protectedSpec: { path: specPath, sha256: createHash('sha256').update(source).digest('hex') },
+        snapshots,
+      }, null, 2)),
+    });
+  });
+}
 
 test('keyboard, lost responses, reload and a second-tab revision preserve the reviewed amount and receipts', async ({ page, context }, testInfo) => {
   const state = createState();
