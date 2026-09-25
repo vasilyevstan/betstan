@@ -508,9 +508,17 @@ Replaying the same operation must yield one canonical
 `ACCEPTED` receipt or `QUOTE_EXPIRED` rejection, with no principal reset or
 duplicate closure. Terminal history, outcome delivery, source release, and Bet
 projection must demonstrably drain and agree. Existing unexpected-restart and
-error checks remain in force. Exact-head revalidation checks the complete
-cash-back evidence before accepted-lease recording and final activation commit,
-under the existing evidence-hash authority.
+error checks remain in force. An allowlisted HTTP `400` stale-selection rejection
+is recorded as handled only when native browser network-request identity and a
+unique method/URL/body fingerprint bind it to the exact request consumed by the
+existing retry helper. Missing or ambiguous attribution, unhandled HTTP failures,
+and application console errors still block acceptance; retries are not broadened.
+Before terminal assertions, `browser-errors.json` retains bounded sanitized
+attribution: method/path/status, a fixed allowed reason for handled rejections,
+and error source where relevant. It excludes bodies, query strings, raw console
+text, credentials, and private identifiers. Exact-head revalidation checks the
+complete cash-back evidence before accepted-lease recording and final
+activation commit, under the existing evidence-hash authority.
 
 ## Rollback and recovery
 

@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { randomUUID } = require('crypto');
+const { createHash, randomUUID } = require('crypto');
 const { spawnSync } = require('child_process');
 const { test, expect } = require('@playwright/test');
 const { withStoppedResulting } = require('../scripts/cash-back-acceptance-recovery-stan');
@@ -74,6 +74,111 @@ const requiredEnv = (name) => {
 const findBySlipId = (bets, slipId) => (
   Array.isArray(bets) ? bets.find((bet) => bet.slipId === slipId) : undefined
 );
+
+const handledLiveSelectionFailures = new WeakMap();
+
+const createBrowserErrorAudit = async (page) => {
+  const responses = new Map();
+  const requests = new Map();
+  const browserErrors = [];
+  const session = await page.context().newCDPSession(page);
+  const pathname = (url) => (
+    /^https?:\/\//.test(url)
+      ? new URL(url).pathname.replace(/\b[0-9a-f]{24,}\b/gi, ':id')
+      : '[non-http]'
+  );
+  const selectionKey = (url, method, body) => (
+    method === 'POST'
+    && new URL(url).pathname === '/api/event/odds'
+    && typeof body === 'string'
+      ? createHash('sha256').update(JSON.stringify([url, method, body])).digest('hex')
+      : null
+  );
+  const describeResponse = (response) => ({
+    method: response.request().method(),
+    pathname: pathname(response.url()),
+    status: response.status(),
+  });
+  session.on('Network.requestWillBeSent', ({ requestId, request }) => {
+    const key = selectionKey(request.url, request.method, request.postData);
+    if (key) {
+      requests.set(requestId, {
+        key, url: request.url, duplicate: requests.has(requestId),
+      });
+    }
+  });
+  session.on('Network.responseReceived', ({ requestId, response }) => {
+    const request = requests.get(requestId);
+    if (request) request.status = response.status;
+  });
+  session.on('Runtime.consoleAPICalled', (event) => {
+    if (event.type === 'error') {
+      browserErrors.push({
+        source: 'console-api',
+        url: event.stackTrace?.callFrames?.[0]?.url ?? '',
+        status: null,
+      });
+    }
+  });
+  session.on('Log.entryAdded', ({ entry }) => {
+    if (entry.level !== 'error') return;
+    const resource = /^Failed to load resource: the server responded with a status of (\d{3}) \(.*\)$/
+      .exec(entry.text);
+    browserErrors.push({
+      source: entry.source,
+      url: entry.url ?? '',
+      requestId: entry.networkRequestId,
+      status: resource ? Number(resource[1]) : null,
+    });
+  });
+  page.on('response', (response) => {
+    if (response.status() >= 400) responses.set(response.request(), response);
+  });
+  await session.send('Network.enable', { maxPostDataSize: 65536 });
+  await session.send('Log.enable');
+  await session.send('Runtime.enable');
+  return async () => {
+    await session.send('Runtime.evaluate', { expression: 'void 0' });
+    const handled = [...responses.values()].filter((response) => (
+      handledLiveSelectionFailures.has(response.request())
+    ));
+    const consoleErrors = browserErrors.filter((error) => {
+      const request = requests.get(error.requestId);
+      if (
+        error.source !== 'network' || error.status !== 400
+        || !request || request.duplicate || request.status !== 400
+        || error.url !== request.url
+        || new URL(error.url).origin !== new URL(page.url()).origin
+      ) return true;
+      const networkMatches = [...requests.values()].filter((other) => (
+        other.key === request.key && other.status === 400
+      ));
+      const responseMatches = [...responses.values()].filter((response) => (
+        response.status() === 400
+        && selectionKey(
+          response.url(), response.request().method(), response.request().postData(),
+        ) === request.key
+      ));
+      return networkMatches.length !== 1 || responseMatches.length !== 1
+        || !handledLiveSelectionFailures.has(responseMatches[0].request());
+    }).map((error) => ({
+      source: error.source,
+      pathname: pathname(error.url),
+      status: error.status,
+    }));
+    await session.detach();
+    return {
+      consoleErrors,
+      httpErrors: [...responses.values()]
+        .filter((response) => !handledLiveSelectionFailures.has(response.request()))
+        .map(describeResponse),
+      handledSelectionErrors: handled.map((response) => ({
+        ...describeResponse(response),
+        reason: handledLiveSelectionFailures.get(response.request()),
+      })),
+    };
+  };
+};
 
 const responseErrorMessage = async (response) => {
   const body = await response.json().catch(() => null);
@@ -152,11 +257,16 @@ const selectLiveMarket = async ({
     }
 
     const errorMessage = await responseErrorMessage(response);
-    if (!RETRYABLE_LIVE_SELECTION_ERRORS.has(errorMessage) || attempt === 5) {
+    if (
+      response.status() !== 400
+      || !RETRYABLE_LIVE_SELECTION_ERRORS.has(errorMessage)
+      || attempt === 5
+    ) {
       throw new Error(
         `Live selection ${fixture.eventId}/${marketType} failed: ${errorMessage}`,
       );
     }
+    handledLiveSelectionFailures.set(response.request(), errorMessage);
 
     await expect.poll(
       () => liveMarketSignature(marketCard),
@@ -393,15 +503,10 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     );
   };
   const pageErrors = [];
-  const consoleErrors = [];
   const apiFailures = [];
+  const browserErrorAudit = await createBrowserErrorAudit(page);
 
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  page.on('console', (message) => {
-    if (message.type() === 'error') {
-      consoleErrors.push(message.text());
-    }
-  });
   page.on('requestfailed', (request) => {
     const pathname = new URL(request.url()).pathname;
     const expectedStreamDisconnect = (
@@ -1313,8 +1418,16 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   if (cashBackMode === 'active') await expect(preMatchHistory).toContainText('PARTIAL CASH BACK');
 
   await page.evaluate(() => window.__liveAcceptance.source.close());
+  const browserErrors = await browserErrorAudit();
+  fs.mkdirSync(path.dirname(evidenceFile), { recursive: true });
+  fs.writeFileSync(
+    path.join(path.dirname(evidenceFile), 'browser-errors.json'),
+    `${JSON.stringify(browserErrors, null, 2)}\n`,
+  );
+  const { consoleErrors, httpErrors } = browserErrors;
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
+  expect(httpErrors).toEqual([]);
   expect(apiFailures).toEqual([]);
 
   fs.mkdirSync(path.dirname(evidenceFile), { recursive: true });
