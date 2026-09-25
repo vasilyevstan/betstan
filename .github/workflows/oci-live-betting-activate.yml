@@ -479,8 +479,24 @@ jobs:
           )"
           [ "$status" = "200" ]
 
+      - name: Verify declared cash-back generation mode
+        run: |
+          set -euo pipefail
+          source ./infra/oci/scripts/lib.sh
+          declared="$(oci_cash_back_source_flag "$SOURCE_SHA" bet)"
+          [ "$declared" = "$(oci_cash_back_source_flag "$SOURCE_SHA" resulting)" ]
+          [[ "$declared" == true || "$declared" == false ]]
+          oci_verify_cash_back_source_flags "$SOURCE_SHA" "$OCI_K8S_NAMESPACE" running
+          if [ "$declared" = true ]; then
+            echo "CASH_BACK_ACCEPTANCE_MODE=active" >> "$GITHUB_ENV"
+          else
+            echo "CASH_BACK_ACCEPTANCE_MODE=compatibility" >> "$GITHUB_ENV"
+          fi
+
       - name: Exercise complete production live journey
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           E2E_BASE_URL: ${{ steps.provenance.outputs.public_url }}
           LIVE_ACCEPTANCE_RUN_ID: ${{ github.run_id }}
           LIVE_ACCEPTANCE_EVIDENCE_FILE: ${{ github.workspace }}/artifacts/live-control/acceptance/evidence.json
@@ -619,6 +635,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          CASH_BACK_ACCEPTANCE_EVIDENCE_FILE: artifacts/live-control/acceptance/evidence.json
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
       - name: Write accepted activation lease evidence
@@ -710,6 +727,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          CASH_BACK_ACCEPTANCE_EVIDENCE_FILE: artifacts/live-control/acceptance/evidence.json
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
       - name: Commit accepted live activation

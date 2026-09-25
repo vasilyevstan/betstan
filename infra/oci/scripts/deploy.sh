@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 # shellcheck source=application-registry.sh
 source "$SCRIPT_DIR/application-registry.sh"
+# shellcheck source=../../azure/agents/live-betting-readiness-lib.sh
+source "$OCI_ROOT_DIR/infra/azure/agents/live-betting-readiness-lib.sh"
 
 SOURCE_SHA="${SOURCE_SHA:-${1:-}}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-${2:-}}"
@@ -17,6 +19,8 @@ OCI_CANONICAL_HOST="${OCI_CANONICAL_HOST:-betstan.xyz}"
 OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
 
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be a full lowercase commit SHA"
+[[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] ||
+  oci_die "GITHUB_RUN_ID is required for the deployment clock observation"
 [[ -f "$IMAGE_PROVENANCE_FILE" ]] || oci_die "verified image provenance TSV is required"
 [[ -f "$INFRA_PROVENANCE_FILE" ]] || oci_die "verified infrastructure provenance is required"
 oci_require_command kubectl
@@ -26,6 +30,12 @@ oci_require_cli_version
 oci_require_vars \
   OCI_JWT_KEY OCI_K8S_NAMESPACE OCI_CERT_EMAIL OCI_COMPARTMENT_OCID
 application_registry_require_ghcr
+bet_cash_back_flag="$(oci_cash_back_source_flag "$SOURCE_SHA" bet)" ||
+  oci_die "Bet cash-back configuration is unavailable"
+resulting_cash_back_flag="$(oci_cash_back_source_flag "$SOURCE_SHA" resulting)" ||
+  oci_die "Resulting cash-back configuration is unavailable"
+[[ "$bet_cash_back_flag" == "$resulting_cash_back_flag" ]] ||
+  oci_die "cash-back producer and admission declarations differ"
 
 unset source_sha runtime_mode infrastructure_finalized
 unset cluster_ocid cluster_fingerprint instance_ocid instance_fingerprint
@@ -334,6 +344,11 @@ done
 ((telemetry_index >= 0 && client_index > telemetry_index)) ||
   oci_die "client must rollout after telemetry"
 for service in "${services[@]}"; do
+  if [[ "$service" == "resulting" ]]; then
+    live_betting_check_mongo_clock "$OCI_K8S_NAMESPACE" "$SOURCE_SHA" \
+      "$GITHUB_RUN_ID" "$OUTPUT_DIR/clock-before-resulting" ||
+      oci_die "shared Mongo clock observation failed before Resulting startup"
+  fi
   apply_documents "Service:^gaming-${service}-srv$"
   apply_documents "Deployment:^gaming-${service}-depl$"
   kubectl rollout status "deployment/gaming-${service}-depl" \
@@ -346,6 +361,9 @@ for service in "${services[@]}"; do
   fi
 done
 
+oci_verify_cash_back_source_flags "$SOURCE_SHA" "$OCI_K8S_NAMESPACE" running ||
+  oci_die "cash-back running configuration differs from the approved source"
+
 rabbit_pod="$(
   kubectl get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
     -o jsonpath='{.items[0].metadata.name}'
@@ -357,6 +375,7 @@ queue_count=0
 queue_names=none
 zero_consumer_queues=none
 expected_queue_count="$(oci_application_rabbitmq_queue_count)"
+expected_queue_names="$(oci_application_rabbitmq_queue_names)"
 for _ in $(seq 1 60); do
   queue_state="$(
     kubectl exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
@@ -372,6 +391,7 @@ for _ in $(seq 1 60); do
     [[ -n "$queue_names" ]] || queue_names=none
     [[ -n "$zero_consumer_queues" ]] || zero_consumer_queues=none
     if [[ "$queue_count" == "$expected_queue_count" ]] &&
+        oci_rabbitmq_queue_inventory_matches "$queue_rows" "$expected_queue_names" &&
         [[ "$(awk '$1 == "telemetry:events:v1" {count++} END {print count+0}' <<<"$queue_rows")" == "1" ]] &&
         awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows"; then
       rabbit_baseline_ready=1

@@ -36,6 +36,7 @@ jest.mock("@betstan/common", () => {
 });
 
 jest.setTimeout(60000);
+process.env.CASH_BACK_ENABLED = "true";
 
 let mongo: any;
 
@@ -53,6 +54,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  process.env.CASH_BACK_ENABLED = "true";
   jest.clearAllMocks();
   const collections = await mongoose.connection.db.collections();
 

@@ -126,7 +126,8 @@
     {"name": "gaming-shared-mongo-srv", "type": "ClusterIP", "ready_endpoints": true}
   ],
   "rabbitmq": {
-    "queue_count": 23,
+    "queue_count": 28,
+    "expected_queue_count": 28,
     "telemetry_queue_present": true,
     "baseline_match": true,
     "all_consumers": true,

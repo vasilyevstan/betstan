@@ -48,10 +48,10 @@ My Bets provides independent status and bet-type filters. **All types**,
 sort order; older records without an explicit kind retain the compatible
 pre-match interpretation.
 
-## Cash back in My Bets - runtime candidate, not active
+## Cash back in My Bets - deployment-gated
 
-The source candidate implements this interaction, but it is **not yet deployed
-or active in production**. Cash-back stays inline in the existing My Bets card,
+Availability depends on a verified, enabled deployed generation; see
+[[Release Orchestration]]. Cash-back stays inline in the existing My Bets card,
 not in a separate wallet screen or modal. The same controls serve singles and
 accumulators across the three variants and both themes.
 

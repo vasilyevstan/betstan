@@ -80,6 +80,7 @@ const ownedBet = async (userId: string, slipId: string) => {
 
 export class CashBackFacade {
   private readonly publisher: Pick<CashBackRequestPublisher, "initConfirmChannel" | "publishWithConfirm">;
+  private readonly cashBackEnabled: boolean;
   private timer?: NodeJS.Timeout;
   private running?: Promise<void>;
 
@@ -87,6 +88,11 @@ export class CashBackFacade {
     connection: IAmqpConnection,
     publisher?: Pick<CashBackRequestPublisher, "initConfirmChannel" | "publishWithConfirm">
   ) {
+    const configured = process.env.CASH_BACK_ENABLED;
+    this.cashBackEnabled = configured === "true";
+    if (configured !== undefined && configured !== "true" && configured !== "false") {
+      console.error("bet_cash_back_invalid_configuration", { variable: "CASH_BACK_ENABLED", disabled: true });
+    }
     this.publisher = publisher ?? new CashBackRequestPublisher(connection);
   }
 
@@ -120,6 +126,7 @@ export class CashBackFacade {
       if (operation.operation.fingerprint !== fingerprint) throw new CashBackHttpError(409, "OPERATION_CONFLICT");
       return operation;
     }
+    if (!this.cashBackEnabled) throw new CashBackHttpError(503, "AUTHORITY_UNAVAILABLE");
     if (bet.status !== BetStatus.CONFIRMED) throw new CashBackHttpError(409, "BET_NOT_CONFIRMED");
     const createdAt = await databaseTime();
     const identity = {
@@ -152,6 +159,7 @@ export class CashBackFacade {
     if (operation.quote?.quoteId !== request.quoteId) throw new CashBackHttpError(409, "QUOTE_CHANGED");
     if (["CONFIRM_PENDING", "ACCEPTED", "REJECTED"].includes(operation.state)) return operation;
     if (operation.state !== "QUOTED") throw new CashBackHttpError(409, "QUOTE_UNAVAILABLE");
+    if (!this.cashBackEnabled) throw new CashBackHttpError(503, "AUTHORITY_UNAVAILABLE");
     const requestedAt = (await databaseTime()).toISOString();
     await CashBackOperation.updateOne(
       { operationId, state: "QUOTED", "quote.quoteId": request.quoteId },

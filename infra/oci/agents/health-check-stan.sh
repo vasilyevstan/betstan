@@ -425,12 +425,13 @@ queue_backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$queue_rows")"
 all_consumers=true
 awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows" || all_consumers=false
 queue_baseline_match=false
+expected_names="$(oci_application_rabbitmq_queue_names)"
 if [[ -n "${OCI_RABBITMQ_BASELINE_FILE:-}" ]]; then
   [[ -f "$OCI_RABBITMQ_BASELINE_FILE" ]] || oci_die "RabbitMQ baseline file is missing"
-  observed_names="$(awk '{print $1}' <<<"$queue_rows" | sort)"
-  expected_names="$(sort "$OCI_RABBITMQ_BASELINE_FILE")"
-  [[ "$observed_names" == "$expected_names" ]] && queue_baseline_match=true
-elif [[ "$queue_count" == "$(oci_application_rabbitmq_queue_count)" ]]; then
+  expected_names="$(cat "$OCI_RABBITMQ_BASELINE_FILE")"
+fi
+expected_queue_count="$(awk 'NF {count++} END {print count+0}' <<<"$expected_names")"
+if oci_rabbitmq_queue_inventory_matches "$queue_rows" "$expected_names"; then
   queue_baseline_match=true
 fi
 
@@ -534,6 +535,7 @@ jq -n \
   --argjson databases "$database_json" \
   --argjson services "$service_health" \
   --argjson queue_count "$queue_count" \
+  --argjson expected_queue_count "$expected_queue_count" \
   --argjson telemetry_queue_present "$telemetry_queue_present" \
   --argjson queue_baseline_match "$queue_baseline_match" \
   --argjson all_consumers "$all_consumers" \
@@ -589,6 +591,7 @@ jq -n \
     services: $services,
     rabbitmq: {
       queue_count: $queue_count,
+      expected_queue_count: $expected_queue_count,
       telemetry_queue_present: $telemetry_queue_present,
       baseline_match: $queue_baseline_match,
       all_consumers: $all_consumers,

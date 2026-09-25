@@ -24,12 +24,13 @@ interface Actor {
   command(action: string, data?: Record<string, unknown>): Promise<unknown>;
   paused(): Promise<void>;
 }
-const startActor = async (role: string): Promise<Actor> => {
+const startActor = async (role: string, cashBackEnabled = true): Promise<Actor> => {
   const child = fork(resolve(__dirname, "cashBackTransportProcess.ts"), [], {
     cwd: resolve(root, role),
     execArgv: ["-r", resolve(root, role, "node_modules/ts-node/register/transpile-only")],
     env: {
       ...process.env, NODE_ENV: "test", JWT_KEY: "cashback-isolated-test",
+      CASH_BACK_ENABLED: cashBackEnabled ? "true" : "false",
       CASH_BACK_TEST_ROLE: role,
       CASH_BACK_TEST_MONGO_URI: `${mongoBase}/cashback_it_${run}_${role}`,
       CASH_BACK_TEST_RABBIT_URI: broker,
@@ -87,6 +88,7 @@ interface Reply {
     quote?: CashBackQuote;
     receipt?: CashBackReceipt;
     items?: CashBackReceipt[];
+    errors?: { code: string; message: string }[];
   };
 }
 interface OfferedOperation { operationId: string; clientOperationId: string; quote: CashBackQuote }
@@ -234,6 +236,86 @@ it("runs repeated partial/full HTTP flows through real RabbitMQ and two independ
   });
   const history = await api(bet, `/api/bet/${fixture.slipId}/cash-back/history`);
   expect(history.body.items).toHaveLength(3);
+});
+
+it("recovers all granted obligations with admission off after an immutable process restart", async () => {
+  const fixture = await seed();
+  const idle = await offer(fixture.slipId, "idle-offer", 1000);
+  const quoted = await offer(fixture.slipId, "admitted-before-off", 1000);
+  await Promise.all([
+    resulting.command("pause-decision", { operationId: quoted.operationId }),
+    resultingPeer.command("pause-decision", { operationId: quoted.operationId }),
+  ]);
+  const confirmation = {
+    action: "CONFIRM", clientOperationId: quoted.clientOperationId, quoteId: quoted.quote.quoteId,
+  };
+  expect((await api(bet, `/api/bet/${fixture.slipId}/cash-back/accept`, confirmation)).status).toBe(202);
+  await Promise.all([resulting.paused(), resultingPeer.paused()]);
+  expect(await resulting.command("bet-state", fixture)).toMatchObject({
+    pending: { state: "UNDECIDED", operationId: quoted.operationId },
+    financial: { remainingStakeMinor: 10000, cumulativeClosedStakeMinor: 0 },
+  });
+  for (const source of [bo, gm]) {
+    expect(await source.command("event-state", fixture)).toMatchObject({ held: true, generation: 1 });
+  }
+  await Promise.all([resulting, resultingPeer, bet].map(async actor => {
+    const exited = new Promise<void>(resolveExit => actor.child.once("exit", () => resolveExit()));
+    actor.child.kill("SIGKILL");
+    await exited;
+  }));
+  [resulting, resultingPeer, bet] = await Promise.all([
+    startActor("resulting", false), startActor("resulting", false), startActor("bet", false),
+  ]);
+  try {
+    const statusPath = `/api/bet/${fixture.slipId}/cash-back/operations/${quoted.operationId}`;
+    const decided = await until(() => api(bet, statusPath), value => value.body.state === "REJECTED");
+    expect(decided.body.receipt).toMatchObject({
+      outcome: "REJECTED", reason: "AUTHORITY_UNAVAILABLE",
+      financial: { remainingStakeMinor: 10000, cumulativeClosedStakeMinor: 0, cumulativeReturnMinor: 0 },
+    });
+    expect(decided.body.quote).toEqual(quoted.quote);
+    expect((await api(bet, `/api/bet/${fixture.slipId}/cash-back/accept`, confirmation)).body.receipt)
+      .toEqual(decided.body.receipt);
+    const repeated = await api(bet, `/api/bet/${fixture.slipId}/cash-back/quote`, {
+      action: "QUOTE", clientOperationId: quoted.clientOperationId, portion: { mode: "PARTIAL", stakeMinor: 1000 },
+    });
+    expect(repeated.body.receipt).toEqual(decided.body.receipt);
+    expect(repeated.body.quote).toEqual(quoted.quote);
+    const fresh = await api(bet, `/api/bet/${fixture.slipId}/cash-back/quote`, {
+      action: "QUOTE", clientOperationId: "not-admitted", portion: { mode: "FULL" },
+    });
+    expect(fresh.status).toBe(503);
+    expect(fresh.body.errors?.[0].code).toBe("AUTHORITY_UNAVAILABLE");
+    expect(fresh.body.operationId).toBeUndefined();
+    const idleConfirm = await api(bet, `/api/bet/${fixture.slipId}/cash-back/accept`, {
+      action: "CONFIRM", clientOperationId: idle.clientOperationId, quoteId: idle.quote.quoteId,
+    });
+    expect(idleConfirm.status).toBe(503);
+    expect(idleConfirm.body.errors?.[0].code).toBe("AUTHORITY_UNAVAILABLE");
+    expect((await api(bet, `/api/bet/${fixture.slipId}/cash-back/operations/${idle.operationId}`)).body)
+      .toMatchObject({ state: "QUOTED", quote: idle.quote });
+    expect((await api(bet, `/api/bet/${fixture.slipId}/cash-back/history`)).body.items).toEqual([]);
+    for (const source of [bo, gm]) {
+      const released = await until(() => source.command("event-state", fixture), value =>
+        Boolean(value && typeof value === "object" && "held" in value && value.held === false));
+      expect(released).toMatchObject({ generation: 2 });
+    }
+    const recovered = await until(() => resulting.command("bet-state", fixture), value =>
+      Boolean(value && typeof value === "object" && "pending" in value && value.pending === null));
+    expect(recovered).toMatchObject({
+      status: "BET_APPROVED", pending: null,
+      financial: { remainingStakeMinor: 10000, cumulativeClosedStakeMinor: 0, cumulativeReturnMinor: 0 },
+    });
+  } finally {
+    await Promise.all([resulting, resultingPeer, bet].map(async actor => {
+      const exited = new Promise<void>(resolveExit => actor.child.once("exit", () => resolveExit()));
+      actor.child.kill("SIGTERM");
+      await exited;
+    }));
+    [resulting, resultingPeer, bet] = await Promise.all([
+      startActor("resulting"), startActor("resulting"), startActor("bet"),
+    ]);
+  }
 });
 
 it.each(["read", "retry"])("fences an independent approval %s against a replacement inserted after full archival", async stage => {

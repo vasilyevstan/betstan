@@ -438,6 +438,138 @@ main().catch((error) => {
 });
 NODE
 client_ui_css="$ROOT_DIR/client/src/styles/ui.css"
+node - "$acceptance_spec" <<'NODE'
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const crypto = require('node:crypto');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+
+function fixture(kind = 'healthy') {
+  const state = { replicas: 1, version: 1, generation: 1, lock: false, held: false, calls: [] };
+  const template = { spec: { containers: [{
+    name: 'gaming-resulting', image: `fixture@sha256:${'a'.repeat(64)}`,
+  }] } };
+  const env = {
+    SOURCE_SHA: 'a'.repeat(40), GITHUB_SHA: 'a'.repeat(40),
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1',
+    GITHUB_REF_NAME: 'master', GITHUB_ACTIONS: 'true',
+    GITHUB_WORKFLOW: 'oci-live-betting-activate', OCI_K8S_NAMESPACE: 'fixture',
+  };
+  if (kind === 'wrong-source') env.GITHUB_SHA = 'b'.repeat(40);
+  const spawnSync = (command, args) => {
+    state.calls.push({ command, args });
+    const ok = (value = '') => ({ status: 0, stdout: typeof value === 'string' ? value : JSON.stringify(value) });
+    if (command.endsWith('revalidate-live-activation-stan.sh')) return ok();
+    if (command.endsWith('shared-mongo-operation-lock-stan.sh')) {
+      if (args[0] === 'acquire') {
+        if (kind === 'foreign-lock') return { status: 1 };
+        assert.equal(state.lock, false);
+        state.lock = true;
+      } else if (args[0] === 'verify') {
+        assert.equal(state.lock, true);
+      } else if (args[0] === 'release') {
+        assert.equal(state.replicas, 1, 'lock released before writer restoration');
+        if (kind === 'release-failure') return { status: 1 };
+        state.lock = false;
+      } else if (args[0] === 'verify-released') assert.equal(state.lock, false);
+      else assert.fail('Unexpected lock action');
+      return ok();
+    }
+    if (command.endsWith('live-data-maintenance-stan.sh')) {
+      assert.equal(args[0], 'hold');
+      state.held = true;
+      state.replicas = 0;
+      return ok();
+    }
+    if (command === 'bash') {
+      if (args[1].includes('wait_for_deployment')) {
+        const target = Number(args.at(-1));
+        assert.equal(state.replicas, target);
+        if (kind === 'lingering-pods' && target === 0) return { status: 1 };
+      } else {
+        assert.ok(args[1].includes('live_betting_check_mongo_clock'));
+        if (kind === 'clock-failure') return { status: 1 };
+      }
+      return ok();
+    }
+    assert.equal(command, 'kubectl');
+    if (args.includes('patch')) {
+      assert.equal(state.lock, true);
+      const patch = JSON.parse(args[args.indexOf('--patch') + 1]);
+      assert.equal(patch[0].path, '/metadata/uid');
+      assert.equal(patch[0].value, 'fixture-deployment');
+      assert.equal(patch[1].path, '/metadata/resourceVersion');
+      assert.equal(patch[1].value, String(state.version));
+      assert.equal(patch[2].path, '/metadata/annotations');
+      assert.ok(patch[2].value['betstan.dev/cash-back-recovery'].startsWith('123:'));
+      const target = patch[3].value;
+      if (target === 1 && state.replicas === 0 && kind !== 'lingering-pods') state.generation += 1;
+      state.replicas = target;
+      state.version += 1;
+      return ok();
+    }
+    if (args.includes('deployment')) return ok({
+      metadata: { uid: 'fixture-deployment', resourceVersion: String(state.version), annotations: {} },
+      spec: { replicas: state.replicas, template },
+    });
+    assert.ok(args.includes('pods'));
+    const present = state.replicas > 0 || kind === 'lingering-pods';
+    return ok({ items: present ? [{ metadata: { uid: `pod-${state.generation}` } }] : [] });
+  };
+  const context = {
+    __dirname: path.dirname(process.argv[2]), process: { env }, console,
+    require: (name) => {
+      if (name === 'child_process') return { spawnSync };
+      if (name === '@playwright/test') return { test: () => {}, expect: () => assert.fail('Unexpected browser assertion') };
+      if (name === 'crypto') return crypto;
+      return require(name);
+    },
+  };
+  vm.runInNewContext(`${source}\nglobalThis.interrupt = withStoppedResulting;`, context);
+  return { state, template, interrupt: context.interrupt };
+}
+
+async function main() {
+  const good = fixture();
+  const report = await good.interrupt(async () => {
+    assert.equal(good.state.replicas, 0);
+    assert.equal(good.state.lock, true);
+    return { pendingObservedWithZeroWorkers: true, operationId: 'a'.repeat(64) };
+  }, 'fixture-output');
+  assert.equal(report.stopped, true);
+  assert.equal(report.restored, true);
+  assert.equal(good.state.replicas, 1);
+  assert.equal(good.state.lock, false);
+  assert.notEqual(report.beforePodFingerprints[0], report.afterPodFingerprints[0]);
+  const callback = fixture();
+  await assert.rejects(() => callback.interrupt(async () => {
+    throw new Error('checkpoint not observed');
+  }, 'fixture-output'), /checkpoint not observed/);
+  assert.equal(callback.state.replicas, 1);
+  assert.equal(callback.state.lock, false);
+  for (const kind of ['wrong-source', 'foreign-lock', 'clock-failure', 'lingering-pods', 'release-failure']) {
+    const test = fixture(kind);
+    await assert.rejects(() => test.interrupt(async () => ({}), 'fixture-output'));
+    if (['wrong-source', 'foreign-lock'].includes(kind)) {
+      assert.equal(test.state.replicas, 1);
+      assert.equal(test.state.held, false, 'another owner was disturbed');
+    } else {
+      assert.equal(test.state.held, true);
+      assert.equal(test.state.lock, true, 'failed recovery released its fence');
+    }
+  }
+  const drift = fixture();
+  await assert.rejects(() => drift.interrupt(async () => {
+    drift.template.spec.containers[0].image = `changed@sha256:${'b'.repeat(64)}`;
+  }, 'fixture-output'));
+  assert.equal(drift.state.held, true);
+  assert.equal(drift.state.lock, true);
+  console.log('oci_cash_back_recovery_operator=PASS cases=8');
+}
+main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+NODE
 client_live_regression="$ROOT_DIR/client/tests/e2e/live-betting-regression.spec.js"
 moderation_listener="$ROOT_DIR/moderation/src/event/listener/LiveEventUpdateListener.ts"
 moderation_runtime="$ROOT_DIR/moderation/src/runtime/ModerationRuntime.ts"
@@ -1212,8 +1344,62 @@ fi
 if oci_rabbitmq_queue_rows <<<$'name messages_ready messages_unacknowledged consumers\nname messages_ready messages_unacknowledged consumers' >/dev/null; then
   fail "duplicate RabbitMQ queue headers were accepted"
 fi
-[[ "$(oci_application_rabbitmq_queue_count)" == "23" ]] ||
-  fail "current RabbitMQ application queue count omits live consumers"
+[[ "$(oci_application_rabbitmq_queue_count)" == "28" ]] ||
+  fail "current RabbitMQ application queue count omits cash-back consumers"
+expected_queues="$(oci_application_rabbitmq_queue_names)"
+current_queue_rows="$(
+  sed 's/^event_live_update\.\*$/event_live_update.fixture-pod/' <<<"$expected_queues" |
+    awk '{print $0 "\t0\t0\t1"}'
+)"
+oci_rabbitmq_queue_inventory_matches "$current_queue_rows" "$expected_queues" ||
+  fail "complete application queue inventory was rejected"
+if oci_rabbitmq_queue_inventory_matches "$(sed '1d' <<<"$current_queue_rows")" "$expected_queues"; then
+  fail "missing application queue was accepted"
+fi
+if oci_rabbitmq_queue_inventory_matches "$(printf '%s\nextra_queue\t0\t0\t1\n' "$current_queue_rows")" "$expected_queues"; then
+  fail "unexpected application queue was accepted"
+fi
+if oci_rabbitmq_queue_inventory_matches "$(sed 's/backoffice_new_event/unknown_queue/' <<<"$current_queue_rows")" "$expected_queues"; then
+  fail "same-count queue replacement was accepted"
+fi
+if oci_rabbitmq_queue_inventory_matches "$(printf '%s\n%s\n' "$current_queue_rows" "$(head -n1 <<<"$current_queue_rows")")" "$expected_queues"; then
+  fail "duplicate application queue was accepted"
+fi
+(
+  set +o pipefail
+  if oci_rabbitmq_queue_inventory_matches \
+      "$(printf '%s\n%s\n' "$current_queue_rows" "$(head -n1 <<<"$current_queue_rows")")" "$expected_queues"; then
+    fail "duplicate queue rejection depends on caller pipefail"
+  fi
+)
+if oci_rabbitmq_queue_inventory_matches \
+    "$(sed 's/event_live_update.fixture-pod/event_live_update/' <<<"$current_queue_rows")" "$expected_queues"; then
+  fail "missing pod-scoped Event queue identity was accepted"
+fi
+if oci_rabbitmq_queue_inventory_matches \
+    "$(printf '%s\nevent_live_update.second-pod\t0\t0\t1\n' "$current_queue_rows")" "$expected_queues"; then
+  fail "unexpected second pod-scoped Event queue was accepted"
+fi
+historical_queues="$(grep -v '_cash_back_' <<<"$expected_queues" |
+  sed 's/^event_live_update\.\*$/event_live_update.historical-pod/')"
+[[ "$(awk 'END {print NR}' <<<"$historical_queues")" == "23" ]] ||
+  fail "cash-back compatibility baseline changed historical queue names"
+oci_rabbitmq_queue_inventory_matches \
+  "$(awk '{print $0 "\t0\t0\t1"}' <<<"$historical_queues")" "$historical_queues" ||
+  fail "exact historical queue inventory was rejected"
+if oci_rabbitmq_queue_inventory_matches \
+    "$(awk '{print $0 "\t0\t0\t1"}' <<<"${historical_queues/historical-pod/other-pod}")" "$historical_queues"; then
+  fail "historical queue identity was silently normalized"
+fi
+for binding in \
+  "backoffice/src/event/listener/CashBackSourceListener.ts:backoffice_cash_back_source" \
+  "gamemaster/src/event/listener/CashBackSourceListener.ts:gamemaster_cash_back_source" \
+  "bet/src/event/listener/CashBackOutcomeListener.ts:bet_cash_back_outcome" \
+  "resulting/src/event/listener/CashBackRequestListener.ts:resulting_cash_back_request" \
+  "resulting/src/event/listener/CashBackSourceReplyListener.ts:resulting_cash_back_source_reply"; do
+  grep -Fq "serviceName = \"${binding#*:}\";" "$ROOT_DIR/${binding%%:*}" ||
+    fail "cash-back queue inventory differs from its consumer: ${binding%%:*}"
+done
 grep -Fq 'zero_consumer_queues=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits zero-consumer diagnostics"
 grep -Fq 'queue_names=' "$OCI_DIR/scripts/deploy.sh" ||

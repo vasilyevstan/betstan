@@ -126,6 +126,124 @@ const accept = async (full = false) => {
   return { ...prepared, receipt, outcome };
 };
 
+it.each([
+  { name: "missing", value: undefined, diagnostic: false },
+  { name: "false", value: "false", diagnostic: false },
+  { name: "malformed", value: "not-a-boolean", diagnostic: true },
+  { name: "empty", value: "", diagnostic: true },
+])("keeps new admission off for a $name flag, latched at construction with sanitized diagnostics", async ({ value, diagnostic }) => {
+  await createBet();
+  if (value === undefined) delete process.env.CASH_BACK_ENABLED;
+  else process.env.CASH_BACK_ENABLED = value;
+  const log = jest.spyOn(console, "error").mockImplementation(() => {});
+  const publish = jest.fn(async () => {});
+  const facade = new CashBackFacade(messengerWrapper.connection, {
+    initConfirmChannel: async () => {}, publishWithConfirm: publish,
+  });
+  const factory = jest.spyOn(cashBackFacadeModule, "getCashBackFacade").mockReturnValue(facade);
+  process.env.CASH_BACK_ENABLED = "true";
+  try {
+    const response = await request(app).post(`${prefix}/quote`).set("currentUser", owner)
+      .send({ action: "QUOTE", clientOperationId: "disabled", portion: { mode: "FULL" } }).expect(503);
+    expect(response.body).toEqual({
+      errors: [{ code: "AUTHORITY_UNAVAILABLE", message: "AUTHORITY_UNAVAILABLE" }],
+    });
+    await request(app).post(`${prefix}/quote`).send({}).expect(401);
+    await request(app).post(`${prefix}/quote`).set("currentUser", other)
+      .send({ action: "QUOTE", clientOperationId: "disabled", portion: { mode: "FULL" } }).expect(404);
+    await request(app).post(`${prefix}/quote`).set("currentUser", owner).send({}).expect(400);
+    await facade.runOnce();
+    expect(await CashBackOperation.countDocuments()).toBe(0);
+    expect(publish).not.toHaveBeenCalled();
+    expect(log.mock.calls).toEqual(diagnostic
+      ? [["bet_cash_back_invalid_configuration", { variable: "CASH_BACK_ENABLED", disabled: true }]]
+      : []);
+  } finally {
+    factory.mockRestore();
+    log.mockRestore();
+  }
+});
+
+it("keeps an existing quote and its conflicts/read paths intact while off blocks an unregistered confirmation", async () => {
+  await createBet();
+  const prepared = await createQuote();
+  const before = await CashBackOperation.findOne({ operationId: prepared.operation.operationId }).lean();
+  process.env.CASH_BACK_ENABLED = "false";
+  const publish = jest.fn(async () => {});
+  const facade = new CashBackFacade(messengerWrapper.connection, {
+    initConfirmChannel: async () => {}, publishWithConfirm: publish,
+  });
+  const factory = jest.spyOn(cashBackFacadeModule, "getCashBackFacade").mockReturnValue(facade);
+  try {
+    const repeated = await request(app).post(`${prefix}/quote`).set("currentUser", owner).send({
+      action: "QUOTE", clientOperationId: "partial", portion: { mode: "PARTIAL", stakeMinor: 4000 },
+    }).expect(200);
+    expect(repeated.body.quote).toEqual(prepared.quote);
+    await request(app).post(`${prefix}/quote`).set("currentUser", owner)
+      .send({ action: "QUOTE", clientOperationId: "partial", portion: { mode: "FULL" } }).expect(409);
+    await request(app).post(`${prefix}/accept`).set("currentUser", owner)
+      .send({ action: "CONFIRM", clientOperationId: "partial", quoteId: "changed" }).expect(409);
+    const denied = await request(app).post(`${prefix}/accept`).set("currentUser", owner)
+      .send({ action: "CONFIRM", clientOperationId: "partial", quoteId: prepared.quote.quoteId }).expect(503);
+    expect(denied.body.errors[0].code).toBe("AUTHORITY_UNAVAILABLE");
+    await request(app).get(`${prefix}/operations/${prepared.operation.operationId}`).set("currentUser", owner).expect(200);
+    await request(app).get(`${prefix}/history`).set("currentUser", owner).expect(200);
+    await facade.runOnce();
+    expect(await CashBackOperation.findOne({ operationId: prepared.operation.operationId }).lean()).toEqual(before);
+    expect(publish).not.toHaveBeenCalled();
+  } finally {
+    factory.mockRestore();
+  }
+});
+
+it.each(["ACCEPTED", "REJECTED"] as const)("recovers admitted confirmation and immutable %s history while off", async terminal => {
+  await createBet();
+  const prepared = await accept();
+  const before = await CashBackOperation.findOne({ operationId: prepared.operation.operationId }).lean();
+  process.env.CASH_BACK_ENABLED = "false";
+  const publish = jest.fn(async () => {});
+  const facade = new CashBackFacade(messengerWrapper.connection, {
+    initConfirmChannel: async () => {}, publishWithConfirm: publish,
+  });
+  const confirmation = { action: "CONFIRM" as const, clientOperationId: "partial", quoteId: prepared.quote.quoteId };
+  expect((await facade.confirm("owner", "slip", confirmation)).toObject()).toEqual(before);
+  expect((await facade.quote("owner", "slip", {
+    action: "QUOTE", clientOperationId: "partial", portion: { mode: "PARTIAL", stakeMinor: 4000 },
+  })).quote).toEqual(prepared.quote);
+  await facade.runOnce();
+  expect(publish).toHaveBeenCalledWith({ data: before?.confirmRequest });
+  const rejected: CashBackRejectedReceipt = {
+    outcome: "REJECTED", operation: prepared.quote.operation, quoteId: prepared.quote.quoteId,
+    expectedRevision: prepared.quote.financial.revision, decisionId: "off-rejection",
+    decisionTime: new Date().toISOString(), reason: "AUTHORITY_UNAVAILABLE",
+    financial: { ...prepared.quote.financial, revision: 2 },
+  };
+  const outcome: ICashBackOutcomeEvent["data"] = terminal === "ACCEPTED" ? prepared.outcome : {
+    outcome: "REJECTED", operation: prepared.operation.operation, receipt: rejected,
+    receiptFingerprint: cashBackReceiptHash(rejected),
+  };
+  await facade.receiveOutcome(outcome);
+  await facade.receiveOutcome(outcome);
+  expect((await facade.confirm("owner", "slip", confirmation)).state).toBe(terminal);
+  expect((await facade.status("owner", "slip", prepared.operation.operationId)).receipt).toEqual(outcome.receipt);
+  expect((await facade.history("owner", "slip")).items).toHaveLength(terminal === "ACCEPTED" ? 1 : 0);
+  await facade.runOnce();
+  expect(publish).toHaveBeenCalledTimes(1);
+});
+
+it("does not hot-switch an enabled facade when the process environment changes", async () => {
+  await createBet();
+  const prepared = await createQuote();
+  const facade = new CashBackFacade(messengerWrapper.connection);
+  process.env.CASH_BACK_ENABLED = "false";
+  expect((await facade.quote("owner", "slip", {
+    action: "QUOTE", clientOperationId: "latched-on", portion: { mode: "FULL" },
+  })).state).toBe("QUOTE_PENDING");
+  expect((await facade.confirm("owner", "slip", {
+    action: "CONFIRM", clientOperationId: "partial", quoteId: prepared.quote.quoteId,
+  })).state).toBe("CONFIRM_PENDING");
+});
+
 it.each<[string, number, boolean]>([
   ["fresh normal", 0, false],
   ["fresh legacy without exp or role", 0, true],
@@ -236,14 +354,19 @@ it("does not silently accept a changed quote and never exposes internal source p
   expect(response.headers["cache-control"]).toBe("no-store");
 });
 
-it("keeps broker failure pending and retries the exact immutable request", async () => {
+it.each(["true", "false"])("keeps broker failure pending and retries the exact immutable request with flag %s", async flag => {
   await createBet();
   await request(app).post(`${prefix}/quote`).set("currentUser", owner)
     .send({ action: "QUOTE", clientOperationId: "retry", portion: { mode: "FULL" } }).expect(202);
+  const before = await CashBackOperation.findOne().lean();
+  process.env.CASH_BACK_ENABLED = flag;
   const publish = jest.fn().mockRejectedValueOnce(new Error("broker unavailable")).mockResolvedValue(undefined);
   const facade = new CashBackFacade(messengerWrapper.connection, {
     initConfirmChannel: async () => {}, publishWithConfirm: publish,
   });
+  expect((await facade.quote("owner", "slip", {
+    action: "QUOTE", clientOperationId: "retry", portion: { mode: "FULL" },
+  })).toObject()).toEqual(before);
   await facade.runOnce();
   expect((await CashBackOperation.findOne())?.state).toBe("QUOTE_PENDING");
   await facade.runOnce();

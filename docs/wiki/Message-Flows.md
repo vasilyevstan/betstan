@@ -28,14 +28,14 @@ Telemetry also observes `slip:bet`, `resulting:slip:settle`, and
 `gamemaster:event:live`; these stable topics are distinct from its
 `telemetry:events:v1` consumer queue name.
 
-### Cash-back flow - runtime candidate, not active
+### Cash-back flow - deployment-gated
 
-The four Common feature topics are now wired in the runtime source candidate,
-but cash-back is **not yet deployed or active in production**. They are kept
-separate from the established topic catalog above to distinguish source
-implementation from current production availability.
+The four Common feature topics are wired in source. New cash-back admission
+depends on a verified, enabled deployed generation; recovery consumers stay
+active with admission off. See [[Release Orchestration]]; source wiring alone
+does not establish current production availability.
 
-| Candidate topic | Publisher -> consumers | Phase |
+| Cash-back topic | Publisher -> consumers | Phase |
 |---|---|---|
 | `bet:cash-back:request` | Bet -> Resulting | Non-reserving `QUOTE`; `CONFIRM` of one stored quote |
 | `resulting:cash-back:outcome` | Resulting -> Bet | `QUOTED`, `UNAVAILABLE`, or durable `ACCEPTED` / `REJECTED` receipt |
