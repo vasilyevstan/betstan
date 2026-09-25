@@ -22,6 +22,17 @@ const stale = 'Live quote is stale';
 const resourceError = (status) => (
   `Failed to load resource: the server responded with a status of ${status} ()`
 );
+const assertionStart = source.indexOf('  expect(browserErrors.overflow).toBe(false);');
+const assertionEnd = source.indexOf('  expect(apiFailures).toEqual([]);', assertionStart);
+assert.ok(assertionStart >= 0 && assertionEnd > assertionStart);
+const assertTerminal = new Function(
+  'browserErrors', 'pageErrors', 'consoleErrors', 'httpErrors', 'apiFailures', 'expect',
+  source.slice(assertionStart, assertionEnd + '  expect(apiFailures).toEqual([]);'.length),
+);
+const expectValue = (actual) => ({
+  toBe: (expected) => assert.equal(actual, expected),
+  toEqual: (expected) => assert.deepEqual(JSON.parse(JSON.stringify(actual)), expected),
+});
 let cases = 0;
 
 async function fixture() {
@@ -29,7 +40,10 @@ async function fixture() {
   const page = new EventEmitter();
   const session = new EventEmitter();
   session.send = async () => ({});
-  session.detach = async () => { session.detached = true; };
+  session.detach = async () => {
+    if (session.onDetach) await session.onDetach();
+    session.detached = true;
+  };
   page.context = () => ({ newCDPSession: async () => session });
   page.url = () => origin;
   const finish = await helpers.createBrowserErrorAudit(page);
@@ -66,15 +80,31 @@ async function fixture() {
   return { session, response, finish };
 }
 
-async function check(configure, consoleCount, httpCount) {
+async function check(configure, consoleCount, httpCount, overflow = false) {
   const current = await fixture();
   configure(current);
   const result = await current.finish();
   assert.equal(result.consoleErrors.length, consoleCount);
   assert.equal(result.httpErrors.length, httpCount);
+  assert.equal(result.overflow, overflow);
   assert.equal(current.session.detached, true);
   assert.ok(!JSON.stringify(result).includes('private-marker'));
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 65536);
+  for (const values of [
+    result.consoleErrors, result.httpErrors, result.handledSelectionErrors,
+  ]) {
+    assert.ok(values.length <= 128);
+    for (const value of values) {
+      assert.ok(Object.values(value).every(field => typeof field !== 'string' || field.length <= 96));
+    }
+  }
+  const validate = () => assertTerminal(
+    result, [], result.consoleErrors, result.httpErrors, [], expectValue,
+  );
+  if (consoleCount || httpCount || overflow) assert.throws(validate);
+  else validate();
   cases += 1;
+  return result;
 }
 
 async function unitCases() {
@@ -118,6 +148,54 @@ async function unitCases() {
     session.emit('Runtime.consoleAPICalled', { type: 'warning' });
     session.emit('Log.entryAdded', { entry: { level: 'warning' } });
   }, 0, 0);
+  await check(({ session }) => {
+    session.onDetach = async () => {
+      await Promise.resolve();
+      session.emit('Runtime.consoleAPICalled', { type: 'error' });
+    };
+  }, 1, 0);
+  await check(({ session, response }) => {
+    session.onDetach = async () => {
+      await Promise.resolve();
+      response({ handled: false });
+    };
+  }, 1, 1);
+  const uuid = '32da0000-4321-4321-9876-012345678901';
+  const uuidResult = await check(({ response }) => response({
+    url: `${origin}/api/bet/${uuid}`, handled: false, method: 'GET',
+  }), 1, 1);
+  assert.equal(uuidResult.httpErrors[0].pathname, '/api/bet/:id');
+  assert.ok(!JSON.stringify(uuidResult).includes(uuid));
+  const encodedResult = await check(({ response }) => response({
+    url: `${origin}/api/bet/private-marker%2Fid/cash-back/operations/%55%55%49%44?private-marker`,
+    handled: false, method: 'GET',
+  }), 1, 1);
+  assert.equal(encodedResult.httpErrors[0].pathname, '/api/bet/:id/cash-back/operations/:id');
+  assert.ok(!JSON.stringify(encodedResult).includes('%55'));
+  await check(({ session }) => session.emit('Log.entryAdded', {
+    entry: {
+      level: 'error', source: 'private-marker'.repeat(1000), text: resourceError(400),
+      url: `${origin}/static/${'private-marker'.repeat(1000)}.js?private-marker`,
+    },
+  }), 1, 0);
+  await check(({ session }) => {
+    for (let index = 0; index < 1001; index += 1) {
+      session.emit('Runtime.consoleAPICalled', { type: 'error' });
+    }
+  }, 128, 0, true);
+  await check(({ session, response }) => {
+    for (let index = 0; index < 128; index += 1) response();
+    session.emit('Runtime.consoleAPICalled', { type: 'error' });
+  }, 0, 0, true);
+  await check(({ response }) => {
+    for (let index = 0; index < 128; index += 1) response();
+    response({ handled: false });
+  }, 0, 0, true);
+  await check(({ response }) => {
+    for (let index = 0; index < 129; index += 1) {
+      response({ handled: false, status: 200, log: false });
+    }
+  }, 0, 0, true);
 }
 
 async function browserCases() {
@@ -223,6 +301,7 @@ document.querySelector('button').onclick = async () => {
           await page.evaluate(() => fetch('/api/unexpected').then(response => response.json()));
         }
         const result = await finish();
+        assert.equal(result.overflow, false, scenario);
         assert.ok(priorErrors.length > 0, 'Original blanket assertion must reproduce red');
         const expectedConsole = {
           stale: 0, version: 0, overlap: 1, 'identical-overlap': 2, console: 1,
