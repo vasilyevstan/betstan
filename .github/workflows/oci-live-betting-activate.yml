@@ -367,6 +367,14 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
+      - name: Arm owner-bound activation abort
+        id: cash_back_abort
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          OUTPUT_DIR: artifacts/live-control/abort
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js arm
+
       - name: Activate new live kickoffs
         id: activate
         env:
@@ -479,8 +487,25 @@ jobs:
           )"
           [ "$status" = "200" ]
 
+      - name: Verify declared cash-back generation mode
+        run: |
+          set -euo pipefail
+          source ./infra/oci/scripts/lib.sh
+          declared="$(oci_cash_back_source_flag "$SOURCE_SHA" bet)"
+          [ "$declared" = "$(oci_cash_back_source_flag "$SOURCE_SHA" resulting)" ]
+          [[ "$declared" == true || "$declared" == false ]]
+          oci_verify_cash_back_source_flags "$SOURCE_SHA" "$OCI_K8S_NAMESPACE" running
+          if [ "$declared" = true ]; then
+            echo "CASH_BACK_ACCEPTANCE_MODE=active" >> "$GITHUB_ENV"
+          else
+            echo "CASH_BACK_ACCEPTANCE_MODE=compatibility" >> "$GITHUB_ENV"
+          fi
+
       - name: Exercise complete production live journey
+        id: journey
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           E2E_BASE_URL: ${{ steps.provenance.outputs.public_url }}
           LIVE_ACCEPTANCE_RUN_ID: ${{ github.run_id }}
           LIVE_ACCEPTANCE_EVIDENCE_FILE: ${{ github.workspace }}/artifacts/live-control/acceptance/evidence.json
@@ -490,6 +515,17 @@ jobs:
           NODE_PATH="$GITHUB_WORKSPACE/client/node_modules" \
             ./client/node_modules/.bin/playwright test \
               --config infra/oci/agents/playwright-live-acceptance.config.js
+
+      - name: Reconcile protected cash-back worker interruption
+        id: cash_back_recovery
+        if: >-
+          always() &&
+          (steps.cash_back_abort.outcome == 'success' ||
+           steps.cash_back_abort.outcome == 'failure' ||
+           steps.cash_back_abort.outcome == 'cancelled')
+        env:
+          OUTPUT_DIR: artifacts/live-control/acceptance
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js recover
 
       - name: Revoke and clean reusable validation account
         if: always() && steps.account.outcome == 'success'
@@ -619,6 +655,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          CASH_BACK_ACCEPTANCE_EVIDENCE_FILE: artifacts/live-control/acceptance/evidence.json
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
       - name: Write accepted activation lease evidence
@@ -674,6 +711,7 @@ jobs:
         id: failure_disable
         if: >-
           always() &&
+          steps.cash_back_abort.outcome == 'success' &&
           ((env.OCI_RUNTIME_MODE == 'oke' &&
             steps.oke_access.outcome == 'success') ||
            (env.OCI_RUNTIME_MODE == 'k3s' &&
@@ -681,13 +719,15 @@ jobs:
           (steps.accepted.outcome != 'success' ||
             steps.accepted_evidence_upload.outcome != 'success')
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           ACTION: disable
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
           CONTROL_RUN_ID: ${{ github.run_id }}
           CONFIRMATION: DISABLE OCI LIVE BETTING
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
           OUTPUT_DIR: artifacts/live-control/failure-disable
-        run: ./infra/oci/scripts/live-betting-control-stan.sh
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js disable
 
       - name: Capture sanitized failure diagnostics
         if: failure() || cancelled()
@@ -710,6 +750,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          CASH_BACK_ACCEPTANCE_EVIDENCE_FILE: artifacts/live-control/acceptance/evidence.json
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
       - name: Commit accepted live activation
@@ -730,6 +771,7 @@ jobs:
         id: final_disable
         if: >-
           always() &&
+          steps.cash_back_abort.outcome == 'success' &&
           ((env.OCI_RUNTIME_MODE == 'oke' &&
             steps.oke_access.outcome == 'success') ||
            (env.OCI_RUNTIME_MODE == 'k3s' &&
@@ -739,13 +781,15 @@ jobs:
             steps.commit_preflight.outcome != 'success' ||
             steps.commit.outcome != 'success')
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           ACTION: disable
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
           CONTROL_RUN_ID: ${{ github.run_id }}
           CONFIRMATION: DISABLE OCI LIVE BETTING
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
           OUTPUT_DIR: artifacts/live-control/final-failure-disable
-        run: ./infra/oci/scripts/live-betting-control-stan.sh
+        run: node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js disable
 
       - name: Revoke exact OKE runner rule
         id: revoke_runner

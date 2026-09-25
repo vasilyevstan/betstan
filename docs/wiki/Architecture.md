@@ -184,14 +184,15 @@ wire contract therefore requires:
 Source appearing in the repository does not silently alter a deployed
 service.
 
-### Cash-back runtime candidate - not active
+### Cash-back runtime - deployment-gated
 
-The runtime candidate now implements the published `@betstan/common`
+The runtime implements the published `@betstan/common`
 `1.1.0-rc.2` contracts; all eight backend manifests and lockfiles pin that exact
 version. Unlike the earlier contract-only slice, it includes service handlers,
-pricing, persistence, source fencing, and the My Bets UI. It is **not yet
-deployed or active in production**. Package publication and source repinning
-alone are not evidence of runtime availability.
+pricing, persistence, source fencing, and the My Bets UI. Availability depends
+on a verified, enabled deployed generation; see [[Release Orchestration]].
+Package publication and source repinning alone are not evidence of runtime
+availability.
 
 | Owner | Cash-back responsibility in the candidate |
 |---|---|

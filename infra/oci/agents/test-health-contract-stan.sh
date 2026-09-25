@@ -28,6 +28,11 @@ jq '
 OCI_HEALTH_FIXTURE_FILE="$WORK_DIR/healthy-k3s.json" \
   "$HEALTH" | grep -qx DEPLOYED_HEALTHY
 
+jq '.rabbitmq.queue_count=23 | .rabbitmq.expected_queue_count=23' \
+  "$HEALTHY" > "$WORK_DIR/historical-queue-baseline.json"
+OCI_HEALTH_FIXTURE_FILE="$WORK_DIR/historical-queue-baseline.json" \
+  "$HEALTH" | grep -qx DEPLOYED_HEALTHY
+
 run_failure() {
   local name="$1"
   local filter="$2"
@@ -74,7 +79,12 @@ run_failure cluster-issuer-failure '.ingress.cluster_issuer_ready=false' cluster
 run_failure www-redirect-failure '.ingress.www_redirect=false' www-redirect
 run_failure diagnostic-https-failure '.ingress.diagnostic_https_trusted=false' diagnostic-https
 run_failure canonical-dns-failure '.ingress.dns_match=false' canonical-dns
-run_failure queue-loss '.rabbitmq.queue_count=22' queue-count
+run_failure queue-loss '.rabbitmq.queue_count=27' queue-count
+run_failure queue-extra '.rabbitmq.queue_count=29' queue-count
+run_failure queue-inventory-mismatch '.rabbitmq.baseline_match=false' queue-baseline
+run_failure queue-baseline-missing 'del(.rabbitmq.expected_queue_count)' queue-baseline
+run_failure queue-baseline-empty '.rabbitmq.expected_queue_count=0' queue-baseline
+run_failure queue-baseline-invalid '.rabbitmq.expected_queue_count="28"' queue-baseline
 run_failure telemetry-queue-loss '.rabbitmq.telemetry_queue_present=false' telemetry-queue
 run_failure consumer-loss '.rabbitmq.all_consumers=false' queue-consumers
 run_failure resource-breach '.node.memory_percent=71' memory-threshold

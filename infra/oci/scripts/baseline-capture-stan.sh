@@ -949,6 +949,8 @@ while IFS= read -r run_id; do
 done <"$WORK_DIR/build-candidates.txt"
 
 [[ -n "$matched_build_run_id" ]] || oci_die "unable to find trusted OCI build provenance for ${matched_source_sha}"
+oci_verify_cash_back_source_flags "$matched_source_sha" "$OCI_K8S_NAMESPACE" running ||
+  oci_die "baseline cash-back configuration differs from authenticated source"
 fi
 
 if [[ "$SSE_REQUIREMENT" == "deployed-source" ]]; then

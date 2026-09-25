@@ -27,11 +27,11 @@ contain a deposit, withdrawal, card-payment, or external-wallet integration.
 | Backoffice | The event catalog and bounded create, visibility, and result controls are intentionally public in the current product. |
 | Responsive UI | The client supports three layout variants, light/dark themes, keyboard access, and desktop/tablet/mobile layouts. |
 
-## Cash back - runtime candidate, not active
+## Cash back - deployment-gated
 
-Full and partial cash-back are implemented in the source candidate, but are
-**not yet deployed or active in production**. The behavior below is not a claim
-of current production availability.
+Full and partial cash-back are implemented in source. Availability depends on
+a verified, enabled deployed generation; see [[Release Orchestration]]. The
+behavior below is not a claim of current production availability.
 
 Cash-back closes exposure on a confirmed bet owned by the signed-in player.
 It applies to both singles and accumulators, without removing or replacing
@@ -104,7 +104,7 @@ general customer feature.
 ## Event and bet lifecycle
 
 This diagram shows the established event and normal-settlement paths. The
-undeployed cash-back candidate is described separately above.
+deployment-gated cash-back flow is described separately above.
 
 ```mermaid
 stateDiagram-v2

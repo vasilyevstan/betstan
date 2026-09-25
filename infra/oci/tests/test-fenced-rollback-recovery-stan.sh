@@ -95,6 +95,8 @@ new_case() {
   printf 'held\n' >"$STATE_DIR/maintenance"
   printf 'held\n' >"$STATE_DIR/lock"
   printf '0\n' >"$STATE_DIR/moderation-restarts"
+  printf 'absent\n' >"$STATE_DIR/cash-back-bet"
+  printf 'absent\n' >"$STATE_DIR/cash-back-resulting"
 
   # Baseline artifact describes the known-good target generation.
   {
@@ -177,10 +179,18 @@ case "$1" in
         if [[ "$*" == *"-o json"* ]]; then
           ready="$replicas"
           [[ -f "$STATE_DIR/ready-$svc" ]] && ready="$(cat "$STATE_DIR/ready-$svc")"
-          cat <<JSON
-{"spec":{"replicas":$replicas,"template":{"spec":{"containers":[{"name":"gaming-$svc","image":"$image"}]}}},
- "status":{"readyReplicas":$ready,"updatedReplicas":$ready,"availableReplicas":$ready}}
-JSON
+          flag=absent
+          [[ ! -f "$STATE_DIR/cash-back-$svc" ]] || flag="$(cat "$STATE_DIR/cash-back-$svc")"
+          python3 - "$svc" "$image" "$replicas" "$ready" "$flag" <<'PY'
+import json, sys
+service, image, replicas, ready, flag = sys.argv[1:]
+env = [{"name": "UNRELATED", "value": "retained"}]
+if flag != "absent":
+    env.append({"name": "CASH_BACK_ENABLED", "value": flag})
+print(json.dumps({"spec": {"replicas": int(replicas), "template": {"spec": {"containers": [
+    {"name": "gaming-" + service, "image": image, "env": env}
+]}}}, "status": {"readyReplicas": int(ready), "updatedReplicas": int(ready), "availableReplicas": int(ready)}}))
+PY
           exit 0
         fi
         printf '%s' "$image"; exit 0
@@ -217,6 +227,22 @@ PY
           svc="$(svc_from_depl "${2#deployment/}")"
           printf '%s' "$(cat "$STATE_DIR/image-$svc")"; exit 0
         fi
+        if [[ "$2" == pods && "$*" == *"-o json" ]]; then
+          for service in bet resulting; do
+            if [[ "$*" == *"app=gaming-${service}"* ]]; then
+              flag="${FAKE_CASH_BACK_POD_FLAG:-$(cat "$STATE_DIR/cash-back-$service")}"
+              python3 - "$service" "$flag" <<'PY'
+import json, sys
+service, flag = sys.argv[1:]
+env = [{"name": "UNRELATED", "value": "retained"}]
+if flag != "absent":
+    env.append({"name": "CASH_BACK_ENABLED", "value": flag})
+print(json.dumps({"items": [{"spec": {"containers": [{"name": "gaming-" + service, "env": env}]}}]}))
+PY
+              exit 0
+            fi
+          done
+        fi
         if [[ "$*" == *"gaming-moderation"* ]]; then
           if [[ "${FAKE_MODERATION_FLAPS:-0}" == "1" ]]; then
             current="$(cat "$STATE_DIR/moderation-restarts")"
@@ -230,6 +256,16 @@ PY
     ;;
   set)
     depl="${3#deployment/}"; svc="$(svc_from_depl "$depl")"
+    if [[ "$2" == env ]]; then
+      [[ "${FAKE_CASH_BACK_ENV_FAIL:-}" != "$svc" ]] || exit 1
+      for arg in "$@"; do
+        case "$arg" in
+          CASH_BACK_ENABLED-) printf 'absent\n' >"$STATE_DIR/cash-back-$svc" ;;
+          CASH_BACK_ENABLED=*) printf '%s\n' "${arg#*=}" >"$STATE_DIR/cash-back-$svc" ;;
+        esac
+      done
+      exit 0
+    fi
     for arg in "$@"; do
       [[ "$arg" == *=ghcr.io/* ]] && printf '%s\n' "${arg#*=}" >"$STATE_DIR/image-$svc"
     done
@@ -335,6 +371,19 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
+  "show ${TARGET_SHA}:infra/k8s/bet-depl.yaml"|"show ${TARGET_SHA}:infra/k8s/resulting-depl.yaml")
+    flag="${FAKE_CASH_BACK_TARGET_FLAG:-absent}"
+    [[ "$flag" != missing ]] || exit 1
+    service="${2##*/}"; service="${service%-depl.yaml}"
+    printf 'kind: Deployment\nmetadata:\n  name: gaming-%s-depl\nspec:\n  template:\n    spec:\n      containers:\n        - name: gaming-%s\n          env:\n            - name: UNRELATED\n              value: retained\n' "$service" "$service"
+    if [[ "$flag" == indirect ]]; then
+      printf '            - name: CASH_BACK_ENABLED\n              valueFrom:\n                configMapKeyRef: {name: flags, key: cashback}\n'
+    elif [[ "$flag" == duplicate ]]; then
+      printf '            - name: CASH_BACK_ENABLED\n              value: "false"\n            - name: CASH_BACK_ENABLED\n              value: "false"\n'
+    elif [[ "$flag" != absent ]]; then
+      printf '            - name: CASH_BACK_ENABLED\n              value: "%s"\n' "$flag"
+    fi
+    ;;
   "show ${TARGET_SHA}:backoffice/src/event/listener/NewEventListener.ts")
     [[ "${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
     cat <<'SOURCE'
@@ -573,6 +622,60 @@ PY
   printf 'captured_baseline_fenced_recovery=PASS\n'
   exit 0
 fi
+
+new_case cash-back-compatible-baseline
+printf 'true\n' >"$STATE_DIR/cash-back-bet"
+printf 'true\n' >"$STATE_DIR/cash-back-resulting"
+run_operator FAKE_CASH_BACK_TARGET_FLAG=false >"$CASE_DIR/out.txt" 2>&1 ||
+  fail "aware-but-disabled cash-back baseline restoration failed"
+[[ "$(cat "$STATE_DIR/cash-back-bet")" == false &&
+   "$(cat "$STATE_DIR/cash-back-resulting")" == false ]] ||
+  fail "cash-back generation stayed enabled after baseline restoration"
+python3 - "$STATE_DIR/operations.log" <<'PY'
+from pathlib import Path
+import sys
+rows = Path(sys.argv[1]).read_text().splitlines()
+changes = [i for i, row in enumerate(rows) if row.startswith("kubectl set env ")]
+first_scale = next(i for i, row in enumerate(rows) if row.startswith("kubectl scale "))
+assert len(changes) == 2 and max(changes) < first_scale
+assert all("CASH_BACK_ENABLED=false" in rows[i] for i in changes)
+assert not any("UNRELATED=" in row for row in rows)
+PY
+
+new_case cash-back-legacy-absence
+printf 'true\n' >"$STATE_DIR/cash-back-bet"
+printf 'true\n' >"$STATE_DIR/cash-back-resulting"
+run_operator >"$CASE_DIR/out.txt" 2>&1 || fail "legacy absent flag restoration failed"
+[[ "$(cat "$STATE_DIR/cash-back-bet")" == absent &&
+   "$(cat "$STATE_DIR/cash-back-resulting")" == absent ]] ||
+  fail "legacy flag absence retained the active generation flag"
+
+for flag in missing duplicate indirect invalid; do
+  new_case "cash-back-invalid-source-$flag"
+  if run_operator "FAKE_CASH_BACK_TARGET_FLAG=$flag" >"$CASE_DIR/out.txt" 2>&1; then
+    fail "invalid source flag was accepted: $flag"
+  fi
+  if grep -Eq '^(set env|set image|scale) ' "$STATE_DIR/kubectl.log"; then
+    fail "invalid source flag was rejected after mutation: $flag"
+  fi
+done
+
+for failure in env-write stale-pod; do
+  new_case "cash-back-$failure"
+  if [[ "$failure" == env-write ]]; then
+    failure_env=FAKE_CASH_BACK_ENV_FAIL=resulting
+  else
+    failure_env=FAKE_CASH_BACK_POD_FLAG=true
+  fi
+  if run_operator FAKE_CASH_BACK_TARGET_FLAG=false "$failure_env" >"$CASE_DIR/out.txt" 2>&1; then
+    fail "cash-back configuration failure was accepted: $failure"
+  fi
+  [[ "$(cat "$STATE_DIR/maintenance")" == held &&
+     "$(cat "$STATE_DIR/lock")" == held &&
+     "$(cat "$STATE_DIR/replicas-bet")" == 0 &&
+     "$(cat "$STATE_DIR/replicas-resulting")" == 0 ]] ||
+    fail "cash-back configuration failure did not retain maintenance"
+done
 
 # Applied cleanup plus an incompatible target must be rejected before the
 # recovery can restart Backoffice and consume a delayed pre-cutoff delivery.

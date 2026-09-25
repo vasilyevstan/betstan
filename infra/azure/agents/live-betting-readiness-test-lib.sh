@@ -238,6 +238,32 @@ print(json.dumps({"items": items}))
 PY
   exit 0
 fi
+if [[ "$args" == *"get pods"* && "$args" == *"-l app=gaming-auth-mongo"* ]]; then
+  [[ "$fail_command" != "pods" ]] || exit 1
+  counter="$STUB_QUERY_CAPTURE_DIR/clock-pod-reads"
+  count=0
+  [[ ! -f "$counter" ]] || count="$(cat "$counter")"
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$counter"
+  python3 - "$count" "${STUB_CLOCK_SCENARIO:-healthy}" <<'PY'
+import json
+import sys
+count, scenario = sys.argv[1:]
+uid = "fixture-mongo-uid"
+if scenario == "identity-change" and count == "2":
+    uid = "fixture-replacement-uid"
+print(json.dumps({"items": [{
+    "metadata": {"name": "gaming-auth-mongo-depl-0", "uid": uid,
+                 "labels": {"app": "gaming-auth-mongo"}},
+    "spec": {"nodeName": "fixture-node"},
+    "status": {"containerStatuses": [{
+        "name": "gaming-auth-mongo", "ready": True,
+        "containerID": "containerd://fixture-mongo"
+    }]}
+}]}))
+PY
+  exit 0
+fi
 if [[ "$args" == *"get pods"* ]]; then
   [[ "$fail_command" != "pods" ]] || exit 1
   python3 - "$IMAGE_PROVENANCE_FILE" "${STUB_TOPOLOGY_MODE:-shared}" <<'PY'
@@ -357,8 +383,17 @@ if [[ "$args" == *"rabbitmqctl list_queues --quiet name messages_ready messages_
 fi
 if [[ "$args" == *"mongosh --quiet --norc --eval"* ]]; then
   target="mongo"
-  query_script="${@: -1}"
+  query_script=""
+  previous_arg=""
+  for arg in "$@"; do
+    if [[ "$previous_arg" == --eval ]]; then
+      query_script="$arg"
+      break
+    fi
+    previous_arg="$arg"
+  done
   case "$args" in
+    *"clockProbeSchema"*) target="mongo-clock" ;;
     *"activeMatches"*) target="mongo-active" ;;
     *"submittedLiveSlips"*) target="mongo-submitted-slips" ;;
     *"pendingbetupdates"*) target="mongo-bet-pending-bet-update" ;;
@@ -374,6 +409,38 @@ if [[ "$args" == *"mongosh --quiet --norc --eval"* ]]; then
     include_legacy_pending=1
   fi
   case "$target" in
+    mongo-clock)
+      python3 - "${STUB_CLOCK_SCENARIO:-healthy}" <<'PY'
+import json
+import sys
+import time
+scenario = sys.argv[1]
+if scenario == "timeout":
+    time.sleep(30)
+if scenario == "missing":
+    print("{}")
+    raise SystemExit(0)
+wall = int(time.time() * 1000)
+samples = [{
+    "databaseMs": wall + offset + 1, "wallBeforeMs": wall + offset,
+    "wallAfterMs": wall + offset + 2,
+    "monotonicBeforeMs": offset, "monotonicAfterMs": offset + 2,
+    "processFingerprint": "a" * 64
+} for offset in (0, 250, 500)]
+if scenario == "backward":
+    for name in ("databaseMs", "wallBeforeMs", "wallAfterMs"):
+        samples[1][name] -= 1000
+elif scenario == "malformed":
+    samples[1]["databaseMs"] = "not-a-time"
+elif scenario == "process-change":
+    samples[1]["processFingerprint"] = "b" * 64
+elif scenario == "slow":
+    samples[0]["monotonicAfterMs"] = 501
+    samples[0]["wallAfterMs"] = wall + 501
+time.sleep(0.51)
+print(json.dumps({"schemaVersion": "betstan.mongo-clock.v1", "samples": samples}))
+PY
+      ;;
     mongo-active)
       if [[ "$malformed_target" == "$target" ]]; then
         printf '{"mongoOk":true,"activeMatches":"oops","overdueUnstartedEvents":0,"simulationQuarantines":0}\n'
@@ -621,6 +688,9 @@ run_live_betting_scenario() {
     export REQUEST_TIMEOUT=1
     export SSE_TIMEOUT=1
     export KUBECTL_TIMEOUT=1s
+    export SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    export CONTROL_RUN_ID=123456
+    export STUB_CLOCK_SCENARIO=healthy
     export STUB_FLAG_VALUE=false
     export STUB_FLAG_MISSING=0
     export STUB_TOPOLOGY_MODE=shared

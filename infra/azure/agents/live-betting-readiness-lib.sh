@@ -1378,6 +1378,69 @@ live_betting_mongo_pod_for_db() {
   return 1
 }
 
+live_betting_check_mongo_clock() {
+  python3 - "${BASH_SOURCE[0]}" "$@" <<'PY'
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+library, namespace, source_sha, run_id, output_dir = sys.argv[1:]
+output = Path(output_dir)
+output.mkdir(parents=True, exist_ok=True)
+evidence = output / "clock-observation.json"
+evidence.unlink(missing_ok=True)
+work = Path(tempfile.mkdtemp(prefix=".clock-work.", dir=output))
+started = time.monotonic_ns()
+process = subprocess.Popen([
+    "bash", "-c", 'source "$1"; shift; live_betting_collect_mongo_clock "$@"',
+    "mongo-clock", library, namespace, source_sha, run_id, output_dir, str(work)
+], start_new_session=True)
+
+def stop_child():
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=1)
+
+def interrupted(signum, _frame):
+    stop_child()
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
+try:
+    code = process.wait(timeout=30)
+except subprocess.TimeoutExpired:
+    stop_child()
+    print("bounded readiness probe timed out", file=sys.stderr)
+    code = 124
+finally:
+    stop_child()
+    for name in ("pods-before.json", "pods-after.json", "mongo-clock.json",
+                 "mongo-clock.stderr", "probe.stderr"):
+        (work / name).unlink(missing_ok=True)
+    work.rmdir()
+if code == 0:
+    elapsed_ms = (time.monotonic_ns() - started) / 1_000_000
+    if elapsed_ms > 30_000:
+        raise SystemExit("clock probe exceeded its whole-probe deadline")
+    result = json.loads(evidence.read_text())
+    span = result["samples"][-1]["monotonicAfterMs"] - result["samples"][0]["monotonicBeforeMs"]
+    if span > elapsed_ms + 50:
+        raise SystemExit("clock samples exceed the whole-probe observation window")
+    result["probeElapsedMonotonicMs"] = elapsed_ms
+    evidence.write_text(json.dumps(result, sort_keys=True) + "\n")
+raise SystemExit(code)
+PY
+}
+
 live_betting_exec_mongo_query() {
   local label="$1"
   local db_name="$2"
@@ -1389,8 +1452,13 @@ live_betting_exec_mongo_query() {
     live_betting_write_sanitized_file "$stderr_file" "$LIVE_BETTING_OUTPUT_DIR/${label}.stderr"
     return 1
   fi
-  if kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" exec -n "$LIVE_BETTING_NAMESPACE" "$pod_name" -- \
-      mongosh --quiet --norc --eval "$script" >"$output_file" 2>"$stderr_file"; then
+  local command=(kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT"
+    exec -n "$LIVE_BETTING_NAMESPACE" "$pod_name" --
+    mongosh --quiet --norc --eval "$script")
+  if [[ "$label" == mongo-clock ]]; then
+    command+=("mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000&connectTimeoutMS=1000&socketTimeoutMS=1000")
+  fi
+  if "${command[@]}" >"$output_file" 2>"$stderr_file"; then
     live_betting_write_sanitized_file "$stderr_file" "$LIVE_BETTING_OUTPUT_DIR/${label}.stderr"
     live_betting_write_sanitized_file "$output_file" "$LIVE_BETTING_OUTPUT_DIR/${label}.json"
     return 0
@@ -1398,6 +1466,160 @@ live_betting_exec_mongo_query() {
   live_betting_write_sanitized_file "$stderr_file" "$LIVE_BETTING_OUTPUT_DIR/${label}.stderr"
   return 1
 }
+
+live_betting_collect_mongo_clock() (
+  local namespace="$1" source_sha="$2" run_id="$3" output_dir="$4"
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'clock observation requires exact source and run bindings\n' >&2
+    return 1
+  }
+  mkdir -p "$output_dir"
+  local work_dir="$5"
+  local LIVE_BETTING_NAMESPACE="$namespace"
+  local LIVE_BETTING_KUBECTL_TIMEOUT=5s
+  local LIVE_BETTING_TOPOLOGY_MODE=shared
+  local LIVE_BETTING_PODS_JSON_FILE="$work_dir/pods-before.json"
+  local LIVE_BETTING_WORK_DIR="$work_dir"
+  local LIVE_BETTING_OUTPUT_DIR="$output_dir"
+  local started script
+  started="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  if ! kubectl --request-timeout=5s get pods \
+      -n "$namespace" -l app=gaming-auth-mongo -o json \
+      >"$work_dir/pods-before.json" 2>"$work_dir/probe.stderr"; then
+    live_betting_write_sanitized_file "$work_dir/probe.stderr" "$output_dir/clock.stderr"
+    return 1
+  fi
+  script="$(cat <<'CLOCK_QUERY'
+const clockProbeSchema = "betstan.mongo-clock.v1";
+const clockCrypto = require("node:crypto");
+const clockPerformance = require("node:perf_hooks").performance;
+const clockSamples = [];
+async function observeMongoClock() {
+  for (let index = 0; index < 3; index++) {
+    const monotonicBeforeMs = clockPerformance.now();
+    const wallBeforeMs = Date.now();
+    const hello = await db.getSiblingDB("admin").runCommand({hello: 1});
+    const wallAfterMs = Date.now();
+    const monotonicAfterMs = clockPerformance.now();
+    if (hello.ok !== 1 || !(hello.localTime instanceof Date) || !hello.topologyVersion?.processId) {
+      throw new Error("Mongo clock or process identity is unavailable");
+    }
+    clockSamples.push({
+      databaseMs: hello.localTime.getTime(), wallBeforeMs, wallAfterMs,
+      monotonicBeforeMs, monotonicAfterMs,
+      processFingerprint: clockCrypto.createHash("sha256")
+        .update(String(hello.topologyVersion.processId)).digest("hex")
+    });
+    if (index < 2) await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  print(JSON.stringify({schemaVersion: clockProbeSchema, samples: clockSamples}));
+}
+observeMongoClock();
+CLOCK_QUERY
+)"
+  if ! live_betting_exec_mongo_query mongo-clock gaming_auth "$script" \
+      "$work_dir/mongo-clock.json"; then
+    return 1
+  fi
+  if ! kubectl --request-timeout=5s get pods \
+      -n "$namespace" -l app=gaming-auth-mongo -o json \
+      >"$work_dir/pods-after.json" 2>"$work_dir/probe.stderr"; then
+    live_betting_write_sanitized_file "$work_dir/probe.stderr" "$output_dir/clock.stderr"
+    return 1
+  fi
+  python3 - "$work_dir" "$output_dir/clock-observation.json" "$source_sha" "$run_id" "$started" <<'PY'
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import sys
+import time
+
+work, output = Path(sys.argv[1]), Path(sys.argv[2])
+source_sha, run_id = sys.argv[3:5]
+started_ms = int(sys.argv[5])
+ended_ms = int(time.time() * 1000)
+elapsed_ms = ended_ms - started_ms
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+def fingerprint(value):
+    require(isinstance(value, str) and bool(value), "missing clock resource identity")
+    return hashlib.sha256(value.encode()).hexdigest()
+
+def identity(path):
+    items = json.loads(path.read_text())["items"]
+    require(len(items) == 1, "expected one retained shared Mongo pod")
+    pod = items[0]
+    containers = [item for item in pod["status"]["containerStatuses"]
+                  if item["name"] == "gaming-auth-mongo"]
+    require(len(containers) == 1 and containers[0]["ready"] is True,
+            "Mongo container is not ready")
+    return {
+        "pod": fingerprint(pod["metadata"]["uid"]),
+        "node": fingerprint(pod["spec"]["nodeName"]),
+        "container": fingerprint(containers[0]["containerID"]),
+    }
+
+try:
+    require(0 <= elapsed_ms <= 30_000 and ended_ms >= started_ms,
+            "clock probe exceeded its observation bounds")
+    before = identity(work / "pods-before.json")
+    require(before == identity(work / "pods-after.json"), "clock resource identity changed")
+    result = json.loads((work / "mongo-clock.json").read_text())
+    require(result.get("schemaVersion") == "betstan.mongo-clock.v1", "invalid clock schema")
+    samples = result["samples"]
+    require(isinstance(samples, list) and len(samples) == 3, "missing clock samples")
+    previous = None
+    for sample in samples:
+        for name in ("databaseMs", "wallBeforeMs", "wallAfterMs"):
+            require(type(sample.get(name)) is int and 0 < sample[name] < 2**53,
+                    "malformed clock wall time")
+        for name in ("monotonicBeforeMs", "monotonicAfterMs"):
+            value = sample.get(name)
+            require(type(value) in (int, float) and math.isfinite(value) and value >= 0,
+                    "malformed monotonic clock sample")
+        require(isinstance(sample.get("processFingerprint"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", sample["processFingerprint"]),
+                "missing Mongo process identity")
+        duration = sample["monotonicAfterMs"] - sample["monotonicBeforeMs"]
+        wall_duration = sample["wallAfterMs"] - sample["wallBeforeMs"]
+        require(0 <= duration <= 500 and wall_duration >= 0
+                and abs(wall_duration - duration) <= 50, "clock bracket is inconsistent")
+        require(sample["wallBeforeMs"] - 50 <= sample["databaseMs"]
+                <= sample["wallAfterMs"] + 50, "database and adjacent wall times differ")
+        if previous is not None:
+            require(sample["processFingerprint"] == previous["processFingerprint"],
+                    "Mongo process identity changed")
+            delta = sample["monotonicBeforeMs"] - previous["monotonicBeforeMs"]
+            require(sample["monotonicBeforeMs"] >= previous["monotonicAfterMs"]
+                    and delta >= 200, "clock sampling interval is invalid")
+            require(sample["databaseMs"] >= previous["databaseMs"]
+                    and sample["wallBeforeMs"] >= previous["wallAfterMs"],
+                    "observed clock moved backwards")
+            require(abs(sample["wallBeforeMs"] - previous["wallBeforeMs"] - delta) <= 50,
+                    "wall clock diverged from monotonic elapsed time")
+        previous = sample
+    sample_span = samples[-1]["monotonicAfterMs"] - samples[0]["monotonicBeforeMs"]
+    require(450 <= sample_span <= elapsed_ms + 50,
+            "clock samples do not fit the observed probe window")
+    output.write_text(json.dumps({
+        "schemaVersion": "betstan.mongo-clock-observation.v1",
+        "source_sha": source_sha, "run_id": run_id, "identity": before,
+        "observationStartedMs": started_ms, "observationEndedMs": ended_ms,
+        "probeElapsedWallMs": elapsed_ms, "samples": samples,
+        "bounds": {"samples": 3, "sampleIntervalMs": 250, "maxRoundTripMs": 500,
+                   "maxClockDifferenceMs": 50, "maxProbeMs": 30_000},
+        "proofLimit": "Observed consistency only; not UTC/NTP attestation, physical commit time, or perpetual monotonicity."
+    }, sort_keys=True) + "\n")
+except (OSError, KeyError, TypeError, ValueError) as error:
+    print(f"Mongo clock observation failed: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+)
 
 live_betting_check_mongo_observability() {
   local active_file="$1"
@@ -2014,6 +2236,8 @@ rabbit_live_unacked_messages=$LIVE_BETTING_RABBIT_UNACK
 rabbit_live_consumers=$LIVE_BETTING_RABBIT_CONSUMERS
 rabbit_dynamic_queues=$LIVE_BETTING_RABBIT_DYNAMIC_QUEUES
 mongo_ping_ok=$LIVE_BETTING_MONGO_PING_OK
+mongo_clock_consistent=$LIVE_BETTING_MONGO_CLOCK_OK
+mongo_clock_evidence_sha256=$LIVE_BETTING_MONGO_CLOCK_SHA256
 active_matches=$LIVE_BETTING_ACTIVE_MATCHES
 overdue_unstarted_events=$LIVE_BETTING_OVERDUE_UNSTARTED_EVENTS
 simulation_quarantines=$LIVE_BETTING_SIMULATION_QUARANTINES
@@ -2107,6 +2331,8 @@ live_betting_readiness_main() {
   LIVE_BETTING_FAILED_CHECKS=""
 
   LIVE_BETTING_ACTUAL_FLAG="unknown"
+  LIVE_BETTING_MONGO_CLOCK_OK="not_checked"
+  LIVE_BETTING_MONGO_CLOCK_SHA256="not_checked"
   LIVE_BETTING_IMAGE_PROVENANCE_ROWS="unknown"
   LIVE_BETTING_APP_DEPLOYMENTS_VERIFIED="unknown"
   LIVE_BETTING_AUX_WORKLOADS_READY="unknown"
@@ -2621,6 +2847,33 @@ EOF_QUERY
       "$pending_result_file" \
       "$retry_file" \
       "$LIVE_BETTING_WORK_DIR/workflow-parking.json" || true
+  fi
+
+  if [[ "$LIVE_BETTING_STACK" == oci &&
+        "$LIVE_BETTING_TOPOLOGY_MODE" == shared &&
+        "$mongo_counts_ready" == true && "$mongo_parking_ready" == true ]]; then
+    local clock_source="$LIVE_BETTING_PROVENANCE_SOURCE_SHA"
+    if ! [[ "$clock_source" =~ ^[0-9a-f]{40}$ ]]; then
+      clock_source="${SOURCE_SHA:-${OCI_EXPECTED_SOURCE_SHA:-${GITHUB_SHA:-}}}"
+    fi
+    if [[ -z "$clock_source" && -f "$LIVE_BETTING_EXACT_MASTER_PROVENANCE_FILE" ]]; then
+      clock_source="$(live_betting_first_env_value "$LIVE_BETTING_EXACT_MASTER_PROVENANCE_FILE" runtime_deploy_source_sha image_sha source_sha)"
+    fi
+    if live_betting_check_mongo_clock "$LIVE_BETTING_NAMESPACE" "$clock_source" \
+        "${GITHUB_RUN_ID:-${CONTROL_RUN_ID:-}}" "$LIVE_BETTING_OUTPUT_DIR/clock"; then
+      LIVE_BETTING_MONGO_CLOCK_OK=true
+      LIVE_BETTING_MONGO_CLOCK_SHA256="$(
+        python3 - "$LIVE_BETTING_OUTPUT_DIR/clock/clock-observation.json" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+      )"
+    else
+      LIVE_BETTING_MONGO_CLOCK_OK=false
+      live_betting_record_failure mongo_clock "bounded shared Mongo clock observation failed"
+    fi
   fi
 
   live_betting_check_event_endpoint public-event "$LIVE_BETTING_BASE_URL" public || true

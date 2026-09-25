@@ -62,6 +62,7 @@ run_revalidation() {
   REPOSITORY=example/repo \
   GITHUB_REF_NAME=master \
   GITHUB_RUN_ATTEMPT=1 \
+  GITHUB_RUN_ID=104 \
     "$SCRIPT"
 }
 
@@ -77,6 +78,77 @@ if STUB_RUN_ATTEMPT=2 run_revalidation >/dev/null 2>&1; then
   echo "revalidation accepted rerun provenance" >&2
   exit 1
 fi
+
+python3 - "$WORK_DIR" <<'PY'
+import copy
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+def financial(remaining, closed, revision, status="CONFIRMED"):
+    return {"originalStakeMinor": 1000, "remainingStakeMinor": remaining,
+            "cumulativeClosedStakeMinor": closed, "cumulativeReturnMinor": closed,
+            "revision": revision, "status": status}
+def accepted(mode, remaining, closed, revision):
+    return {"state": "ACCEPTED", "receipt": {
+        "outcome": "ACCEPTED", "mode": mode,
+        "financial": financial(remaining, closed, revision, "CASH_BACK" if mode == "FULL" else "CONFIRMED"),
+    }}
+compatibility = {"runId": "104", "cashBack": {"mode": "compatibility", "compatibility": {
+    "newAdmissionRefused": True, "historyReadable": True, "noPendingIdentifier": True,
+}}}
+active = {"runId": "104", "cashBack": {
+    "mode": "active", "liveFull": {"operation": accepted("FULL", 0, 1000, 1)},
+    "preMatchFull": {"operation": accepted("FULL", 0, 1000, 1), "confirmedThroughUI": True},
+    "partial": {
+        "operations": [accepted("PARTIAL", 900, 100, 1), accepted("PARTIAL", 800, 200, 2)],
+        "settlement": financial(800, 200, 3, "WIN"),
+    },
+    "recovery": {
+        "interruption": {
+            "sourceSha": "a" * 40, "runId": "104", "stopped": True, "restored": True,
+            "replicas": 1, "beforePodFingerprints": ["a" * 64], "afterPodFingerprints": ["b" * 64],
+            "checkpoint": {"pendingObservedWithZeroWorkers": True, "operationId": "c" * 64},
+        },
+        "operation": {"state": "REJECTED", "operationId": "c" * 64, "receipt": {
+            "outcome": "REJECTED", "reason": "QUOTE_EXPIRED", "financial": financial(1000, 0, 1),
+        }},
+        "sameIdentityReplay": True,
+        "drained": {key: True for key in ("rootPresent", "slotDrained", "terminalHistory",
+                                        "outcomePublished", "projectionComplete", "receiptMatches")},
+    },
+    "fullImmutableAfterResults": True,
+}}
+for name, value in (("compatibility", compatibility), ("active", active)):
+    (root / f"{name}.json").write_text(json.dumps(value))
+mutations = {
+    "missing-pending": lambda value: value["cashBack"]["recovery"]["interruption"]["checkpoint"].update(pendingObservedWithZeroWorkers=False),
+    "stale-source": lambda value: value["cashBack"]["recovery"]["interruption"].update(sourceSha="b" * 40),
+    "worker-overlap": lambda value: value["cashBack"]["recovery"]["interruption"].update(afterPodFingerprints=["a" * 64]),
+    "pending-release": lambda value: value["cashBack"]["recovery"]["drained"].update(slotDrained=False),
+    "principal-reset": lambda value: value["cashBack"]["partial"]["settlement"].update(remainingStakeMinor=1000),
+    "mutable-full": lambda value: value["cashBack"].update(fullImmutableAfterResults=False),
+    "unknown-receipt": lambda value: value["cashBack"]["liveFull"]["operation"]["receipt"].update(outcome="UNKNOWN"),
+    "wrong-mode": lambda value: value["cashBack"].update(mode="compatibility"),
+    "wrong-run": lambda value: value.update(runId="105"),
+}
+for name, mutate in mutations.items():
+    value = copy.deepcopy(active)
+    mutate(value)
+    (root / f"{name}.json").write_text(json.dumps(value))
+PY
+for cash_back_mode in compatibility active; do
+  CASH_BACK_ACCEPTANCE_MODE="$cash_back_mode" \
+  CASH_BACK_ACCEPTANCE_EVIDENCE_FILE="$WORK_DIR/$cash_back_mode.json" \
+    run_revalidation >/dev/null
+done
+for negative in missing-pending stale-source worker-overlap pending-release principal-reset mutable-full unknown-receipt wrong-mode wrong-run missing-file; do
+  if CASH_BACK_ACCEPTANCE_MODE=active \
+      CASH_BACK_ACCEPTANCE_EVIDENCE_FILE="$WORK_DIR/$negative.json" \
+      run_revalidation >/dev/null 2>&1; then
+    fail "invalid cash-back acceptance passed: $negative"
+  fi
+done
 
 for literal in \
   'Write accepted activation lease evidence' \
@@ -96,6 +168,8 @@ for literal in \
   grep -Fq "$literal" "$WORKFLOW" ||
     fail "activation workflow is missing safety contract: $literal"
 done
+grep -Fq 'CASH_BACK_ACCEPTANCE_EVIDENCE_FILE: artifacts/live-control/acceptance/evidence.json' "$WORKFLOW" ||
+  fail "final activation revalidation is not bound to cash-back acceptance"
 
 if grep -Fq "steps.evidence_upload.outcome != 'success'" "$WORKFLOW"; then
   fail "activation workflow still disables live based on post-commit evidence upload"
@@ -132,6 +206,17 @@ require_order(
         "Upload protected activation evidence",
     ],
     "activation workflow",
+)
+require_order(
+    [
+        "Verify declared cash-back generation mode",
+        "Exercise complete production live journey",
+        "Reconcile protected cash-back worker interruption",
+        "Revoke and clean reusable validation account",
+        "Revalidate release head before acceptance",
+        "Write accepted activation lease evidence",
+    ],
+    "cash-back acceptance",
 )
 PY
 

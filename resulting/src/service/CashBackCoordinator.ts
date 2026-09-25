@@ -118,11 +118,17 @@ const reserveRequests = (op: Operation): CashBackSourceReserveRequest[] => {
 
 export class CashBackCoordinator {
   private readonly publishers: CashBackPublishers;
+  private readonly cashBackEnabled: boolean;
   private timer?: NodeJS.Timeout;
   private running?: Promise<void>;
   private readonly activeOperations = new Map<string, Promise<void>>();
 
   constructor(connection: IAmqpConnection, publishers?: CashBackPublishers) {
+    const configured = process.env.CASH_BACK_ENABLED;
+    this.cashBackEnabled = configured === "true";
+    if (configured !== undefined && configured !== "true" && configured !== "false") {
+      console.error("resulting_cash_back_invalid_configuration", { variable: "CASH_BACK_ENABLED", disabled: true });
+    }
     this.publishers = publishers ?? {
       source: new SourcePublisher(connection), outcome: new OutcomePublisher(connection),
     };
@@ -378,6 +384,7 @@ export class CashBackCoordinator {
   }
 
   private async prepareQuote(op: Operation): Promise<void> {
+    if (!this.cashBackEnabled) return this.unavailable(op, "AUTHORITY_UNAVAILABLE");
     try {
       if (await BetArchive.exists({ slipId: op.operation.slipId })) {
         throw new CashBackUnavailable("BET_NOT_CONFIRMED");
@@ -523,6 +530,7 @@ export class CashBackCoordinator {
     if (!root || root.bet.cashBackPending?.operation.operationId !== op.operationId) return;
     const pending = root.bet.cashBackPending;
     if (pending.state !== "UNDECIDED") return;
+    if (!this.cashBackEnabled) return this.reject(root, "AUTHORITY_UNAVAILABLE");
     const financial = financialSnapshot(root.bet);
     if (!isDeepStrictEqual(financial, pending.quote.financial)) return this.reject(root, "STALE_REVISION");
     if (root.model === BetArchive || root.bet.status !== ResultingStatus.BET_APPROVED) return this.reject(root, "BET_NOT_CONFIRMED");
@@ -564,7 +572,7 @@ export class CashBackCoordinator {
         "cashBackPending.operation.operationId": op.operationId,
         "cashBackPending.operation.fingerprint": op.operation.fingerprint,
         rows: { $not: { $elemMatch: { result: { $ne: ResultingStatus.ROW_NO_RESULT } } } },
-        $expr: cashBackBeforeDeadline,
+        $expr: { $and: [{ $literal: this.cashBackEnabled }, cashBackBeforeDeadline] },
       },
       [{ $set: {
         status: quote.mode === "FULL" ? ResultingStatus.BET_CASH_BACK : ResultingStatus.BET_APPROVED,

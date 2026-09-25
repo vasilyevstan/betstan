@@ -70,7 +70,7 @@ flowchart TB
 | Ingress | Routes the SPA and `/api/*` paths; disables buffering for SSE |
 | k3s | Runs the ten application workloads plus MongoDB and RabbitMQ |
 | MongoDB | Persistent state for nine service-owned logical databases |
-| RabbitMQ | Internal fanout broker with 23 current application queues |
+| RabbitMQ | Internal fanout broker with a generation-bound queue inventory; cash-back-compatible releases require 28 queues (see [[Release Orchestration]]) |
 | GHCR | Public application image registry; runtime pulls without a long-lived registry secret |
 | GitHub Actions | Builds, validates, deploys, activates, rolls back, and records provenance |
 

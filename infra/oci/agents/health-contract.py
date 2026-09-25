@@ -54,7 +54,6 @@ EXPECTED_PLATFORM_DIGESTS = {
     "cert-manager/cert-manager-webhook": "sha256:d8b3961b51c8c7320633f8208dc46bf88aa13804d0f7cbe48a096b2c523cee42",
     "cert-manager/cert-manager-cainjector": "sha256:ccf6b919ec0500745a47a910118f834f9636d0aac1ff221245cd2557ed8c7c98",
 }
-EXPECTED_RABBITMQ_QUEUE_COUNT = 23
 
 
 class ContractFailure(Exception):
@@ -210,10 +209,17 @@ def validate(snapshot):
         require(service.get("type") == "ClusterIP", "public-data-service", "application/data service is public")
 
     rabbit = snapshot.get("rabbitmq", {})
+    expected_queue_count = rabbit.get("expected_queue_count")
     require(
-        rabbit.get("queue_count") == EXPECTED_RABBITMQ_QUEUE_COUNT,
+        type(expected_queue_count) is int and expected_queue_count > 0,
+        "queue-baseline",
+        "RabbitMQ expected inventory is missing or invalid",
+    )
+    require(
+        type(rabbit.get("queue_count")) is int
+        and rabbit["queue_count"] == expected_queue_count,
         "queue-count",
-        f"RabbitMQ does not expose the expected {EXPECTED_RABBITMQ_QUEUE_COUNT} queues",
+        f"RabbitMQ does not expose the expected {expected_queue_count} queues",
     )
     require(
         rabbit.get("telemetry_queue_present") is True,

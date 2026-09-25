@@ -21,7 +21,7 @@ For the service map and message catalog, see [[Architecture]] and
 | Draft slip maintenance | Slip | Event, Client |
 | Placement and moderation | Slip, Moderation | Bet, Resulting |
 | Settlement and payout | Resulting | Bet, Event, Gamemaster |
-| Cash-back candidate, not active | Resulting | Bet, Backoffice, Gamemaster, Client |
+| Cash back (deployment-gated) | Resulting | Bet, Backoffice, Gamemaster, Client |
 | Public event projection | Event | Client |
 | Public operational summaries | Telemetry | Client, Auth, Slip, Resulting, Gamemaster |
 
@@ -302,11 +302,11 @@ the final row outcomes, aggregate result, and payout in the history shown on
 duplicates and the case where a settlement message reaches a consumer before
 the related placement is visible there.
 
-## Cash back - runtime candidate, not active
+## Cash back - deployment-gated
 
-This process is implemented in source but is **not yet deployed or active in
-production**. It closes all or part of a confirmed bet's remaining exposure;
-it does not cancel the placement or transfer money.
+Availability depends on a verified, enabled deployed generation; see
+[[Release Orchestration]]. This process closes all or part of a confirmed bet's
+remaining exposure; it does not cancel the placement or transfer money.
 
 ### Eligibility and quote lifetime
 

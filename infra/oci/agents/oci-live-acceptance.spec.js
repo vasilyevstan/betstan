@@ -1,7 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const { spawnSync } = require('child_process');
 const { test, expect } = require('@playwright/test');
+const { withStoppedResulting } = require('../scripts/cash-back-acceptance-recovery-stan');
 
 const ROTATING_LIVE_MARKETS = [
   { marketType: 'NEXT_YELLOW_CARD', label: 'Next Yellow Card' },
@@ -49,9 +51,16 @@ const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([
   'Live quote is stale',
   'Market version mismatch',
 ]);
+const RETRYABLE_CASH_BACK_REASONS = [
+  'QUOTE_EXPIRED', 'QUOTE_CHANGED', 'STALE_REVISION', 'RESERVATION_DENIED',
+];
 
 const board = (page, betKind) => page.locator(
   `section[aria-labelledby="slip-board-title-${betKind}"]`,
+);
+
+const betCard = (page, slipId) => page.locator(
+  `.my-bets-card[data-slip-id="${slipId}"]`,
 );
 
 const requiredEnv = (name) => {
@@ -72,6 +81,17 @@ const responseErrorMessage = async (response) => {
     ?? body?.errors?.[0]?.message
     ?? body?.message
     ?? `HTTP ${response.status()}`;
+};
+
+const operatorCommand = (stage, command, args, env = process.env) => {
+  const result = spawnSync(command, args, {
+    env, encoding: 'utf8', timeout: 140000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`Protected cash-back ${stage} failed (${result.error?.code ?? result.status}).`);
+  }
+  return result.stdout;
 };
 
 const liveMarketSignature = async (marketCard) => {
@@ -148,6 +168,207 @@ const selectLiveMarket = async ({
   }
 };
 
+const readOwnedBet = async (page, slipId) => {
+  const response = await page.request.get('/api/bet');
+  expect(response.ok()).toBeTruthy();
+  const bets = await response.json();
+  expect(Array.isArray(bets)).toBe(true);
+  return findBySlipId(bets, slipId);
+};
+
+const waitForCashBackDrain = async (slipId, operation) => {
+  const owner = requiredEnv('LIVE_ACCEPTANCE_USER_ID');
+  const namespace = requiredEnv('OCI_K8S_NAMESPACE');
+  if (
+    !/^[a-f0-9]{24}$/.test(owner) || !/^[a-f0-9]{24}$/.test(slipId)
+    || !/^[a-f0-9]{64}$/.test(operation.operationId)
+  ) throw new Error('Cash-back obligation inspection requires owned exact identifiers.');
+  const pods = JSON.parse(operatorCommand('Mongo identity', 'kubectl', [
+    '--request-timeout=15s', 'get', 'pods', '-n', namespace,
+    '-l', 'app=gaming-auth-mongo', '-o', 'json',
+  ])).items;
+  if (pods.length !== 1) throw new Error('Expected one retained shared Mongo pod.');
+  const query = `
+const owner = ${JSON.stringify(owner)};
+const slipId = ${JSON.stringify(slipId)};
+const operationId = ${JSON.stringify(operation.operationId)};
+const resulting = db.getSiblingDB("gaming_resulting");
+const root = resulting.bets.findOne({slipId, userId: owner})
+  || resulting.betarchives.findOne({slipId, userId: owner});
+const filter = {operationId, "operation.userId": owner, "operation.slipId": slipId};
+const canonical = resulting.cashbackoperations.findOne(filter);
+const projection = db.getSiblingDB("gaming_bet").cashbackoperations.findOne(filter);
+print(JSON.stringify({
+  rootPresent: Boolean(root),
+  slotDrained: Boolean(root && !root.cashBackPending),
+  terminalHistory: canonical?.stage === "TERMINAL",
+  outcomePublished: canonical?.outcomePending === false,
+  projectionComplete: projection?.projectionPending === false,
+  receiptMatches: Boolean(canonical?.outcome?.receiptFingerprint
+    && canonical.outcome.receiptFingerprint === projection?.receiptFingerprint)
+}));`;
+  let evidence;
+  await expect.poll(() => {
+    evidence = JSON.parse(operatorCommand('bounded obligation inspection', 'kubectl', [
+      '--request-timeout=15s', 'exec', '-n', namespace, pods[0].metadata.name, '--',
+      'mongosh', '--quiet', '--norc', '--eval', query,
+      'mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000&socketTimeoutMS=3000',
+    ]));
+    return Object.keys(evidence).length === 6
+      && Object.values(evidence).every((value) => value === true);
+  }, { timeout: 30000, intervals: [250, 500, 1000] }).toBe(true);
+  return evidence;
+};
+
+const waitForCashBackState = async (page, slipId, operationId, states) => {
+  let operation;
+  await expect.poll(async () => {
+    const response = await page.request.get(
+      `/api/bet/${slipId}/cash-back/operations/${operationId}`,
+    );
+    expect(response.ok()).toBeTruthy();
+    operation = await response.json();
+    expect(operation.slipId).toBe(slipId);
+    expect(operation.operationId).toBe(operationId);
+    return states.includes(operation.state);
+  }, { timeout: 30000, intervals: [200, 400, 800] }).toBe(true);
+  return operation;
+};
+
+const requestCashBackQuote = async (page, slipId, portion) => {
+  const request = { action: 'QUOTE', clientOperationId: randomUUID(), portion };
+  const response = await page.request.post(`/api/bet/${slipId}/cash-back/quote`, {
+    data: request,
+  });
+  expect([200, 202]).toContain(response.status());
+  const registered = await response.json();
+  const operation = await waitForCashBackState(
+    page, slipId, registered.operationId, ['QUOTED', 'UNAVAILABLE'],
+  );
+  expect(operation.clientOperationId).toBe(request.clientOperationId);
+  return operation;
+};
+
+const acceptCashBack = async (page, slipId, portion) => {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const operation = await requestCashBackQuote(page, slipId, portion);
+    if (operation.state === 'UNAVAILABLE') {
+      expect(RETRYABLE_CASH_BACK_REASONS).toContain(operation.reason);
+      continue;
+    }
+    const confirm = {
+      action: 'CONFIRM', clientOperationId: operation.clientOperationId,
+      quoteId: operation.quote.quoteId,
+    };
+    const response = await page.request.post(`/api/bet/${slipId}/cash-back/accept`, {
+      data: confirm,
+    });
+    expect([200, 202]).toContain(response.status());
+    const decided = await waitForCashBackState(
+      page, slipId, operation.operationId, ['ACCEPTED', 'REJECTED'],
+    );
+    await waitForCashBackDrain(slipId, decided);
+    if (decided.state === 'REJECTED') {
+      expect(RETRYABLE_CASH_BACK_REASONS).toContain(decided.receipt.reason);
+      continue;
+    }
+    expect(decided.receipt.quote).toEqual(operation.quote);
+    const financial = decided.receipt.financial;
+    expect(financial.originalStakeMinor).toBe(
+      financial.remainingStakeMinor + financial.cumulativeClosedStakeMinor,
+    );
+    return decided;
+  }
+  throw new Error('No current cash-back offer was accepted within the bounded journey.');
+};
+
+const acceptFullCashBackThroughUI = async (page, slipId) => {
+  await page.getByTitle('My bets').click();
+  const card = betCard(page, slipId);
+  await expect(card).toContainText('CONFIRMED');
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const quoteResponse = page.waitForResponse((response) => (
+      new URL(response.url()).pathname === `/api/bet/${slipId}/cash-back/quote`
+      && response.request().method() === 'POST'
+    ));
+    await card.getByRole('button', { name: /^Get (cash-back|new) offer$/ }).click();
+    const response = await quoteResponse;
+    expect([200, 202]).toContain(response.status());
+    const registered = await response.json();
+    const quoted = await waitForCashBackState(
+      page, slipId, registered.operationId, ['QUOTED', 'UNAVAILABLE'],
+    );
+    expect(quoted.state).toBe('QUOTED');
+    expect(quoted.quote.mode).toBe('FULL');
+    await expect(card).toContainText('Quoted nominal return');
+    const confirmation = page.waitForResponse((result) => (
+      new URL(result.url()).pathname === `/api/bet/${slipId}/cash-back/accept`
+      && result.request().method() === 'POST'
+    ));
+    await card.getByRole('button', { name: 'Confirm full cash back', exact: true }).click();
+    expect([200, 202]).toContain((await confirmation).status());
+    const decided = await waitForCashBackState(
+      page, slipId, quoted.operationId, ['ACCEPTED', 'REJECTED'],
+    );
+    await waitForCashBackDrain(slipId, decided);
+    if (decided.state === 'REJECTED') {
+      expect(RETRYABLE_CASH_BACK_REASONS).toContain(decided.receipt.reason);
+      continue;
+    }
+    expect(decided.receipt.quote).toEqual(quoted.quote);
+    expect(decided.receipt.financial.remainingStakeMinor).toBe(0);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(betCard(page, slipId)).toContainText('CASH BACK');
+    return decided;
+  }
+  throw new Error('The reviewed full cash-back offer was not accepted.');
+};
+
+const closedBetState = (bet) => ({
+  status: bet.status,
+  financial: bet.cashBackFinancial,
+  rows: bet.rows.map((row) => ({
+    id: row.id ?? row._id, status: row.status,
+    winningSide: row.winningSide, winningSelection: row.winningSelection,
+    settlementReason: row.settlementReason, settlementSequence: row.settlementSequence,
+  })),
+});
+
+const placeAdditionalAcceptanceBet = async (page, fixture, betKind) => {
+  await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (betKind === 'LIVE') {
+      await selectLiveMarket({ fixture, marketType: SETTLEMENT_MARKET_TYPE, page });
+    } else {
+      await page.getByRole('article', { name: fixture.name })
+        .getByRole('button', { name: /^Select 1X2 .* at / }).first().click();
+      await expect(board(page, 'PRE_MATCH')).toContainText(fixture.name);
+    }
+    await page.getByLabel(`Wager for ${betKind === 'LIVE' ? 'LIVE' : 'PRE-MATCH'} SLIP`).fill('10');
+    const boards = await (await page.request.get('/api/slip/boards')).json();
+    const slipId = boards[betKind]._id;
+    const placed = page.waitForResponse((response) => (
+      new URL(response.url()).pathname === '/api/slip/bet'
+      && response.request().method() === 'POST'
+    ));
+    await board(page, betKind).getByRole('button', { name: 'BET!' }).click();
+    expect((await placed).ok()).toBeTruthy();
+    let bet;
+    await expect.poll(async () => {
+      bet = await readOwnedBet(page, slipId);
+      return bet?.status ?? 'MISSING';
+    }, { timeout: 30000, intervals: [250, 500, 1000] }).toMatch(/^(CONFIRMED|DECLINED)$/);
+    if (bet.status === 'CONFIRMED') return bet;
+    expect(betKind).toBe('LIVE');
+    expect(bet.declineReason).toBe('STALE_QUOTE');
+    await expect.poll(async () => {
+      const next = await (await page.request.get('/api/slip/boards')).json();
+      return `${next.LIVE?.status}:${next.LIVE?.sourceSlipId}`;
+    }, { timeout: 30000, intervals: [250, 500, 1000] }).toBe(`DRAFT:${slipId}`);
+  }
+  throw new Error('Cash-back acceptance could not place a current owned bet.');
+};
+
 test('production live matches, dual slips, and settlement stay coherent', async ({
   browser,
   page,
@@ -156,6 +377,9 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   const password = requiredEnv('LIVE_ACCEPTANCE_PASSWORD');
   const runId = requiredEnv('LIVE_ACCEPTANCE_RUN_ID');
   const evidenceFile = requiredEnv('LIVE_ACCEPTANCE_EVIDENCE_FILE');
+  const cashBackMode = requiredEnv('CASH_BACK_ACCEPTANCE_MODE');
+  expect(['compatibility', 'active']).toContain(cashBackMode);
+  const cashBackEvidence = { mode: cashBackMode };
   const livePlacementEvidenceFile = path.join(
     path.dirname(evidenceFile),
     'live-placement-attempts.json',
@@ -619,6 +843,24 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   expect(acceptedLiveQuote).toBeDefined();
   expect(liveSlipId).toBeDefined();
 
+  if (cashBackMode === 'active') {
+    const cashBackPage = await page.context().newPage();
+    const fullLiveBet = await placeAdditionalAcceptanceBet(
+      cashBackPage, fixtures[1], 'LIVE',
+    );
+    const fullLive = await acceptCashBack(
+      cashBackPage, fullLiveBet.slipId, { mode: 'FULL' },
+    );
+    expect(fullLive.receipt.financial.remainingStakeMinor).toBe(0);
+    const closed = await readOwnedBet(cashBackPage, fullLiveBet.slipId);
+    expect(closed.status).toBe('CASH_BACK');
+    cashBackEvidence.liveFull = {
+      slipId: fullLiveBet.slipId, operation: fullLive,
+      immutableState: closedBetState(closed),
+    };
+    await cashBackPage.close();
+  }
+
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toHaveValue('10');
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toBeEnabled();
   await expect(preMatchBoard.getByRole('button', { name: 'BET!' })).toBeEnabled();
@@ -923,6 +1165,94 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     intervals: [500, 1000, 2000],
   }).toBe('CONFIRMED');
 
+  if (cashBackMode === 'compatibility') {
+    const response = await page.request.post(
+      `/api/bet/${preMatchSlipId}/cash-back/quote`,
+      { data: { action: 'QUOTE', clientOperationId: randomUUID(), portion: { mode: 'FULL' } } },
+    );
+    expect(response.status()).toBe(503);
+    const unavailable = await response.json();
+    expect(unavailable.errors[0].code).toBe('AUTHORITY_UNAVAILABLE');
+    expect(unavailable.operationId).toBeUndefined();
+    const history = await page.request.get(`/api/bet/${preMatchSlipId}/cash-back/history`);
+    expect(history.ok()).toBeTruthy();
+    expect((await history.json()).items).toEqual([]);
+    cashBackEvidence.compatibility = {
+      newAdmissionRefused: true, historyReadable: true, noPendingIdentifier: true,
+    };
+  } else {
+    const firstPartial = await acceptCashBack(
+      page, preMatchSlipId, { mode: 'PARTIAL', stakeMinor: 1 },
+    );
+    const secondPartial = await acceptCashBack(
+      page, preMatchSlipId, { mode: 'PARTIAL', stakeMinor: 1 },
+    );
+    expect(secondPartial.receipt.financial.originalStakeMinor).toBe(1000);
+    expect(secondPartial.receipt.financial.remainingStakeMinor).toBe(998);
+    expect(secondPartial.receipt.financial.cumulativeClosedStakeMinor).toBe(2);
+    expect(secondPartial.receipt.financial.revision).toBeGreaterThan(
+      firstPartial.receipt.financial.revision,
+    );
+    const cashBackPage = await page.context().newPage();
+    const fullBet = await placeAdditionalAcceptanceBet(cashBackPage, futureFixture, 'PRE_MATCH');
+    const full = await acceptFullCashBackThroughUI(cashBackPage, fullBet.slipId);
+    cashBackEvidence.preMatchFull = {
+      slipId: fullBet.slipId, operation: full, confirmedThroughUI: true,
+      immutableState: closedBetState(await readOwnedBet(cashBackPage, fullBet.slipId)),
+    };
+    await cashBackPage.close();
+
+    const recoveryPage = await page.context().newPage();
+    const recoveryBet = await placeAdditionalAcceptanceBet(
+      recoveryPage, futureFixture, 'PRE_MATCH',
+    );
+    const recoverySlipId = recoveryBet.slipId;
+    const recoveryQuote = await requestCashBackQuote(recoveryPage, recoverySlipId, { mode: 'FULL' });
+    expect(recoveryQuote.state).toBe('QUOTED');
+    const confirm = {
+      action: 'CONFIRM', clientOperationId: recoveryQuote.clientOperationId,
+      quoteId: recoveryQuote.quote.quoteId,
+    };
+    const interruption = await withStoppedResulting(async () => {
+      const response = await recoveryPage.request.post(`/api/bet/${recoverySlipId}/cash-back/accept`, {
+        data: confirm,
+      });
+      expect(response.status()).toBe(202);
+      const pending = await response.json();
+      expect(pending.state).toBe('CONFIRM_PENDING');
+      expect(pending.operationId).toBe(recoveryQuote.operationId);
+      fs.writeFileSync(path.join(path.dirname(evidenceFile), 'cash-back-pending.json'),
+        `${JSON.stringify({ runId, slipId: recoverySlipId, operationId: pending.operationId,
+          clientOperationId: pending.clientOperationId, quoteId: confirm.quoteId,
+          state: pending.state })}\n`, { mode: 0o600 });
+      return { pendingObservedWithZeroWorkers: true, operationId: pending.operationId };
+    }, path.dirname(evidenceFile));
+    const recovered = await waitForCashBackState(
+      recoveryPage, recoverySlipId, recoveryQuote.operationId, ['ACCEPTED', 'REJECTED'],
+    );
+    const accepted = recovered.state === 'ACCEPTED';
+    if (!accepted) expect(recovered.receipt.reason).toBe('QUOTE_EXPIRED');
+    expect(recovered.receipt.financial.originalStakeMinor).toBe(1000);
+    expect(recovered.receipt.financial.remainingStakeMinor).toBe(accepted ? 0 : 1000);
+    expect(recovered.receipt.financial.cumulativeClosedStakeMinor).toBe(accepted ? 1000 : 0);
+    const replay = await recoveryPage.request.post(`/api/bet/${recoverySlipId}/cash-back/accept`, {
+      data: confirm,
+    });
+    expect(replay.status()).toBe(200);
+    expect((await replay.json()).receipt).toEqual(recovered.receipt);
+    const drained = await waitForCashBackDrain(recoverySlipId, recovered);
+    const history = await page.request.get(`/api/bet/${preMatchSlipId}/cash-back/history`);
+    expect((await history.json()).items).toHaveLength(2);
+    cashBackEvidence.partial = { slipId: preMatchSlipId, operations: [firstPartial, secondPartial] };
+    cashBackEvidence.recovery = {
+      slipId: recoverySlipId, interruption, operation: recovered, drained,
+      sameIdentityReplay: true,
+      immutableState: accepted
+        ? closedBetState(await readOwnedBet(recoveryPage, recoverySlipId)) : null,
+    };
+    await recoveryPage.close();
+  }
+
   const manualResult = await publicContext.request.post('/api/backoffice/result', {
     data: {
       eventId: futureFixture.eventId,
@@ -940,25 +1270,47 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     intervals: [500, 1000, 2000],
   }).toBe('WIN');
 
+  if (cashBackMode === 'active') {
+    const partialSettled = await readOwnedBet(page, preMatchSlipId);
+    expect(partialSettled.wager).toBe(10);
+    expect(partialSettled.cashBackFinancial.status).toBe('WIN');
+    expect(partialSettled.cashBackFinancial.remainingStakeMinor).toBe(998);
+    expect(partialSettled.cashBackFinancial.cumulativeClosedStakeMinor).toBe(2);
+    for (const full of [cashBackEvidence.liveFull, cashBackEvidence.preMatchFull]) {
+      expect(closedBetState(await readOwnedBet(page, full.slipId))).toEqual(full.immutableState);
+      const history = await page.request.get(`/api/bet/${full.slipId}/cash-back/history`);
+      const receipts = (await history.json()).items;
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toEqual(full.operation.receipt);
+    }
+    const recoveryBet = await readOwnedBet(page, cashBackEvidence.recovery.slipId);
+    if (cashBackEvidence.recovery.operation.state === 'ACCEPTED') {
+      expect(closedBetState(recoveryBet)).toEqual(cashBackEvidence.recovery.immutableState);
+    } else {
+      await expect.poll(async () => (
+        (await readOwnedBet(page, cashBackEvidence.recovery.slipId))?.status
+      ), { timeout: 30000, intervals: [250, 500, 1000] }).toBe('WIN');
+    }
+    cashBackEvidence.partial.settlement = partialSettled.cashBackFinancial;
+    cashBackEvidence.fullImmutableAfterResults = true;
+  }
+
   await page.getByTitle('My bets').click();
-  const preKickoffLiveHistory = page.locator('.my-bets-card')
-    .filter({ hasText: `Slip ${preKickoffLiveSlipId}` });
+  const preKickoffLiveHistory = betCard(page, preKickoffLiveSlipId);
   await expect(preKickoffLiveHistory).toContainText('Live');
   await expect(preKickoffLiveHistory).toContainText('Kickoff Team');
   await expect(preKickoffLiveHistory).toContainText(fixtures[0].name);
   await expect(preKickoffLiveHistory).toContainText(fixtures[1].name);
   await expect(preKickoffLiveHistory).toContainText(preKickoffLiveBet.status);
-  const inPlayLiveHistory = page.locator('.my-bets-card')
-    .filter({ hasText: `Slip ${liveSlipId}` });
+  const inPlayLiveHistory = betCard(page, liveSlipId);
   await expect(inPlayLiveHistory).toContainText('Live');
   await expect(inPlayLiveHistory).toContainText('Second Half Score');
   await expect(inPlayLiveHistory).toContainText(fixtures[0].name);
   await expect(inPlayLiveHistory).toContainText(liveBet.status);
-  const preMatchHistory = page.locator('.my-bets-card').filter({
-    hasText: futureFixture.name,
-  });
+  const preMatchHistory = betCard(page, preMatchSlipId);
   await expect(preMatchHistory).toContainText('Pre-match');
   await expect(preMatchHistory).toContainText('WIN');
+  if (cashBackMode === 'active') await expect(preMatchHistory).toContainText('PARTIAL CASH BACK');
 
   await page.evaluate(() => window.__liveAcceptance.source.close());
   expect(pageErrors).toEqual([]);
@@ -994,6 +1346,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     },
     preMatchSlipId,
     preMatchBetStatus: 'WIN',
+    cashBack: cashBackEvidence,
     pageErrors: pageErrors.length,
     consoleErrors: consoleErrors.length,
     apiFailures: apiFailures.length,

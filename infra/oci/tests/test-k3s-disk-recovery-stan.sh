@@ -1154,6 +1154,7 @@ for malformed in \
   'name messages_ready messages_unacknowledged consumers extra' \
   'event_new_event invalid 0 1' \
   'event_new_event -1 0 1' \
+  'event_new_event 2 1 1' \
   'Listing queues for vhost / ...'; do
   printf '%s\n%s\n' "$active_queues" "$malformed" >"$work_dir/snapshot-queues.tsv"
   snapshot_malformed_count=$((snapshot_malformed_count + 1))
@@ -1190,16 +1191,23 @@ if grep -Eq 'customer_private_token|event_result_private|private-pod-id' \
     "$work_dir/snapshot-redacted-queue-names.log"; then
   fail "snapshot diagnostic exposed an unknown queue name"
 fi
-printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
-awk 'BEGIN {for (i=0; i<100; i++) print "event_result\t1\t2\t0"}' \
-  >>"$work_dir/snapshot-queues.tsv"
+{
+  printf 'fixture_active_queue\t0\t0\t1\n'
+  awk '{print $1 "\t1\t2\t0"}' "$work_dir/snapshot-known-queues.tsv"
+  awk 'BEGIN {for (i=0; i<100; i++) print "fixture_private_queue_" i "\t1\t2\t0"}'
+} >"$work_dir/snapshot-queues.tsv"
 snapshot_case bounded-queue-details fail "queue baseline is unhealthy or malformed"
-[[ "$(grep -c '^queue_zero_consumers ' "$work_dir/snapshot-bounded-queue-details.log")" == "24" ]] ||
+expected_details="$(awk 'END {print (NR < 24 ? NR : 24)}' "$work_dir/snapshot-known-queues.tsv")"
+other_details="$(awk 'END {print 100 + (NR > 24 ? NR - 24 : 0)}' "$work_dir/snapshot-known-queues.tsv")"
+[[ "$(grep -c '^queue_zero_consumers ' "$work_dir/snapshot-bounded-queue-details.log")" == "$expected_details" ]] ||
   fail "snapshot queue detail count is not bounded"
 snapshot_diagnostic bounded-queue-details \
-  'other_zero_consumer_queues=76 messages_ready=76 messages_unacknowledged=152 consumers=0'
+  "other_zero_consumer_queues=$other_details messages_ready=$other_details messages_unacknowledged=$((other_details * 2)) consumers=0"
+if grep -Fq 'fixture_private_queue_' "$work_dir/snapshot-bounded-queue-details.log"; then
+  fail "bounded snapshot diagnostic exposed an unknown queue name"
+fi
 {
-  printf '%s\n' "$active_queues"
+  printf 'fixture_active_queue\t0\t0\t1\n'
   cat "$work_dir/snapshot-known-queues.tsv"
 } >"$work_dir/snapshot-queues.tsv"
 snapshot_case source-declared-queues fail "queue baseline is unhealthy or malformed"
