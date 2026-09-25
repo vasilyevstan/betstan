@@ -439,6 +439,7 @@ main().catch((error) => {
 });
 NODE
 client_ui_css="$ROOT_DIR/client/src/styles/ui.css"
+node "$OCI_DIR/tests/test-live-acceptance-errors-stan.js"
 node "$OCI_DIR/tests/test-cash-back-acceptance-recovery-stan.js"
 client_live_regression="$ROOT_DIR/client/tests/e2e/live-betting-regression.spec.js"
 moderation_listener="$ROOT_DIR/moderation/src/event/listener/LiveEventUpdateListener.ts"

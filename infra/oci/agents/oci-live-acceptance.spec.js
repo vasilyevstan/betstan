@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { randomUUID } = require('crypto');
+const { createHash, randomUUID } = require('crypto');
 const { spawnSync } = require('child_process');
 const { test, expect } = require('@playwright/test');
 const { withStoppedResulting } = require('../scripts/cash-back-acceptance-recovery-stan');
@@ -74,6 +74,150 @@ const requiredEnv = (name) => {
 const findBySlipId = (bets, slipId) => (
   Array.isArray(bets) ? bets.find((bet) => bet.slipId === slipId) : undefined
 );
+
+const handledLiveSelectionFailures = new WeakMap();
+
+const createBrowserErrorAudit = async (page) => {
+  const sampleLimit = 128;
+  const fieldLimit = 96;
+  const responses = new Map();
+  const requests = new Map();
+  const browserErrors = [];
+  const session = await page.context().newCDPSession(page);
+  let capturing = true;
+  let overflow = false;
+  const staticPaths = new Set([
+    '/api/auth/currentuser', '/api/auth/login', '/api/auth/logout', '/api/auth/signup',
+    '/api/bet', '/api/bet/stats', '/api/event', '/api/event/odds', '/api/event/stream',
+    '/api/slip', '/api/slip/boards', '/api/slip/bet', '/api/slip/clean',
+    '/api/backoffice', '/api/backoffice/new_event', '/api/backoffice/result',
+  ]);
+  const pathname = (url) => {
+    if (!/^https?:\/\//.test(url)) return '[non-http]';
+    const value = new URL(url).pathname;
+    if (staticPaths.has(value)) return value;
+    const cashBack = /^\/api\/bet\/[^/]+\/cash-back\/(quote|accept|history|operations)(\/[^/]+)?$/
+      .exec(value);
+    if (cashBack) {
+      return `/api/bet/:id/cash-back/${cashBack[1]}${cashBack[2] ? '/:id' : ''}`;
+    }
+    if (/^\/api\/bet\/[^/]+$/.test(value)) return '/api/bet/:id';
+    const service = /^\/api\/(auth|bet|event|slip|backoffice)(?:\/|$)/.exec(value);
+    if (service) return `/api/${service[1]}/:route`;
+    if (value.startsWith('/api/')) return '/api/:route';
+    return value.startsWith('/static/') ? '/static/:asset' : '/:resource';
+  };
+  const recordBrowserError = (error) => {
+    if (browserErrors.length >= sampleLimit) overflow = true;
+    else browserErrors.push(error);
+  };
+  const selectionKey = (url, method, body) => (
+    method === 'POST'
+    && new URL(url).pathname === '/api/event/odds'
+    && typeof body === 'string'
+      ? createHash('sha256').update(JSON.stringify([url, method, body])).digest('hex')
+      : null
+  );
+  const describeResponse = (response) => ({
+    method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+      .includes(response.request().method()) ? response.request().method() : '[other]',
+    pathname: pathname(response.url()).slice(0, fieldLimit),
+    status: response.status(),
+  });
+  session.on('Network.requestWillBeSent', ({ requestId, request }) => {
+    if (!capturing) return;
+    const key = selectionKey(request.url, request.method, request.postData);
+    if (key) {
+      if (!requests.has(requestId) && requests.size >= sampleLimit) {
+        overflow = true;
+        return;
+      }
+      requests.set(requestId, {
+        key, url: request.url, duplicate: requests.has(requestId),
+      });
+    }
+  });
+  session.on('Network.responseReceived', ({ requestId, response }) => {
+    if (!capturing) return;
+    const request = requests.get(requestId);
+    if (request) request.status = response.status;
+  });
+  session.on('Runtime.consoleAPICalled', (event) => {
+    if (!capturing) return;
+    if (event.type === 'error') {
+      recordBrowserError({
+        source: 'console-api',
+        url: event.stackTrace?.callFrames?.[0]?.url ?? '',
+        status: null,
+      });
+    }
+  });
+  session.on('Log.entryAdded', ({ entry }) => {
+    if (!capturing || entry.level !== 'error') return;
+    const resource = /^Failed to load resource: the server responded with a status of (\d{3}) \(.*\)$/
+      .exec(entry.text);
+    recordBrowserError({
+      source: ['network', 'javascript', 'security', 'worker', 'rendering', 'storage']
+        .includes(entry.source) ? entry.source : 'browser',
+      url: entry.url ?? '',
+      requestId: entry.networkRequestId,
+      status: resource ? Number(resource[1]) : null,
+    });
+  });
+  const onResponse = (response) => {
+    if (!capturing || response.status() < 400) return;
+    if (!responses.has(response.request()) && responses.size >= sampleLimit) overflow = true;
+    else responses.set(response.request(), response);
+  };
+  page.on('response', onResponse);
+  await session.send('Network.enable', { maxPostDataSize: 65536 });
+  await session.send('Log.enable');
+  await session.send('Runtime.enable');
+  return async () => {
+    await session.send('Runtime.evaluate', { expression: 'void 0' });
+    await session.detach();
+    capturing = false;
+    page.off('response', onResponse);
+    const handled = [...responses.values()].filter((response) => (
+      handledLiveSelectionFailures.has(response.request())
+    ));
+    const consoleErrors = browserErrors.filter((error) => {
+      const request = requests.get(error.requestId);
+      if (
+        error.source !== 'network' || error.status !== 400
+        || !request || request.duplicate || request.status !== 400
+        || error.url !== request.url
+        || new URL(error.url).origin !== new URL(page.url()).origin
+      ) return true;
+      const networkMatches = [...requests.values()].filter((other) => (
+        other.key === request.key && other.status === 400
+      ));
+      const responseMatches = [...responses.values()].filter((response) => (
+        response.status() === 400
+        && selectionKey(
+          response.url(), response.request().method(), response.request().postData(),
+        ) === request.key
+      ));
+      return networkMatches.length !== 1 || responseMatches.length !== 1
+        || !handledLiveSelectionFailures.has(responseMatches[0].request());
+    }).map((error) => ({
+      source: error.source.slice(0, fieldLimit),
+      pathname: pathname(error.url).slice(0, fieldLimit),
+      status: error.status,
+    }));
+    return {
+      overflow,
+      consoleErrors,
+      httpErrors: [...responses.values()]
+        .filter((response) => !handledLiveSelectionFailures.has(response.request()))
+        .map(describeResponse),
+      handledSelectionErrors: handled.map((response) => ({
+        ...describeResponse(response),
+        reason: handledLiveSelectionFailures.get(response.request()).slice(0, fieldLimit),
+      })),
+    };
+  };
+};
 
 const responseErrorMessage = async (response) => {
   const body = await response.json().catch(() => null);
@@ -152,11 +296,16 @@ const selectLiveMarket = async ({
     }
 
     const errorMessage = await responseErrorMessage(response);
-    if (!RETRYABLE_LIVE_SELECTION_ERRORS.has(errorMessage) || attempt === 5) {
+    if (
+      response.status() !== 400
+      || !RETRYABLE_LIVE_SELECTION_ERRORS.has(errorMessage)
+      || attempt === 5
+    ) {
       throw new Error(
         `Live selection ${fixture.eventId}/${marketType} failed: ${errorMessage}`,
       );
     }
+    handledLiveSelectionFailures.set(response.request(), errorMessage);
 
     await expect.poll(
       () => liveMarketSignature(marketCard),
@@ -393,15 +542,10 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     );
   };
   const pageErrors = [];
-  const consoleErrors = [];
   const apiFailures = [];
+  const browserErrorAudit = await createBrowserErrorAudit(page);
 
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  page.on('console', (message) => {
-    if (message.type() === 'error') {
-      consoleErrors.push(message.text());
-    }
-  });
   page.on('requestfailed', (request) => {
     const pathname = new URL(request.url()).pathname;
     const expectedStreamDisconnect = (
@@ -1313,8 +1457,17 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   if (cashBackMode === 'active') await expect(preMatchHistory).toContainText('PARTIAL CASH BACK');
 
   await page.evaluate(() => window.__liveAcceptance.source.close());
+  const browserErrors = await browserErrorAudit();
+  fs.mkdirSync(path.dirname(evidenceFile), { recursive: true });
+  fs.writeFileSync(
+    path.join(path.dirname(evidenceFile), 'browser-errors.json'),
+    `${JSON.stringify(browserErrors, null, 2)}\n`,
+  );
+  const { consoleErrors, httpErrors } = browserErrors;
+  expect(browserErrors.overflow).toBe(false);
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
+  expect(httpErrors).toEqual([]);
   expect(apiFailures).toEqual([]);
 
   fs.mkdirSync(path.dirname(evidenceFile), { recursive: true });
