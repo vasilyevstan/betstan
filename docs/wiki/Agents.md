@@ -92,6 +92,12 @@ Once a slice is accepted, keep its feature/design scope fixed during release;
 continue required safety work and only the smallest correction for an
 observed blocker. See [[Release Orchestration]] for owned operational waits.
 
+After a successful deployment but failed acceptance, the conductor records the
+exact assertion and distinguishes application, harness, and provider causes
+before routing only the affected correction. Once the existing final-evidence
+checklist passes, it closes the unit rather than adding reviews, status-only
+handoffs, or another release. See [[Engineering Learnings]] for these lessons.
+
 It also treats concurrent feature delivery as normal. A session records the
 commits its outcome requires, while the release candidate may contain
 additional protected work. The conductor adopts the exact current `master`
@@ -130,6 +136,12 @@ handoffs.
 Mutation-capable runtime agents begin with diagnosis and require exact scope,
 authority, rollback, and stop conditions. They do not treat a broad request as
 permission for unrelated production changes.
+
+Deployment safety brings title, configuration, and publication-metadata checks
+forward, preserves the bounded same-authority approval rules, and verifies final
+artifact bytes, committed/no-lease state, and post-upload cleanup. The lessons in
+[[Engineering Learnings]] refine execution of [[Release Orchestration]]; they do
+not add gates or expand production authority.
 
 Seven specialists retain manual-only invocation: AKS operator, Azure
 retirement, domain/ingress, migration recovery, Mongo migration, OCI health
@@ -219,6 +231,12 @@ implementation owner.
 Reuse verified immutable facts only with current scope and complete coverage
 as required by [[Quality Gates]]. Keep private handoff references out of the
 public handbook; see [[Security]].
+
+For scoped-fixture or additional-page harness corrections, the test engineer
+follows [[Engineering Learnings]] on actual helpers, fixture isolation,
+identity-faithful request mocks, observable form restoration, and drained,
+precisely attributed error audits. Mock-browser results do not establish
+production acceptance.
 
 ### Resuming accepted reviews
 

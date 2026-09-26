@@ -137,6 +137,24 @@ boundaries. Browser tests prove geometry, accessibility, and interaction.
 Production acceptance proves the deployed composition and operational
 dependencies.
 
+### Exercise protected acceptance through the actual helper
+
+When a harness correction affects scoped fixtures or additional pages, run the
+actual helper on a fresh page, not just the primary page. Preserve the existing
+administrator-only offline fixture scope through affected LIVE and PRE_MATCH
+navigation and reload; exclude sibling fixtures and grant nothing to anonymous
+users. Browser route mocks do not intercept `APIRequestContext`: stub only
+required request-context reads and resolve selections by the submitted event
+identity. Await restored form values; a visible confirmation button alone does
+not prove asynchronous restoration. Keep mock-HTTP evidence distinct from real
+protected acceptance.
+
+Drain pending error captures before the final audit. A known retry needs exact
+handled-request attribution, never a blanket HTTP or console exemption. Keep
+diagnostics bounded and sanitized; unknown errors, ambiguity, and overflow
+remain failures. A snapshot of another tab cannot explain the failing page.
+See [[Release Orchestration]] for the acceptance and artifact boundaries.
+
 ### Treat first-attempt behavior as a contract
 
 If downstream provenance accepts only attempt one, a failed run is terminal
@@ -160,6 +178,13 @@ as a blocker, and never create dispatch, approval, or mutation authority.
 Active mutating work remains a fence. Provider-boundary revalidation preserves
 the exact source, runtime mode, protected approval, and provenance before any
 mutation.
+
+Check protected configuration, publishing prerequisites, and packed-manifest
+provenance metadata before expensive or one-use work. Registry reachability,
+a successful pack, or a consumer build does not prove publishability. Absence
+requires an exact prerequisite lookup or a complete paginated inventory, not
+the first page of results. See [[Release Orchestration]] for existing preflight
+requirements; inspect metadata without exposing secret values.
 
 ## Release and operations
 
@@ -230,7 +255,9 @@ procedures.
 A pull request title is release evidence, not an internal work bucket. Prefer
 short plain-language outcomes such as `Add second-half score betting` or
 `Fix live slip alignment`. Ambiguous prefixes such as `chore`, `misc`, or
-`wip` hide intent and should fail merge safety.
+`wip` hide intent and should fail merge safety. Check the title and its
+72-character limit before PR creation or metadata edits that trigger workflows,
+without replacing the final canonical merge check.
 
 ### Capture rollback before mutation
 
@@ -243,6 +270,22 @@ compatibility constraints required to restore it.
 A dark deployment can prove images, health, data compatibility, routing, and
 readiness before enabling a user-facing feature. Activation remains bounded
 until the full acceptance journey passes.
+
+Failed acceptance does not turn a successful deployment into a failed one or
+invalidate unchanged design. Classify the exact assertion as an application,
+harness, or provider problem before routing a bounded correction. A harness
+fix reopens affected evidence and required exact-source release checks, not
+unchanged contracts, package publication, or specialist reviews.
+
+After success, distinguish the leased acceptance artifact from final
+committed/no-lease evidence. Compare downloaded bytes and declared hashes,
+bind the verified image inventory, and inspect actual cleanup outcomes after
+upload; an earlier provenance snapshot cannot prove later work. Finish source
+inclusion and required byte-identical documentation publication, record one
+terminal result, and close. Reuse successful canonical revalidation when its
+inputs are unchanged. Failed attempts stay failed; completion does not require
+extra probes, reviews, handoffs, or status-only releases. See
+[[Release Orchestration]] for the existing release boundaries.
 
 ### A watcher is not progress
 
@@ -266,6 +309,12 @@ Inspect pending gates first on startup, resume, and each monitoring checkpoint.
 Eligible CLI-owned approvals and merges are the automation owner's execution
 responsibility, not another request for the user to approve manually. This
 does not remove technical checks or change approval of human-originated work.
+
+A retry for incomplete approval inventory is limited to a failure proven
+before approval submission, refreshed complete evidence, and still-valid
+original authority for the same canonical approval. Keep the same observer
+and wait bound. An ambiguous submission requires canonical reconciliation,
+not another dispatch, workflow rerun, or an authority change.
 
 ### Recovery is not diagnosis
 
