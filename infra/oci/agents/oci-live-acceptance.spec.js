@@ -484,7 +484,10 @@ const closedBetState = (bet) => ({
 });
 
 const placeAdditionalAcceptanceBet = async (page, fixture, betKind) => {
-  await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await page.goto(
+    `/?ui=v2&theme=dark&acceptanceEventIds=${fixture.eventId}`,
+    { waitUntil: 'domcontentloaded' },
+  );
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (betKind === 'LIVE') {
       await selectLiveMarket({ fixture, marketType: SETTLEMENT_MARKET_TYPE, page });
