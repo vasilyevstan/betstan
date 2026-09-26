@@ -5,7 +5,7 @@ const { execFileSync } = require('child_process');
 const path = require('path');
 const { runInNewContext } = require('vm');
 const { installFakeEventSource } = require('./support/fakeEventSource');
-const { createShellMockState, installAppApiMocks } = require('./support/mockAppApi');
+const { createLiveBettingMockState, createShellMockState, installAppApiMocks } = require('./support/mockAppApi');
 const { bet, quoted, accepted, rejected } = require('../fixtures/cashBack');
 
 const longName = 'Northern Mountain Falcons United Sporting Association - Southern Coastal Owls Athletic Club';
@@ -135,28 +135,122 @@ const prepare = async (page, state) => {
   });
 };
 
+const loadProtectedAcceptanceHelpers = () => {
+  const specPath = 'infra/oci/agents/oci-live-acceptance.spec.js';
+  const source = readFileSync(path.resolve(__dirname, '../../..', specPath), 'utf8');
+  const helpers = runInNewContext(`${source}\n({ betCard, placeAdditionalAcceptanceBet });`, {
+    URL,
+    process: { env: {} },
+    require: (name) => {
+      if (name === '@playwright/test') return { test: () => {}, expect };
+      if (name === 'fs' || name === 'child_process') return {};
+      if (name === '../scripts/cash-back-acceptance-recovery-stan') {
+        return {
+          withStoppedResulting: () => {
+            throw new Error('Protected recovery operations must not run in client helper tests');
+          },
+        };
+      }
+      if (name === 'path' || name === 'crypto') return require(name);
+      throw new Error(`Unexpected protected acceptance dependency: ${name}`);
+    },
+  }, { filename: specPath });
+  return { ...helpers, specPath, source };
+};
+
+for (const betKind of ['LIVE', 'PRE_MATCH']) {
+  test(`protected OCI additional ${betKind} page preserves its offline fixture scope`, async ({ page, context }, testInfo) => {
+    const { placeAdditionalAcceptanceBet, specPath, source } = loadProtectedAcceptanceHelpers();
+    const state = createLiveBettingMockState();
+    state.currentUser.role = 'ADMIN';
+    state.bets = [];
+    state.events.forEach((event, index) => {
+      event.eventId = String(index + 1).repeat(24);
+      event.visibility = 'OFFLINE';
+    });
+    const fixture = state.events.find((event) => Boolean(event.live) === (betKind === 'LIVE'));
+    const sibling = state.events.find((event) => event !== fixture);
+    if (fixture.live) {
+      fixture.live.currentMarkets = [{
+        ...fixture.live.currentMarkets[0],
+        marketId: `${fixture.eventId}:SECOND_HALF_SCORE`,
+        marketType: 'SECOND_HALF_SCORE',
+        selections: [{ selectionId: 'score-0-0', side: 'NONE', label: '0 - 0', odds: 3.5 }],
+      }];
+    }
+    const submitBoard = state.submitBoard;
+    state.submitBoard = (body) => {
+      const result = submitBoard(body);
+      if (result.status === 200) {
+        state.bets = [{
+          _id: `bet-${body.slipId}`, slipId: body.slipId, betKind,
+          status: 'CONFIRMED', wager: Number(body.wager), rows: state.boards[betKind].rows,
+        }];
+        state.boards[betKind] = null;
+      }
+      return result;
+    };
+    const configurePage = async (target) => {
+      await installFakeEventSource(target);
+      await installAppApiMocks(target, state);
+    };
+    await configurePage(page);
+    const scopedUrl = `/?ui=v2&theme=dark&acceptanceEventIds=${fixture.eventId}`;
+    await page.goto(scopedUrl);
+    await expect(page.getByRole('article', { name: fixture.name })).toBeVisible();
+    await expect(page.getByRole('article', { name: sibling.name })).toHaveCount(0);
+
+    const additionalPage = await context.newPage();
+    const originalGet = additionalPage.request.get;
+    // Browser routing does not intercept the helper's two APIRequestContext reads.
+    additionalPage.request.get = async (url) => {
+      expect(['/api/slip/boards', '/api/bet']).toContain(url);
+      const body = url === '/api/slip/boards' ? state.boards : state.bets;
+      return { ok: () => true, json: async () => JSON.parse(JSON.stringify(body)) };
+    };
+    try {
+      await configurePage(additionalPage);
+      await additionalPage.goto('/?ui=v2&theme=dark');
+      await expect(additionalPage.getByTitle('My bets')).toBeVisible();
+      await expect(additionalPage.getByRole('article', { name: fixture.name })).toHaveCount(0);
+      await expect(page.getByRole('article', { name: fixture.name })).toBeVisible();
+
+      const placed = await placeAdditionalAcceptanceBet(additionalPage, fixture, betKind);
+      expect(placed.status).toBe('CONFIRMED');
+      expect(state.submissions).toHaveLength(1);
+      expect(state.submissions[0].rows.every((row) => row.eventId === fixture.eventId)).toBe(true);
+      expect(new URL(additionalPage.url()).searchParams.get('acceptanceEventIds')).toBe(fixture.eventId);
+      await expect(additionalPage.getByRole('article', { name: fixture.name })).toBeVisible();
+      await expect(additionalPage.getByRole('article', { name: sibling.name })).toHaveCount(0);
+      await additionalPage.reload();
+      await expect(additionalPage.getByRole('article', { name: fixture.name })).toBeVisible();
+
+      state.currentUser = null;
+      await additionalPage.reload();
+      await expect(additionalPage.getByRole('link', { name: 'Log in', exact: true })).toBeVisible();
+      await expect(additionalPage.getByRole('article', { name: fixture.name })).toHaveCount(0);
+      expect(state.unhandledRequests).toEqual([]);
+      await testInfo.attach('protected-additional-page-scope', {
+        contentType: 'application/json',
+        body: Buffer.from(JSON.stringify({
+          evidence: 'Actual additional-page helper and rendered application with HTTP mocks; no production operations',
+          betKind, source: sourceBinding(),
+          protectedSpec: { path: specPath, sha256: createHash('sha256').update(source).digest('hex') },
+          unscopedAdditionalPageExcluded: true, mainPageRemainedScoped: true,
+          exactFixturePlaced: true, siblingExcluded: true, reloadPreservedScope: true,
+          anonymousScopeRefused: true,
+        }, null, 2)),
+      });
+    } finally {
+      additionalPage.request.get = originalGet;
+      await additionalPage.close();
+    }
+  });
+}
+
 for (const mode of ['compatibility', 'active']) {
   test(`protected OCI bet-card helper selects the exact rendered slip in ${mode} mode across reload`, async ({ page }, testInfo) => {
-    const specPath = 'infra/oci/agents/oci-live-acceptance.spec.js';
-    const source = readFileSync(path.resolve(__dirname, '../../..', specPath), 'utf8');
-    // As in infra/oci/tests/test-contract.sh, register no production journey.
-    // Only the actual locator helper escapes this context; operational I/O is unavailable.
-    const betCard = runInNewContext(`${source}\nbetCard;`, {
-      process: { env: {} },
-      require: (name) => {
-        if (name === '@playwright/test') return { test: () => {}, expect };
-        if (name === 'fs' || name === 'child_process') return {};
-        if (name === '../scripts/cash-back-acceptance-recovery-stan') {
-          return {
-            withStoppedResulting: () => {
-              throw new Error('Protected recovery operations must not run in client locator tests');
-            },
-          };
-        }
-        if (name === 'path' || name === 'crypto') return require(name);
-        throw new Error(`Unexpected protected acceptance dependency: ${name}`);
-      },
-    }, { filename: specPath });
+    const { betCard, specPath, source } = loadProtectedAcceptanceHelpers();
     const state = createState();
     const slipId = state.bets[1].slipId; // A second card catches accidental first-card selection.
     const siblingId = state.bets[0].slipId;

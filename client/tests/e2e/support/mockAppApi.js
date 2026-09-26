@@ -511,7 +511,7 @@ const createLiveBettingMockState = () => {
 
   state.selectSelection = (payload) => {
     if (payload.marketId) {
-      const event = getLiveEvent();
+      const event = state.events.find((candidate) => candidate.eventId === payload.eventId);
       const market = event?.live?.currentMarkets?.find((candidate) => candidate.marketId === payload.marketId);
       const selection = market?.selections?.find((candidate) => candidate.selectionId === payload.selectionId);
 
