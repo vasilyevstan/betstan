@@ -107,6 +107,7 @@ it('shows the exact partial offer and all original identities before a separate 
   mount();
   const confirm = await getOffer({ partial: '40.00' });
   const offer = card().querySelector('.cash-back-offer');
+  fireEvent.click(within(offer).getByText('Original selections, wager and odds'));
   expect(offer).toHaveTextContent('Stake to close40.00 Stanbucks');
   expect(offer).toHaveTextContent('Quoted nominal return20.00 Stanbucks');
   expect(offer).toHaveTextContent('Original wager100.00 Stanbucks');
@@ -119,7 +120,8 @@ it('shows the exact partial offer and all original identities before a separate 
   expect(request).toEqual({ action: 'QUOTE', clientOperationId: expect.any(String), portion: { mode: 'PARTIAL', stakeMinor: 4000 } });
   expect(state.bets[0].wager).toBe(100);
   fireEvent.click(confirm);
-  await screen.findByText('Cash back recorded. The receipt below is authoritative.');
+  await screen.findByText('Cash back recorded. See the receipt in cash-back history.');
+  fireEvent.click(within(card()).getByRole('button', { name: /^Bet details/ }));
   expect(axios.post.mock.calls[1][1]).toEqual({ action: 'CONFIRM', clientOperationId: request.clientOperationId,
     quoteId: state.operations[request.clientOperationId].quote.quoteId });
   expect(card()).toHaveTextContent('PARTIAL CASH BACK');
@@ -160,10 +162,12 @@ it('invalidates edits/expiry, preserves the input, and requires a new identity p
   await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm partial cash back' })).toBeEnabled());
   expect(axios.post.mock.calls[1][1].clientOperationId).not.toBe(firstBody.clientOperationId);
   await advance(7001);
-  expect(screen.getByRole('button', { name: 'Confirm partial cash back' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Confirm partial cash back' })).not.toBeInTheDocument();
   expect(screen.getByText(cashBackReason('QUOTE_EXPIRED'))).toBeInTheDocument();
+  expect(within(card()).getByRole('button', { name: 'Expired offer details' })).toHaveAttribute('aria-expanded', 'false');
+  fireEvent.click(within(card()).getByRole('button', { name: 'Expired offer details' }));
   expect(screen.getByLabelText('Stake to close (Stanbucks)')).toHaveValue(30);
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm partial cash back' }));
+  expect(screen.queryByRole('button', { name: 'Confirm partial cash back' })).not.toBeInTheDocument();
   expect(axios.post.mock.calls.every(([url]) => url.endsWith('/quote'))).toBe(true);
 });
 
@@ -189,7 +193,7 @@ it.each([
   await screen.findByText('Northern Falcons - Southern Owls');
   fireEvent.click(screen.getByRole('button', { name: 'Get cash-back offer' }));
   expect(await screen.findByRole('alert')).toHaveTextContent(cashBackReason(code));
-  expect(screen.queryByText('Cash back recorded. The receipt below is authoritative.')).not.toBeInTheDocument();
+  expect(screen.queryByText('Cash back recorded. See the receipt in cash-back history.')).not.toBeInTheDocument();
 });
 
 it('separates durable rejection from transport failure and requires a fresh offer', async () => {
@@ -197,10 +201,10 @@ it('separates durable rejection from transport failure and requires a fresh offe
   mount();
   fireEvent.click(await getOffer());
   await within(card()).findByText(`Cash back rejected. ${cashBackReason('STALE_REVISION')}`);
-  expect(screen.getByRole('button', { name: 'Confirm full cash back' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Confirm full cash back' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Get new offer' })).toBeEnabled();
   expect(card()).toHaveTextContent('Original wager: 100.00');
-  expect(screen.queryByText('Cash back recorded. The receipt below is authoritative.')).not.toBeInTheDocument();
+  expect(screen.queryByText('Cash back recorded. See the receipt in cash-back history.')).not.toBeInTheDocument();
 });
 
 it('recovers a lost initial quote response on reload by retrying the identical POST, never an invented lookup', async () => {
@@ -237,14 +241,17 @@ it('keeps uncertain consent locked past browser expiry and recovers its accepted
   await screen.findByText(/Network failure/);
   await advance(9000);
   expect(screen.getByText(/Confirmation pending/)).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Get new offer' })).toBeDisabled();
-  expect(confirm).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Get new offer' })).toHaveAttribute('aria-disabled', 'true');
+  const quotePosts = axios.post.mock.calls.filter(([url]) => url.endsWith('/quote')).length;
+  fireEvent.click(screen.getByRole('button', { name: 'Get new offer' }));
+  expect(axios.post.mock.calls.filter(([url]) => url.endsWith('/quote'))).toHaveLength(quotePosts);
+  expect(confirm).not.toBeInTheDocument();
   expect(screen.queryByText(cashBackReason('QUOTE_EXPIRED'))).not.toBeInTheDocument();
   const id = Object.keys(state.operations)[0];
   state.operations[id] = accepted(state.operations[id]);
   first.unmount();
   mount();
-  await screen.findByText('Cash back recorded. The receipt below is authoritative.');
+  await screen.findByText('Cash back recorded. See the receipt in cash-back history.');
   await findRestoredPartialInput(40);
   expect(axios.post.mock.calls.filter(([url]) => url.endsWith('/accept'))).toHaveLength(1);
   expect(card()).toHaveTextContent('Remaining stake: 60.00');
@@ -268,7 +275,7 @@ it('replays the saved confirmation after reload of an ambiguous unsubmitted POST
   expect(axios.post.mock.calls[2][1]).toEqual(consent);
   expect(await screen.findByText(/Confirmation pending/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Full remainder' })).toHaveAttribute('aria-pressed', 'true');
-  expect(screen.queryByText('Cash back recorded. The receipt below is authoritative.')).not.toBeInTheDocument();
+  expect(screen.queryByText('Cash back recorded. See the receipt in cash-back history.')).not.toBeInTheDocument();
 });
 
 it('never creates a quote or confirmation from consent planted before the real App resolves the owner login', async () => {
@@ -341,7 +348,7 @@ it('uses the real App auth refresh to isolate changed accounts and revoke failed
   expect(card()).toBeNull();
   expect(card('next-slip')).toHaveTextContent('Remaining stake: 100.00');
   expect(screen.queryByText(/Cash back recorded/)).not.toBeInTheDocument();
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toHaveAttribute('aria-disabled', 'false'));
   denyRecovery = true;
   fireEvent.click(screen.getByRole('button', { name: 'Check confirmation status' }));
   await screen.findByText(/Log in to view your bets/);
@@ -362,7 +369,7 @@ it('never treats a 202 with an accepted-shaped body as acceptance', async () => 
   });
   fireEvent.click(confirm);
   expect(await screen.findByRole('alert')).toHaveTextContent('server response could not be verified');
-  expect(screen.getByRole('button', { name: 'Get new offer' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Get new offer' })).toHaveAttribute('aria-disabled', 'true');
   expect(card()).toHaveTextContent('Remaining stake: 100.00');
 });
 
@@ -370,9 +377,10 @@ it('keeps completion feedback and moves focus only when the current filter remov
   installApi({ confirm: accepted });
   mount();
   await screen.findByText('Northern Falcons - Southern Owls');
+  fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
   fireEvent.click(screen.getByRole('button', { name: 'CONFIRMED', exact: true }));
   const confirm = await getOffer();
-  confirm.focus();
+  act(() => confirm.focus());
   fireEvent.click(confirm);
   await screen.findByText(/Full cash back recorded: 100.00/);
   expect(card()).toBeNull();
@@ -380,6 +388,7 @@ it('keeps completion feedback and moves focus only when the current filter remov
   expect(document.activeElement).toBe(document.querySelector('.my-bets-feedback'));
   fireEvent.click(screen.getByRole('button', { name: 'CASH BACK', exact: true }));
   expect(card()).toHaveTextContent('CASH BACK');
+  fireEvent.click(within(card()).getByRole('button', { name: /^Bet details/ }));
   expect(card()).toHaveTextContent('Exposure closed by cash back');
   expect(card()).not.toHaveTextContent('Pending result');
   expect(card()).not.toHaveTextContent('Won');
@@ -393,13 +402,13 @@ it('preserves keyed input, focus, filters, sibling forms and expansion across re
   ] });
   mount();
   const confirm = await getOffer({ partial: '40.00' });
-  fireEvent.click(screen.getByRole('button', { name: 'Show all selections (5)' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Bet details · 5 selections' }));
   const input = within(card()).getByLabelText('Stake to close (Stanbucks)');
-  input.focus();
+  act(() => input.focus());
   const otherCard = card('other-slip');
   fireEvent.click(within(otherCard).getByRole('button', { name: 'Partial stake' }));
   fireEvent.change(within(otherCard).getByLabelText('Stake to close (Stanbucks)'), { target: { value: '12.34' } });
-  input.focus();
+  act(() => input.focus());
   state.bets[0] = { ...state.bets[0], cashBackFinancial: financial({
     revision: 2, remainingStakeMinor: 6000, cumulativeClosedStakeMinor: 4000, cumulativeReturnMinor: 2000,
   }) };
@@ -409,7 +418,7 @@ it('preserves keyed input, focus, filters, sibling forms and expansion across re
   expect(within(card()).getByLabelText('Stake to close (Stanbucks)')).toBe(input);
   expect(input).toHaveValue(40);
   expect(input).toHaveFocus();
-  expect(screen.getByRole('button', { name: 'Show less selections' })).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('button', { name: 'Hide bet details' })).toHaveAttribute('aria-expanded', 'true');
   expect(within(otherCard).getByLabelText('Stake to close (Stanbucks)')).toHaveValue(12.34);
   expect(within(otherCard).getByRole('button', { name: 'Get cash-back offer' })).toBeEnabled();
 });
@@ -424,7 +433,7 @@ it('pins a restored offer instead of adopting another tab offer, and keeps the f
   mount();
   await screen.findByRole('button', { name: 'Confirm partial cash back' });
   const input = await findRestoredPartialInput(40);
-  input.focus();
+  act(() => input.focus());
   const otherRequest = { action: 'QUOTE', clientOperationId: 'other-tab', portion: { mode: 'PARTIAL', stakeMinor: 2000 } };
   const other = quoted(otherRequest);
   state.operations['other-tab'] = { ...other, state: 'CONFIRM_PENDING' };
@@ -436,14 +445,17 @@ it('pins a restored offer instead of adopting another tab offer, and keeps the f
   localStorage.setItem(key, JSON.stringify(otherRecord));
   fireEvent(window, new StorageEvent('storage', { key }));
   await screen.findByText(/Confirmation pending/);
+  await waitFor(() => expect(card().querySelector('.cash-back-pending-values')).toHaveTextContent('20.00 Stanbucks to close'));
+  expect(card().querySelector('.cash-back-offer')).not.toBeInTheDocument();
+  expect(card()).toHaveTextContent('Your entered draft is paused');
   expect(input).toHaveFocus();
   expect(input).toHaveAttribute('readonly');
   expect(input).toHaveValue(40);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toHaveAttribute('aria-disabled', 'false'));
   axios.get.mockClear();
   fireEvent.click(screen.getByRole('button', { name: 'Check confirmation status' }));
   await waitFor(() => expect(axios.get).toHaveBeenCalledWith(`/api/bet/slip-one/cash-back/operations/${other.operationId}`, expect.any(Object)));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toHaveAttribute('aria-disabled', 'false'));
   state.operations['other-tab'] = accepted(other);
   fireEvent(window, new StorageEvent('storage', { key }));
   await within(card()).findByText(/This offer is no longer current/);
@@ -481,6 +493,151 @@ it('canonicalizes saved metadata once and does not echo unchanged lookup results
   }
 });
 
+it('preserves multiple owner/slip-keyed drafts and the reviewed identity through details, filtering and reordering', async () => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2026-09-24T12:00:00Z'));
+  const state = installApi({ bets: [bet(), bet({
+    _id: 'sibling', slipId: 'sibling-slip', timestamp: '2026-09-23T12:00:00Z',
+    rows: [{ ...bet().rows[0], eventName: 'Sibling match' }],
+  })] });
+  const view = mount();
+  await getOffer({ partial: '17.25' });
+  const request = copy(axios.post.mock.calls[0][1]);
+  fireEvent.click(within(card()).getByRole('button', { name: /^Bet details/ }));
+  fireEvent.click(within(card('sibling-slip')).getByRole('button', { name: 'Partial stake' }));
+  fireEvent.change(within(card('sibling-slip')).getByLabelText('Stake to close (Stanbucks)'), { target: { value: '9.99' } });
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search bets' }), { target: { value: 'Sibling' } });
+  expect(card()).toBeNull();
+  expect(within(card('sibling-slip')).getByLabelText('Stake to close (Stanbucks)')).toHaveValue(9.99);
+  fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+  await waitFor(() => expect(within(card()).getByRole('button', { name: 'Confirm partial cash back' })).toBeEnabled());
+  expect(within(card()).getByLabelText('Stake to close (Stanbucks)')).toHaveValue(17.25);
+  expect(within(card()).getByRole('button', { name: 'Hide bet details' })).toHaveAttribute('aria-expanded', 'true');
+  fireEvent.click(within(card()).getByRole('button', { name: 'Hide bet details' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Newest first' }));
+  expect([...document.querySelectorAll('.my-bets-card')].map((node) => node.dataset.slipId)).toEqual(['sibling-slip', 'slip-one']);
+  fireEvent.click(within(card()).getByRole('button', { name: 'Confirm partial cash back' }));
+  expect(axios.post.mock.calls[1][1]).toEqual({
+    action: 'CONFIRM', clientOperationId: request.clientOperationId,
+    quoteId: state.operations[request.clientOperationId].quote.quoteId,
+  });
+  expect(within(card('sibling-slip')).getByLabelText('Stake to close (Stanbucks)')).toHaveValue(9.99);
+  state.bets = [bet()];
+  view.rerender(<MyBets currentUser={{ id: 'new-owner' }} />);
+  await waitFor(() => expect(within(card()).getByRole('button', { name: 'Get cash-back offer' })).toBeEnabled());
+  expect(within(card()).getByRole('button', { name: 'Full remainder' })).toHaveAttribute('aria-pressed', 'true');
+  expect(within(card()).queryByLabelText('Stake to close (Stanbucks)')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Confirmation pending/)).not.toBeInTheDocument();
+  expect(axios.post).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the actual pending confirmation discoverable outside filters past expiry without resetting the view or consent', async () => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2026-09-24T12:00:00Z'));
+  const state = installApi();
+  mount();
+  fireEvent.click(await getOffer({ partial: '20.00' }));
+  const id = axios.post.mock.calls[0][1].clientOperationId;
+  const consent = copy(axios.post.mock.calls[1][1]);
+  await screen.findByText(/Confirmation pending/);
+  fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+  fireEvent.click(screen.getByRole('button', { name: 'WIN', exact: true }));
+  expect(card()).toBeNull();
+  const pending = screen.getByRole('region', { name: 'Pending cash-back confirmations outside this view' });
+  expect(pending).toHaveTextContent('Northern Falcons - Southern Owls');
+  expect(pending).toHaveTextContent('20.00 Stanbucks to close');
+  await advance(9000);
+  await waitFor(() => expect(within(pending).getByRole('button', { name: 'Check confirmation status' })).toHaveAttribute('aria-disabled', 'false'));
+  fireEvent.click(within(pending).getByRole('button', { name: 'Check confirmation status' }));
+  await waitFor(() => expect(axios.get).toHaveBeenCalledWith(
+    `/api/bet/slip-one/cash-back/operations/${state.operations[id].operationId}`, expect.any(Object),
+  ));
+  expect(screen.getByRole('button', { name: 'WIN', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  expect(axios.post.mock.calls.filter(([url]) => url.endsWith('/accept')).map(([, body]) => body)).toEqual([consent]);
+  fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+  const restored = await findRestoredPartialInput(20);
+  expect(restored).toHaveAttribute('readonly');
+  expect(screen.queryByRole('region', { name: 'Pending cash-back confirmations outside this view' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'WIN', exact: true }));
+  const pendingAgain = screen.getByRole('region', { name: 'Pending cash-back confirmations outside this view' });
+  const check = within(pendingAgain).getByRole('button', { name: 'Check confirmation status' });
+  await waitFor(() => expect(check).toHaveAttribute('aria-disabled', 'false'));
+  act(() => check.focus());
+  state.operations[id] = accepted(state.operations[id]);
+  await advance(CASH_BACK_POLL_MS * 2);
+  await screen.findByText(/Partial cash back recorded: 20.00/);
+  expect(pendingAgain).not.toBeInTheDocument();
+  expect(document.querySelector('.my-bets-feedback')).toHaveFocus();
+  expect(screen.getByRole('button', { name: 'WIN', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+  expect(card()).toHaveTextContent('Remaining stake: 80.00');
+});
+
+it('reconciles an older pending slip beyond the twenty visible cards and names its operation without revealing raw IDs', async () => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2026-09-24T12:00:00Z'));
+  const bets = Array.from({ length: 23 }, (_, index) => bet({
+    _id: `bet-${index}`, slipId: `slip-${index}`,
+    timestamp: new Date(Date.now() - index * 1000).toISOString(),
+    rows: [{ ...bet().rows[0], eventName: `Match ${index}` }],
+  }));
+  const state = installApi({ bets });
+  const quoteRequest = { action: 'QUOTE', clientOperationId: 'older-pending', portion: { mode: 'FULL' } };
+  const operation = quoted(quoteRequest, { slipId: 'slip-22' });
+  state.operations['older-pending'] = { ...operation, state: 'CONFIRM_PENDING' };
+  const record = {
+    slipId: 'slip-22', clientOperationId: 'older-pending', createdAt: Date.now(), quoteRequest,
+    operationId: operation.operationId,
+    confirmRequest: { action: 'CONFIRM', clientOperationId: 'older-pending', quoteId: operation.quote.quoteId },
+  };
+  localStorage.setItem(storageKey(currentUser.id, record), JSON.stringify(record));
+  mount();
+  await screen.findByText('23 bets found');
+  expect(document.querySelectorAll('.my-bets-card')).toHaveLength(20);
+  expect(card('slip-22')).toBeNull();
+  const pending = screen.getByRole('region', { name: 'Pending cash-back confirmations outside this view' });
+  expect(pending).toHaveTextContent('Match 22');
+  await advance(8000);
+  expect(pending).toHaveTextContent('Full confirmation pending');
+  expect(pending).not.toHaveTextContent(operation.operationId);
+  expect(axios.post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+  await waitFor(() => expect(within(card('slip-22')).getByRole('button', { name: 'Check confirmation status' })).toHaveAttribute('aria-disabled', 'false'));
+  expect(document.querySelectorAll('.my-bets-card')).toHaveLength(23);
+  expect(screen.queryByRole('region', { name: 'Pending cash-back confirmations outside this view' })).not.toBeInTheDocument();
+});
+
+it('removes expired consent controls without refreshing, and restores keyboard focus to the separate new-offer action', async () => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2026-09-24T12:00:00Z'));
+  installApi();
+  mount();
+  const confirm = await getOffer();
+  const requestButton = screen.getByRole('button', { name: 'Get new offer' });
+  act(() => confirm.focus());
+  await advance(7001);
+  expect(confirm).not.toBeInTheDocument();
+  expect(requestButton).toHaveFocus();
+  expect(card().querySelector('.cash-back-expired .cash-back-values')).not.toBeVisible();
+  expect(axios.post).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Expired offer details' }));
+  expect(card().querySelector('.cash-back-expired .cash-back-values')).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Confirm full cash back' })).not.toBeInTheDocument();
+});
+
+it('blocks repeated activation keys on request and confirm without suppressing keyboard navigation', async () => {
+  installApi();
+  mount();
+  const confirm = await getOffer();
+  const request = screen.getByRole('button', { name: 'Get new offer' });
+  for (const control of [request, confirm]) {
+    for (const key of ['Enter', ' ']) expect(fireEvent.keyDown(control, { key, repeat: true })).toBe(false);
+    for (const key of ['Tab', 'ArrowDown']) expect(fireEvent.keyDown(control, { key, repeat: true })).toBe(true);
+  }
+  expect(axios.post).toHaveBeenCalledTimes(1);
+});
+
 it('retains explicit consent racing an in-flight lookup and sends its exact body once, not a new operation', async () => {
   const state = installApi({ confirm: accepted });
   const { result } = renderHook(() => useMyBets({ ownerId: currentUser.id }));
@@ -515,6 +672,7 @@ it('retains repeated partial histories and cumulative totals after remainder set
   expect(card()).toHaveTextContent('PARTIAL CASH BACK');
   expect(card()).toHaveTextContent('Remainder stake that settled: 60.00');
   expect(card()).toHaveTextContent('Active exposure: 0.00');
+  fireEvent.click(within(card()).getByRole('button', { name: /^Bet details/ }));
   expect(card()).toHaveTextContent('Cumulative closed principal: 40.00');
   expect(card()).not.toHaveTextContent('Possible return on remaining stake:');
   fireEvent.click(screen.getByRole('button', { name: 'Cash-back history' }));
@@ -583,13 +741,13 @@ it('keeps lookup failures pending rather than inventing rejection or another ope
   mount();
   fireEvent.click(await getOffer());
   await screen.findByText(/Confirmation pending/);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Check confirmation status' })).toHaveAttribute('aria-disabled', 'false'));
   const previousGet = axios.get.getMockImplementation();
   axios.get.mockImplementation((url) => url.includes('/operations/')
     ? Promise.reject(httpError(404, 'OPERATION_NOT_FOUND')) : previousGet(url));
   fireEvent.click(screen.getByRole('button', { name: 'Check confirmation status' }));
   expect(await screen.findByRole('alert')).toHaveTextContent(cashBackReason('OPERATION_NOT_FOUND'));
-  expect(screen.getByRole('button', { name: 'Get new offer' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Get new offer' })).toHaveAttribute('aria-disabled', 'true');
   expect(axios.post.mock.calls.filter(([url]) => url.endsWith('/accept'))).toHaveLength(1);
   expect(screen.queryByText(/Cash back rejected/)).not.toBeInTheDocument();
 });
@@ -603,7 +761,7 @@ it('shows a confirm facade conflict, then reconciles the same operation before e
   axios.post.mockRejectedValueOnce(httpError(409, 'QUOTE_UNAVAILABLE'));
   fireEvent.click(confirm);
   expect(await screen.findByRole('alert')).toHaveTextContent(cashBackReason('QUOTE_UNAVAILABLE'));
-  expect(screen.getByRole('button', { name: 'Get new offer' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Get new offer' })).toHaveAttribute('aria-disabled', 'true');
   fireEvent.click(screen.getByRole('button', { name: 'Check confirmation status' }));
   await screen.findByText(`Cash back unavailable. ${cashBackReason('MARKET_UNAVAILABLE')}`);
   expect(screen.getByRole('button', { name: 'Get new offer' })).toBeEnabled();
@@ -664,7 +822,7 @@ it('polls only owned pending operations and stops once an offer or final decisio
   await screen.findByText('Northern Falcons - Southern Owls');
   fireEvent.click(screen.getByRole('button', { name: 'Get cash-back offer' }));
   await screen.findByText(/Getting an offer/);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same offer request' })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same offer request' })).toHaveAttribute('aria-disabled', 'false'));
   await advance(CASH_BACK_POLL_MS * 2);
   const lookups = () => axios.get.mock.calls.filter(([url]) => url.includes('/operations/')).length;
   expect(lookups()).toBe(1);

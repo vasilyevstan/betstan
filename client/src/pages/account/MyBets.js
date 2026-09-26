@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { format } from 'date-fns';
 import useMyBets from '../../hook/useMyBets';
-import CashBackPanel from './CashBackPanel';
-import { acceptedOddsForBet, cashBackReason, formatMinor, parseStakeMinor, possibleReturn } from '../../cashBackUtils';
+import CashBackPanel, { emptyCashBackDraft } from './CashBackPanel';
+import { acceptedOddsForBet, cashBackReason, formatMinor, isFinalOperation, parseStakeMinor, possibleReturn } from '../../cashBackUtils';
 import {
   formatDeclineReason,
   formatLegacyLiveSelectionLabel,
@@ -31,12 +31,23 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
   const [sortOrder, setSortOrder] = useState('DESC');
   const [visibleCount, setVisibleCount] = useState(20);
   const [expandedBets, setExpandedBets] = useState({});
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [drafts, setDrafts] = useState({ ownerId: currentUser?.id, values: {} });
+  const boardId = useId();
+  const updateDraft = useCallback((slipId, update) => {
+    setDrafts((old) => {
+      const values = old.ownerId === currentUser?.id ? old.values : {};
+      return { ownerId: currentUser?.id, values: {
+        ...values, [slipId]: update(values[slipId] ?? emptyCashBackDraft),
+      } };
+    });
+  }, [currentUser?.id]);
   const [feedback, setFeedback] = useState('');
   const feedbackRef = useRef(null);
   const focusedBeforeUpdate = useRef(null);
   const beforeUpdate = useCallback(() => {
     const active = document.activeElement;
-    focusedBeforeUpdate.current = active?.closest?.('.my-bets-card') ? active : null;
+    focusedBeforeUpdate.current = active?.closest?.('.my-bets-card, .my-bets-pending') ? active : null;
   }, []);
   const onDecision = useCallback((operation) => {
     if (operation.state === 'ACCEPTED') {
@@ -48,7 +59,11 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
   const model = useMyBets({ ownerId: currentUser?.id ?? '', onAuthRefresh, onBeforeUpdate: beforeUpdate, onDecision });
   const betsList = model.bets;
 
-  useEffect(() => { setFeedback(''); setExpandedBets({}); }, [currentUser?.id]);
+  useEffect(() => {
+    setFeedback('');
+    setExpandedBets({});
+    setDrafts({ ownerId: currentUser?.id, values: {} });
+  }, [currentUser?.id]);
   useLayoutEffect(() => {
     const previousFocus = focusedBeforeUpdate.current;
     focusedBeforeUpdate.current = null;
@@ -115,6 +130,9 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
 
   const visibleBets = filteredAndSortedBets.slice(0, visibleCount);
   const hasMoreBets = visibleCount < filteredAndSortedBets.length;
+  const hiddenPending = Object.values(drafts.ownerId === currentUser?.id ? model.attempts : {}).filter((attempt) => attempt.confirmRequest
+    && !isFinalOperation(model.operations[attempt.clientOperationId])
+    && !visibleBets.some((bet) => bet.slipId === attempt.slipId));
 
   const toggleExpandedBet = (betId) => {
     setExpandedBets((currentExpandedBets) => ({
@@ -149,10 +167,10 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
     const betKindLabel = getBetKindLabel(betKind);
     const rows = bet.rows ?? [];
     const totalOdds = rows.reduce((accumulator, row) => accumulator * (row.oddsValue ?? 1), 1);
-    const betKey = bet._id ?? bet.slipId;
+    const betKey = `${currentUser?.id}:${bet.slipId}`;
     const isExpanded = !!expandedBets[betKey];
-    const hasHiddenRows = rows.length > 4;
-    const rowsToRender = hasHiddenRows && !isExpanded ? rows.slice(0, 4) : rows;
+    const detailsId = `${boardId}-${bet.slipId}`;
+    const firstRow = rows[0];
     const betStatusColor = getStatusColorClass(bet.status);
     const financial = bet.cashBackFinancial;
     const terminal = isTerminalBetStatus(bet.status);
@@ -161,22 +179,36 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
     const acceptedOdds = acceptedOddsForBet(bet);
 
     return <div className="card mb-2 my-bets-card" key={betKey} data-slip-id={bet.slipId}>
-      <div className="card-body">
-        <div className="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
-          <div>
-            <h2 className="card-title h5 mb-1">{formatTimestamp(bet.timestamp)}</h2>
+      <div className="card-body my-bets-summary">
+        <div className="my-bets-summary-heading">
             <div className="my-bets-badges">
               <span className={`bet-kind-badge bet-kind-badge--${betKind.toLowerCase()}`}>{betKindLabel}</span>
               <span className={`my-bets-status ${betStatusColor}`}>{statusLabel(bet.status)}</span>
               {financial?.cumulativeClosedStakeMinor > 0 && bet.status !== 'CASH_BACK'
                 ? <span className="cash-back-badge">PARTIAL CASH BACK</span> : null}
+              <span>{rows.length === 1 ? 'Single' : `Accumulator · ${rows.length} selections`}</span>
             </div>
-          </div>
-          <div className="text-secondary small">{rows.length === 1 ? 'Single' : `Accumulator · ${rows.length} selections`}</div>
+            <span className="my-bets-placed">Placed {formatTimestamp(bet.timestamp)}</span>
+        </div>
+        <h2 className="h5 my-bets-event-name">{firstRow?.eventName || 'Bet selections'}</h2>
+        {firstRow ? <p className="my-bets-pick">
+          {firstRow.productName || formatLiveMarketType(firstRow.marketType)} · {formatLegacyLiveSelectionLabel(firstRow.oddsName, firstRow, 'selected')}
+          {rows.length > 1 ? <strong> · Plus {rows.length - 1} more selections</strong> : null}
+        </p> : null}
+        <div className="my-bets-position">
+          <span>Original wager: <strong>{financial ? formatMinor(financial.originalStakeMinor) : bet.wager} Stanbucks</strong></span>
+          <span>{bet.status === 'DECLINED' ? 'Unaccepted stake' : settled ? 'Remainder stake that settled' : 'Remaining stake'}: <strong>{remainder === null ? bet.wager : formatMinor(remainder)} Stanbucks</strong></span>
+          {terminal ? <span>Active exposure: <strong>0.00 Stanbucks</strong></span> : null}
         </div>
 
         {bet.declineReason ? <div className="my-bets-note my-bets-note--danger">Declined: {formatDeclineReason(bet.declineReason)}</div> : null}
-
+        <button type="button" className="btn btn-shell my-bets-expand cash-back-control"
+          aria-expanded={isExpanded} aria-controls={detailsId} onClick={() => toggleExpandedBet(betKey)}>
+          {isExpanded ? 'Hide bet details' : `Bet details · ${rows.length} selection${rows.length === 1 ? '' : 's'}`}
+        </button>
+      </div>
+      {isExpanded ? <div id={detailsId} className="card-body my-bets-details">
+        <h3 className="h6">All selections and financial details</h3>
         <div className="card-subtitle row my-bets-row my-bets-row--header">
           <div className="col-5 col-md-4">Event / Time</div>
           <div className="col-3 col-md-3">Market</div>
@@ -184,7 +216,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
           <div className="col-2 col-md-2 text-end">Odds / Outcome</div>
         </div>
 
-        {rowsToRender.map((row) => {
+        {rows.map((row) => {
           const rowKind = normalizeBetKind(row.betKind ?? betKind);
           const rowOutcome = formatRowOutcome(row, bet.status);
           const rowColor = row.status === 'WIN' ? ' text-success' : row.status === 'LOSS' ? ' text-danger' : '';
@@ -222,30 +254,19 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
           </div>;
         })}
 
-        {hasHiddenRows ? (
-          <button
-            type="button"
-            className="btn btn-sm my-bets-expand mt-2"
-            aria-expanded={isExpanded}
-            onClick={() => toggleExpandedBet(betKey)}
-          >
-            {isExpanded ? 'Show less selections' : `Show all selections (${rows.length})`}
-          </button>
-        ) : null}
-      </div>
-      <div className="card-body my-bets-footer">
-        <span>Original wager: {financial ? formatMinor(financial.originalStakeMinor) : bet.wager} Stanbucks</span>
+      <div className="my-bets-footer">
         <span>Accepted total odds: {totalOdds.toFixed(2)}</span>
-        <span>{bet.status === 'DECLINED' ? 'Unaccepted stake' : settled ? 'Remainder stake that settled' : 'Remaining stake'}: {remainder === null ? bet.wager : formatMinor(remainder)} Stanbucks</span>
-        {terminal ? <span>Active exposure: 0.00 Stanbucks</span>
-          : <span>Possible return on remaining stake: {remainder === null ? (totalOdds * bet.wager).toFixed(2) : possibleReturn(remainder, acceptedOdds)} Stanbucks</span>}
+        {!terminal ? <span>Possible return on remaining stake: {remainder === null ? (totalOdds * bet.wager).toFixed(2) : possibleReturn(remainder, acceptedOdds)} Stanbucks</span> : null}
         {financial?.cumulativeClosedStakeMinor > 0 ? <>
           <span>Cumulative closed principal: {formatMinor(financial.cumulativeClosedStakeMinor)} Stanbucks</span>
           <span>Cumulative recorded nominal return: {formatMinor(financial.cumulativeReturnMinor)} Stanbucks</span>
         </> : null}
       </div>
-      <div className="card-body">
-        <CashBackPanel bet={bet} ownerId={currentUser?.id} model={model} />
+      </div> : null}
+      <div className="card-body my-bets-cash-back">
+        <CashBackPanel bet={bet} ownerId={currentUser?.id} model={model}
+          draft={drafts.ownerId === currentUser?.id ? drafts.values[bet.slipId] ?? emptyCashBackDraft : emptyCashBackDraft}
+          onDraftChange={updateDraft} />
       </div>
     </div>;
   });
@@ -259,7 +280,30 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
   return <div className="my-bets-board">
     <div ref={feedbackRef} className="my-bets-feedback" tabIndex={-1} role="status">{feedback}</div>
     <section className="card my-bets-toolbar mb-2">
-      <div className="card-body d-grid gap-2">
+      <div className="card-body">
+        <div className="my-bets-find">
+          <h1 className="h5">My bets</h1>
+          <input type="search" aria-label="Search bets" className="form-control my-bets-search"
+            value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)}
+            placeholder="Search event, market or selection" />
+          <button type="button" className="btn btn-shell cash-back-control"
+            aria-expanded={filtersOpen} aria-controls={`${boardId}-filters`} onClick={() => setFiltersOpen(!filtersOpen)}>
+            Filters
+          </button>
+          <button type="button" className="btn btn-shell cash-back-control"
+            disabled={model.listStatus.refreshing || model.listStatus.permission} onClick={() => void model.refresh()}>
+            Refresh bets
+          </button>
+        </div>
+        <div className="my-bets-filter-context">
+          <span role="status">{filteredAndSortedBets.length} bets found</span>
+          <span>{statusFilter === 'ALL' ? 'All statuses' : statusLabel(statusFilter)} · {betKindFilter === 'ALL' ? 'All types' : getBetKindLabel(betKindFilter)} · {{ ALL: 'All dates', TODAY: 'Today', '7D': 'Last 7 days', '30D': 'Last 30 days' }[datePreset]} · {sortOrder === 'DESC' ? 'Newest first' : 'Oldest first'}</span>
+          {statusFilter !== 'ALL' || betKindFilter !== 'ALL' || datePreset !== 'ALL' || searchTerm ? <button
+            type="button" className="btn btn-shell cash-back-control" onClick={() => {
+              setStatusFilter('ALL'); setBetKindFilter('ALL'); setDatePreset('ALL'); setSearchTerm('');
+            }}>Clear filters</button> : null}
+        </div>
+        <div id={`${boardId}-filters`} hidden={!filtersOpen} className="my-bets-filter-disclosure">
         <div className="my-bets-filter-groups">
           <div className="my-bets-filter-group" role="group" aria-label="Filter bets by status">
             <span className="my-bets-filter-label">Status</span>
@@ -297,14 +341,6 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
           </div>
         </div>
         <div className="d-flex flex-wrap gap-2 align-items-center">
-          <input
-            type="search"
-            aria-label="Search bets"
-            className="form-control my-bets-search"
-            value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
-            placeholder="Search event, market, selection, or bet kind"
-          />
           <select aria-label="Filter bets by date" className="form-select my-bets-select" value={datePreset} onChange={(event) => setDatePreset(event.target.value)}>
             <option value="ALL">All dates</option>
             <option value="TODAY">Today</option>
@@ -318,12 +354,8 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
           >
             {sortOrder === 'DESC' ? 'Newest first' : 'Oldest first'}
           </button>
-          <button type="button" className="btn btn-shell cash-back-control"
-            disabled={model.listStatus.refreshing || model.listStatus.permission} onClick={() => void model.refresh()}>
-            Refresh bets
-          </button>
         </div>
-        <small className="text-secondary">{filteredAndSortedBets.length} bets found</small>
+        </div>
       </div>
     </section>
 
@@ -334,6 +366,27 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
       {model.listStatus.permission ? <a href={loginHref}>Log in</a> : null}
     </div> : null}
     {model.storageError ? <p role="alert" className="cash-back-error">{model.storageError}</p> : null}
+    {hiddenPending.length ? <section className="card card-body my-bets-pending" aria-label="Pending cash-back confirmations outside this view">
+      <h2 className="h6">Cash-back confirmations outside this view</h2>
+      <p>Your filters are unchanged. These confirmations still need a durable decision.</p>
+      {hiddenPending.map((attempt) => {
+        const pendingBet = betsList.find((bet) => bet.slipId === attempt.slipId);
+        const operation = model.operations[attempt.clientOperationId];
+        const quote = operation?.quote;
+        return <div key={attempt.clientOperationId} className="my-bets-pending-item">
+          <span>{pendingBet?.rows?.[0]?.eventName || 'Previously submitted bet'} · {pendingBet?.rows?.length > 1 ? `${pendingBet.rows.length} selections · ` : ''}{attempt.quoteRequest.portion.mode === 'FULL' ? 'Full' : 'Partial'} confirmation pending
+            {quote ? ` · ${formatMinor(quote.closedStakeMinor)} Stanbucks to close` : ''}
+            {pendingBet ? ` · Placed ${formatTimestamp(pendingBet.timestamp)}` : ''}
+          </span>
+          <button type="button" className="btn btn-shell cash-back-control"
+            aria-disabled={Boolean(model.network[attempt.clientOperationId]?.busy)}
+            onClick={() => { if (!model.network[attempt.clientOperationId]?.busy) model.retry(attempt.clientOperationId); }}>
+            Check confirmation status
+          </button>
+          {model.network[attempt.clientOperationId]?.error ? <p role="alert" className="cash-back-error">{model.network[attempt.clientOperationId].error}</p> : null}
+        </div>;
+      })}
+    </section> : null}
     {renderedBets.length === 0 && !model.listStatus.loading && !model.listStatus.error ? (
       <div className="card card-body empty-state-card">No bets match the active filters.</div>
     ) : renderedBets}

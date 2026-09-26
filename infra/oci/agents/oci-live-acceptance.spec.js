@@ -1444,6 +1444,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
 
   await page.getByTitle('My bets').click();
   const preKickoffLiveHistory = betCard(page, preKickoffLiveSlipId);
+  await preKickoffLiveHistory.getByRole('button', { name: /^Bet details/ }).click();
   await expect(preKickoffLiveHistory).toContainText('Live');
   await expect(preKickoffLiveHistory).toContainText('Kickoff Team');
   await expect(preKickoffLiveHistory).toContainText(fixtures[0].name);
