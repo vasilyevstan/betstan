@@ -271,8 +271,10 @@ A dark deployment can prove images, health, data compatibility, routing, and
 readiness before enabling a user-facing feature. Activation remains bounded
 until the full acceptance journey passes.
 
-Failed acceptance does not turn a successful deployment into a failed one or
-invalidate unchanged design. Classify the exact assertion as an application,
+Failed acceptance does not by itself establish failed-deployment recovery
+authority or automatically invalidate accepted design, but an actual application
+or architectural defect can invalidate accepted assumptions and must block
+closure. Classify the exact assertion as an application,
 harness, or provider problem before routing a bounded correction. A harness
 fix reopens affected evidence and required exact-source release checks, not
 unchanged contracts, package publication, or specialist reviews.
