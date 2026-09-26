@@ -85,15 +85,18 @@ const prepare = async (page, state) => {
       if (!previous) {
         expect(Object.keys(body).sort()).toEqual(['action', 'clientOperationId', 'portion']);
         state.quoteBodies.set(body.clientOperationId, body);
-        state.operations.set(body.clientOperationId, quoted(body, {
+        const offer = quoted(body, {
           slipId, financial: state.bets.find((entry) => entry.slipId === slipId).cashBackFinancial,
-        }));
+        });
+        state.operations.set(body.clientOperationId, state.holdQuote
+          ? { ...offer.quote.operation, state: 'QUOTE_PENDING' } : offer);
       }
       if (state.loseQuoteOnce) {
         state.loseQuoteOnce = false;
         return route.abort('failed');
       }
-      return send(state.operations.get(body.clientOperationId));
+      const operation = state.operations.get(body.clientOperationId);
+      return send(operation, operation.state === 'QUOTE_PENDING' ? 202 : 200);
     }
     if (url.pathname.endsWith('/accept')) {
       expect(Object.keys(body).sort()).toEqual(['action', 'clientOperationId', 'quoteId']);
@@ -336,7 +339,7 @@ test('keyboard, lost responses, reload and a second-tab revision preserve the re
   await expect(card.getByRole('button', { name: 'Confirm partial cash back' })).toBeEnabled();
   expect(state.cashRequests.filter((item) => item.path.endsWith('/quote')).map((item) => item.body)).toEqual([firstBody, firstBody]);
   await expect(input).toHaveValue('40.00');
-  await card.getByRole('button', { name: 'Show all selections (5)' }).click();
+  await card.getByRole('button', { name: 'Bet details · 5 selections' }).click();
   await input.focus();
 
   const secondTab = await context.newPage();
@@ -353,7 +356,7 @@ test('keyboard, lost responses, reload and a second-tab revision preserve the re
   await expect(card).toContainText('This offer is no longer current');
   await expect(input).toHaveValue('40.00');
   await expect(input).toBeFocused();
-  await expect(card.getByRole('button', { name: 'Show less selections' })).toHaveAttribute('aria-expanded', 'true');
+  await expect(card.getByRole('button', { name: 'Hide bet details' })).toHaveAttribute('aria-expanded', 'true');
   await expect(card.getByRole('button', { name: 'Confirm partial cash back' })).toBeDisabled();
   await expect(getCard(page, 'other-slip').getByRole('button', { name: 'Get cash-back offer' })).toBeEnabled();
   await secondTab.close();
@@ -413,7 +416,7 @@ const measureLayout = (page) => page.evaluate(() => {
     slipId: node.closest('[data-slip-id]')?.dataset.slipId ?? null,
     element: node.tagName.toLowerCase(), className: node.className,
   });
-  const containerWidths = [root, ...root.querySelectorAll('.my-bets-toolbar, .my-bets-card, .card-body, .my-bets-row, .my-bets-row > [data-label], .my-bets-footer, .cash-back, .cash-back-amount, .cash-back-offer, .cash-back-history, .cash-back-history__body, .cash-back-values, .cash-back-values > div, .cash-back-actions, .cash-back-receipts')]
+  const containerWidths = [root, ...root.querySelectorAll('.my-bets-toolbar, .my-bets-find, .my-bets-filter-context, .my-bets-filter-disclosure, .my-bets-card, .my-bets-summary, .my-bets-summary-heading, .my-bets-pick, .my-bets-position, .my-bets-pending, .my-bets-pending-item, .card-body, .my-bets-row, .my-bets-row > [data-label], .my-bets-footer, .cash-back, .cash-back-strip, .cash-back-editor, .cash-back-amount, .cash-back-offer, .cash-back-expired, .cash-back-review-context, .cash-back-history, .cash-back-history__body, .cash-back-values, .cash-back-values > div, .cash-back-actions, .cash-back-receipts')]
     .filter(visible).map((node) => ({ ...describe(node), client: node.clientWidth, scroll: node.scrollWidth }));
   const overflow = containerWidths.filter((entry) => entry.scroll > entry.client);
   const contains = (outer, inner) => inner.left >= outer.left && inner.right <= outer.right
@@ -435,11 +438,11 @@ const measureLayout = (page) => page.evaluate(() => {
   const cardNodes = [...root.querySelectorAll('.my-bets-card')].filter(visible);
   const cards = cardNodes.map((node) => ({ ...describe(node), bounds: rect(node) }));
   const cardPairs = measurePairs(cardNodes);
-  const controlNodes = [...root.querySelectorAll('button, input, select, textarea, a[href], [role="button"]')].filter(visible);
+  const controlNodes = [...root.querySelectorAll('button, input, select, textarea, a[href], summary, [role="button"]')].filter(visible);
   const controls = controlNodes.map((node) => {
     const bounds = rect(node);
     const parent = node.parentElement;
-    const card = node.closest('.my-bets-card, .my-bets-toolbar');
+    const card = node.closest('.my-bets-card, .my-bets-toolbar, .my-bets-pending') ?? root;
     const parentBounds = rect(parent); const cardBounds = rect(card);
     return {
       ...describe(node),
@@ -475,7 +478,7 @@ const measureLayout = (page) => page.evaluate(() => {
       if (Math.abs(left.top - right.top) < 1 && Math.abs(left.height - right.height) > 1) unequalRows.push([left.height, right.height]);
     }));
   });
-  const targets = [...root.querySelectorAll('.cash-back-control, .my-bets-filter-group button')].filter(visible).map(rect);
+  const targets = controlNodes.map(rect);
   return {
     viewport: window.innerWidth, viewportHeight: window.innerHeight,
     document: { scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth },
@@ -485,6 +488,269 @@ const measureLayout = (page) => page.evaluate(() => {
     minimumTargetWidth: Math.min(...targets.map((box) => box.width)),
     minimumTargetHeight: Math.min(...targets.map((box) => box.height)),
   };
+});
+
+test.describe('My Bets correction 2 recovery and expiry focus', () => {
+  for (const kind of ['lost response', 'known QUOTE_PENDING']) {
+    test(`${kind} remains recoverable after settlement, paging and filtering`, async ({ page }, testInfo) => {
+      const state = createState();
+      state.loseQuoteOnce = kind === 'lost response';
+      state.holdQuote = kind === 'known QUOTE_PENDING';
+      await prepare(page, state);
+      await page.goto('/bets?ui=v2&theme=dark');
+      const card = getCard(page);
+      await card.getByRole('button', { name: 'Get cash-back offer' }).click();
+      await expect(card.getByRole('button', { name: 'Retry same offer request' })).toBeEnabled();
+      const request = state.cashRequests.find(entry => entry.path.endsWith('/quote')).body;
+      const registered = state.operations.get(request.clientOperationId);
+      state.bets[0] = { ...state.bets[0], status: 'LOSS',
+        cashBackFinancial: { ...state.bets[0].cashBackFinancial, revision: 2, status: 'LOSS' } };
+      await page.getByRole('button', { name: 'Refresh bets' }).click();
+      await expect(card.locator('.my-bets-status')).toHaveText('LOSS');
+      await expect(card.getByRole('button', { name: 'Retry same offer request' })).toBeEnabled();
+      await expect(card.getByRole('button', { name: 'Get new offer' })).toHaveCount(0);
+
+      state.bets.push(...Array.from({ length: 21 }, (_, index) => bet({
+        _id: `newer-bet-${index}`, slipId: `newer-slip-${index}`,
+        timestamp: new Date(Date.now() + index + 1).toISOString(),
+        rows: [{ ...bet().rows[0], eventName: `Newer match ${index}` }],
+      })));
+      await page.getByRole('button', { name: 'Refresh bets' }).click();
+      await expect(card).toHaveCount(0);
+      await expect(page.locator('.my-bets-card')).toHaveCount(20);
+      const recovery = page.getByRole('region', { name: 'Pending cash-back operations outside this view' });
+      await expect(recovery).toContainText('offer request pending');
+      await page.getByRole('searchbox', { name: 'Search bets' }).fill('not-a-match');
+      await expect(recovery.getByRole('button', { name: 'Retry same offer request' })).toBeEnabled();
+      await expect(recovery.getByRole('button', { name: 'Check confirmation status' })).toHaveCount(0);
+      if (kind === 'lost response') await expect(recovery.getByRole('alert')).toContainText('Network failure');
+      const geometry = await measureLayout(page);
+      expect(geometry.document.scroll).toBeLessThanOrEqual(geometry.document.client);
+      expect(geometry.overflow).toEqual([]);
+      expect(geometry.collisions).toEqual([]);
+      expect(geometry.containmentFailures).toEqual([]);
+      expect(geometry.minimumTargetHeight).toBeGreaterThanOrEqual(44);
+
+      if (kind === 'known QUOTE_PENDING') state.operations.set(request.clientOperationId, {
+        ...registered, state: 'UNAVAILABLE', reason: 'BET_NOT_CONFIRMED',
+      });
+      const retry = recovery.getByRole('button', { name: 'Retry same offer request' });
+      await retry.focus();
+      await page.keyboard.press('Enter');
+      const feedback = page.locator('.my-bets-feedback');
+      await expect(feedback).toContainText(kind === 'lost response'
+        ? 'Cash-back offer request recovered' : 'Cash-back offer request unavailable');
+      await expect(feedback).toBeFocused();
+      await expect(feedback).toBeVisible();
+      await expect(recovery).toHaveCount(0);
+      await expect(page.getByRole('searchbox', { name: 'Search bets' })).toHaveValue('not-a-match');
+      const quotePosts = state.cashRequests.filter(entry => entry.path.endsWith('/quote')).map(entry => entry.body);
+      expect(quotePosts).toEqual(kind === 'lost response' ? [request, request] : [request]);
+      const lookups = state.cashRequests.filter(entry => entry.path.includes('/operations/')).map(entry => entry.path);
+      if (kind === 'lost response') expect(lookups).toEqual([]);
+      else {
+        expect(lookups.length).toBeGreaterThan(0);
+        expect(lookups.every(url => url === `/api/bet/slip-one/cash-back/operations/${registered.operationId}`)).toBe(true);
+      }
+      expect(state.cashRequests.filter(entry => entry.path.endsWith('/accept'))).toEqual([]);
+      expect(state.receipts).toEqual([]);
+      await page.getByRole('searchbox', { name: 'Search bets' }).fill('Northern Mountain');
+      await expect(card.locator('.my-bets-status')).toHaveText('LOSS');
+      await expect(card.getByRole('button', { name: 'Get new offer' })).toHaveCount(0);
+      const confirm = card.getByRole('button', { name: 'Confirm full cash back' });
+      if (await confirm.count()) await expect(confirm).toBeDisabled();
+      await testInfo.attach('my-bets-quote-recovery-delta', {
+        contentType: 'application/json', body: Buffer.from(JSON.stringify({
+          evidence: 'Actual MyBets render with HTTP mocks; no production acceptance',
+          source: sourceBinding(), kind, request, operationId: registered.operationId,
+          quotePosts, lookups, terminalStatus: await card.locator('.my-bets-status').innerText(),
+          feedback: await feedback.innerText(), geometry,
+        }, null, 2)),
+      });
+    });
+  }
+
+  for (const target of ['review summary', 'unchanged mode', 'outside control']) {
+    test(`expiry leaves visible logical focus from ${target}`, async ({ page }, testInfo) => {
+      const state = createState();
+      await page.setViewportSize({ width: 390, height: 844 });
+      await prepare(page, state);
+      await page.goto('/bets?ui=v2&theme=dark');
+      const card = getCard(page);
+      await card.getByRole('button', { name: 'Get cash-back offer' }).click();
+      await expect(card.getByRole('button', { name: 'Confirm full cash back' })).toBeEnabled();
+      const control = target === 'review summary' ? card.locator('.cash-back-review-context summary')
+        : target === 'unchanged mode' ? card.getByRole('button', { name: 'Full remainder', exact: true })
+          : page.getByRole('searchbox', { name: 'Search bets' });
+      await control.focus();
+      await expect(control).toBeFocused();
+      await expect(card.getByRole('button', { name: 'Expired offer details' })).toBeVisible();
+      const expected = target === 'outside control' ? control : card.getByRole('button', { name: 'Get new offer' });
+      await expect(expected).toBeFocused();
+      await expect(expected).toBeVisible();
+      await expect(card.locator('.cash-back-expired .cash-back-values').first()).not.toBeVisible();
+      expect(state.cashRequests.filter(entry => entry.path.endsWith('/quote'))).toHaveLength(1);
+      expect(state.cashRequests.filter(entry => entry.path.endsWith('/accept'))).toHaveLength(0);
+      const focus = await expected.evaluate(node => ({
+        label: node.getAttribute('aria-label') || node.textContent.trim(),
+        active: document.activeElement === node, visible: node.checkVisibility(),
+        hiddenAncestor: Boolean(node.closest('[hidden]')),
+      }));
+      await testInfo.attach('my-bets-expiry-focus-delta', {
+        contentType: 'application/json', body: Buffer.from(JSON.stringify({
+          evidence: 'Native keyboard/focus with unchanged seven-second quotes and HTTP mocks',
+          source: sourceBinding(), target, focus,
+          quotePosts: state.cashRequests.filter(entry => entry.path.endsWith('/quote')).map(entry => entry.body),
+          confirmPosts: state.cashRequests.filter(entry => entry.path.endsWith('/accept')).length,
+        }, null, 2)),
+      });
+    });
+  }
+});
+
+test.describe('My Bets whole-page usability', () => {
+  test.use({ locale: 'en-US', timezoneId: 'UTC', deviceScaleFactor: 1 });
+
+  for (const sample of [
+    { width: 1600, height: 1000, toolbar: 211.8, single: 516.5, accumulator: 890.61, expired: 607.77, partial: 692.88 },
+    { width: 390, height: 844, toolbar: 469.36, single: 946.27, accumulator: 2099.48, expired: 1046.05, partial: 1187.16 },
+    { width: 768, height: 1000, toolbar: 211.8, single: 588.95, accumulator: 1117.61, expired: 687.66 },
+    { width: 320, height: 844, toolbar: 469.36, single: 996.38, accumulator: 2275.14, expired: 1131.95 },
+  ]) {
+    test(`same-fixture compactness and readable reflow at ${sample.width}px`, async ({ page }, testInfo) => {
+      const state = createState();
+      state.bets = [bet(), { ...makeLongBet(), _id: 'long-bet', slipId: 'long-slip' }];
+      await page.setViewportSize({ width: sample.width, height: sample.height });
+      await prepare(page, state);
+      await page.goto('/bets?ui=v2&theme=dark');
+      const card = getCard(page);
+      await expect(card.getByRole('heading', { name: 'Northern Falcons - Southern Owls' })).toBeVisible();
+      await page.evaluate(() => document.fonts.ready);
+      const captures = [];
+      const capture = async (stage) => {
+        const layout = await measureLayout(page);
+        const regions = await page.evaluate(() => {
+          const first = document.querySelector('.my-bets-card');
+          const style = getComputedStyle(first);
+          const height = (node) => node.getBoundingClientRect().height;
+          return {
+            toolbar: height(document.querySelector('.my-bets-toolbar')),
+            single: height(first),
+            accumulator: height(document.querySelector('[data-slip-id="long-slip"]')),
+            cashBack: height(first.querySelector('.cash-back')),
+            typography: { family: style.fontFamily, size: style.fontSize, lineHeight: style.lineHeight },
+            visibleQuoteFields: [...first.querySelectorAll('.cash-back-values dt')]
+              .filter((node) => node.checkVisibility()).map((node) => node.textContent),
+            visibleSelectionRows: [...first.querySelectorAll('.my-bets-row:not(.my-bets-row--header)')]
+              .filter((node) => node.checkVisibility()).length,
+          };
+        });
+        captures.push({ stage, regions, layout });
+      };
+      try {
+        await capture('idle');
+        if (sample.width === 1600) await testInfo.attach('my-bets-idle-1600', { contentType: 'image/png', body: await page.screenshot({ fullPage: true }) });
+        if (sample.partial) {
+          await card.getByRole('button', { name: 'Partial stake', exact: true }).click();
+          await card.getByLabel('Stake to close (Stanbucks)').fill('40.00');
+          await card.getByRole('button', { name: 'Get cash-back offer' }).click();
+          await expect(card.getByRole('button', { name: 'Confirm partial cash back' })).toBeEnabled();
+          await capture('quote-ready-partial');
+          await expect(card.locator('.cash-back-review-values')).toContainText('Stake to close40.00 Stanbucks');
+          await expect(card.locator('.cash-back-review-values')).toContainText('Quoted nominal return20.00 Stanbucks');
+          await expect(card.locator('.cash-back-review-values')).toContainText('Remaining stake after cash back60.00 Stanbucks');
+          await card.locator('.cash-back-review-context summary').click();
+          await expect(card.getByRole('list', { name: 'All original selections for this offer' })).toBeVisible();
+          await expect(card.locator('.cash-back-review-context')).toContainText('Original wager100.00 Stanbucks');
+          await expect(card.locator('.cash-back-review-context')).toContainText('Accepted total odds3');
+          await card.locator('.cash-back-review-context summary').click();
+          await card.getByRole('button', { name: 'Full remainder', exact: true }).click();
+        }
+        await card.getByRole('button', { name: /^Get (cash-back|new) offer$/ }).click();
+        await expect(card.getByRole('button', { name: 'Confirm full cash back' })).toBeEnabled();
+        const quoteCount = state.quoteBodies.size;
+        await expect(card.getByRole('button', { name: 'Expired offer details' })).toBeVisible();
+        await capture('expired-unconfirmed-full');
+        await expect(card.getByRole('button', { name: 'Confirm full cash back' })).toHaveCount(0);
+        await expect(card.getByRole('button', { name: 'Get new offer' })).toBeEnabled();
+        expect(state.quoteBodies.size).toBe(quoteCount);
+        if (sample.partial) {
+          await testInfo.attach(`my-bets-expired-${sample.width}`, { contentType: 'image/png', body: await page.screenshot({ fullPage: true }) });
+          state.holdNextConfirmation = true;
+          await card.getByRole('button', { name: 'Get new offer' }).click();
+          await card.getByRole('button', { name: 'Confirm full cash back' }).click();
+          await expect(card).toContainText('Confirmation pending');
+          const [pending] = state.pendingDecisions.values();
+          await page.reload();
+          await expect(card).toContainText('Confirmation pending');
+          await expect.poll(() => Date.now(), { timeout: 10000 }).toBeGreaterThan(Date.parse(pending.quote.expiresAt));
+          await capture('confirmation-pending-past-expiry');
+          await expect(card.getByRole('button', { name: 'Check confirmation status' })).toBeVisible();
+          await expect(card.getByRole('button', { name: 'Expired offer details' })).toHaveCount(0);
+          expect(state.cashRequests.filter((request) => request.path.endsWith('/accept'))).toHaveLength(1);
+          if (sample.width === 390) await testInfo.attach('my-bets-pending-390', { contentType: 'image/png', body: await page.screenshot({ fullPage: true }) });
+        }
+        for (const { layout, regions } of captures) {
+          expect(layout.document.scroll).toBeLessThanOrEqual(layout.document.client);
+          expect(layout.overflow).toEqual([]);
+          expect(layout.cardCollisions).toEqual([]);
+          expect(layout.containmentFailures).toEqual([]);
+          expect(layout.collisions).toEqual([]);
+          expect(layout.escapedText).toEqual([]);
+          expect(layout.minimumTargetWidth).toBeGreaterThanOrEqual(44);
+          expect(layout.minimumTargetHeight).toBeGreaterThanOrEqual(44);
+          expect(regions.typography.size).toBe('16px');
+          expect(regions.typography.lineHeight).toBe('24px');
+        }
+        const idle = captures[0].regions;
+        const expired = captures.find((entry) => entry.stage === 'expired-unconfirmed-full').regions;
+        expect(expired.visibleQuoteFields).toEqual([]);
+        if (sample.partial) {
+          const partial = captures.find((entry) => entry.stage === 'quote-ready-partial').regions;
+          expect(partial.visibleQuoteFields).toEqual(['Stake to close', 'Quoted nominal return', 'Remaining stake after cash back']);
+          expect(idle.toolbar).toBeLessThanOrEqual(sample.toolbar * 0.7);
+          expect(idle.single).toBeLessThanOrEqual(sample.single * 0.65);
+          expect(idle.accumulator).toBeLessThanOrEqual(sample.accumulator * 0.7);
+          expect(expired.cashBack).toBeLessThanOrEqual(sample.expired * 0.3);
+          expect(partial.cashBack).toBeLessThanOrEqual(sample.partial * 0.6);
+        }
+      } finally {
+        await testInfo.attach('my-bets-compactness-comparison', {
+          contentType: 'application/json', body: Buffer.from(JSON.stringify({
+            evidence: 'Rendered HTTP mocks, not human usability or production acceptance',
+            baselineSha256: 'c205f2ff8dce4894436d1db80cf462341b16f98e561d208e6b83fe15247a7623',
+            baseline: sample, source: sourceBinding(), captures,
+          }, null, 2)),
+        });
+      }
+    });
+  }
+
+  test('request double-click and held Enter never confirm a fresh quote without a separate review activation', async ({ page }) => {
+    const state = createState();
+    await prepare(page, state);
+    await page.goto('/bets?ui=v2&theme=dark');
+    const card = getCard(page);
+    const request = card.getByRole('button', { name: /^Get (cash-back|new) offer$/ });
+    await request.focus();
+    await page.keyboard.down('Enter');
+    const confirm = card.getByRole('button', { name: 'Confirm full cash back' });
+    await expect(confirm).toBeEnabled();
+    await page.keyboard.down('Enter');
+    await page.keyboard.up('Enter');
+    await expect(request).toBeFocused();
+    expect(state.quoteBodies.size).toBe(1);
+    expect(state.cashRequests.filter((entry) => entry.path.endsWith('/accept'))).toHaveLength(0);
+    await request.dblclick();
+    await expect(confirm).toBeEnabled();
+    expect(state.quoteBodies.size).toBe(2);
+    expect(state.cashRequests.filter((entry) => entry.path.endsWith('/accept'))).toHaveLength(0);
+    await card.locator('.cash-back-review-context summary').click();
+    await expect(card.locator('.cash-back-selections li')).toHaveCount(5);
+    await confirm.click();
+    await expect(card.locator('.my-bets-status')).toHaveText('CASH BACK');
+    expect(state.cashRequests.filter((entry) => entry.path.endsWith('/accept'))).toHaveLength(1);
+  });
 });
 
 const measureContrast = (page) => page.evaluate(() => {
@@ -564,7 +830,7 @@ test('cash-back geometry at three viewports and measured shared-token contrast i
   await prepare(page, state);
   await page.goto('/bets?ui=v1&theme=dark');
   const card = getCard(page);
-  await card.getByRole('button', { name: 'Show all selections (5)' }).click();
+  await card.getByRole('button', { name: 'Bet details · 5 selections' }).click();
   await card.getByRole('button', { name: 'Partial stake', exact: true }).click();
   const input = card.getByLabel('Stake to close (Stanbucks)');
   await input.fill('40.00');
@@ -604,6 +870,17 @@ test('cash-back geometry at three viewports and measured shared-token contrast i
     expect(Math.abs(metrics.rootWidth - metrics.mainWidth)).toBeLessThanOrEqual(1);
   }
 
+  await page.setViewportSize({ width: 768, height: 1000 });
+  await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
+  const enlargedText = await measureLayout(page);
+  expect(enlargedText.document.scroll).toBeLessThanOrEqual(enlargedText.document.client);
+  expect(enlargedText.overflow).toEqual([]);
+  expect(enlargedText.collisions).toEqual([]);
+  expect(enlargedText.containmentFailures).toEqual([]);
+  expect(enlargedText.escapedText).toEqual([]);
+  expect(enlargedText.minimumTargetHeight).toBeGreaterThanOrEqual(44);
+  expect(await card.evaluate((node) => getComputedStyle(node).fontSize)).toBe('32px');
+  await page.evaluate(() => { document.documentElement.style.removeProperty('font-size'); });
   await page.setViewportSize({ width: 1600, height: 1000 });
   const contrast = [];
   for (const variant of ['v1', 'v2', 'v3']) {
@@ -636,10 +913,10 @@ test('cash-back geometry at three viewports and measured shared-token contrast i
       metrics.pairs.filter((pair) => ['--text-main', '--accent-contrast'].includes(pair.foreground))
         .forEach((pair) => expect(pair.ratio).toBeGreaterThanOrEqual(4.5));
       await expect(input).toHaveValue('40.001');
-      await expect(card.getByRole('button', { name: 'Show less selections' })).toHaveAttribute('aria-expanded', 'true');
+      await expect(card.getByRole('button', { name: 'Hide bet details' })).toHaveAttribute('aria-expanded', 'true');
     }
   }
-  const evidence = { evidence: 'Rendered HTTP mocks; computed CSS pixels and WCAG contrast bounds including gradient stops/alpha compositing', source: sourceBinding(), geometry, contrast };
+  const evidence = { evidence: 'Rendered HTTP mocks; computed CSS pixels and WCAG contrast bounds including gradient stops/alpha compositing', source: sourceBinding(), geometry, enlargedText, contrast };
   console.log('CASH_BACK_LAYOUT_EVIDENCE', JSON.stringify(evidence));
   await testInfo.attach('cash-back-layout-and-contrast', { contentType: 'application/json', body: Buffer.from(JSON.stringify(evidence, null, 2)) });
 });

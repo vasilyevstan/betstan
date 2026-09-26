@@ -39,6 +39,11 @@ technical gate and the separate approval rules for human-originated work.
 - Record source SHA, packed file list, npm integrity/shasum, independent
   tarball SHA-256, publish authorization, dist-tag, and downloaded registry
   hash. Publish first; repin and clean-install all consumers second.
+- Before spending one-use publication authority, verify the protected
+  environment and publishing credential prerequisites, and inspect the packed
+  manifest's `repository.url` against the provenance repository. Registry
+  reachability is not authenticated publishing authority; a successful pack
+  or consumer build does not prove provenance metadata is publishable.
 - Service-local compatibility bridges are temporary rolling-release adapters,
   not another contract owner. Add the wire value to `common/src/` in the same
   feature, keep it additive, and remove the bridge after consumers adopt the
@@ -418,6 +423,27 @@ timestamp:
 ```
 Retry tests must keep `submittedAt` fixed while changing `event.timestamp` and prove the second delivery is an exact duplicate with no placement-conflict record.
 
+### Protected browser acceptance
+
+- Reproduce a failing journey through its actual helper, including any new
+  page. A second tab does not inherit the first tab's URL query: pass the
+  existing administrator-only `acceptanceEventIds` scope on each relevant
+  navigation. Cover LIVE and PRE_MATCH selection, reload, sibling exclusion,
+  and anonymous exclusion without widening fixture visibility.
+- Browser `page.route`/`context.route` mocks do not intercept
+  `APIRequestContext` requests. In a mock-HTTP reproduction, stub only the
+  helper's required request-context reads and resolve selections by the
+  submitted event identity, not a default fixture. Keep mock-browser evidence
+  distinct from the subsequent real protected journey.
+- Wait for the restored form value before confirming a recovered operation;
+  a rendered button alone does not prove asynchronous restoration finished.
+  Fix the readiness assertion, not product behavior or arbitrary sleep time.
+- An expected stale-selection retry must be attributed to the exact handled
+  request, not a blanket HTTP-status or console-error exemption. Drain pending
+  error captures before the final audit; keep diagnostics bounded and
+  sanitized, and fail on overflow or ambiguous attribution. A failure snapshot
+  from another tab is not evidence about the failing page.
+
 ---
 
 ## Build & test commands
@@ -543,6 +569,21 @@ cd resulting && npm ci && npm run test:ci
   majority vote.
 - PR descriptions are durable evidence. Use
   `.github/pull_request_template.md` for the exact core and conditional fields.
+  Check the plain-language title and its 72-character limit before creating
+  the PR or editing workflow-producing metadata, not only after CI finishes.
+- Separate a successful deployment from its failed acceptance. Classify the
+  actual failing assertion before reopening product design; a proven harness
+  defect needs its bounded correction and affected evidence, not another
+  unchanged Common publication or source-review campaign. A changed protected
+  harness still needs its required exact-source release and fresh acceptance;
+  local regression success cannot turn the failed deployed run green.
+- After the complete journey succeeds, finish the existing closure checklist:
+  bind artifact bytes and declared hashes, distinguish leased acceptance from
+  final committed/no-lease state, check cleanup that runs after artifact
+  upload, confirm source inclusion and required documentation publication,
+  then persist one public-safe terminal record and close the work. Do not
+  manufacture more probes, reviews, or a status-only release. Failed attempts
+  remain failed evidence.
 - Copilot CLI automatic approval removes only the personal prompt. It never
   removes exact-SHA, trusted-check, review-thread, workflow-inventory,
   environment, or exclusivity gates. Human/default PRs require approval bound

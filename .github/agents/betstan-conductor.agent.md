@@ -240,6 +240,18 @@ accepted by the next owner.
 - Apply `Reusing accepted evidence` in `.github/agents/README.md` on recovery.
   Reuse completed, still-applicable source reviews; a lost agent context or a
   new PR alone does not justify repeating the chain.
+- When deployment succeeds but acceptance fails, register the exact failing
+  assertion and distinguish application, harness, and provider causes before
+  routing a correction. Keep accepted feature scope frozen; a harness-only
+  correction reopens only affected evidence and required exact-source release
+  checks, not unchanged architecture, Common publication, or specialist work.
+- Once the full journey succeeds, route the existing finite closure checklist
+  directly to the orchestrator: final artifact/hash and committed-state proof,
+  required post-upload cleanup, source inclusion, documentation publication,
+  and one persistent terminal record. Close the unit when these pass. Do not
+  add status-only handoffs, another review round, or a new release merely to
+  report completion; see `Protected browser acceptance` and completion lessons
+  in `LEARNINGS.md`.
 - Reconcile current protected refs, the actual deployed generation, and exact
   operation artifacts before resuming a release. Another session may already
   have completed a dependency. Continue only the remaining authorized

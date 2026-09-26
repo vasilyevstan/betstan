@@ -691,9 +691,11 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   const main = page.locator('main');
   const declinedCard = main.locator('.my-bets-card').filter({ hasText: 'Declined: Quote changed' }).first();
   const preMatchHistoryCard = main.locator('.my-bets-card').filter({ hasText: 'Historic Derby' }).first();
-  const legacyIdentifierCard = main.locator('.my-bets-card').filter({ hasText: 'Won · Winner' }).first();
+  const legacyIdentifierCard = main.locator('.my-bets-card[data-slip-id="legacy-live-identifier-1"]');
 
   await expect(declinedCard).toContainText('Live');
+  await declinedCard.getByRole('button', { name: /^Bet details/ }).click();
+  await legacyIdentifierCard.getByRole('button', { name: /^Bet details/ }).click();
   await expect(declinedCard).toContainText('Void · Manual void');
   await expect(preMatchHistoryCard).toContainText('Pre-match');
   // The raw stored identifier is never rendered verbatim -- it is normalized into a readable
@@ -703,6 +705,7 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(page.getByText(legacyRawIdentifier, { exact: false })).toHaveCount(0);
 
   const betTypeFilters = page.getByRole('group', { name: 'Filter bets by type' });
+  await page.getByRole('button', { name: 'Filters', exact: true }).click();
   await betTypeFilters.getByRole('button', { name: 'LIVE' }).click();
   await expect(declinedCard).toBeVisible();
   await expect(legacyIdentifierCard).toBeVisible();

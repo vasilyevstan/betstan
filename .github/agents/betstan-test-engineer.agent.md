@@ -58,6 +58,18 @@ coverage, stale/demoted administrator checks, auth-unavailable failure, private
 seed invariants, activation lease expiry, same-run/SHA commit ownership,
 ambiguous writes, and automatic flag-plus-lease disable.
 
+When a protected browser-harness correction affects scoped fixtures or extra
+tabs, execute the actual helper on a fresh additional page. Verify the existing
+administrator-only fixture scope survives affected LIVE/PRE_MATCH navigation
+and reload, excludes sibling fixtures, and grants nothing to anonymous users.
+Browser route mocks do not
+intercept `APIRequestContext`; stub only the necessary request-context reads
+in mock tests and bind selection lookup to the submitted event identity.
+Await observable restored form state, not merely a visible confirmation
+button. Follow `Protected browser acceptance` in `LEARNINGS.md` for exact
+handled-error attribution and final audit draining. Preserve unknown-error
+failures and distinguish mock-HTTP proof from actual production acceptance.
+
 For concurrency and timing changes, require executable race tests where
 placement wins clean/delete, a restored board progresses before decline
 redelivery, and terminal/suspension updates arrive before or after their
