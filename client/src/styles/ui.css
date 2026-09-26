@@ -592,6 +592,101 @@ body {
   gap: 0.55rem;
 }
 
+.my-bets-board .my-bets-card > .card-body,
+.my-bets-toolbar > .card-body {
+  padding: 0.75rem;
+}
+
+.my-bets-summary {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.my-bets-summary h2,
+.my-bets-pick,
+.my-bets-find h1,
+.my-bets-pending p {
+  margin: 0;
+}
+
+.my-bets-summary-heading,
+.my-bets-position,
+.my-bets-filter-context,
+.my-bets-pending-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 1rem;
+}
+
+.my-bets-summary-heading {
+  justify-content: space-between;
+}
+
+.my-bets-placed {
+  color: var(--text-subtle);
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.my-bets-summary .my-bets-expand {
+  justify-self: start;
+}
+
+.my-bets-pick,
+.my-bets-position,
+.my-bets-filter-context {
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.my-bets-details {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.my-bets-find {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.my-bets-find h1 {
+  margin-inline-end: 0.25rem;
+}
+
+.my-bets-filter-context {
+  margin-top: 0.5rem;
+}
+
+.my-bets-filter-context > :first-child {
+  font-weight: 600;
+}
+
+.my-bets-filter-disclosure:not([hidden]) {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.my-bets-pending,
+.my-bets-pending-item {
+  gap: 0.5rem;
+}
+
+.my-bets-pending-item {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 0.5rem;
+}
+
+.my-bets-pending-item > span {
+  flex: 1 1 16rem;
+  overflow-wrap: anywhere;
+}
+
 .my-bets-toolbar {
   background: color-mix(in srgb, var(--surface-soft) 94%, var(--surface-elevated));
   border-color: color-mix(in srgb, var(--border-subtle) 86%, var(--accent) 14%);
@@ -643,8 +738,9 @@ body {
 }
 
 .my-bets-search {
-  min-width: min(100%, 22rem);
-  flex: 1 1 18rem;
+  min-width: 0;
+  width: auto;
+  flex: 1 1 14rem;
 }
 
 .my-bets-select {
@@ -691,6 +787,8 @@ body {
 }
 
 .my-bets-expand {
+  min-height: 44px;
+  min-width: 44px;
   border-color: var(--border-subtle);
   color: var(--text-subtle);
 }
@@ -701,6 +799,7 @@ body {
 }
 
 .my-bets-load-more {
+  min-height: 44px;
   font-weight: 700;
 }
 
@@ -741,9 +840,35 @@ body {
 
 .cash-back {
   display: grid;
-  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
   border-top: 1px solid var(--border-subtle);
-  padding-top: 1rem;
+  padding-top: 0.5rem;
+}
+
+.cash-back > :not(.cash-back-strip, .cash-back-history, .visually-hidden) {
+  grid-column: 1 / -1;
+}
+
+.cash-back-strip,
+.cash-back-editor:not([hidden]) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.cash-back-strip h3 {
+  flex-shrink: 0;
+}
+
+.cash-back-editor {
+  min-width: 0;
+}
+
+.cash-back [hidden],
+.my-bets-board [hidden] {
+  display: none;
 }
 
 .cash-back h3,
@@ -767,6 +892,10 @@ body {
   padding: 0.75rem;
   border-inline-start: 3px solid var(--accent);
   border-radius: 0.5rem;
+}
+
+.cash-back-message {
+  padding: 0.4rem 0.6rem;
 }
 
 .cash-back-actions {
@@ -805,6 +934,7 @@ body {
 }
 
 .cash-back-control:focus-visible,
+.cash-back-message:focus,
 .my-bets-feedback:focus {
   outline: 3px solid var(--text-main);
   outline-offset: 3px;
@@ -819,9 +949,11 @@ body {
 
 .cash-back-amount {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(7rem, 12rem);
+  grid-template-columns: minmax(0, 1fr) minmax(5rem, 7.5rem);
   align-items: center;
   gap: 0.5rem 0.75rem;
+  max-width: 24rem;
+  font-size: 1rem;
 }
 
 .cash-back-amount input {
@@ -848,8 +980,40 @@ body {
   border-radius: var(--radius-card);
 }
 
-.cash-back-offer > .btn {
-  justify-self: start;
+.cash-back-offer > div,
+.cash-back-expired > div:not([hidden]) {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cash-back-offer .btn {
+  justify-self: end;
+}
+
+.cash-back-review-context summary {
+  display: list-item;
+  align-content: center;
+  cursor: pointer;
+  padding: 0.5rem;
+  border: 1px solid var(--text-subtle);
+  border-radius: calc(var(--radius-card) * 0.45);
+  font-size: 1rem;
+}
+
+.cash-back-review-context[open] > :not(summary) {
+  margin-top: 0.5rem;
+}
+
+.cash-back-review-values {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.cash-back-expired > div:not([hidden]) {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
 }
 
 .cash-back-selections {
@@ -882,12 +1046,21 @@ body {
 }
 
 .cash-back-history {
-  border-top: 1px solid var(--border-subtle);
-  padding-top: 0.75rem;
+  min-width: 0;
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+}
+
+.cash-back-history--open {
+  grid-column: 1 / -1;
+  grid-row: auto;
 }
 
 .cash-back-history__body {
+  grid-column: 1 / -1;
   padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .cash-back-receipts {
@@ -949,15 +1122,36 @@ body {
 }
 
 @media (max-width: 575.98px) {
-  .cash-back-amount {
+  .my-bets-find h1 {
+    flex-basis: 100%;
+  }
+
+  .my-bets-search {
+    flex-basis: 100%;
+  }
+
+  .cash-back {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .cash-back-actions {
-    flex-direction: column;
+  .cash-back-history {
+    grid-column: 1;
+    grid-row: auto;
+    justify-self: start;
   }
 
-  .cash-back-offer > .btn {
+  .cash-back-review-values {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cash-back-review-values > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    align-items: baseline;
+  }
+
+  .cash-back-offer .btn {
     justify-self: stretch;
   }
 }

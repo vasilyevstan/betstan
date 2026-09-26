@@ -1,6 +1,6 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import axios from 'axios';
 import App from './App';
@@ -339,6 +339,13 @@ describe('coverage components', () => {
     // Row-level settlement colouring is asserted inside the owning selection row.
     const cards = document.querySelectorAll('.my-bets-card');
     expect(cards).toHaveLength(20);
+    cards.forEach((card) => {
+      expect(firstSelectionRow(card)).toBeNull();
+      const details = within(card).getByRole('button', { name: /^Bet details/ });
+      expect(details).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(details);
+      expect(details).toHaveAttribute('aria-expanded', 'true');
+    });
     expect(cards[0]).toHaveTextContent('Needle Match');
     expect(firstSelectionRow(cards[0]).querySelectorAll('.text-success')).toHaveLength(4);
     expect(cards[1]).toHaveTextContent('Event 1');
@@ -348,9 +355,12 @@ describe('coverage components', () => {
       firstSelectionRow(cards[2]).querySelectorAll('.text-success, .text-danger'),
     ).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Show all selections (5)' }));
-    expect(screen.getByRole('button', { name: 'Show less selections' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Show less selections' }));
+    expect(cards[0].querySelectorAll('.my-bets-row:not(.my-bets-row--header)')).toHaveLength(5);
+    const details = within(cards[0]).getByRole('button', { name: 'Hide bet details' });
+    expect(details).toBeInTheDocument();
+    fireEvent.click(details);
+    expect(within(cards[0]).getByRole('button', { name: /^Bet details/ })).toHaveAttribute('aria-expanded', 'false');
+    expect(firstSelectionRow(cards[0])).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
@@ -363,6 +373,10 @@ describe('coverage components', () => {
     fireEvent.change(screen.getByRole('searchbox'), {
       target: { value: '' },
     });
+    const filters = screen.getByRole('button', { name: 'Filters' });
+    expect(filters).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(filters);
+    expect(filters).toHaveAttribute('aria-expanded', 'true');
     fireEvent.click(screen.getByRole('button', { name: 'DECLINED' }));
     expect(await screen.findByText(/bets found/)).toHaveTextContent('4 bets found');
     const declinedBadges = readBetStatusBadges();
