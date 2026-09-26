@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-  cashBackReason, formatMinor, isFinalOperation, parseStakeMinor, possibleReturn, validReceipt,
+  cashBackReason, formatMinor, isFinalOperation, isPendingOperation, parseStakeMinor, possibleReturn, validReceipt,
 } from '../../cashBackUtils';
 import { formatLegacyLiveSelectionLabel, formatLiveMarketType } from '../../liveBettingUtils';
 
@@ -114,6 +114,10 @@ export const emptyCashBackDraft = {
   mode: 'FULL', amount: '', selectedId: null, edited: false, validation: '', initialized: false,
 };
 
+export const needsCashBackRecovery = (attempt, operation, network) => Boolean(attempt
+  && !isFinalOperation(operation)
+  && (attempt.confirmRequest || !operation || isPendingOperation(operation) || network?.error));
+
 const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
   const inputId = useId();
   const helpId = useId();
@@ -123,6 +127,7 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
   const [now, setNow] = useState(Date.now());
   const [expiredDetailsOpen, setExpiredDetailsOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
+  const panelRef = useRef(null);
   const requestRef = useRef(null);
   const statusRef = useRef(null);
   const focusedAction = useRef(null);
@@ -142,6 +147,7 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
   const terminal = isFinalOperation(displayedOperation);
   const retryAttempt = pendingAttempt ?? attempt;
   const network = model.network[retryAttempt?.clientOperationId];
+  const needsRecovery = needsCashBackRecovery(retryAttempt, model.operations[retryAttempt?.clientOperationId], network);
   const gettingOffer = Boolean(attempt && !terminal && !network?.invalidOffer
     && (!operation || operation.state === 'QUOTE_PENDING'));
   const locked = pendingConfirm || gettingOffer;
@@ -166,8 +172,12 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
 
   useEffect(() => {
     if (!quote || terminal || pendingConfirm) return undefined;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 250);
+    const updateNow = () => {
+      focusedAction.current = panelRef.current?.contains(document.activeElement) ? document.activeElement : null;
+      setNow(Date.now());
+    };
+    updateNow();
+    const timer = setInterval(updateNow, 250);
     return () => clearInterval(timer);
   }, [quote, terminal, pendingConfirm]);
 
@@ -196,19 +206,21 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
   const error = validation || model.actionErrors[bet.slipId] || network?.error;
   const reviewVisible = quote && !terminal && !expired && !pendingConfirm;
   useLayoutEffect(() => {
-    if (focusedAction.current && !document.contains(focusedAction.current)
-      && document.activeElement === document.body) {
+    const previous = focusedAction.current;
+    if (previous && (!document.contains(previous) || previous.closest('[hidden]'))
+      && (document.activeElement === previous || document.activeElement === document.body)) {
       const target = pendingConfirm || requestRef.current?.disabled ? statusRef.current : requestRef.current ?? statusRef.current;
       target?.focus();
       focusedAction.current = null;
     }
   }, [reviewVisible, pendingConfirm, expired, showForm]);
 
-  return <section className="cash-back" aria-label={`Cash back for ${bet.rows?.map((row) => row.eventName).join(', ') || 'this slip'}`}>
+  return <section ref={panelRef} className="cash-back"
+    onFocusCapture={(event) => { focusedAction.current = event.target; }}
+    aria-label={`Cash back for ${bet.rows?.map((row) => row.eventName).join(', ') || 'this slip'}`}>
     <div className="cash-back-strip">
     <h3 className="h6">Cash back</h3>
-    {showForm ? <>
-      <div className="cash-back-editor" hidden={expired && !edited && !expiredDetailsOpen && !inputFocused}>
+    {showForm ? <div className="cash-back-editor" hidden={expired && !edited && !expiredDetailsOpen && !inputFocused}>
       <div role="group" aria-label="Cash-back mode" className="cash-back-actions" aria-describedby={helpId}>
         <button type="button" aria-pressed={mode === 'FULL'}
           className={`btn cash-back-control ${mode === 'FULL' ? 'btn-primary' : 'btn-shell'}`}
@@ -233,23 +245,21 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
             setDraft((old) => ({ ...old, amount: value, edited: true, validation: '' }));
           }} />
       </div> : null}
-      </div>
-      <div className="cash-back-actions">
-        <button ref={requestRef} type="button" className="btn btn-shell cash-back-control"
+      </div> : null}
+      {showForm || needsRecovery ? <div className="cash-back-actions">
+        {showForm ? <button ref={requestRef} type="button" className="btn btn-shell cash-back-control"
           disabled={bet.status !== 'CONFIRMED' || Boolean(model.storageError)} aria-disabled={locked}
           aria-describedby={error ? errorId : helpId}
-          onFocus={(event) => { focusedAction.current = event.currentTarget; }}
           onKeyDown={(event) => { if (event.repeat && ['Enter', ' '].includes(event.key)) event.preventDefault(); }}
           onClick={(event) => { if (!locked && event.detail < 2) getOffer(); }}>
           {attempt ? 'Get new offer' : 'Get cash-back offer'}
-        </button>
-        {pendingAttempt || (attempt && !terminal && (locked || network?.error)) ? <button type="button"
+        </button> : null}
+        {needsRecovery ? <button type="button"
           className="btn btn-shell cash-back-control" aria-disabled={Boolean(network?.busy)}
           onClick={() => { if (!network?.busy) model.retry(retryAttempt.clientOperationId); }}>
           {pendingConfirm ? 'Check confirmation status' : 'Retry same offer request'}
         </button> : null}
-      </div>
-    </> : null}
+      </div> : null}
     </div>
     {message ? <p ref={statusRef} tabIndex={-1} role={['ACCEPTED', 'REJECTED'].includes(displayedOperation?.state) ? undefined : 'status'}
       className={`cash-back-message${displayedOperation?.state === 'REJECTED' ? ' cash-back-error' : ''}`}>{message}</p> : null}
@@ -289,7 +299,6 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
         {' '}{Math.max(0, Math.ceil((displayedOperation.deadline - now) / 1000))}s remaining (informational, not a guarantee of availability).
       </p> : null}
       {!expired ? <button type="button" className="btn btn-primary cash-back-control" disabled={!canConfirm}
-        onFocus={(event) => { focusedAction.current = event.currentTarget; }}
         onKeyDown={(event) => { if (event.repeat && ['Enter', ' '].includes(event.key)) event.preventDefault(); }}
         onClick={(event) => { if (event.detail < 2) model.confirm(attempt.clientOperationId); }}>
         {quote.mode === 'FULL' ? 'Confirm full cash back' : 'Confirm partial cash back'}

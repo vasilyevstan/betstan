@@ -544,7 +544,7 @@ it('keeps the actual pending confirmation discoverable outside filters past expi
   fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
   fireEvent.click(screen.getByRole('button', { name: 'WIN', exact: true }));
   expect(card()).toBeNull();
-  const pending = screen.getByRole('region', { name: 'Pending cash-back confirmations outside this view' });
+  const pending = screen.getByRole('region', { name: 'Pending cash-back operations outside this view' });
   expect(pending).toHaveTextContent('Northern Falcons - Southern Owls');
   expect(pending).toHaveTextContent('20.00 Stanbucks to close');
   await advance(9000);
@@ -558,9 +558,9 @@ it('keeps the actual pending confirmation discoverable outside filters past expi
   fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
   const restored = await findRestoredPartialInput(20);
   expect(restored).toHaveAttribute('readonly');
-  expect(screen.queryByRole('region', { name: 'Pending cash-back confirmations outside this view' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Pending cash-back operations outside this view' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'WIN', exact: true }));
-  const pendingAgain = screen.getByRole('region', { name: 'Pending cash-back confirmations outside this view' });
+  const pendingAgain = screen.getByRole('region', { name: 'Pending cash-back operations outside this view' });
   const check = within(pendingAgain).getByRole('button', { name: 'Check confirmation status' });
   await waitFor(() => expect(check).toHaveAttribute('aria-disabled', 'false'));
   act(() => check.focus());
@@ -596,7 +596,7 @@ it('reconciles an older pending slip beyond the twenty visible cards and names i
   await screen.findByText('23 bets found');
   expect(document.querySelectorAll('.my-bets-card')).toHaveLength(20);
   expect(card('slip-22')).toBeNull();
-  const pending = screen.getByRole('region', { name: 'Pending cash-back confirmations outside this view' });
+  const pending = screen.getByRole('region', { name: 'Pending cash-back operations outside this view' });
   expect(pending).toHaveTextContent('Match 22');
   await advance(8000);
   expect(pending).toHaveTextContent('Full confirmation pending');
@@ -605,7 +605,7 @@ it('reconciles an older pending slip beyond the twenty visible cards and names i
   fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
   await waitFor(() => expect(within(card('slip-22')).getByRole('button', { name: 'Check confirmation status' })).toHaveAttribute('aria-disabled', 'false'));
   expect(document.querySelectorAll('.my-bets-card')).toHaveLength(23);
-  expect(screen.queryByRole('region', { name: 'Pending cash-back confirmations outside this view' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Pending cash-back operations outside this view' })).not.toBeInTheDocument();
 });
 
 it('removes expired consent controls without refreshing, and restores keyboard focus to the separate new-offer action', async () => {
@@ -624,6 +624,81 @@ it('removes expired consent controls without refreshing, and restores keyboard f
   fireEvent.click(screen.getByRole('button', { name: 'Expired offer details' }));
   expect(card().querySelector('.cash-back-expired .cash-back-values')).toBeVisible();
   expect(screen.queryByRole('button', { name: 'Confirm full cash back' })).not.toBeInTheDocument();
+});
+
+it.each(['lost response', 'known QUOTE_PENDING'])('retains %s quote recovery after settlement, paging and filtering without new admission', async (kind) => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2026-09-24T12:00:00Z'));
+  const state = installApi({ quote: (offer) => ({ ...offer.quote.operation, state: 'QUOTE_PENDING' }) });
+  if (kind === 'lost response') axios.post.mockRejectedValueOnce(new Error('initial response lost'));
+  mount();
+  await screen.findByText('Northern Falcons - Southern Owls');
+  fireEvent.click(screen.getByRole('button', { name: 'Get cash-back offer' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same offer request' })).toHaveAttribute('aria-disabled', 'false'));
+  const request = copy(axios.post.mock.calls[0][1]);
+  state.bets = [bet({ status: 'LOSS', cashBackFinancial: financial({ revision: 2, status: 'LOSS' }) })];
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh bets' }));
+  await waitFor(() => expect(card().querySelector('.my-bets-status')).toHaveTextContent('LOSS'));
+  expect(within(card()).getByRole('button', { name: 'Retry same offer request' })).toHaveAttribute('aria-disabled', 'false');
+  expect(within(card()).queryByRole('button', { name: 'Get new offer' })).not.toBeInTheDocument();
+  state.bets.push(...Array.from({ length: 21 }, (_, index) => bet({
+    _id: `newer-bet-${index}`, slipId: `newer-slip-${index}`,
+    timestamp: new Date(Date.now() + index + 1).toISOString(),
+    rows: [{ ...bet().rows[0], eventName: `Newer match ${index}` }],
+  })));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh bets' }));
+  await waitFor(() => expect(card()).toBeNull());
+  expect(document.querySelectorAll('.my-bets-card')).toHaveLength(20);
+  const recovery = screen.getByRole('region', { name: 'Pending cash-back operations outside this view' });
+  expect(recovery).toHaveTextContent('offer request pending');
+  expect(within(recovery).queryByRole('button', { name: 'Check confirmation status' })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search bets' }), { target: { value: 'not-a-match' } });
+  if (kind === 'lost response') {
+    expect(within(recovery).getByRole('alert')).toHaveTextContent('Network failure');
+    state.quote = (offer) => ({ ...offer.quote.operation, state: 'UNAVAILABLE', reason: 'BET_NOT_CONFIRMED' });
+  } else {
+    state.operations[request.clientOperationId] = quoted(request);
+  }
+  const retry = within(recovery).getByRole('button', { name: 'Retry same offer request' });
+  act(() => retry.focus());
+  fireEvent.click(retry);
+  const feedback = document.querySelector('.my-bets-feedback');
+  await waitFor(() => expect(feedback).toHaveTextContent(kind === 'lost response'
+    ? 'Cash-back offer request unavailable' : 'Cash-back offer request recovered'));
+  expect(feedback).toHaveFocus();
+  expect(recovery).not.toBeInTheDocument();
+  expect(screen.getByRole('searchbox', { name: 'Search bets' })).toHaveValue('not-a-match');
+  const posts = axios.post.mock.calls.filter(([url]) => url.endsWith('/quote')).map(([, body]) => body);
+  expect(posts).toEqual(kind === 'lost response' ? [request, request] : [request]);
+  expect(axios.post.mock.calls.some(([url]) => url.endsWith('/accept'))).toBe(false);
+  const lookups = axios.get.mock.calls.filter(([url]) => url.includes('/operations/')).map(([url]) => url);
+  expect(lookups).toEqual(kind === 'lost response' ? [] : [
+    `/api/bet/slip-one/cash-back/operations/${state.operations[request.clientOperationId].operationId}`,
+  ]);
+});
+
+it.each(['review summary', 'unchanged mode', 'outside control'])('keeps visible logical focus when expiry hides the %s region', async (target) => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2026-09-24T12:00:00Z'));
+  installApi();
+  mount();
+  await getOffer();
+  const control = target === 'review summary' ? card().querySelector('.cash-back-review-context summary')
+    : screen.getByRole(target === 'unchanged mode' ? 'button' : 'searchbox', {
+      name: target === 'unchanged mode' ? 'Full remainder' : 'Search bets',
+    });
+  act(() => control.focus());
+  await advance(7001);
+  if (target === 'outside control') expect(control).toHaveFocus();
+  else {
+    expect(control).toBeInTheDocument();
+    expect(control).not.toBeVisible();
+    expect(screen.getByRole('button', { name: 'Get new offer' })).toHaveFocus();
+  }
+  expect(document.activeElement).toBeVisible();
+  expect(card().querySelector('.cash-back-expired .cash-back-values')).not.toBeVisible();
+  expect(axios.post).toHaveBeenCalledTimes(1);
+  expect(axios.post.mock.calls[0][0]).toMatch(/\/quote$/);
 });
 
 it('blocks repeated activation keys on request and confirm without suppressing keyboard navigation', async () => {

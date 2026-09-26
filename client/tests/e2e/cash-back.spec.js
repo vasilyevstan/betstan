@@ -85,15 +85,18 @@ const prepare = async (page, state) => {
       if (!previous) {
         expect(Object.keys(body).sort()).toEqual(['action', 'clientOperationId', 'portion']);
         state.quoteBodies.set(body.clientOperationId, body);
-        state.operations.set(body.clientOperationId, quoted(body, {
+        const offer = quoted(body, {
           slipId, financial: state.bets.find((entry) => entry.slipId === slipId).cashBackFinancial,
-        }));
+        });
+        state.operations.set(body.clientOperationId, state.holdQuote
+          ? { ...offer.quote.operation, state: 'QUOTE_PENDING' } : offer);
       }
       if (state.loseQuoteOnce) {
         state.loseQuoteOnce = false;
         return route.abort('failed');
       }
-      return send(state.operations.get(body.clientOperationId));
+      const operation = state.operations.get(body.clientOperationId);
+      return send(operation, operation.state === 'QUOTE_PENDING' ? 202 : 200);
     }
     if (url.pathname.endsWith('/accept')) {
       expect(Object.keys(body).sort()).toEqual(['action', 'clientOperationId', 'quoteId']);
@@ -485,6 +488,124 @@ const measureLayout = (page) => page.evaluate(() => {
     minimumTargetWidth: Math.min(...targets.map((box) => box.width)),
     minimumTargetHeight: Math.min(...targets.map((box) => box.height)),
   };
+});
+
+test.describe('My Bets correction 2 recovery and expiry focus', () => {
+  for (const kind of ['lost response', 'known QUOTE_PENDING']) {
+    test(`${kind} remains recoverable after settlement, paging and filtering`, async ({ page }, testInfo) => {
+      const state = createState();
+      state.loseQuoteOnce = kind === 'lost response';
+      state.holdQuote = kind === 'known QUOTE_PENDING';
+      await prepare(page, state);
+      await page.goto('/bets?ui=v2&theme=dark');
+      const card = getCard(page);
+      await card.getByRole('button', { name: 'Get cash-back offer' }).click();
+      await expect(card.getByRole('button', { name: 'Retry same offer request' })).toBeEnabled();
+      const request = state.cashRequests.find(entry => entry.path.endsWith('/quote')).body;
+      const registered = state.operations.get(request.clientOperationId);
+      state.bets[0] = { ...state.bets[0], status: 'LOSS',
+        cashBackFinancial: { ...state.bets[0].cashBackFinancial, revision: 2, status: 'LOSS' } };
+      await page.getByRole('button', { name: 'Refresh bets' }).click();
+      await expect(card.locator('.my-bets-status')).toHaveText('LOSS');
+      await expect(card.getByRole('button', { name: 'Retry same offer request' })).toBeEnabled();
+      await expect(card.getByRole('button', { name: 'Get new offer' })).toHaveCount(0);
+
+      state.bets.push(...Array.from({ length: 21 }, (_, index) => bet({
+        _id: `newer-bet-${index}`, slipId: `newer-slip-${index}`,
+        timestamp: new Date(Date.now() + index + 1).toISOString(),
+        rows: [{ ...bet().rows[0], eventName: `Newer match ${index}` }],
+      })));
+      await page.getByRole('button', { name: 'Refresh bets' }).click();
+      await expect(card).toHaveCount(0);
+      await expect(page.locator('.my-bets-card')).toHaveCount(20);
+      const recovery = page.getByRole('region', { name: 'Pending cash-back operations outside this view' });
+      await expect(recovery).toContainText('offer request pending');
+      await page.getByRole('searchbox', { name: 'Search bets' }).fill('not-a-match');
+      await expect(recovery.getByRole('button', { name: 'Retry same offer request' })).toBeEnabled();
+      await expect(recovery.getByRole('button', { name: 'Check confirmation status' })).toHaveCount(0);
+      if (kind === 'lost response') await expect(recovery.getByRole('alert')).toContainText('Network failure');
+      const geometry = await measureLayout(page);
+      expect(geometry.document.scroll).toBeLessThanOrEqual(geometry.document.client);
+      expect(geometry.overflow).toEqual([]);
+      expect(geometry.collisions).toEqual([]);
+      expect(geometry.containmentFailures).toEqual([]);
+      expect(geometry.minimumTargetHeight).toBeGreaterThanOrEqual(44);
+
+      if (kind === 'known QUOTE_PENDING') state.operations.set(request.clientOperationId, {
+        ...registered, state: 'UNAVAILABLE', reason: 'BET_NOT_CONFIRMED',
+      });
+      const retry = recovery.getByRole('button', { name: 'Retry same offer request' });
+      await retry.focus();
+      await page.keyboard.press('Enter');
+      const feedback = page.locator('.my-bets-feedback');
+      await expect(feedback).toContainText(kind === 'lost response'
+        ? 'Cash-back offer request recovered' : 'Cash-back offer request unavailable');
+      await expect(feedback).toBeFocused();
+      await expect(feedback).toBeVisible();
+      await expect(recovery).toHaveCount(0);
+      await expect(page.getByRole('searchbox', { name: 'Search bets' })).toHaveValue('not-a-match');
+      const quotePosts = state.cashRequests.filter(entry => entry.path.endsWith('/quote')).map(entry => entry.body);
+      expect(quotePosts).toEqual(kind === 'lost response' ? [request, request] : [request]);
+      const lookups = state.cashRequests.filter(entry => entry.path.includes('/operations/')).map(entry => entry.path);
+      if (kind === 'lost response') expect(lookups).toEqual([]);
+      else {
+        expect(lookups.length).toBeGreaterThan(0);
+        expect(lookups.every(url => url === `/api/bet/slip-one/cash-back/operations/${registered.operationId}`)).toBe(true);
+      }
+      expect(state.cashRequests.filter(entry => entry.path.endsWith('/accept'))).toEqual([]);
+      expect(state.receipts).toEqual([]);
+      await page.getByRole('searchbox', { name: 'Search bets' }).fill('Northern Mountain');
+      await expect(card.locator('.my-bets-status')).toHaveText('LOSS');
+      await expect(card.getByRole('button', { name: 'Get new offer' })).toHaveCount(0);
+      const confirm = card.getByRole('button', { name: 'Confirm full cash back' });
+      if (await confirm.count()) await expect(confirm).toBeDisabled();
+      await testInfo.attach('my-bets-quote-recovery-delta', {
+        contentType: 'application/json', body: Buffer.from(JSON.stringify({
+          evidence: 'Actual MyBets render with HTTP mocks; no production acceptance',
+          source: sourceBinding(), kind, request, operationId: registered.operationId,
+          quotePosts, lookups, terminalStatus: await card.locator('.my-bets-status').innerText(),
+          feedback: await feedback.innerText(), geometry,
+        }, null, 2)),
+      });
+    });
+  }
+
+  for (const target of ['review summary', 'unchanged mode', 'outside control']) {
+    test(`expiry leaves visible logical focus from ${target}`, async ({ page }, testInfo) => {
+      const state = createState();
+      await page.setViewportSize({ width: 390, height: 844 });
+      await prepare(page, state);
+      await page.goto('/bets?ui=v2&theme=dark');
+      const card = getCard(page);
+      await card.getByRole('button', { name: 'Get cash-back offer' }).click();
+      await expect(card.getByRole('button', { name: 'Confirm full cash back' })).toBeEnabled();
+      const control = target === 'review summary' ? card.locator('.cash-back-review-context summary')
+        : target === 'unchanged mode' ? card.getByRole('button', { name: 'Full remainder', exact: true })
+          : page.getByRole('searchbox', { name: 'Search bets' });
+      await control.focus();
+      await expect(control).toBeFocused();
+      await expect(card.getByRole('button', { name: 'Expired offer details' })).toBeVisible();
+      const expected = target === 'outside control' ? control : card.getByRole('button', { name: 'Get new offer' });
+      await expect(expected).toBeFocused();
+      await expect(expected).toBeVisible();
+      await expect(card.locator('.cash-back-expired .cash-back-values').first()).not.toBeVisible();
+      expect(state.cashRequests.filter(entry => entry.path.endsWith('/quote'))).toHaveLength(1);
+      expect(state.cashRequests.filter(entry => entry.path.endsWith('/accept'))).toHaveLength(0);
+      const focus = await expected.evaluate(node => ({
+        label: node.getAttribute('aria-label') || node.textContent.trim(),
+        active: document.activeElement === node, visible: node.checkVisibility(),
+        hiddenAncestor: Boolean(node.closest('[hidden]')),
+      }));
+      await testInfo.attach('my-bets-expiry-focus-delta', {
+        contentType: 'application/json', body: Buffer.from(JSON.stringify({
+          evidence: 'Native keyboard/focus with unchanged seven-second quotes and HTTP mocks',
+          source: sourceBinding(), target, focus,
+          quotePosts: state.cashRequests.filter(entry => entry.path.endsWith('/quote')).map(entry => entry.body),
+          confirmPosts: state.cashRequests.filter(entry => entry.path.endsWith('/accept')).length,
+        }, null, 2)),
+      });
+    });
+  }
 });
 
 test.describe('My Bets whole-page usability', () => {

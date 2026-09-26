@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { format } from 'date-fns';
 import useMyBets from '../../hook/useMyBets';
-import CashBackPanel, { emptyCashBackDraft } from './CashBackPanel';
-import { acceptedOddsForBet, cashBackReason, formatMinor, isFinalOperation, parseStakeMinor, possibleReturn } from '../../cashBackUtils';
+import CashBackPanel, { emptyCashBackDraft, needsCashBackRecovery } from './CashBackPanel';
+import { acceptedOddsForBet, cashBackReason, formatMinor, parseStakeMinor, possibleReturn } from '../../cashBackUtils';
 import {
   formatDeclineReason,
   formatLegacyLiveSelectionLabel,
@@ -45,6 +45,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
   const [feedback, setFeedback] = useState('');
   const feedbackRef = useRef(null);
   const focusedBeforeUpdate = useRef(null);
+  const previousQuoteRecovery = useRef({ ownerId: currentUser?.id, ids: [] });
   const beforeUpdate = useCallback(() => {
     const active = document.activeElement;
     focusedBeforeUpdate.current = active?.closest?.('.my-bets-card, .my-bets-pending') ? active : null;
@@ -64,14 +65,6 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
     setExpandedBets({});
     setDrafts({ ownerId: currentUser?.id, values: {} });
   }, [currentUser?.id]);
-  useLayoutEffect(() => {
-    const previousFocus = focusedBeforeUpdate.current;
-    focusedBeforeUpdate.current = null;
-    if (previousFocus && !document.contains(previousFocus)) {
-      setFeedback((current) => current || 'Bets updated. The focused slip no longer matches the current view. Your filters are unchanged.');
-      feedbackRef.current?.focus();
-    }
-  }, [betsList]);
 
   const filteredAndSortedBets = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -130,9 +123,36 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
 
   const visibleBets = filteredAndSortedBets.slice(0, visibleCount);
   const hasMoreBets = visibleCount < filteredAndSortedBets.length;
-  const hiddenPending = Object.values(drafts.ownerId === currentUser?.id ? model.attempts : {}).filter((attempt) => attempt.confirmRequest
-    && !isFinalOperation(model.operations[attempt.clientOperationId])
-    && !visibleBets.some((bet) => bet.slipId === attempt.slipId));
+  const recoveryAttempts = Object.values(drafts.ownerId === currentUser?.id ? model.attempts : {}).filter((attempt) => (
+    needsCashBackRecovery(attempt, model.operations[attempt.clientOperationId], model.network[attempt.clientOperationId])
+  ));
+  const hiddenRecovery = recoveryAttempts.filter((attempt) => !visibleBets.some((bet) => bet.slipId === attempt.slipId));
+
+  useLayoutEffect(() => {
+    // Remember presentation identities, not another copy of server operations.
+    // Ordinary in-card initial quotes should not announce recovery completion.
+    const ids = recoveryAttempts.filter((attempt) => !attempt.confirmRequest
+      && (model.network[attempt.clientOperationId]?.error
+        || model.operations[attempt.clientOperationId]?.state === 'QUOTE_PENDING'
+        || hiddenRecovery.includes(attempt))).map((attempt) => attempt.clientOperationId);
+    const previous = previousQuoteRecovery.current;
+    const completed = previous.ownerId === currentUser?.id
+      ? previous.ids.filter((id) => !ids.includes(id)).map((id) => model.operations[id])
+        .filter((operation) => ['QUOTED', 'UNAVAILABLE'].includes(operation?.state)
+          && !model.attempts[operation.clientOperationId]?.confirmRequest) : [];
+    previousQuoteRecovery.current = { ownerId: currentUser?.id, ids };
+    if (completed.length) {
+      setFeedback(completed.map((operation) => operation.state === 'UNAVAILABLE'
+        ? `Cash-back offer request unavailable. ${cashBackReason(operation.reason)} No cash back was confirmed. Your filters are unchanged.`
+        : 'Cash-back offer request recovered. No cash back was confirmed. Check the bet before reviewing any offer. Your filters are unchanged.').join(' '));
+    }
+    const previousFocus = focusedBeforeUpdate.current;
+    focusedBeforeUpdate.current = null;
+    if (previousFocus && !document.contains(previousFocus)) {
+      if (!completed.length) setFeedback((current) => current || 'Bets updated. The focused control is no longer in this view. Your filters are unchanged.');
+      feedbackRef.current?.focus();
+    }
+  }, [recoveryAttempts, hiddenRecovery, currentUser?.id, model.attempts, model.network, model.operations]);
 
   const toggleExpandedBet = (betId) => {
     setExpandedBets((currentExpandedBets) => ({
@@ -366,22 +386,22 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
       {model.listStatus.permission ? <a href={loginHref}>Log in</a> : null}
     </div> : null}
     {model.storageError ? <p role="alert" className="cash-back-error">{model.storageError}</p> : null}
-    {hiddenPending.length ? <section className="card card-body my-bets-pending" aria-label="Pending cash-back confirmations outside this view">
-      <h2 className="h6">Cash-back confirmations outside this view</h2>
-      <p>Your filters are unchanged. These confirmations still need a durable decision.</p>
-      {hiddenPending.map((attempt) => {
+    {hiddenRecovery.length ? <section className="card card-body my-bets-pending" aria-label="Pending cash-back operations outside this view">
+      <h2 className="h6">Cash-back recovery outside this view</h2>
+      <p>Your filters are unchanged. Check these requests without starting a new cash back.</p>
+      {hiddenRecovery.map((attempt) => {
         const pendingBet = betsList.find((bet) => bet.slipId === attempt.slipId);
         const operation = model.operations[attempt.clientOperationId];
         const quote = operation?.quote;
         return <div key={attempt.clientOperationId} className="my-bets-pending-item">
-          <span>{pendingBet?.rows?.[0]?.eventName || 'Previously submitted bet'} · {pendingBet?.rows?.length > 1 ? `${pendingBet.rows.length} selections · ` : ''}{attempt.quoteRequest.portion.mode === 'FULL' ? 'Full' : 'Partial'} confirmation pending
+          <span>{pendingBet?.rows?.[0]?.eventName || 'Previously submitted bet'} · {pendingBet?.rows?.length > 1 ? `${pendingBet.rows.length} selections · ` : ''}{attempt.quoteRequest.portion.mode === 'FULL' ? 'Full' : 'Partial'} {attempt.confirmRequest ? 'confirmation pending' : 'offer request pending'}
             {quote ? ` · ${formatMinor(quote.closedStakeMinor)} Stanbucks to close` : ''}
             {pendingBet ? ` · Placed ${formatTimestamp(pendingBet.timestamp)}` : ''}
           </span>
           <button type="button" className="btn btn-shell cash-back-control"
             aria-disabled={Boolean(model.network[attempt.clientOperationId]?.busy)}
             onClick={() => { if (!model.network[attempt.clientOperationId]?.busy) model.retry(attempt.clientOperationId); }}>
-            Check confirmation status
+            {attempt.confirmRequest ? 'Check confirmation status' : 'Retry same offer request'}
           </button>
           {model.network[attempt.clientOperationId]?.error ? <p role="alert" className="cash-back-error">{model.network[attempt.clientOperationId].error}</p> : null}
         </div>;

@@ -139,22 +139,26 @@ consent to another tab's quote. Permission failure clears the rendered account
 state and stops stale work; returning to the same account can recover its
 pending requests. Another account never adopts them.
 
-**Cash-back confirmations outside this view** keeps status recovery available
-when a pending bet is filtered out or lies beyond the visible cards, including
-the initial 20. It identifies the submitted bet without changing the filters.
-Expiry never turns submitted consent into a fresh offer; the same confirmation
-continues to reconcile, separately from any paused local draft.
+**Cash-back recovery outside this view** keeps existing offer requests and
+confirmations reachable when a bet is filtered out or lies beyond the visible
+cards, including the initial 20. **Retry same offer request** reconciles a lost
+initial response or `QUOTE_PENDING` with the same request identity, even after
+the bet settles; **Check confirmation status** retains the submitted consent.
+These are recovery actions, not new admission on terminal bets. Completing
+request recovery uses the existing feedback without changing the filters.
+Expiry never turns submitted consent into a fresh offer; recovery stays
+separate from any paused local draft.
 
 Refresh and status/history failures remain visible while previously loaded
 cards and input are retained where appropriate. Filters, sorting, Bet details,
 and sibling forms are preserved. Per-account, per-bet mode and typed-amount
 drafts survive filtering, reordering, refresh, and detail toggles while My Bets
-is mounted; switching accounts clears those local drafts. If an updated card
-leaves the current filter and removes the focused control, focus moves to
-completion feedback instead of disappearing; the filter is not changed
-automatically.
-If expiry removes a focused confirmation control, focus moves to the separate
-new-offer action or status feedback.
+is mounted; switching accounts clears those local drafts. If an update removes
+the focused control, including when recovery completes, focus moves to
+completion feedback instead of disappearing; the filters remain unchanged.
+If expiry hides or removes the focused confirmation, summary, or mode control,
+focus moves to the separate new-offer action or status feedback without
+automatically requesting or confirming an offer.
 
 Native labelled controls have visible focus and at least 44-by-44 CSS-pixel
 targets. Offer values reflow, controls wrap on small screens, and narrow
