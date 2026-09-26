@@ -178,9 +178,16 @@ inactive. Fail closed when either query is incomplete or fails.
 - Fail production exclusivity closed unless every active-run response has a
   nonnegative integer count, an array of runs, exact count/list agreement, and
   no pagination overflow.
+- If automatic approval fails before its POST because that inventory is
+  incomplete, refresh the evidence and retry only the same canonical approval
+  when its original authority remains valid. Keep the existing observer and
+  wait bound. An ambiguous POST still requires canonical reconciliation,
+  never a new dispatch, workflow rerun, or authority-store edit.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - Require every PR title to be a short, understandable outcome. Reject
   ambiguous category prefixes such as `chore`, `misc`, or `wip`.
+  Check this and the 72-character limit before PR creation or a
+  workflow-producing metadata edit; retain the final canonical merge check.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
 - Preserve unrelated tracked, untracked, and staged user work.
@@ -448,6 +455,13 @@ After deployment:
 - enable live kickoffs only through a bounded worker-enforced activation lease;
   permit the same run/SHA to remove that lease only after complete acceptance,
   protected evidence upload, and final current-master/provenance revalidation;
+- distinguish the accepted leased artifact from the full final activation
+  artifact. Recompute declared hashes against downloaded bytes, bind shared
+  accepted/final files and the verified image inventory, and require final
+  committed/post-commit success with no lease. Inspect actual job outcomes for
+  cleanup after artifact upload; an earlier provenance snapshot cannot prove
+  those later steps. Reuse successful canonical revalidation when its inputs
+  are unchanged, and preserve failed attempts without relabeling them;
 - reject an activation journey whose success requires overlapping moving-quote
   authority windows from independent accelerated fixtures. Prove multi-event
   placement with stable pre-kickoff quotes, then exercise moving in-play
@@ -593,6 +607,10 @@ A Running broker with missing consumers is not healthy production.
   to make an old queue record disappear.
 - Query exact artifact names from the successful upstream run instead of
   guessing them in a mutation preflight.
+- Before declaring a named Actions variable or prerequisite absent, query its
+  exact endpoint or complete the paginated inventory. A first page and its
+  reported count are not absence proof. Inspect metadata without exposing
+  secret values or changing configuration to repair an unproven problem.
 - Validate every upstream release prerequisite before enabling a workflow,
   creating a dispatch intent, or issuing authority. Protected authority is
   one-use, so a prerequisite discovered mid-run permanently strands that master
