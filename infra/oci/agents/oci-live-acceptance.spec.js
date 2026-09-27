@@ -63,6 +63,29 @@ const betCard = (page, slipId) => page.locator(
   `.my-bets-card[data-slip-id="${slipId}"]`,
 );
 
+const assertCollapsedEventTime = async (page, bet) => {
+  const firstRow = bet.rows[0];
+  expect(firstRow).toBeTruthy();
+  const [eventTime, placedTime] = await page.evaluate((values) => values.map((value) => {
+    const date = new Date(value ?? '');
+    if (Number.isNaN(date.getTime())) throw new Error('Acceptance bet timestamp must be valid');
+    const day = date.getDate();
+    const suffix = day % 100 >= 11 && day % 100 <= 13
+      ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[day % 10] || 'th');
+    return `${date.toLocaleString('en-US', { month: 'long' })} ${day}${suffix}, ${date.getFullYear()} ${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`;
+  }), [firstRow.eventTime ?? firstRow.timestamp, bet.timestamp]);
+  const card = betCard(page, bet.slipId);
+  const summary = card.locator('.my-bets-summary');
+  const label = bet.rows.length > 1 ? 'Shown event time' : 'Event time';
+  await expect(summary.getByRole('button', { name: /^Bet details/ })).toHaveAttribute('aria-expanded', 'false');
+  await expect(card.locator('.my-bets-details')).toHaveCount(0);
+  await expect(summary.getByRole('heading')).toHaveText(firstRow.eventName);
+  await expect(summary.getByText(`${label}: ${eventTime}`, { exact: true })).toBeVisible();
+  await expect(summary.locator('.my-bets-placed')).toBeVisible();
+  await expect(summary.locator('.my-bets-placed')).toHaveText(`Placed ${placedTime}`);
+  return { label, eventTimeVisible: true, placementTimeVisible: true, detailsCollapsed: true };
+};
+
 const requiredEnv = (name) => {
   const value = process.env[name];
   if (!value) {
@@ -1443,6 +1466,10 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   }
 
   await page.getByTitle('My bets').click();
+  const myBetsEventTime = {
+    accumulator: await assertCollapsedEventTime(page, preKickoffLiveBet),
+    single: await assertCollapsedEventTime(page, liveBet),
+  };
   const preKickoffLiveHistory = betCard(page, preKickoffLiveSlipId);
   await preKickoffLiveHistory.getByRole('button', { name: /^Bet details/ }).click();
   await expect(preKickoffLiveHistory).toContainText('Live');
@@ -1504,6 +1531,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     preMatchSlipId,
     preMatchBetStatus: 'WIN',
     cashBack: cashBackEvidence,
+    myBetsEventTime,
     pageErrors: pageErrors.length,
     consoleErrors: consoleErrors.length,
     apiFailures: apiFailures.length,
