@@ -213,6 +213,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
         <h2 className="h5 my-bets-event-name">{firstRow?.eventName || 'Bet selections'}</h2>
         {firstRow ? <p className="my-bets-pick">
           {firstRow.productName || formatLiveMarketType(firstRow.marketType)} · {formatLegacyLiveSelectionLabel(firstRow.oddsName, firstRow, 'selected')}
+          {' · '}<span>{rows.length > 1 ? 'Shown event time' : 'Event time'}: {formatRowTimestamp(firstRow.eventTime ?? firstRow.timestamp)}</span>
           {rows.length > 1 ? <strong> · Plus {rows.length - 1} more selections</strong> : null}
         </p> : null}
         <div className="my-bets-position">
