@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { rejects } = require('assert/strict');
 const { createHash } = require('crypto');
 const { readFileSync } = require('fs');
 const { execFileSync } = require('child_process');
@@ -138,14 +139,14 @@ const prepare = async (page, state) => {
   });
 };
 
-const loadProtectedAcceptanceHelpers = () => {
+const loadProtectedAcceptanceHelpers = (assertion = expect) => {
   const specPath = 'infra/oci/agents/oci-live-acceptance.spec.js';
   const source = readFileSync(path.resolve(__dirname, '../../..', specPath), 'utf8');
-  const helpers = runInNewContext(`${source}\n({ betCard, placeAdditionalAcceptanceBet });`, {
+  const helpers = runInNewContext(`${source}\n({ betCard, placeAdditionalAcceptanceBet, assertCollapsedEventTime });`, {
     URL,
     process: { env: {} },
     require: (name) => {
-      if (name === '@playwright/test') return { test: () => {}, expect };
+      if (name === '@playwright/test') return { test: () => {}, expect: assertion };
       if (name === 'fs' || name === 'child_process') return {};
       if (name === '../scripts/cash-back-acceptance-recovery-stan') {
         return {
@@ -317,6 +318,64 @@ for (const mode of ['compatibility', 'active']) {
     });
   });
 }
+
+test.describe('Protected My Bets event-time assertions', () => {
+  test.use({ locale: 'en-US', timezoneId: 'America/Los_Angeles' });
+
+  test('protected OCI event-time helper rejects missing or mismatched metadata in browser-local time', async ({ page }, testInfo) => {
+    const { assertCollapsedEventTime, betCard, specPath, source } = loadProtectedAcceptanceHelpers();
+    const negative = loadProtectedAcceptanceHelpers(expect.configure({ timeout: 100 }));
+    expect(negative.source).toBe(source);
+    const state = createState();
+    state.bets = state.bets.map((entry) => ({
+      ...entry, timestamp: '2030-01-01T01:15:00.000Z',
+      rows: entry.rows.map((row, index) => ({
+        ...row,
+        eventTime: index === 0 ? '2030-01-03T01:45:00.000Z' : '2030-01-02T01:45:00.000Z',
+        timestamp: '2030-01-02T12:30:00.000Z',
+      })),
+    }));
+    await prepare(page, state);
+    await page.goto('/bets?ui=v2&theme=dark');
+    const checked = [];
+    for (const entry of state.bets) {
+      await assertCollapsedEventTime(page, entry);
+      await betCard(page, entry.slipId).locator('.my-bets-pick span').evaluate((node) => node.remove());
+      await rejects(() => negative.assertCollapsedEventTime(page, entry), /toBeVisible/);
+      await page.reload();
+      const restored = await assertCollapsedEventTime(page, entry);
+      await rejects(() => negative.assertCollapsedEventTime(page, {
+        ...entry, rows: [{ ...entry.rows[0], eventTime: entry.timestamp }, ...entry.rows.slice(1)],
+      }), /toBeVisible/);
+      await rejects(() => negative.assertCollapsedEventTime(page, {
+        ...entry, timestamp: entry.rows[0].eventTime,
+      }), /toHaveText/);
+      checked.push({
+        ...restored, removedSpanRejected: true, eventTimeConflationRejected: true, placementTimeConflationRejected: true,
+      });
+    }
+    const browserTime = await page.evaluate((timestamp) => ({
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      eventDay: new Date(timestamp).getDate(),
+    }), state.bets[0].rows[0].eventTime);
+    expect(browserTime).toEqual({ timeZone: 'America/Los_Angeles', eventDay: 2 });
+    expect(new Date(state.bets[0].rows[0].eventTime).getUTCDate()).toBe(3);
+    expect(checked).toHaveLength(2);
+    expect(state.cashRequests.filter((request) => request.method === 'POST')).toEqual([]);
+    expect(state.submissions).toEqual([]);
+    await testInfo.attach('my-bets-event-time-protected-helper-corr2', {
+      contentType: 'application/json',
+      body: Buffer.from(JSON.stringify({
+        evidence: 'Actual protected helper on rendered HTTP mocks; protected main/recovery never executed',
+        source: sourceBinding(),
+        protectedSpec: { path: specPath, sha256: createHash('sha256').update(source).digest('hex') },
+        nodeTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, browserTime,
+        negativeExpectTimeoutMs: 100, productionExpectTimeoutUnchanged: true,
+        checked, cashBackPosts: 0, betSubmissions: 0,
+      }, null, 2)),
+    });
+  });
+});
 
 test('keyboard, lost responses, reload and a second-tab revision preserve the reviewed amount and receipts', async ({ page, context }, testInfo) => {
   const state = createState();
@@ -612,6 +671,7 @@ test.describe('My Bets whole-page usability', () => {
   test.use({ locale: 'en-US', timezoneId: 'UTC', deviceScaleFactor: 1 });
 
   test('collapsed event times remain associated and wrap without clipping at 320, 390 and desktop', async ({ page }, testInfo) => {
+    const { assertCollapsedEventTime, specPath, source } = loadProtectedAcceptanceHelpers();
     const state = createState();
     const single = bet();
     const multi = makeLongBet();
@@ -630,9 +690,14 @@ test.describe('My Bets whole-page usability', () => {
     await expect(getCard(page).getByRole('heading', { name: single.rows[0].eventName })).toBeVisible();
     await page.evaluate(() => document.fonts.ready);
     const captures = [];
+    const protectedChecks = [];
     try {
       for (const width of [320, 390, 1600]) {
         await page.setViewportSize({ width, height: width === 1600 ? 1000 : 844 });
+        protectedChecks.push({
+          width, single: await assertCollapsedEventTime(page, state.bets[0]),
+          accumulator: await assertCollapsedEventTime(page, state.bets[1]),
+        });
         for (const [slipId, eventName, time] of [
           ['slip-one', single.rows[0].eventName, 'Event time: January 3rd, 2030 18:45'],
           ['long-slip', multi.rows[0].eventName, 'Shown event time: January 4th, 2030 20:00'],
@@ -677,7 +742,8 @@ test.describe('My Bets whole-page usability', () => {
       await testInfo.attach('my-bets-event-time-rendering', {
         contentType: 'application/json', body: Buffer.from(JSON.stringify({
           evidence: 'Rendered HTTP mocks, not human usability or production acceptance',
-          source: sourceBinding(), captures,
+          source: sourceBinding(), captures, protectedChecks,
+          protectedSpec: { path: specPath, sha256: createHash('sha256').update(source).digest('hex') },
         }, null, 2)),
       });
     }
