@@ -3,14 +3,87 @@ import '@testing-library/jest-dom';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import axios from 'axios';
 import MyBets from './MyBets';
+import { bet } from '../../../tests/fixtures/cashBack';
 
 jest.mock('axios', () => ({
   get: jest.fn(),
 }));
 
 describe('MyBets', () => {
+  const placedTime = new Date(2030, 0, 1, 9, 15).toISOString();
+  const rowTime = new Date(2030, 0, 2, 12, 30).toISOString();
+  const eventTime = new Date(2030, 0, 3, 18, 45).toISOString();
+
   beforeEach(() => {
     axios.get.mockReset();
+  });
+
+  it('shows the event start time in a collapsed single separately from row and placement timestamps', async () => {
+    axios.get.mockResolvedValue({ data: [bet({
+      timestamp: placedTime, rows: [{ ...bet().rows[0], eventTime, timestamp: rowTime }],
+    })] });
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
+    await screen.findByRole('heading', { name: 'Northern Falcons - Southern Owls' });
+    const summary = document.querySelector('.my-bets-summary');
+    expect(within(summary).getByText('Event time: January 3rd, 2030 18:45')).toBeVisible();
+    expect(within(summary).getByText('Placed January 1st, 2030 9:15')).toBeVisible();
+    expect(summary).not.toHaveTextContent('January 2nd, 2030 12:30');
+    expect(within(summary).getByRole('button', { name: /^Bet details/ })).toHaveAttribute('aria-expanded', 'false');
+    expect(document.querySelector('.my-bets-details')).toBeNull();
+  });
+
+  it.each([
+    ['absent event time', undefined, rowTime, 'January 2nd, 2030 12:30'],
+    ['null event time', null, rowTime, 'January 2nd, 2030 12:30'],
+    ['present invalid event time', 'invalid', rowTime, '—'],
+    ['present empty event time', '', rowTime, '—'],
+    ['both row times absent', undefined, undefined, '—'],
+  ])('preserves row-time fallback semantics for %s in the collapsed summary and details', async (_, start, timestamp, expected) => {
+    axios.get.mockResolvedValue({ data: [bet({
+      timestamp: placedTime, rows: [{ ...bet().rows[0], eventTime: start, timestamp }],
+    })] });
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
+    await screen.findByRole('heading', { name: 'Northern Falcons - Southern Owls' });
+    const summary = document.querySelector('.my-bets-summary');
+    expect(within(summary).getByText(`Event time: ${expected}`)).toBeVisible();
+    expect(within(summary).queryByText('Event time: January 1st, 2030 9:15')).toBeNull();
+    fireEvent.click(within(summary).getByRole('button', { name: /^Bet details/ }));
+    expect(within(document.querySelector('.my-bets-details')).getByText(`Event time: ${expected}`)).toBeVisible();
+  });
+
+  it.each([undefined, []])('does not invent an event time for a row-less bet (%s)', async (rows) => {
+    axios.get.mockResolvedValue({ data: [bet({ timestamp: placedTime, rows })] });
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
+    await screen.findByRole('heading', { name: 'Bet selections' });
+    const summary = document.querySelector('.my-bets-summary');
+    expect(summary.querySelector('.my-bets-pick')).toBeNull();
+    expect(summary).not.toHaveTextContent(/Event time:|Shown event time:/);
+    expect(summary).toHaveTextContent('Placed January 1st, 2030 9:15');
+  });
+
+  it('associates an accumulator summary time with the shown first event, not its earlier second event', async () => {
+    const earlierTime = new Date(2030, 0, 2, 10, 0).toISOString();
+    axios.get.mockResolvedValue({ data: [bet({
+      timestamp: placedTime,
+      rows: [
+        { ...bet().rows[0], eventName: 'Later shown match', eventTime, timestamp: rowTime },
+        { ...bet().rows[0], _id: 'earlier-row', eventName: 'Earlier second match', eventTime: earlierTime },
+      ],
+    })] });
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
+    await screen.findByRole('heading', { name: 'Later shown match' });
+    const summary = document.querySelector('.my-bets-summary');
+    expect(within(summary).getByText('Shown event time: January 3rd, 2030 18:45')).toBeVisible();
+    expect(summary).toHaveTextContent('Plus 1 more selections');
+    expect(summary).not.toHaveTextContent('January 2nd, 2030 10:00');
+    expect(within(summary).queryByText(/^Event time:/)).toBeNull();
+    fireEvent.click(within(summary).getByRole('button', { name: /^Bet details/ }));
+    const rows = document.querySelectorAll('.my-bets-details .my-bets-row:not(.my-bets-row--header)');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Later shown match');
+    expect(within(rows[0]).getByText('Event time: January 3rd, 2030 18:45')).toBeVisible();
+    expect(rows[1]).toHaveTextContent('Earlier second match');
+    expect(within(rows[1]).getByText('Event time: January 2nd, 2030 10:00')).toBeVisible();
   });
 
   it('labels live and legacy pre-match bets while rendering outcomes and decline reasons', async () => {

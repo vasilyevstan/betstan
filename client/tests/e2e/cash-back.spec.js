@@ -455,7 +455,7 @@ const measureLayout = (page) => page.evaluate(() => {
   const controlPairs = measurePairs(controlNodes);
   const collisions = controlPairs.filter(overlaps);
   const escapedText = [];
-  root.querySelectorAll('.cash-back-values dt, .cash-back-values dd, .cash-back-control, .cash-back-amount label').forEach((element) => {
+  root.querySelectorAll('.my-bets-pick, .cash-back-values dt, .cash-back-values dd, .cash-back-control, .cash-back-amount label').forEach((element) => {
     if (!visible(element)) return;
     const bounds = rect(element);
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
@@ -610,6 +610,78 @@ test.describe('My Bets correction 2 recovery and expiry focus', () => {
 
 test.describe('My Bets whole-page usability', () => {
   test.use({ locale: 'en-US', timezoneId: 'UTC', deviceScaleFactor: 1 });
+
+  test('collapsed event times remain associated and wrap without clipping at 320, 390 and desktop', async ({ page }, testInfo) => {
+    const state = createState();
+    const single = bet();
+    const multi = makeLongBet();
+    const placedTime = '2030-01-01T09:15:00.000Z';
+    state.bets = [
+      { ...single, timestamp: placedTime, rows: [{
+        ...single.rows[0], eventTime: '2030-01-03T18:45:00.000Z', timestamp: '2030-01-02T12:30:00.000Z',
+      }] },
+      { ...multi, _id: 'long-bet', slipId: 'long-slip', timestamp: placedTime,
+        rows: multi.rows.slice(0, 2).map((row, index) => ({
+          ...row, eventTime: index === 0 ? '2030-01-04T20:00:00.000Z' : '2030-01-02T10:00:00.000Z',
+        })) },
+    ];
+    await prepare(page, state);
+    await page.goto('/bets?ui=v2&theme=dark');
+    await expect(getCard(page).getByRole('heading', { name: single.rows[0].eventName })).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
+    const captures = [];
+    try {
+      for (const width of [320, 390, 1600]) {
+        await page.setViewportSize({ width, height: width === 1600 ? 1000 : 844 });
+        for (const [slipId, eventName, time] of [
+          ['slip-one', single.rows[0].eventName, 'Event time: January 3rd, 2030 18:45'],
+          ['long-slip', multi.rows[0].eventName, 'Shown event time: January 4th, 2030 20:00'],
+        ]) {
+          const card = getCard(page, slipId);
+          const summary = card.locator('.my-bets-summary');
+          await expect(summary.getByRole('heading', { name: eventName })).toBeVisible();
+          await expect(summary.getByText(time, { exact: true })).toBeVisible();
+          await expect(summary.locator('.my-bets-placed')).toHaveText('Placed January 1st, 2030 9:15');
+          await expect(summary.getByRole('button', { name: /^Bet details/ })).toHaveAttribute('aria-expanded', 'false');
+          await expect(card.locator('.my-bets-details')).toHaveCount(0);
+          await expect(card.locator('.my-bets-status')).toHaveText('CONFIRMED');
+          await expect(summary).not.toContainText('January 2nd, 2030');
+        }
+        await expect(getCard(page, 'long-slip').locator('.my-bets-pick')).toContainText('Plus 1 more selections');
+        const layout = await measureLayout(page);
+        const metadata = await page.locator('.my-bets-pick').evaluateAll((nodes) => nodes.map((node) => {
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const style = getComputedStyle(node);
+          return {
+            slipId: node.closest('[data-slip-id]').dataset.slipId,
+            text: node.textContent, lineCount: new Set([...range.getClientRects()].filter((line) => line.width > 0).map((line) => line.top)).size,
+            fontFamily: style.fontFamily, fontSize: style.fontSize, lineHeight: style.lineHeight,
+          };
+        }));
+        captures.push({ width, layout, metadata });
+        expect(layout.document.scroll).toBeLessThanOrEqual(layout.document.client);
+        expect(layout.overflow).toEqual([]);
+        expect(layout.escapedText).toEqual([]);
+        expect(layout.cardCollisions).toEqual([]);
+        expect(layout.collisions).toEqual([]);
+        expect(layout.containmentFailures).toEqual([]);
+        expect(layout.minimumTargetWidth).toBeGreaterThanOrEqual(44);
+        expect(layout.minimumTargetHeight).toBeGreaterThanOrEqual(44);
+        expect(metadata).toHaveLength(2);
+        if (width < 400) metadata.forEach((entry) => expect(entry.lineCount).toBeGreaterThan(1));
+        await testInfo.attach(`my-bets-event-time-${width}`, { contentType: 'image/png', body: await page.screenshot({ fullPage: true }) });
+      }
+      expect(state.cashRequests.filter((request) => request.method === 'POST')).toEqual([]);
+    } finally {
+      await testInfo.attach('my-bets-event-time-rendering', {
+        contentType: 'application/json', body: Buffer.from(JSON.stringify({
+          evidence: 'Rendered HTTP mocks, not human usability or production acceptance',
+          source: sourceBinding(), captures,
+        }, null, 2)),
+      });
+    }
+  });
 
   for (const sample of [
     { width: 1600, height: 1000, toolbar: 211.8, single: 516.5, accumulator: 890.61, expired: 607.77, partial: 692.88 },

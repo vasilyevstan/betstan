@@ -55,6 +55,9 @@ interpretation.
 Each compact card identifies the first event and selection, placement time,
 bet type, status, selection count, original wager, and remaining or historical
 stake. Accumulators indicate how many additional selections they contain.
+The first named event's start time must also stay visible inline as **Event
+time** for a single or **Shown event time** for an accumulator, separate from
+placement time and not a computed earliest kickoff or a time for all selections.
 **Bet details** reveals every selection's event/time, market, pick, accepted
 odds, and outcome, plus accepted total odds and relevant financial context.
 Details stay inline; they do not replace the recognizable card summary.
