@@ -220,13 +220,13 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
           <span>Original wager: <strong>{financial ? formatMinor(financial.originalStakeMinor) : bet.wager} Stanbucks</strong></span>
           <span>{bet.status === 'DECLINED' ? 'Unaccepted stake' : settled ? 'Remainder stake that settled' : 'Remaining stake'}: <strong>{remainder === null ? bet.wager : formatMinor(remainder)} Stanbucks</strong></span>
           {terminal ? <span>Active exposure: <strong>0.00 Stanbucks</strong></span> : null}
-        </div>
-
-        {bet.declineReason ? <div className="my-bets-note my-bets-note--danger">Declined: {formatDeclineReason(bet.declineReason)}</div> : null}
         <button type="button" className="btn btn-shell my-bets-expand cash-back-control"
           aria-expanded={isExpanded} aria-controls={detailsId} onClick={() => toggleExpandedBet(betKey)}>
           {isExpanded ? 'Hide bet details' : `Bet details · ${rows.length} selection${rows.length === 1 ? '' : 's'}`}
         </button>
+        </div>
+
+        {bet.declineReason ? <div className="my-bets-note my-bets-note--danger">Declined: {formatDeclineReason(bet.declineReason)}</div> : null}
       </div>
       {isExpanded ? <div id={detailsId} className="card-body my-bets-details">
         <h3 className="h6">All selections and financial details</h3>

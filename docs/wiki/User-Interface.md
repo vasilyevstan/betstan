@@ -60,7 +60,9 @@ time** for a single or **Shown event time** for an accumulator, separate from
 placement time and not a computed earliest kickoff or a time for all selections.
 **Bet details** reveals every selection's event/time, market, pick, accepted
 odds, and outcome, plus accepted total odds and relevant financial context.
-Details stay inline; they do not replace the recognizable card summary.
+The **Bet details** control shares a naturally wrapping row with position
+metadata where space permits; opened details stay inline and readable without
+replacing the recognizable card summary.
 
 ## Cash back in My Bets - deployment-gated
 
@@ -164,11 +166,13 @@ focus moves to the separate new-offer action or status feedback without
 automatically requesting or confirming an offer.
 
 Native labelled controls have visible focus and at least 44-by-44 CSS-pixel
-targets. Offer values reflow, controls wrap on small screens, and narrow
-selection rows retain their labels. Status text, pressed states, and error
-messages do not rely on color alone. See [[Application Processes]] for
-eligibility/pricing and [[Architecture]] for server authority and availability
-limits.
+targets. Cash-back mode, amount, request/retry, and closed disclosure controls
+share available width without a reserved history column. Groups wrap when
+needed; opened history and expired-offer details use the full width inline.
+Offer values reflow, and narrow selection rows retain their labels. Status
+text, pressed states, and error messages do not rely on color alone. See
+[[Application Processes]] for eligibility/pricing and [[Architecture]] for
+server authority and availability limits.
 
 ## UI variants
 
@@ -305,9 +309,12 @@ Activity graphs use two columns on wide desktop layouts and one column on
 tablet and mobile layouts. Service health uses five, two, then one column over
 the same ranges. At a given card width and text setting, daily and selected
 hourly views keep a stable card and plot footprint, including loading, error,
-retained-data, and expiry states. Hourly time/count cells are smaller and
-read-only; daily entries remain native buttons with targets at least 44 by 44
-CSS pixels, as do Back and Retry.
+retained-data, and expiry states. Hourly values retain all 24 exact UTC
+hour/count pairs, including zeros and complete counts, in chronological order.
+They form equal-width columns across responsive rows; the column count adapts
+to available width and readability rather than forming a one-to-one axis for
+the SVG bars. Hourly cells remain read-only; daily entries remain native buttons
+with targets at least 44 by 44 CSS pixels, as do Back and Retry.
 
 A contained, keyboard-scrollable values/status area accommodates overflow
 when needed, including on desktop. Every exact value, complete freshness

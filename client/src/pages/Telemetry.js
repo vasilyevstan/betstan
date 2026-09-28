@@ -402,7 +402,9 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, generatedAt
               onClick={(event) => openDay(record.day, event)}
             >Retry</button> : null}
           </div> : null}
-        {values ? <ol className={`telemetry-metric__values${isDaily ? '' : ' telemetry-metric__values--hourly'}`} aria-label={`${label} ${isDaily ? 'daily' : 'hourly UTC'} values`}>
+        {values ? <ol className={`telemetry-metric__values${isDaily ? '' : ' telemetry-metric__values--hourly'}`}
+          style={isDaily ? undefined : { '--hourly-value-digits': Math.max(...values.map((value) => String(value).length)) }}
+          aria-label={`${label} ${isDaily ? 'daily' : 'hourly UTC'} values`}>
           {buckets.map((bucket, valueIndex) => {
             const pair = <>
               <time className="telemetry-metric__date" dateTime={bucket}>

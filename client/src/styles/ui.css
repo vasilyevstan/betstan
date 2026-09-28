@@ -602,6 +602,14 @@ body {
   gap: 0.4rem;
 }
 
+.my-bets-board .my-bets-card > .my-bets-summary {
+  padding-bottom: 0.5rem;
+}
+
+.my-bets-board .my-bets-card > .my-bets-cash-back {
+  padding-top: 0;
+}
+
 .my-bets-summary h2,
 .my-bets-pick,
 .my-bets-find h1,
@@ -839,23 +847,23 @@ body {
 }
 
 .cash-back {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
   border-top: 1px solid var(--border-subtle);
   padding-top: 0.5rem;
 }
 
-.cash-back > :not(.cash-back-strip, .cash-back-history, .visually-hidden) {
-  grid-column: 1 / -1;
+.cash-back > :not(.cash-back-strip, .cash-back-history, .cash-back-expired, .visually-hidden),
+.cash-back > .cash-back-expired--open {
+  flex-basis: 100%;
+  min-width: 0;
 }
 
 .cash-back-strip,
 .cash-back-editor:not([hidden]) {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
+  display: contents;
 }
 
 .cash-back-strip h3 {
@@ -880,6 +888,10 @@ body {
 .cash-back-help {
   color: var(--text-subtle);
   font-size: 0.88rem;
+}
+
+.cash-back > .cash-back-help {
+  flex: 1 1 30rem;
 }
 
 .cash-back-error {
@@ -949,6 +961,7 @@ body {
 
 .cash-back-amount {
   display: grid;
+  flex: 1 1 16rem;
   grid-template-columns: minmax(0, 1fr) minmax(5rem, 7.5rem);
   align-items: center;
   gap: 0.5rem 0.75rem;
@@ -1047,14 +1060,19 @@ body {
 
 .cash-back-history {
   min-width: 0;
-  grid-column: 2;
-  grid-row: 1;
-  align-self: start;
 }
 
 .cash-back-history--open {
-  grid-column: 1 / -1;
-  grid-row: auto;
+  flex-basis: 100%;
+}
+
+.cash-back:has(> .cash-back-expired:not(.cash-back-expired--open)) > :is(.cash-back-expired, .cash-back-history:not(.cash-back-history--open)) {
+  max-width: calc((100% - 0.5rem) / 2);
+}
+
+.cash-back-expired > button,
+.cash-back-history > button {
+  max-width: 100%;
 }
 
 .cash-back-history__body {
@@ -1128,16 +1146,6 @@ body {
 
   .my-bets-search {
     flex-basis: 100%;
-  }
-
-  .cash-back {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .cash-back-history {
-    grid-column: 1;
-    grid-row: auto;
-    justify-self: start;
   }
 
   .cash-back-review-values {
@@ -2651,8 +2659,7 @@ body {
 }
 
 .telemetry-metric__values--hourly {
-  display: flex;
-  flex-wrap: wrap;
+  grid-template-columns: repeat(auto-fit, minmax(min(calc(2.75rem + var(--hourly-value-digits) * 0.75rem), 100%), 1fr));
   align-items: stretch;
   row-gap: 0.15rem;
 }
@@ -2662,7 +2669,6 @@ body {
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: center;
-  flex: 1 1 max-content;
   max-width: 100%;
   padding: 0.1rem 0.25rem;
   gap: 0.15rem;

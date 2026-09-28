@@ -642,7 +642,7 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
         row = { top: pairBox.top, controls: [] };
         rows.push(row);
       }
-      row.controls.push({ top: box.top, bottom: box.bottom, width: box.width, valueBaseline });
+      row.controls.push({ left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, valueBaseline });
       return { box, pairBox };
     });
     for (let a = 0; a < controls.length; a += 1) {
@@ -667,6 +667,12 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
     const contentLeft = bodyBox.left + parseFloat(bodyStyle.paddingLeft);
     const contentWidth = bodyBox.width - parseFloat(bodyStyle.paddingLeft) - parseFloat(bodyStyle.paddingRight);
     const plot = element.querySelector('svg').getBoundingClientRect();
+    const columnEdgeSpread = Math.max(...rows[0].controls.map((_, index) => {
+      const column = rows.flatMap((row) => row.controls[index] ? [row.controls[index]] : []);
+      return Math.max(...['left', 'right'].map((edge) => (
+        Math.max(...column.map((control) => control[edge])) - Math.min(...column.map((control) => control[edge]))
+      )));
+    }));
     const containers = [
       document.documentElement, element, body,
       ...element.querySelectorAll('.telemetry-metric__figure, .telemetry-metric__viewport, .telemetry-metric__values, .telemetry-metric__pair, button'),
@@ -675,6 +681,7 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
       count: pairs.length, counts, times, splitIntegers, containmentFailures, intersections,
       rowTopSpread: spread('top'), rowBottomSpread: spread('bottom'),
       rowWidthSpread: spread('width'), valueBaselineSpread: spread('valueBaseline'),
+      columnEdgeSpread, columns: rows[0].controls.length, cardWidth: element.getBoundingClientRect().width,
       plotWidth: plot.width, contentWidth, plotOffset: plot.left - contentLeft,
       overflow: containers.filter((container) => container.scrollWidth > container.clientWidth)
         .map((container) => ({ className: container.className, scrollWidth: container.scrollWidth, clientWidth: container.clientWidth })),
@@ -685,8 +692,7 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
   expect(evidence.containmentFailures).toEqual([]);
   expect(evidence.intersections).toEqual([]);
   expect(evidence.overflow).toEqual([]);
-  for (const key of mode === 'daily'
-    ? ['rowTopSpread', 'rowBottomSpread', 'rowWidthSpread', 'valueBaselineSpread'] : ['rowTopSpread', 'rowBottomSpread']) {
+  for (const key of ['rowTopSpread', 'rowBottomSpread', 'rowWidthSpread', 'valueBaselineSpread', 'columnEdgeSpread']) {
     expect(evidence[key], key).toBeLessThanOrEqual(0.75);
   }
   if (mode === 'hourly') {
@@ -698,6 +704,7 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
   await expectMetricContentsInsideCards(card);
   expect(Math.abs(evidence.plotWidth - evidence.contentWidth)).toBeLessThanOrEqual(0.75);
   expect(Math.abs(evidence.plotOffset)).toBeLessThanOrEqual(0.75);
+  return evidence;
 };
 
 const expectStableCardStates = async (page, state, label, ordinaryDesktop = false) => {
@@ -1321,7 +1328,7 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
   console.log(`Mobile focus fallback measured; text contrast ${Math.min(...contrast.tooltipText).toFixed(2)}, focus ${contrast.focus.ratio.toFixed(2)}; network/batch completion retained sibling focus.`);
 });
 
-test('mixed-count pair geometry and both-mode time/amount tooltips stay contained at three widths', async ({ page }) => {
+test('mixed-count pair geometry and both-mode time/amount tooltips stay contained at target widths', async ({ page }, testInfo) => {
   await installFakeEventSource(page);
   const state = createShellMockState();
   const counts = [0, 7, Number.MAX_SAFE_INTEGER];
@@ -1335,20 +1342,54 @@ test('mixed-count pair geometry and both-mode time/amount tooltips stay containe
     },
   };
   await installAppApiMocks(page, state);
-  for (const width of [390, 768, 1600]) {
+  const captures = [];
+  for (const width of [320, 390, 768, 1600]) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/telemetry?ui=v2&theme=light');
     const card = page.locator('.telemetry-metric').first();
     await expect(card.locator('.telemetry-metric__values data')).toHaveCount(14);
-    await expectOwnPairGeometry(card, width, 'daily', dailyCounts);
+    const daily = await expectOwnPairGeometry(card, width, 'daily', dailyCounts);
     await expectTooltipGeometry(page, card, card.locator('rect').first(), '2026-08-28', 0);
     await expectTooltipGeometry(page, card, card.locator('rect').nth(2), '2026-08-30', Number.MAX_SAFE_INTEGER);
     await card.locator('.telemetry-metric__date-button').first().press('Enter');
     await expect(card.locator('.telemetry-metric__values data')).toHaveCount(24);
-    await expectOwnPairGeometry(card, width, 'hourly', hourlyCounts);
+    const hourly = await expectOwnPairGeometry(card, width, 'hourly', hourlyCounts);
+    captures.push({ width, daily, hourly });
     await expectTooltipGeometry(page, card, card.locator('rect').first(), '2026-08-28T00:00:00.000Z', 0);
     await expectTooltipGeometry(page, card, card.locator('rect').last(), '2026-08-28T23:00:00.000Z', Number.MAX_SAFE_INTEGER);
   }
+  await testInfo.attach('activity-hourly-mixed-count-geometry', {
+    contentType: 'application/json', body: Buffer.from(JSON.stringify({ evidence: 'Rendered HTTP mocks', captures }, null, 2)),
+  });
+});
+
+test('ordinary hourly values use dense equal tracks at screenshot and intermediate card widths', async ({ page }, testInfo) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  const counts = Array.from({ length: 24 }, (_, index) => [0, 7, 2, 1][index % 4]);
+  state.telemetryHourlyResponses['MAIN_PAGE_VISIT/2026-08-28'] = {
+    body: { ...createTelemetryHourly('MAIN_PAGE_VISIT', '2026-08-28'), values: counts },
+  };
+  await installAppApiMocks(page, state);
+  const captures = [];
+  for (const width of [1660, 1366, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto('/telemetry?ui=v2&theme=light');
+    const card = page.locator('.telemetry-metric').first();
+    await card.locator('.telemetry-metric__date-button').first().press('Enter');
+    await expect(card.locator('.telemetry-metric__values data')).toHaveCount(24);
+    const geometry = await expectOwnPairGeometry(card, width, 'hourly', counts);
+    captures.push({ width, geometry });
+    if (width === 1660) {
+      expect(geometry.cardWidth).toBeGreaterThanOrEqual(780);
+      expect(geometry.cardWidth).toBeLessThanOrEqual(840);
+      expect(geometry.columns).toBeGreaterThanOrEqual(8);
+    }
+    await testInfo.attach(`activity-hourly-${width}`, { contentType: 'image/png', body: await card.screenshot() });
+  }
+  await testInfo.attach('activity-hourly-ordinary-geometry', {
+    contentType: 'application/json', body: Buffer.from(JSON.stringify({ evidence: 'Rendered HTTP mocks', captures }, null, 2)),
+  });
 });
 
 test.describe('Telemetry native touch', () => {
