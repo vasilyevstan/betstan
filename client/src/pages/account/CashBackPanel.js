@@ -270,7 +270,7 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
     {pendingConfirm && pendingAttempt.clientOperationId !== attempt?.clientOperationId ? <p className="cash-back-help">
       Your entered draft is paused. The submitted confirmation above is a different operation; your draft amount has not changed.
     </p> : null}
-    {reviewVisible || expired ? <div className={expired ? 'cash-back-expired' : 'cash-back-offer'}>
+    {reviewVisible || expired ? <div className={expired ? `cash-back-expired${expiredDetailsOpen ? ' cash-back-expired--open' : ''}` : 'cash-back-offer'}>
       {expired ? <button type="button" className="btn btn-shell cash-back-control"
         aria-expanded={expiredDetailsOpen} aria-controls={`${helpId}-expired`}
         onClick={() => setExpiredDetailsOpen(!expiredDetailsOpen)}>Expired offer details</button> : null}
