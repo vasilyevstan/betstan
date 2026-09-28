@@ -16,6 +16,7 @@ the two paths cannot drift.
 import argparse
 import datetime as dt
 import io
+import ipaddress
 import json
 import re
 import stat
@@ -103,31 +104,50 @@ def _classify_artifact_download_failure(returncode, stderr):
     statuses = {int(value) for match in matches for value in match if value}
     if len(statuses) > 1:
         return "ambiguous", None, False
-    if statuses:
-        status = statuses.pop()
-        if status not in {500, 502, 503, 504}:
-            return "http", status, False
-        if (
-            len(diagnostic.splitlines()) != 1
-            or len(re.findall(r"\bHTTP [1-5][0-9]{2}\b", diagnostic)) != 1
-            or re.search(
-                r"\b(?:unauthorized|forbidden|permission denied|not found|"
-                r"authentication|credentials|not authorized|access denied)\b",
-                diagnostic,
-                re.IGNORECASE,
-            )
-        ):
-            return "ambiguous", status, False
+    status = statuses.pop() if statuses else None
+    if status is not None and status not in {500, 502, 503, 504}:
+        return "http", status, False
+    if (
+        len(diagnostic.splitlines()) > 1
+        or len(re.findall(r"\bHTTP [1-5][0-9]{2}\b", diagnostic))
+        != (1 if status is not None else 0)
+        or re.search(
+            r"\b(?:unauthorized|forbidden|permission denied|not found|"
+            r"authentication|credentials|not authorized|access denied)\b",
+            diagnostic,
+            re.IGNORECASE,
+        )
+    ):
+        return "ambiguous", status, False
+    if status is not None:
         return "http", status, True
-    if re.fullmatch(
+    address = (
+        r"(?:[0-9.]+|\[[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.-]+)?\])"
+        r":[0-9]{1,5}"
+    )
+    network = re.fullmatch(
         r'(?:gh: )?(?:(?:Get|Head) "[^"\r\n]+": )?'
         r"(?:net/http: TLS handshake timeout|"
         r"context deadline exceeded"
         r"(?: \(Client\.Timeout exceeded while awaiting headers\))?|"
-        r"(?:(?:read|write|dial) tcp [^\"\r\n]+: )?(?:read: )?"
+        rf"(?:(?P<operation>read|write|dial) tcp "
+        rf"(?P<addresses>{address}(?:->{address})?): )?(?:read: )?"
         r"(?:i/o timeout|connection reset by peer))",
         diagnostic,
-    ):
+    )
+    if network:
+        if network.group("addresses") is not None:
+            addresses = network.group("addresses").split("->")
+            if len(addresses) != (1 if network.group("operation") == "dial" else 2):
+                return "unknown", None, False
+            for endpoint in addresses:
+                host, port = endpoint.rsplit(":", 1)
+                try:
+                    ipaddress.ip_address(host[1:-1] if host.startswith("[") else host)
+                except ValueError:
+                    return "unknown", None, False
+                if not 1 <= int(port) <= 65535:
+                    return "unknown", None, False
         return "network", None, True
     return "unknown", None, False
 
