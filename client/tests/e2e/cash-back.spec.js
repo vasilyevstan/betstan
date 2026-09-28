@@ -670,6 +670,115 @@ test.describe('My Bets correction 2 recovery and expiry focus', () => {
 test.describe('My Bets whole-page usability', () => {
   test.use({ locale: 'en-US', timezoneId: 'UTC', deviceScaleFactor: 1 });
 
+  test('activity cash-back action lane geometry keeps expired and partial request-pending compact', async ({ page }, testInfo) => {
+    const state = createState();
+    state.bets = [bet(), bet({ _id: 'other-bet', slipId: 'other-slip' })];
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await prepare(page, state);
+    await page.goto('/bets?ui=v2&theme=dark');
+    const expired = getCard(page);
+    const pending = getCard(page, 'other-slip');
+    await expired.getByRole('button', { name: 'Get cash-back offer' }).click();
+    await expect(expired.getByRole('button', { name: 'Expired offer details' })).toBeVisible();
+    state.holdQuote = true;
+    await pending.getByRole('button', { name: 'Partial stake', exact: true }).click();
+    await pending.getByLabel('Stake to close (Stanbucks)').fill('0.1');
+    await pending.getByRole('button', { name: 'Get cash-back offer' }).click();
+    await expect(pending.getByRole('status')).toHaveText('Getting an offer. Availability is being checked by the server.');
+    const input = pending.getByLabel('Stake to close (Stanbucks)');
+    await input.focus();
+    const captures = [];
+    try {
+      for (const width of [1600, 1024, 320]) {
+        await page.setViewportSize({ width, height: 1000 });
+        const layout = await measureLayout(page);
+        const cards = await page.locator('.my-bets-card').evaluateAll((nodes) => nodes.map((node) => {
+          const box = (element) => {
+            const rect = element.getBoundingClientRect();
+            return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
+          };
+          const position = node.querySelector('.my-bets-position');
+          const input = node.querySelector('input:focus');
+          const clippedFocus = [];
+          if (input) {
+            const style = getComputedStyle(input);
+            const ring = parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset));
+            const bounds = box(input);
+            for (let ancestor = input.parentElement; ancestor; ancestor = ancestor.parentElement) {
+              const clip = getComputedStyle(ancestor);
+              const frame = box(ancestor);
+              if ((/(hidden|clip|auto|scroll)/.test(clip.overflowX)
+                  && (bounds.left - ring < frame.left || bounds.right + ring > frame.right))
+                || (/(hidden|clip|auto|scroll)/.test(clip.overflowY)
+                  && (bounds.top - ring < frame.top || bounds.bottom + ring > frame.bottom))) {
+                clippedFocus.push(ancestor.className);
+              }
+            }
+          }
+          return {
+            slipId: node.dataset.slipId, bounds: box(node), lane: box(node.querySelector('.cash-back')),
+            position: box(position), positionText: box(position.querySelector('span')),
+            details: box(node.querySelector('.my-bets-summary button')),
+            clippedFocus,
+            controls: [...node.querySelectorAll('.cash-back button')].filter((control) => control.checkVisibility())
+              .map((control) => ({ label: control.textContent.trim(), bounds: box(control) })),
+          };
+        }));
+        captures.push({ width, layout, cards });
+        expect(layout.document.scroll).toBeLessThanOrEqual(layout.document.client);
+        expect(layout.overflow).toEqual([]);
+        expect(layout.escapedText).toEqual([]);
+        expect(layout.cardCollisions).toEqual([]);
+        expect(layout.collisions).toEqual([]);
+        expect(layout.containmentFailures).toEqual([]);
+        expect(layout.minimumTargetWidth).toBeGreaterThanOrEqual(44);
+        expect(layout.minimumTargetHeight).toBeGreaterThanOrEqual(44);
+        cards.forEach((card) => expect(card.clippedFocus).toEqual([]));
+        const secondary = cards[0].controls.filter((control) => control.label !== 'Get new offer');
+        expect(Math.max(...secondary.map((control) => control.bounds.top)) - Math.min(...secondary.map((control) => control.bounds.top))).toBeLessThanOrEqual(1);
+        await expect(expired.locator('.cash-back-values:visible')).toHaveCount(0);
+        await expect(pending.getByRole('button', { name: 'Retry same offer request' })).toBeVisible();
+        await expect(pending.getByRole('button', { name: 'Check confirmation status' })).toHaveCount(0);
+        await expect(pending.getByLabel('Stake to close (Stanbucks)')).toHaveValue('0.1');
+        await expect(input).toBeFocused();
+        if (width !== 1024) await testInfo.attach(`activity-cashback-${width}`, {
+          contentType: 'image/png', body: await page.screenshot({ fullPage: true }),
+        });
+      }
+      const wide = captures[0];
+      wide.cards.forEach((card) => {
+        expect(card.bounds.width).toBeGreaterThan(1000);
+        expect(card.positionText.top).toBeLessThan(card.details.bottom);
+        expect(card.details.top).toBeLessThan(card.positionText.bottom);
+        const before = card.slipId === 'slip-one' ? 361.5 : 411.71875;
+        expect(before - card.bounds.height).toBeGreaterThanOrEqual(44);
+      });
+      const primary = wide.cards[1].controls.filter((control) => control.label !== 'Cash-back history');
+      expect(Math.max(...primary.map((control) => control.bounds.top)) - Math.min(...primary.map((control) => control.bounds.top))).toBeLessThanOrEqual(1);
+      await page.setViewportSize({ width: 1600, height: 1000 });
+      await expired.getByRole('button', { name: 'Expired offer details' }).click();
+      await expect(expired.locator('.cash-back-review-values')).toBeVisible();
+      await expired.getByRole('button', { name: 'Cash-back history' }).click();
+      await expect(expired.getByRole('heading', { name: 'Recorded cash back' })).toBeVisible();
+      const lane = await expired.locator('.cash-back').boundingBox();
+      for (const selector of ['.cash-back-expired', '.cash-back-history--open']) {
+        expect(Math.abs((await expired.locator(selector).boundingBox()).width - lane.width)).toBeLessThanOrEqual(1);
+      }
+      const open = await measureLayout(page);
+      expect(open.overflow).toEqual([]);
+      expect(open.collisions).toEqual([]);
+      expect(open.escapedText).toEqual([]);
+      expect(state.cashRequests.filter((request) => request.path.endsWith('/accept'))).toEqual([]);
+    } finally {
+      await testInfo.attach('activity-cashback-action-lane', {
+        contentType: 'application/json', body: Buffer.from(JSON.stringify({
+          evidence: 'Rendered HTTP mocks; expired full offer and pending partial QUOTE, not pending confirmation',
+          source: sourceBinding(), captures,
+        }, null, 2)),
+      });
+    }
+  });
+
   test('collapsed event times remain associated and wrap without clipping at 320, 390 and desktop', async ({ page }, testInfo) => {
     const { assertCollapsedEventTime, specPath, source } = loadProtectedAcceptanceHelpers();
     const state = createState();
