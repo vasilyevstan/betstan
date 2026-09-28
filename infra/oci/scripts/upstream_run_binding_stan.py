@@ -21,6 +21,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import zipfile
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -40,6 +41,9 @@ ARTIFACT_VALUE_TOKEN = re.compile(
 )
 MAX_ARTIFACT_ARCHIVE_BYTES = 50 * 1024 * 1024
 MAX_ARTIFACT_EVIDENCE_BYTES = 1024 * 1024
+ARTIFACT_DOWNLOAD_ATTEMPTS = 3
+ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS = 120
+ARTIFACT_DOWNLOAD_BACKOFF_SECONDS = (1, 2)
 
 
 def fail(message):
@@ -84,19 +88,92 @@ def gh_api_pages(path):
     return payload
 
 
-def gh_api_bytes(path):
-    result = subprocess.run(
-        ["gh", "api", path],
-        capture_output=True,
-        check=False,
+def _classify_artifact_download_failure(returncode, stderr):
+    if returncode < 0:
+        return "cancelled", None, False
+    if returncode != 1:
+        return "command", None, False
+    diagnostic = (stderr or b"").decode("utf-8", errors="replace").strip()
+    matches = re.findall(
+        r"(?m)^(?:gh: HTTP ([1-5][0-9]{2})|"
+        r"gh: [^\r\n]+ \(HTTP ([1-5][0-9]{2})\)|"
+        r"HTTP ([1-5][0-9]{2}): [^\r\n]+)$",
+        diagnostic,
     )
-    if result.returncode != 0:
-        fail(f"unable to download {path}")
-    if not result.stdout:
-        fail(f"empty download for {path}")
-    if len(result.stdout) > MAX_ARTIFACT_ARCHIVE_BYTES:
-        fail(f"download for {path} exceeds the evidence size limit")
-    return result.stdout
+    statuses = {int(value) for match in matches for value in match if value}
+    if len(statuses) > 1:
+        return "ambiguous", None, False
+    if statuses:
+        status = statuses.pop()
+        if status not in {500, 502, 503, 504}:
+            return "http", status, False
+        if (
+            len(diagnostic.splitlines()) != 1
+            or len(re.findall(r"\bHTTP [1-5][0-9]{2}\b", diagnostic)) != 1
+            or re.search(
+                r"\b(?:unauthorized|forbidden|permission denied|not found|"
+                r"authentication|credentials|not authorized|access denied)\b",
+                diagnostic,
+                re.IGNORECASE,
+            )
+        ):
+            return "ambiguous", status, False
+        return "http", status, True
+    if re.fullmatch(
+        r'(?:gh: )?(?:(?:Get|Head) "[^"\r\n]+": )?'
+        r"(?:net/http: TLS handshake timeout|"
+        r"context deadline exceeded"
+        r"(?: \(Client\.Timeout exceeded while awaiting headers\))?|"
+        r"(?:(?:read|write|dial) tcp [^\"\r\n]+: )?(?:read: )?"
+        r"(?:i/o timeout|connection reset by peer))",
+        diagnostic,
+    ):
+        return "network", None, True
+    return "unknown", None, False
+
+
+def gh_api_bytes(path):
+    for attempt in range(1, ARTIFACT_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            result = subprocess.run(
+                ["gh", "api", path],
+                capture_output=True,
+                check=False,
+                timeout=ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            classification, status, retryable = "timeout", None, True
+        except OSError:
+            classification, status, retryable = "local-execution", None, False
+        else:
+            if result.returncode == 0:
+                if not result.stdout:
+                    classification = "empty-body"
+                elif len(result.stdout) > MAX_ARTIFACT_ARCHIVE_BYTES:
+                    classification = "oversized-body"
+                else:
+                    return result.stdout
+                status, retryable = None, False
+            else:
+                classification, status, retryable = (
+                    _classify_artifact_download_failure(
+                        result.returncode, result.stderr
+                    )
+                )
+        disposition = (
+            "retry" if attempt < ARTIFACT_DOWNLOAD_ATTEMPTS else "exhausted"
+        ) if retryable else "not-retryable"
+        message = f"artifact download classification={classification}"
+        if status is not None:
+            message += f" status={status}"
+        message += (
+            f" attempt={attempt}/{ARTIFACT_DOWNLOAD_ATTEMPTS}"
+            f" disposition={disposition}"
+        )
+        if disposition != "retry":
+            fail(message)
+        print(message, file=sys.stderr)
+        time.sleep(ARTIFACT_DOWNLOAD_BACKOFF_SECONDS[attempt - 1])
 
 
 def parse_timestamp(value, label):
