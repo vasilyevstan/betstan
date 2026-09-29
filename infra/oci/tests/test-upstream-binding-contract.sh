@@ -43,6 +43,22 @@ set -euo pipefail
 [ "${1:-}" = "api" ] || { echo "unexpected gh invocation: $*" >&2; exit 1; }
 file="$FIXTURE_DIR/$(printf '%s' "$2" | tr '/?=&' '____')"
 [ -f "$file" ] || { echo "no fixture for $2" >&2; exit 1; }
+if [[ "$2" == */zip ]]; then
+  attempt=0
+  if [ -f "$file.calls" ]; then read -r attempt <"$file.calls"; fi
+  attempt=$((attempt + 1))
+  printf '%s\n' "$attempt" >"$file.calls"
+  prefix="$file.$attempt"
+  if [ -f "$prefix.status" ] || [ -f "$prefix.sleep" ]; then
+    if [ -f "$prefix.stdout" ]; then cat "$prefix.stdout"; fi
+    if [ -f "$prefix.stderr" ]; then cat "$prefix.stderr" >&2; fi
+    if [ -f "$prefix.sleep" ]; then
+      printf '%s\n' "$$" >"$file.pid"
+      exec sleep "$(cat "$prefix.sleep")"
+    fi
+    exit "$(cat "$prefix.status")"
+  fi
+fi
 cat "$file"
 EOF
 chmod 755 "$WORK/bin/gh"
@@ -152,6 +168,208 @@ ok "accept exact first-attempt dispatched capacity run"
 
 reset_fixtures
 write_capacity_fixtures
+artifact_endpoint="repos/$REPO/actions/artifacts/9001/zip"
+artifact_file="$FIXTURE_DIR/$(printf '%s' "$artifact_endpoint" | tr '/?=&' '____')"
+printf '1\n' >"$artifact_file.1.status"
+printf 'gh: Bad Gateway (HTTP 502)\n' >"$artifact_file.1.stderr"
+printf 'discarded partial archive' >"$artifact_file.1.stdout"
+run_validator >/dev/null || fail "transient artifact failure was not recovered"
+[ "$(cat "$artifact_file.calls")" = 2 ] || fail "artifact recovery changed attempt count"
+ok "retry a transient artifact GET without bypassing binding validation"
+
+reset_fixtures
+write_capacity_fixtures
+PATH="$WORK/bin:$PATH" python3 -B - "$VALIDATOR" "$artifact_endpoint" "$artifact_file" <<'PY'
+import contextlib
+import importlib.util
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("binding_transport", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+endpoint, fixture = sys.argv[2], Path(sys.argv[3])
+valid_archive = fixture.read_bytes()
+assert module.ARTIFACT_DOWNLOAD_ATTEMPTS == 3
+assert module.ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS == 120
+assert module.ARTIFACT_DOWNLOAD_BACKOFF_SECONDS == (1, 2)
+assert 3 * 120 + sum(module.ARTIFACT_DOWNLOAD_BACKOFF_SECONDS) == 363
+backoffs = []
+secret = "synthetic-private-token"
+signed_url = "https://example.invalid/archive?signature=synthetic-private-token"
+
+
+def sidecar(suffix):
+    return Path(str(fixture) + suffix)
+
+
+def reset_download(body=valid_archive):
+    for suffix in [".calls", ".pid"] + [
+        f".{attempt}.{kind}"
+        for attempt in range(1, 4)
+        for kind in ("status", "stdout", "stderr", "sleep")
+    ]:
+        sidecar(suffix).unlink(missing_ok=True)
+    fixture.write_bytes(body)
+    backoffs.clear()
+
+
+def failure(attempt, diagnostic, output=valid_archive):
+    sidecar(f".{attempt}.status").write_text("1\n")
+    sidecar(f".{attempt}.stderr").write_text(diagnostic)
+    sidecar(f".{attempt}.stdout").write_bytes(output)
+
+
+def invoke(accepted, calls, sleeps, expected=valid_archive):
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            value = module.gh_api_bytes(endpoint)
+        except SystemExit as error:
+            assert not accepted and error.code == 1
+        else:
+            assert accepted and value == expected
+    assert int(sidecar(".calls").read_text()) == calls
+    assert backoffs == sleeps
+    assert stdout.getvalue() == ""
+    assert secret not in stderr.getvalue() and signed_url not in stderr.getvalue()
+    return stderr.getvalue()
+
+
+with patch.object(module.time, "sleep", side_effect=backoffs.append):
+    reset_download()
+    assert invoke(True, 1, []) == ""
+    for status in (500, 502, 503, 504):
+        reset_download()
+        failure(1, f"gh: {secret} {signed_url} (HTTP {status})\n")
+        diagnostic = invoke(True, 2, [1])
+        assert f"status={status}" in diagnostic and "disposition=retry" in diagnostic
+
+    reset_download()
+    failure(1, "gh: HTTP 502\n", b"")
+    failure(2, "HTTP 503: Service Unavailable\n", b"")
+    invoke(True, 3, [1, 2])
+
+    reset_download()
+    for attempt in range(1, 4):
+        failure(attempt, "gh: HTTP 504\n")
+    assert "disposition=exhausted" in invoke(False, 3, [1, 2])
+
+    for diagnostic in (
+        f'Get "{signed_url}": net/http: TLS handshake timeout',
+        f'Get "{signed_url}": context deadline exceeded (Client.Timeout exceeded while awaiting headers)',
+        "read tcp 192.0.2.1:1234->192.0.2.2:443: read: connection reset by peer",
+        "dial tcp 192.0.2.2:443: i/o timeout",
+        "write tcp 192.0.2.1:1234->192.0.2.2:443: i/o timeout",
+        "read tcp [2001:db8::1]:1234->[2001:db8::2]:443: read: connection reset by peer",
+        "dial tcp [fe80::1%eth0]:443: i/o timeout",
+        "gh: i/o timeout",
+    ):
+        reset_download()
+        failure(1, diagnostic)
+        invoke(True, 2, [1])
+
+    for diagnostic in (
+        "gh: i/o timeout (HTTP 401)",
+        "gh: connection reset by peer (HTTP 403)",
+        "gh: Not Found (HTTP 404)",
+        "gh: rate limited (HTTP 429)",
+        "gh: Not Implemented (HTTP 501)",
+        "gh: HTTP 502\ngh: Forbidden (HTTP 403)",
+        "gh: HTTP 502\ngh: HTTP 503",
+        "gh: Bad Gateway (HTTP 502) versus Service Unavailable (HTTP 503)",
+        "HTTP 502: conflicting HTTP 503",
+        "gh: permission denied (HTTP 503)",
+        "gh: Bad credentials (HTTP 503)",
+        "gh: Requires authentication (HTTP 500)",
+        "gh: Not authorized (HTTP 504)",
+        "dial tcp permission denied: i/o timeout",
+        'Get "https://example.invalid/archive": read tcp 192.0.2.1:1234->192.0.2.2:443: Forbidden (HTTP 403): read: connection reset by peer',
+        f"read tcp {secret}: i/o timeout",
+        "read tcp 192.0.2.1:1234->192.0.2.2:443: HTTP 503: i/o timeout",
+        "dial tcp 999.0.2.1:443: i/o timeout",
+        "dial tcp [dead:beef]:443: i/o timeout",
+        "dial tcp 192.0.2.1:65536: i/o timeout",
+        "read tcp 192.0.2.1:443: i/o timeout",
+        "dial tcp 192.0.2.1:1234->192.0.2.2:443: i/o timeout",
+        "gh: HTTP 502\nunclassified second diagnostic",
+        f"{secret}: arbitrary timeout or reset and 502",
+        "context canceled",
+        f'Get "{signed_url}": x509: certificate signed by unknown authority',
+    ):
+        reset_download()
+        failure(1, diagnostic)
+        assert "disposition=not-retryable" in invoke(False, 1, [])
+
+    reset_download(b"")
+    invoke(False, 1, [])
+    limit = module.MAX_ARTIFACT_ARCHIVE_BYTES
+    reset_download(b"x" * limit)
+    invoke(True, 1, [], expected=b"x" * limit)
+    reset_download(b"x" * (limit + 1))
+    invoke(False, 1, [])
+
+    for result in [
+        subprocess.CompletedProcess(["gh"], code, valid_archive, b"gh: HTTP 502")
+        for code in (-15, 2, 4, 130, 143, 99)
+    ] + [OSError(f"{secret} {signed_url}")]:
+        reset_download()
+        with patch.object(module.subprocess, "run", side_effect=[result]) as run:
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                try:
+                    module.gh_api_bytes(endpoint)
+                except SystemExit as error:
+                    assert error.code == 1
+                else:
+                    raise AssertionError("local failure or cancellation was accepted")
+            assert run.call_count == 1 and backoffs == []
+            assert secret not in stderr.getvalue() and signed_url not in stderr.getvalue()
+
+
+def require_child_gone():
+    pid = int(sidecar(".pid").read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    raise AssertionError("timed-out child survived into retry")
+
+
+def timeout_backoff(seconds):
+    require_child_gone()
+    backoffs.append(seconds)
+
+
+with patch.object(module, "ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS", 0.5), \
+        patch.object(module.time, "sleep", side_effect=timeout_backoff):
+    for exhausted in (False, True):
+        reset_download(b"fresh successful bytes")
+        for attempt in range(1, 4 if exhausted else 2):
+            sidecar(f".{attempt}.sleep").write_text("10\n")
+            sidecar(f".{attempt}.stdout").write_bytes(valid_archive)
+            sidecar(f".{attempt}.stderr").write_text(secret + signed_url)
+        invoke(not exhausted, 3 if exhausted else 2, [1, 2] if exhausted else [1],
+               expected=b"fresh successful bytes")
+        require_child_gone()
+reset_download()
+print("artifact_transport_contract=PASS")
+PY
+ok "bounded artifact transport, exact bytes, timeout cleanup and diagnostic redaction"
+
+reset_fixtures
+write_capacity_fixtures
+printf 'not a zip archive' >"$artifact_file"
+if run_validator >/dev/null; then fail "malformed downloaded ZIP was accepted"; fi
+[ "$(cat "$artifact_file.calls")" = 1 ] || fail "malformed ZIP triggered a retry"
+ok "reject malformed downloaded ZIP without transport retry"
+
+reset_fixtures
+write_capacity_fixtures
 fixture "repos/$REPO/actions/runs/$CAPACITY_RUN/artifacts?per_page=100" <<EOF2
 [
   {
@@ -234,6 +452,7 @@ boot_volume_vpus_per_gb=10
 if run_validator >/dev/null; then
   fail "capacity artifact with wrong source SHA was accepted"
 fi
+[ "$(cat "$artifact_file.calls")" = 1 ] || fail "content mismatch triggered a retry"
 ok "reject capacity artifact content mismatch"
 
 reset_fixtures

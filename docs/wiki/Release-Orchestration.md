@@ -234,6 +234,19 @@ Before deployment, the release chain verifies:
   source SHA, apply state, verification state, and rollback state;
 - absence of competing production operations.
 
+**Upstream artifact transport.** The retry contract is limited to the same
+authenticated artifact GET: at most three attempts, each with a 120-second
+subprocess timeout, and 1/2-second backoffs only before eligible retries.
+The 363-second configured allowance excludes process overhead and is not a
+whole-validator deadline. Only positively identified HTTP 500/502/503/504,
+network timeout/reset, or subprocess timeout is retryable; permanent,
+authentication, not-found, cancellation, unknown/ambiguous, content, and
+provenance failures remain fail-closed. Failed-attempt bytes are discarded,
+successful bytes still undergo existing validation, and diagnostics are fixed
+and sanitized. These are transport retries, not protected-workflow reruns or
+reuse of consumed authority, and do not establish that an unclassified failure
+would recover.
+
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this
 operation-specific check at the actual selected fresh or imported baseline.
 Canonical checksum/provenance validation runs first, then retained-Telemetry
