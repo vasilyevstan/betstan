@@ -111,8 +111,10 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     left.left < right.right && right.left < left.right
     && left.top < right.bottom && right.top < left.bottom
   );
-  const cards = Array.from(board.querySelectorAll('.backoffice-event')).map((card) => {
-    const cardBox = bounds(card);
+  const cardElements = Array.from(board.querySelectorAll('.backoffice-event'));
+  const cardBounds = cardElements.map(bounds);
+  const cards = cardElements.map((card, index) => {
+    const cardBox = cardBounds[index];
     const identity = bounds(card.querySelector('.backoffice-event__identity'));
     const controls = bounds(card.querySelector('.backoffice-event__controls'));
     const inputs = Array.from(card.querySelectorAll('input')).map(bounds);
@@ -137,6 +139,14 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
       )),
     };
   });
+  const siblingCardIntersections = [];
+  for (let firstIndex = 0; firstIndex < cardBounds.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < cardBounds.length; secondIndex += 1) {
+      if (overlaps(cardBounds[firstIndex], cardBounds[secondIndex])) {
+        siblingCardIntersections.push([firstIndex, secondIndex]);
+      }
+    }
+  }
   const targets = Array.from(board.querySelectorAll('input, select, button')).map(bounds);
 
   // Resolve computed colors (including color-mix) and alpha-composite local
@@ -183,6 +193,7 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
   const focused = board.querySelector(':focus');
   return {
     cards,
+    siblingCardIntersections,
     boardWidth: bounds(board).width,
     documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     overflowingComponents: Array.from(board.querySelectorAll(
@@ -1077,6 +1088,7 @@ for (const scenario of [
     const metrics = await getBackofficeLayout(page);
     expect(metrics.documentOverflow).toBeLessThanOrEqual(1);
     expect(metrics.overflowingComponents).toEqual([]);
+    expect(metrics.siblingCardIntersections).toEqual([]);
     expect(metrics.minTargetHeight).toBeGreaterThanOrEqual(44);
     expect(metrics.minTargetWidth).toBeGreaterThanOrEqual(44);
     expect(metrics.minTextContrast).toBeGreaterThanOrEqual(4.5);
@@ -1110,6 +1122,7 @@ for (const scenario of [
       const zoomed = await getBackofficeLayout(page);
       expect(zoomed.documentOverflow).toBeLessThanOrEqual(1);
       expect(zoomed.overflowingComponents).toEqual([]);
+      expect(zoomed.siblingCardIntersections).toEqual([]);
       expect(zoomed.cards.every((card) => card.fullNameFits && !card.regionCollision && !card.actionCollision)).toBe(true);
       const zoomMetricsPath = testInfo.outputPath('backoffice-200-percent-text-metrics.json');
       await writeFile(zoomMetricsPath, JSON.stringify(zoomed, null, 2));
