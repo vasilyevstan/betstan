@@ -475,7 +475,7 @@ const measureLayout = (page) => page.evaluate(() => {
     slipId: node.closest('[data-slip-id]')?.dataset.slipId ?? null,
     element: node.tagName.toLowerCase(), className: node.className,
   });
-  const containerWidths = [root, ...root.querySelectorAll('.my-bets-toolbar, .my-bets-find, .my-bets-filter-context, .my-bets-filter-disclosure, .my-bets-card, .my-bets-summary, .my-bets-summary-heading, .my-bets-pick, .my-bets-position, .my-bets-pending, .my-bets-pending-item, .card-body, .my-bets-row, .my-bets-row > [data-label], .my-bets-footer, .cash-back, .cash-back-strip, .cash-back-editor, .cash-back-amount, .cash-back-offer, .cash-back-expired, .cash-back-review-context, .cash-back-history, .cash-back-history__body, .cash-back-values, .cash-back-values > div, .cash-back-actions, .cash-back-receipts')]
+  const containerWidths = [root, ...root.querySelectorAll('.my-bets-toolbar, .my-bets-find, .my-bets-filter-context, .my-bets-filter-disclosure, .my-bets-card, .my-bets-summary, .my-bets-summary-heading, .my-bets-pick, .my-bets-position, .my-bets-pending, .my-bets-pending-item, .card-body, .my-bets-row, .my-bets-row > [data-label], .my-bets-footer, .cash-back, .cash-back-strip, .cash-back-editor, .cash-back-amount, .cash-back-offer, .cash-back-expired, .cash-back-review-context, .cash-back-history, .cash-back-history__header, .cash-back-history__body, .cash-back-values, .cash-back-values > div, .cash-back-actions, .cash-back-receipts, .cash-back-receipt, .cash-back-receipt__values, .cash-back-receipt__values > div')]
     .filter(visible).map((node) => ({ ...describe(node), client: node.clientWidth, scroll: node.scrollWidth }));
   const overflow = containerWidths.filter((entry) => entry.scroll > entry.client);
   const contains = (outer, inner) => inner.left >= outer.left && inner.right <= outer.right
@@ -514,7 +514,7 @@ const measureLayout = (page) => page.evaluate(() => {
   const controlPairs = measurePairs(controlNodes);
   const collisions = controlPairs.filter(overlaps);
   const escapedText = [];
-  root.querySelectorAll('.my-bets-pick, .cash-back-values dt, .cash-back-values dd, .cash-back-control, .cash-back-amount label').forEach((element) => {
+  root.querySelectorAll('.my-bets-pick, .cash-back-values dt, .cash-back-values dd, .cash-back-receipts strong, .cash-back-receipts time, .cash-back-receipt__values dt, .cash-back-receipt__values dd, .cash-back-control, .cash-back-amount label').forEach((element) => {
     if (!visible(element)) return;
     const bounds = rect(element);
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
@@ -670,6 +670,176 @@ test.describe('My Bets correction 2 recovery and expiry focus', () => {
 test.describe('My Bets whole-page usability', () => {
   test.use({ locale: 'en-US', timezoneId: 'UTC', deviceScaleFactor: 1 });
 
+  for (const sample of [
+    // Paired unchanged-runtime baseline at c2ace281; same DTOs, locale and fonts.
+    { width: 1600, height: 1000, variant: 'v1', theme: 'dark', baseline: 430.578125, rowBudget: 64 },
+    { width: 768, height: 1000, variant: 'v2', theme: 'light', baseline: 482.578125, rowBudget: 88 },
+    { width: 390, height: 844, variant: 'v3', theme: 'light', baseline: 707.875, rowBudget: 120 },
+    { width: 320, height: 844, variant: 'v3', theme: 'light', baseline: 806.09375, rowBudget: 144 },
+  ]) {
+    test(`accepted partial history compactness at ${sample.width}px`, async ({ page }, testInfo) => {
+      const state = createState();
+      state.bets = [bet()];
+      const request = { action: 'QUOTE', clientOperationId: 'compact-1', portion: { mode: 'PARTIAL', stakeMinor: 1000 } };
+      const decision = accepted(quoted(request, { now: Date.parse('2026-09-24T12:00:00Z'), quoteId: 'compact-quote-1' }));
+      state.publish(decision);
+      // Recover an already-durable ACCEPTED operation through the existing HTTP
+      // fixture, not just a bet bearing the PARTIAL CASH BACK badge.
+      await page.addInitScript(({ ownerId, request, decision }) => {
+        localStorage.setItem(`betstan.cash-back.v1:${ownerId}:${request.clientOperationId}`, JSON.stringify({
+          slipId: decision.slipId, clientOperationId: request.clientOperationId,
+          operationId: decision.operationId, createdAt: Date.parse(decision.quote.issuedAt),
+          quoteRequest: request,
+          confirmRequest: { action: 'CONFIRM', clientOperationId: request.clientOperationId, quoteId: decision.quote.quoteId },
+        }));
+      }, { ownerId: state.currentUser.id, request, decision });
+      await page.setViewportSize({ width: sample.width, height: sample.height });
+      await prepare(page, state);
+      await page.goto(`/bets?ui=${sample.variant}&theme=${sample.theme}`);
+      const card = getCard(page);
+      const input = card.getByLabel('Stake to close (Stanbucks)');
+      await expect(input).toHaveValue('10.00');
+      await expect(card.locator('.cash-back-message')).toHaveText('Cash back recorded. See the receipt in cash-back history.');
+      const disclosure = card.locator('.cash-back-history button').first();
+      await expect(disclosure).toHaveAccessibleName('Cash-back history');
+      await disclosure.focus();
+      await page.keyboard.press('Enter');
+      await expect(disclosure).toBeFocused();
+      await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+      await expect(card).toContainText('1 receipt loaded. End of available history.');
+      await page.evaluate(() => document.fonts.ready);
+
+      const captures = [];
+      const capture = async (stage, target = card) => {
+        const layout = await measureLayout(page);
+        const regions = await target.locator('.cash-back').evaluate((node) => {
+          const origin = node.getBoundingClientRect();
+          const box = (element) => {
+            const rect = element.getBoundingClientRect();
+            return { left: rect.left - origin.left, top: rect.top - origin.top, width: rect.width, height: rect.height };
+          };
+          const typography = (element) => {
+            const style = getComputedStyle(element);
+            return { family: style.fontFamily, size: style.fontSize, lineHeight: style.lineHeight };
+          };
+          return {
+            height: box(node).height, width: box(node).width,
+            historyWidth: box(node.querySelector('.cash-back-history')).width,
+            controls: [...node.querySelectorAll('button, input')].filter((element) => element.checkVisibility()).map(box),
+            receipts: [...node.querySelectorAll('.cash-back-receipts li')].map((item) => ({
+              height: box(item).height, text: item.textContent,
+              dateTime: item.querySelector('time').dateTime,
+              type: typography(item.querySelector('strong')), time: typography(item.querySelector('time')),
+              amounts: [...item.querySelectorAll('dl > div')].map((field) => {
+                const value = field.querySelector('dd');
+                const range = document.createRange();
+                range.selectNodeContents(value);
+                return { ...box(field), label: field.querySelector('dt').textContent, value: value.textContent,
+                  labelType: typography(field.querySelector('dt')), valueType: typography(value),
+                  valueBaseline: range.getClientRects()[0].bottom };
+              }),
+            })),
+          };
+        });
+        captures.push({ stage, regions, layout });
+        return regions;
+      };
+      const one = await capture('one-receipt');
+      await input.focus();
+      await page.keyboard.press('Tab');
+      await page.keyboard.press('Tab');
+      await expect(disclosure).toBeFocused();
+      await page.keyboard.press('Space');
+      await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+      await page.keyboard.press('Enter');
+      await expect(card).toContainText('1 receipt loaded. End of available history.');
+      await input.focus();
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      await expect(page.getByRole('button', { name: 'Refresh bets' })).toBeEnabled();
+      await expect(input).toBeFocused();
+      await expect(input).toHaveValue('10.00');
+      const refreshed = await capture('same-state-refresh');
+      expect(refreshed.controls).toEqual(one.controls);
+
+      let previous = decision;
+      for (let index = 2; index <= 5; index += 1) {
+        previous = accepted(quoted({ ...request, clientOperationId: `compact-${index}` }, {
+          financial: previous.receipt.financial, now: Date.parse('2026-09-24T12:00:00Z') + index * 1000,
+          quoteId: `compact-quote-${index}`,
+        }));
+        state.publish(previous);
+      }
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      await expect(card.locator('.cash-back-receipts li')).toHaveCount(5);
+      await expect(card).toContainText('5 receipts loaded. End of available history.');
+      await expect(input).toBeFocused();
+      await expect(input).toHaveValue('10.00');
+      await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+      const five = await capture('five-receipts');
+      // Large, valid public DTO values, not shortened strings or unsafe numbers.
+      const large = accepted(quoted({ ...request, clientOperationId: 'compact-large', portion: { mode: 'FULL' } }, {
+        slipId: 'large-slip',
+        financial: { revision: 1, status: 'CONFIRMED', originalStakeMinor: Number.MAX_SAFE_INTEGER,
+          remainingStakeMinor: Number.MAX_SAFE_INTEGER, cumulativeClosedStakeMinor: 0, cumulativeReturnMinor: 0 },
+        now: Date.parse('2026-09-24T12:01:00Z'), quoteId: 'compact-quote-large', returnMinor: Number.MAX_SAFE_INTEGER,
+      }));
+      state.bets.push(bet({ _id: 'large-bet', slipId: 'large-slip', cashBackFinancial: large.quote.financial }));
+      state.publish(large);
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      const largeCard = getCard(page, 'large-slip');
+      await largeCard.getByRole('button', { name: 'Cash-back history' }).click();
+      await expect(largeCard.locator('.cash-back-receipts li')).toHaveCount(1);
+      const largeValues = await capture('large-values', largeCard);
+      await input.focus();
+      const contrast = await measureContrast(page);
+      const evidence = { sample, source: sourceBinding(), captures, contrast };
+      console.log('CASH_BACK_HISTORY_COMPACTNESS', JSON.stringify({
+        sample, source: evidence.source, heights: captures.map(({ stage, regions }) => ({
+          stage, height: regions.height, rows: regions.receipts.map((receipt) => receipt.height),
+        })), contrast: { text: contrast.minimumText, controls: contrast.minimumControl, focus: contrast.focusRatio },
+      }));
+      await testInfo.attach('accepted-history-compactness', {
+        contentType: 'application/json', body: Buffer.from(JSON.stringify(evidence, null, 2)),
+      });
+
+      expect(one.height).toBeLessThanOrEqual(sample.baseline * (sample.width === 1600 ? 0.65 : 0.8));
+      if (sample.width === 1600) expect(one.height).toBeLessThanOrEqual(260);
+      expect(five.height - one.height).toBeLessThanOrEqual(4 * sample.rowBudget);
+      five.receipts.forEach((receipt) => expect(receipt.height).toBeLessThanOrEqual(sample.rowBudget));
+      expect(largeValues.receipts[0].text).toContain('90071992547409.91 Stanbucks');
+      expect(largeValues.receipts[0].amounts.map((amount) => amount.value))
+        .toEqual(['90071992547409.91 Stanbucks', '90071992547409.91 Stanbucks']);
+      expect(largeValues.receipts[0].height - five.receipts[0].height).toBeLessThanOrEqual(48);
+      for (const { layout, regions } of captures) {
+        expect(layout.document.scroll).toBeLessThanOrEqual(layout.document.client);
+        for (const key of ['overflow', 'escapedText', 'collisions', 'containmentFailures', 'unequalRows']) expect(layout[key]).toEqual([]);
+        expect(layout.minimumTargetWidth).toBeGreaterThanOrEqual(44);
+        expect(layout.minimumTargetHeight).toBeGreaterThanOrEqual(44);
+        expect(Math.abs(regions.historyWidth - regions.width)).toBeLessThanOrEqual(1);
+        regions.controls.forEach((left, index) => regions.controls.slice(index + 1).forEach((right) => {
+          if (Math.abs(left.top - right.top) <= 1) expect(Math.abs(left.height - right.height)).toBeLessThanOrEqual(1);
+        }));
+        for (const receipt of regions.receipts) {
+          expect(receipt.type.size).toBe('16px');
+          expect(receipt.time.size).toBe('13.6px');
+          expect(receipt.amounts.map((amount) => amount.label)).toEqual(['Closed principal', 'Recorded nominal return']);
+          receipt.amounts.forEach((amount, index) => {
+            expect(amount.valueType.size).toBe('16px');
+            expect(amount.labelType.size).toBe('13.6px');
+            expect(Math.abs(amount.left - regions.receipts[0].amounts[index].left)).toBeLessThanOrEqual(1);
+            expect(Math.abs(amount.width - regions.receipts[0].amounts[index].width)).toBeLessThanOrEqual(1);
+          });
+          expect(Math.abs(receipt.amounts[0].valueBaseline - receipt.amounts[1].valueBaseline)).toBeLessThanOrEqual(1);
+        }
+      }
+      expect(five.controls).toEqual(one.controls);
+      expect(contrast.failures).toEqual([]);
+      expect(contrast.focusRatio).toBeGreaterThanOrEqual(3);
+      expect(contrast.focusWidth).toBeGreaterThanOrEqual(3);
+      expect(state.cashRequests.filter((entry) => entry.method === 'POST')).toEqual([]);
+    });
+  }
+
   test('activity cash-back action lane geometry keeps expired and partial request-pending compact', async ({ page }, testInfo) => {
     const state = createState();
     state.bets = [bet(), bet({ _id: 'other-bet', slipId: 'other-slip' })];
@@ -759,7 +929,8 @@ test.describe('My Bets whole-page usability', () => {
       await expired.getByRole('button', { name: 'Expired offer details' }).click();
       await expect(expired.locator('.cash-back-review-values')).toBeVisible();
       await expired.getByRole('button', { name: 'Cash-back history' }).click();
-      await expect(expired.getByRole('heading', { name: 'Recorded cash back' })).toBeVisible();
+      await expect(expired.getByRole('button', { name: 'Hide cash-back history' })).toHaveAttribute('aria-expanded', 'true');
+      await expect(expired).toContainText('0 receipts loaded. End of available history.');
       const lane = await expired.locator('.cash-back').boundingBox();
       for (const selector of ['.cash-back-expired', '.cash-back-history--open']) {
         expect(Math.abs((await expired.locator(selector).boundingBox()).width - lane.width)).toBeLessThanOrEqual(1);
@@ -1041,7 +1212,7 @@ const measureContrast = (page) => page.evaluate(() => {
     if (foreground[3] === 1 && Math.min(...bounds) <= foregroundLuminance && Math.max(...bounds) >= foregroundLuminance) return 1;
     return Math.min(...backgrounds.map((surface) => contrast(blend(foreground, surface), surface)));
   };
-  const text = [...document.querySelectorAll('.cash-back-help, .cash-back-values dt, .cash-back-values dd, .cash-back-error, .cash-back-message, .cash-back-control')]
+  const text = [...document.querySelectorAll('.cash-back-help, .cash-back-values dt, .cash-back-values dd, .cash-back-receipts strong, .cash-back-receipts time, .cash-back-receipt__values dt, .cash-back-receipt__values dd, .cash-back-error, .cash-back-message, .cash-back-control')]
     .filter((element) => element.getClientRects().length && !element.disabled && element.getAttribute('aria-disabled') !== 'true')
     .map((element) => ({ className: element.className || element.tagName,
       ratio: contrastBound(rgba(getComputedStyle(element).color), background(element)) }));
