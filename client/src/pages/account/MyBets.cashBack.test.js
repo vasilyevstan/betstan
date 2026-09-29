@@ -120,7 +120,10 @@ it('shows the exact partial offer and all original identities before a separate 
   expect(request).toEqual({ action: 'QUOTE', clientOperationId: expect.any(String), portion: { mode: 'PARTIAL', stakeMinor: 4000 } });
   expect(state.bets[0].wager).toBe(100);
   fireEvent.click(confirm);
-  await screen.findByText('Cash back recorded. See the receipt in cash-back history.');
+  const recorded = await screen.findByText('Cash back recorded. See the receipt in cash-back history.');
+  expect(recorded).toHaveClass('cash-back-message--accepted');
+  expect(recorded).toHaveAttribute('tabindex', '-1');
+  expect(recorded).not.toHaveAttribute('role');
   fireEvent.click(within(card()).getByRole('button', { name: /^Bet details/ }));
   expect(axios.post.mock.calls[1][1]).toEqual({ action: 'CONFIRM', clientOperationId: request.clientOperationId,
     quoteId: state.operations[request.clientOperationId].quote.quoteId });
@@ -848,8 +851,10 @@ it('makes history failures actionable and restarts an invalid cursor at the firs
   state.history = { items: [receipt], nextCursor: 'cursor-to-retry' };
   const previousGet = axios.get.getMockImplementation();
   let firstHistory = true;
+  let reopening;
   axios.get.mockImplementation((url) => {
     if (url.includes('?cursor=')) return Promise.reject(httpError(400, 'INVALID_CURSOR'));
+    if (url.endsWith('/history') && reopening) return reopening.promise;
     if (url.endsWith('/history') && firstHistory) {
       firstHistory = false;
       return Promise.reject(new Error('offline'));
@@ -864,9 +869,31 @@ it('makes history failures actionable and restarts an invalid cursor at the firs
   await screen.findByText('1 receipt loaded. Earlier receipts are available.');
   fireEvent.click(screen.getByRole('button', { name: 'Load earlier receipts' }));
   expect(await screen.findByRole('alert')).toHaveTextContent(cashBackReason('INVALID_CURSOR'));
-  state.history.nextCursor = null;
+  expect(screen.getByText('1 receipt loaded.')).toBeInTheDocument();
+  expect(screen.queryByText(/Earlier receipts are available|End of available history/)).not.toBeInTheDocument();
+  reopening = deferred();
   fireEvent.click(screen.getByRole('button', { name: 'Hide cash-back history' }));
   fireEvent.click(screen.getByRole('button', { name: 'Cash-back history' }));
+  await screen.findByText('Loading cash-back history…');
+  const history = document.getElementById(screen.getByRole('button', { name: 'Hide cash-back history' }).getAttribute('aria-controls'));
+  expect(history.querySelector('ol').children).toHaveLength(1);
+  expect(history).toHaveTextContent('Partial cash back');
+  expect(history).toHaveTextContent('Closed principal1.00 Stanbucks');
+  expect(history).toHaveTextContent('Recorded nominal return0.50 Stanbucks');
+  expect(history.querySelector('time')).toHaveAttribute('datetime', receipt.decisionTime);
+  expect(screen.queryByRole('heading', { name: 'Recorded cash back' })).not.toBeInTheDocument();
+  expect(screen.getByText('1 receipt loaded.')).toBeInTheDocument();
+  expect(screen.queryByText(/Earlier receipts are available|End of available history/)).not.toBeInTheDocument();
+  await act(async () => { reopening.reject(new Error('offline on reopen')); });
+  expect(await screen.findByRole('alert')).toHaveTextContent('Cash-back history could not be loaded');
+  expect(screen.queryByText('Loading cash-back history…')).not.toBeInTheDocument();
+  expect(history.querySelector('ol').children).toHaveLength(1);
+  expect(screen.getByText('1 receipt loaded.')).toBeInTheDocument();
+  expect(screen.queryByText(/Earlier receipts are available|End of available history/)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Retry history page' })).toBeEnabled();
+  reopening = null;
+  state.history.nextCursor = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry history page' }));
   await screen.findByText('1 receipt loaded. End of available history.');
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
