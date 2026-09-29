@@ -99,9 +99,10 @@ details**, with no confirmation action; opening the details does not renew it.
 distinct from success. `202` never produces an optimistic success message.
 Once confirmation is pending or uncertain, the card prevents another closure
 and offers **Check confirmation status**, even after the displayed expiry.
-Only the durable receipt produces **Cash back recorded**. A rejection or
-unsupported legacy precision is shown explicitly; neither is a network-error
-fallback.
+Only the durable receipt produces **Cash back recorded. See the receipt in
+cash-back history.** as quiet inline feedback; pending and failure messages
+retain their distinct treatment. A rejection or unsupported legacy precision
+is shown explicitly; neither is a network-error fallback.
 
 ### Exposure and permanent history
 
@@ -122,9 +123,14 @@ All copy describes nominal Stanbucks, not money paid, wallet credit, or balance.
 **Cash-back history** remains discoverable on fully closed and normally
 settled cards, not only while a new offer is available. Opening it reads a
 bounded page of up to 20 immutable accepted receipts, newest first; **Load
-earlier receipts** follows the opaque cursor. Loading, empty, failure, and
-**Retry history page** states are explicit. Newer receipts can refresh the
-open first page without rewinding exposure. A loaded page or **End of
+earlier receipts** follows the opaque cursor. One disclosure groups subdued,
+wrapping newest-first, loaded-count, and earlier/end metadata without a
+duplicate body title or explanatory paragraph. Loading, empty, failure, and
+**Retry history page** states are explicit. Retained receipts and counts are
+not pagination authority: earlier/end metadata waits for a successful page,
+remaining hidden during unresolved opening/refresh or after a page error.
+Newer receipts can refresh the open first page without rewinding exposure or
+automatically opening or closing history. A loaded page or **End of
 available history** is not a new completeness attestation.
 
 ### Pending recovery, ownership, and layout
@@ -169,8 +175,15 @@ Native labelled controls have visible focus and at least 44-by-44 CSS-pixel
 targets. Cash-back mode, amount, request/retry, and closed disclosure controls
 share available width without a reserved history column. Groups wrap when
 needed; opened history and expired-offer details use the full width inline.
+The compact ordered receipt list groups full/partial type with the full
+decision date/time, alongside aligned **Closed principal** and **Recorded
+nominal return** columns that reflow without truncating values or Stanbucks
+units. Concise help retains nominal precision, minimum partial remainder,
+server-checked availability, explicit confirmation, and server acceptance.
 Offer values reflow, and narrow selection rows retain their labels. Status
-text, pressed states, and error messages do not rely on color alone. See
+text, pressed states, and error messages do not rely on color alone.
+This presentation change leaves APIs and stored receipts unchanged; reverting
+the layout does not reverse accepted cash-back decisions. See
 [[Application Processes]] for eligibility/pricing and [[Architecture]] for
 server authority and availability limits.
 
