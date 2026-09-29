@@ -75,33 +75,42 @@ const CashBackHistory = ({ slipId, ownerId, receipt, revision, onHistory, onAuth
   }, [open, revision, load, status.loading, status.error]);
 
   return <div className={`cash-back-history${open ? ' cash-back-history--open' : ''}`}>
-    <button type="button" className="btn btn-shell my-bets-expand cash-back-control"
-      aria-expanded={open} aria-controls={historyId}
-      onClick={() => {
-        setOpen(!open);
-        if (!open) setCursor(null);
-      }}>
-      {open ? 'Hide cash-back history' : 'Cash-back history'}
-    </button>
+    <div className="cash-back-history__header">
+      <button type="button" className="btn btn-shell my-bets-expand cash-back-control"
+        aria-expanded={open} aria-controls={historyId}
+        onClick={() => {
+          setOpen(!open);
+          if (!open) setCursor(null);
+        }}>
+        {open ? 'Hide cash-back history' : 'Cash-back history'}
+      </button>
+      {open ? <p className="cash-back-help">
+        Newest first.
+        {loaded || items.length ? <> <span>
+          {items.length} receipt{items.length === 1 ? '' : 's'} loaded.
+          {loaded && wasOpen.current && !status.loading && !status.error
+            && !(revision > loadedRevision.current)
+            ? (cursor ? ' Earlier receipts are available.' : ' End of available history.') : ''}
+        </span></> : null}
+      </p> : null}
+    </div>
     {open ? <div id={historyId} className="cash-back-history__body">
-      <h4 className="h6">Recorded cash back</h4>
-      <p className="cash-back-help">Immutable accepted portions, newest first. Original selections and wager are unchanged.</p>
       {status.loading ? <p role="status">Loading cash-back history…</p> : null}
       {status.error ? <p role="alert" className="cash-back-error">{status.error}</p> : null}
       {items.length ? <ol className="cash-back-receipts">
         {items.map((item) => <li key={item.decisionId}>
-          <strong>{item.mode === 'FULL' ? 'Full cash back' : 'Partial cash back'}</strong>
-          <time dateTime={item.decisionTime}>{displayTime(item.decisionTime)}</time>
-          <dl className="cash-back-values">
-            <div><dt>Closed principal</dt><dd>{nominal(item.quote.closedStakeMinor)}</dd></div>
-            <div><dt>Recorded nominal return</dt><dd>{nominal(item.quote.returnMinor)}</dd></div>
-          </dl>
+          <div className="cash-back-receipt">
+            <div className="cash-back-receipt__identity">
+              <strong>{item.mode === 'FULL' ? 'Full cash back' : 'Partial cash back'}</strong>
+              <time dateTime={item.decisionTime}>{displayTime(item.decisionTime)}</time>
+            </div>
+            <dl className="cash-back-receipt__values">
+              <div><dt>Closed principal</dt><dd>{nominal(item.quote.closedStakeMinor)}</dd></div>
+              <div><dt>Recorded nominal return</dt><dd>{nominal(item.quote.returnMinor)}</dd></div>
+            </dl>
+          </div>
         </li>)}
       </ol> : loaded && !status.error ? <p>No accepted cash back has been recorded.</p> : null}
-      {loaded ? <p className="cash-back-help">
-        {items.length} receipt{items.length === 1 ? '' : 's'} loaded.
-        {cursor ? ' Earlier receipts are available.' : ' End of available history.'}
-      </p> : null}
       {status.error || cursor ? <button type="button" className="btn btn-shell cash-back-control"
         disabled={status.loading} onClick={() => void load(cursor)}>
         {status.error ? 'Retry history page' : 'Load earlier receipts'}
@@ -262,7 +271,7 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
       </div> : null}
     </div>
     {message ? <p ref={statusRef} tabIndex={-1} role={['ACCEPTED', 'REJECTED'].includes(displayedOperation?.state) ? undefined : 'status'}
-      className={`cash-back-message${displayedOperation?.state === 'REJECTED' ? ' cash-back-error' : ''}`}>{message}</p> : null}
+      className={`cash-back-message${displayedOperation?.state === 'ACCEPTED' ? ' cash-back-message--accepted' : ''}${displayedOperation?.state === 'REJECTED' ? ' cash-back-error' : ''}`}>{message}</p> : null}
     {error ? <p id={errorId} role="alert" className="cash-back-error">{error}</p> : null}
     {pendingConfirm && quote ? <p className="cash-back-pending-values">
       Submitted {quote.mode === 'FULL' ? 'full' : 'partial'} cash back: {nominal(quote.closedStakeMinor)} to close · Quoted nominal return {nominal(quote.returnMinor)} · Remaining stake after cash back {nominal(quote.remainingStakeMinorAfter)}.
@@ -306,8 +315,8 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
       </div>
     </div> : null}
     {reviewVisible || (mode === 'PARTIAL' && !expired && showForm) ? <p id={helpId} className="cash-back-help">
-      Nominal Stanbucks only (0.01 precision). {mode === 'PARTIAL' ? 'A partial must leave at least 0.01 Stanbucks. ' : ''}
-      {reviewVisible ? 'Nothing is recorded until you explicitly confirm and the server accepts.' : 'The server checks each offer; a confirmed bet does not guarantee availability.'}
+      Nominal Stanbucks (0.01 precision). {mode === 'PARTIAL' ? 'Partial must leave at least 0.01 Stanbucks. ' : ''}
+      {reviewVisible ? 'Recorded only after you explicitly confirm and the server accepts.' : 'Server checks availability, even for confirmed bets.'}
     </p> : <span id={helpId} className="visually-hidden">The server checks each offer; a confirmed bet does not guarantee availability.</span>}
     <CashBackHistory slipId={bet.slipId} ownerId={ownerId} receipt={latestReceipt} revision={bet.cashBackFinancial?.revision}
       onHistory={model.applyHistory} onAuthFailure={model.revoke} />
