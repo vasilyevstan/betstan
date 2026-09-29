@@ -424,9 +424,54 @@ Every data-driven surface should represent its real state:
 Backoffice controls, slip placement, authentication, live markets, event
 catalogs, and betting history follow the same principle.
 
-Backoffice event cards show the scheduled kickoff alongside the event name,
-score controls, result state, and visibility. Its create form states the
-server-defined 15-minute kickoff lead time.
+## Backoffice event controls
+
+The redesigned `/backoffice` center panel uses compact, full-width event cards.
+Statistics, the betting-slip sidebars, navigation, and responsive stacking
+remain unchanged. Anonymous, ordinary, legacy roleless, and administrator
+visitors retain the same catalog and controls. All three UI variants and both
+themes use the existing semantic tokens.
+
+**Create new event** stays expanded and states the server-defined 15-minute
+kickoff lead time. Each displayed card shows the event name and scheduled
+kickoff alongside an always-visible, labelled **Home score** / **Away score**
+pair. **Save final result** requires both scores as whole numbers from `0` to
+`99`. Recorded scores remain visible but disabled, as does result submission:
+final results cannot be changed once recorded.
+
+**Final result: Not recorded / Recorded** and **Visibility: Online / Offline**
+are independent, human-readable states, not inferred live-match phases.
+Unknown or missing values receive **Unknown** or **Unavailable** labels.
+Visibility remains actionable after a result is recorded; **Take offline**
+and **Make online** name the explicit target rather than an ambiguous toggle.
+
+**Search events** matches trimmed, case-insensitive substrings of event or
+team names, not IDs. Separate **Final result** and **Visibility** filters
+default to **All**, retaining the complete catalog in its existing API order.
+Active search and filters combine without reordering matches. **Showing N of
+M events** appears only after a successful load; loading, load failure, an
+empty catalog, and no matching events have distinct feedback. **Clear
+filters** stays visible and resets only search and the two filters.
+
+Local search, filtering, and clearing send no requests and preserve creation
+inputs, score drafts (including hidden events), and action feedback. Filters
+survive normal refreshes while the page is mounted, but accepted actions still
+trigger the existing catalog GET, which reseeds score inputs and can reset
+other unsaved score drafts. Draft preservation does not extend across server
+refreshes.
+
+One shared busy state disables all mutation controls while an action is
+pending; local discovery remains available. Complete errors and action
+messages stay in a global feedback area outside the filtered list. A `202`
+publication-retrying warning remains distinct from downstream completion.
+If an action refresh removes the focused card, focus moves to the Events
+heading only when it was lost and the user has not moved elsewhere; local
+filtering does not trigger that fallback.
+
+This describes repository behavior, not a claim of production deployment.
+The redesign changes no backend, authorization, schema, dependency, route,
+deployment, or operational procedure. Normal integration and rollout still
+apply; reverting the client presentation requires no data migration.
 
 ## Design principles
 

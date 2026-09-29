@@ -1165,8 +1165,19 @@ body {
 }
 
 .backoffice-board {
+  container-type: inline-size;
+}
+
+.backoffice-board,
+.backoffice-events {
   display: grid;
   gap: 0.65rem;
+}
+
+.backoffice-board > *,
+.backoffice-event__body > *,
+.backoffice-field {
+  min-width: 0;
 }
 
 .backoffice-header,
@@ -1175,8 +1186,11 @@ body {
 }
 
 .backoffice-header p,
-.backoffice-empty {
-  color: var(--text-subtle);
+.backoffice-empty,
+.backoffice-help,
+.backoffice-kickoff,
+.backoffice-results-heading span {
+  color: color-mix(in srgb, var(--text-subtle) 90%, var(--text-main));
 }
 
 .backoffice-create,
@@ -1184,22 +1198,200 @@ body {
   background: var(--surface-soft);
 }
 
-.backoffice-action {
-  min-width: 8.5rem;
+.backoffice-create > .card-body,
+.backoffice-event > .card-body {
+  padding: 0.85rem 1rem;
 }
 
-.backoffice-action--create {
-  background: #158a56;
-  border-color: #158a56;
+.backoffice-create__form,
+.backoffice-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem 0.75rem;
+  align-items: end;
 }
 
-.backoffice-action--create:hover {
-  background: #0f7a4a;
-  border-color: #0f7a4a;
+.backoffice-create__form > .btn,
+.backoffice-filters > .btn,
+.backoffice-search {
+  grid-column: 1 / -1;
 }
 
-.backoffice-action--warn {
-  color: #1f1600;
+.backoffice-field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.backoffice-field .form-label {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+/* The shared My Bets control grammar supplies touch size, strong token
+   boundaries and focus; numeric editors intentionally stay a bounded pair. */
+.backoffice-board .backoffice-control {
+  min-width: 44px;
+  min-height: 44px;
+  border-color: var(--text-subtle);
+  background-color: var(--surface-elevated);
+  color: var(--text-main);
+}
+
+.backoffice-board .backoffice-action {
+  padding: 0.5rem 0.7rem;
+  background: var(--surface-soft);
+  font-size: 0.875rem;
+  font-weight: 600;
+  white-space: normal;
+}
+
+.backoffice-board .backoffice-action--primary {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.backoffice-board .backoffice-action:hover:not(:disabled) {
+  border-color: var(--text-main);
+  box-shadow: inset 0 0 0 1px var(--text-main);
+}
+
+.backoffice-board .backoffice-control:disabled {
+  opacity: 1;
+  background: var(--surface-elevated);
+  color: color-mix(in srgb, var(--text-subtle) 90%, var(--text-main));
+  border-color: var(--border-subtle);
+}
+
+.backoffice-board .backoffice-control:focus-visible,
+.backoffice-results-heading:focus {
+  outline: 3px solid var(--text-main);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+
+.backoffice-help {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.backoffice-discovery {
+  padding: 0.5rem 0.15rem 0.15rem;
+}
+
+.backoffice-results-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.75rem;
+  margin: 0.85rem 0 0;
+  font-size: 1rem;
+}
+
+.backoffice-results-heading span {
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.backoffice-feedback:empty {
+  display: none;
+}
+
+.backoffice-feedback {
+  display: grid;
+  gap: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.backoffice-feedback .alert {
+  margin: 0;
+}
+
+.backoffice-event__body {
+  display: grid;
+  gap: 0.75rem 1.25rem;
+  align-items: center;
+}
+
+.backoffice-event__name {
+  margin: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.backoffice-kickoff {
+  margin: 0.35rem 0 0.5rem;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.backoffice-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.backoffice-state {
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.5rem;
+  background: var(--surface-elevated);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.backoffice-state--recorded {
+  border-inline-start: 3px solid var(--accent);
+}
+
+.backoffice-state--online {
+  border-inline-start: 3px solid var(--positive);
+}
+
+.backoffice-event__controls {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.backoffice-scores {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  width: min(100%, 11rem);
+}
+
+.backoffice-scores input {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.backoffice-event__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+@container (min-width: 42rem) {
+  .backoffice-create__form {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  }
+
+  .backoffice-filters {
+    grid-template-columns: minmax(0, 1fr) 9rem 8rem auto;
+  }
+
+  .backoffice-create__form > .btn,
+  .backoffice-filters > .btn,
+  .backoffice-search {
+    grid-column: auto;
+  }
+
+  .backoffice-event__body {
+    grid-template-columns: minmax(0, 1fr) 18rem;
+  }
 }
 
 .slip-board {
