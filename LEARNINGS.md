@@ -201,6 +201,17 @@ technical gate and the separate approval rules for human-originated work.
   overflow, touch-target, pixel-geometry, or dynamic-interaction claims still
   require the smallest suitable rendered evidence; a user-facing change alone
   does not require a new visual-regression matrix.
+- Compactness must not silently remove useful summary context. In My Bets,
+  preserve event time separately from `Placed`; an accumulator's `Shown event
+  time` belongs to its first displayed event, not an inferred earliest kickoff.
+  Reproduce the actual lifecycle state: offer-request pending is not
+  confirmation pending, and its recovery action is different.
+- No overflow alone does not prove alignment or compactness. Compare column
+  edges, value baselines and card/action heights under the same fixture,
+  viewport and font conditions. For hourly Activity, cover ordinary mixed
+  counts, zeros and complete supported large integers: sparse extreme-value
+  layouts must not hide poor ordinary-value density. Let columns adapt rather
+  than turning one measured column count into a universal requirement.
 
 ### Live timeline completeness and market alignment
 
@@ -435,6 +446,11 @@ Retry tests must keep `submittedAt` fixed while changing `event.timestamp` and p
   helper's required request-context reads and resolve selections by the
   submitted event identity, not a default fixture. Keep mock-browser evidence
   distinct from the subsequent real protected journey.
+- A local HEAD or `sourceBinding()` identifies the test's local source, not
+  remotely served assets. When claiming deployed layout evidence, bind the
+  served JavaScript/CSS bytes to the immutable Client image and deployment.
+  Tests loading those assets with HTTP-mocked fixtures still prove only the
+  exercised frontend behavior, not real financial acceptance.
 - Wait for the restored form value before confirming a recovered operation;
   a rendered button alone does not prove asynchronous restoration finished.
   Fix the readiness assertion, not product behavior or arbitrary sleep time.
@@ -1380,6 +1396,15 @@ Durable rules:
   mutation, not a similarly named retired job. Bracket upstream validation
   with fresh `master` and runtime-mode checks immediately before the first
   provider API call.
+- Keep bounded artifact retries inside the idempotent binary GET, not around
+  the protected operation. Authentication/permission failures and contradictory
+  diagnostics must defeat every positive HTTP or network fallback; unknown
+  diagnostics remain fail-closed. Exercise cross-class negatives such as a
+  permission failure containing timeout/reset wording, not just isolated
+  status codes. Discard failed/timed-out stdout even when it resembles a valid
+  archive. Preserve downstream validation and consumed authority; an unexposed
+  historical HTTP status cannot establish a provider cause or prove retry
+  would have recovered that attempt.
 
 ## Implement before optimizing the process — 2026-09-09
 

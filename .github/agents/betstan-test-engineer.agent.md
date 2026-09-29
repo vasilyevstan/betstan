@@ -69,6 +69,16 @@ Await observable restored form state, not merely a visible confirmation
 button. Follow `Protected browser acceptance` in `LEARNINGS.md` for exact
 handled-error attribution and final audit draining. Preserve unknown-error
 failures and distinguish mock-HTTP proof from actual production acceptance.
+When claiming deployed frontend coverage, distinguish the local test-source
+SHA from served asset identity. Bind served JavaScript/CSS to the immutable
+Client image and deployment; HTTP-mocked fixtures remain frontend evidence,
+not a substitute for a real financial journey.
+
+For artifact-download retry changes, cover permanent or contradictory
+diagnostics containing positive timeout/reset wording across every classifier
+fallback. Require fail-closed unknown errors and discard failed/timed-out
+bytes even when they resemble a valid archive. Exercise the bounded GET
+itself, never replay a protected operation to test transport recovery.
 
 For concurrency and timing changes, require executable race tests where
 placement wins clean/delete, a restored board progresses before decline
@@ -116,6 +126,14 @@ and prove the atomic write preserves that current decision.
 For semantic-control and layout changes, prove accessible names remain
 distinct from compact visual tokens and cross-card computed geometry
 (bounding boxes, baselines, equal-height groups) holds across sibling cards.
+For compactness corrections, retain the prior summary context and reproduce
+the exact state: My Bets event time remains separate from `Placed`, accumulator
+time describes the shown event, and offer-request pending differs from
+confirmation pending. Compare card/action heights and column/value alignment
+under matched fixture, viewport and font conditions, not just absence of
+overflow. When hourly Activity changes, include ordinary mixed counts, zeros
+and complete supported large integers; neither extreme-only coverage nor a
+fixed column count proves responsive density.
 For access requirements, test the exact requested capability rather than a
 proxy: visible navigation proves discovery, while “available to anonymous and
 ordinary users” requires successful data loading and intended actions in
