@@ -100,11 +100,22 @@ Compact labels, sorting, and responsive movement must keep the original
 selection ID, name, value, and click payload together. Never reconnect values
 to options by array index after sorting.
 
+When compacting bet cards, retain useful summary context: event time stays
+distinct from placement time, and an accumulator's time describes its shown
+event, not an invented earliest kickoff.
+
 ### Consistency is measurable
 
 Long content can shift sibling headings and odds even when every control is
 clickable. Cross-card baselines, control bounds, touch targets, overflow,
 focus order, and responsive height are testable acceptance criteria.
+
+When changing geometry, absence of overflow is not proof of equal tracks,
+aligned baselines, or compactness. Measure those outcomes under matched
+fixture, viewport, and font conditions. Use the actual lifecycle state:
+offer-request pending is not confirmation pending. For hourly values, include
+ordinary mixed counts, zeros, and complete supported large integers; neither
+extreme-only coverage nor one observed column count proves responsive density.
 
 ### Use available width before hiding information
 
@@ -137,6 +148,12 @@ boundaries. Browser tests prove geometry, accessibility, and interaction.
 Production acceptance proves the deployed composition and operational
 dependencies.
 
+When claiming deployed layout evidence, local `HEAD` or `sourceBinding()`
+identifies the local test context, not the served JavaScript/CSS. Bind served
+bytes to immutable image and deployment evidence. Loading those assets with
+HTTP-mocked fixtures proves only the exercised frontend behavior, not real
+financial acceptance.
+
 ### Exercise protected acceptance through the actual helper
 
 When a harness correction affects scoped fixtures or additional pages, run the
@@ -160,6 +177,14 @@ See [[Release Orchestration]] for the acceptance and artifact boundaries.
 If downstream provenance accepts only attempt one, a failed run is terminal
 evidence. Fix the cause and create a new exact candidate rather than rerunning
 the failed authority.
+
+When changing artifact reads, keep bounded retries inside the idempotent
+artifact GET, not the protected operation or its validation. Permission or
+authentication failures and contradictory or unrecognized diagnostics must
+defeat otherwise positive HTTP/network retry signals. Discard all failed or
+timed-out attempt bytes. Do not infer an unobserved historical HTTP status or
+replay/reset consumed operations. Existing archive, provenance, and one-use
+safeguards in [[Release Orchestration]] still apply.
 
 ### Prove prerequisites before spending one-use authority
 
