@@ -1565,6 +1565,69 @@ def validate_live_betting_disable_workflow!(file, document, content)
     )
   end
 
+  disable_steps = document.dig("jobs", "disable-and-drain", "steps")
+  deployment_image_validation_steps =
+    if disable_steps.is_a?(Array)
+      disable_steps.select do |step|
+        step.is_a?(Hash) &&
+          step["name"] == "Validate deployment image provenance"
+      end
+    else
+      []
+    end
+  exact_image_validation = <<~'SH'.chomp
+    set -euo pipefail
+    provenance=artifacts/deployment/provenance.txt
+    images=artifacts/deployment/images.tsv
+    producer=infra/oci/scripts/build-images.sh
+    [ -s "$provenance" ]
+    [ -s "$images" ]
+    [ -s "$producer" ]
+    [ "$(grep -c '^image_provenance_sha256=' "$provenance")" = "1" ]
+    recorded_images_sha256="$(
+      sed -n 's/^image_provenance_sha256=//p' "$provenance"
+    )"
+    [[ "$recorded_images_sha256" =~ ^[0-9a-f]{64}$ ]]
+    [ "$(sha256sum "$images" | awk '{print $1}')" = "$recorded_images_sha256" ]
+    [ "$(grep -c '^services=(' "$producer")" = "1" ]
+    producer_services="$(sed -n 's/^services=(\(.*\))$/\1/p' "$producer")"
+    case "$producer_services" in
+      "auth bet backoffice client event gamemaster moderation resulting slip")
+        expected_count=9
+        expected_services="auth backoffice bet client event gamemaster moderation resulting slip"
+        ;;
+      "auth bet backoffice client event gamemaster moderation resulting slip telemetry")
+        expected_count=10
+        expected_services="auth backoffice bet client event gamemaster moderation resulting slip telemetry"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    [ "$(wc -l < "$images" | tr -d ' ')" = "$expected_count" ]
+    observed_services="$(cut -f1 "$images" | LC_ALL=C sort | paste -sd' ' -)"
+    [ "$observed_services" = "$expected_services" ]
+    awk -F '\t' \
+      -v expected_count="$expected_count" \
+      -v expected_repository="ghcr.io/vasilyevstan/betstan-images" '
+      NF != 5 { exit 1 }
+      $2 != expected_repository { exit 1 }
+      $3 != $2 "@" $4 { exit 1 }
+      $4 !~ /^sha256:[0-9a-f]{64}$/ { exit 1 }
+      $5 !~ /^sha256:[0-9a-f]{64}$/ { exit 1 }
+      END { if (NR != expected_count) exit 1 }
+    ' "$images"
+  SH
+  unless deployment_image_validation_steps.length == 1 &&
+      deployment_image_validation_steps.first["run"].is_a?(String) &&
+      deployment_image_validation_steps.first.keys.sort == %w[name run] &&
+      deployment_image_validation_steps.first["run"].chomp ==
+        exact_image_validation
+    fail_inventory(
+      "#{name} must enforce exact generation-bound deployment image validation"
+    )
+  end
+
   require_content(
     content,
     /group:\s*oci-control-plane/,
