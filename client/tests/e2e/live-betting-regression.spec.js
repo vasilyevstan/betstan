@@ -1,7 +1,9 @@
 const { test, expect } = require('@playwright/test');
+const { writeFile } = require('node:fs/promises');
 const { installFakeEventSource } = require('./support/fakeEventSource');
 const {
   BET_KIND,
+  createBackofficeEvents,
   createLiveBettingMockState,
   installAppApiMocks,
 } = require('./support/mockAppApi');
@@ -52,9 +54,30 @@ const REPRESENTATIVE_VIEWPORTS = [
 const UI_VARIANTS = ['v1', 'v2', 'v3'];
 const THEMES = ['dark', 'light'];
 
+const createPopulatedBackofficeState = () => {
+  const state = createLiveBettingMockState();
+  state.backofficeEvents = createBackofficeEvents();
+  state.backofficeActions = {};
+  return state;
+};
+
 const createEventThroughBackoffice = async (page, state, label) => {
   const home = `${label} Home`;
   const away = `${label} Away`;
+  const createdEvent = {
+    eventId: 'backoffice-created',
+    name: `${home} - ${away}`,
+    home,
+    away,
+    time: '2030-01-01T12:15:00.000Z',
+    status: 'NO_RESULT',
+    visibility: 'ONLINE',
+  };
+  state.backofficeActions.new_event = {
+    status: 201,
+    body: { event: createdEvent },
+    nextEvents: [...state.backofficeEvents, createdEvent],
+  };
 
   await page.getByLabel('Home team').fill(home);
   await page.getByLabel('Away team').fill(away);
@@ -75,7 +98,120 @@ const createEventThroughBackoffice = async (page, state, label) => {
   await expect(page.locator('.alert[role="status"]')).toContainText(
     `${home} - ${away} was created.`
   );
+  await expect(page.getByRole('article', { name: createdEvent.name })).toBeVisible();
+  await expect.poll(() => state.requestCount('GET /api/backoffice')).toBe(2);
 };
+
+const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate((board) => {
+  const bounds = (element) => {
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+  };
+  const overlaps = (left, right) => (
+    left.left < right.right && right.left < left.right
+    && left.top < right.bottom && right.top < left.bottom
+  );
+  const cardElements = Array.from(board.querySelectorAll('.backoffice-event'));
+  const cardBounds = cardElements.map(bounds);
+  const cards = cardElements.map((card, index) => {
+    const cardBox = cardBounds[index];
+    const identity = bounds(card.querySelector('.backoffice-event__identity'));
+    const controls = bounds(card.querySelector('.backoffice-event__controls'));
+    const inputs = Array.from(card.querySelectorAll('input')).map(bounds);
+    const actions = Array.from(card.querySelectorAll('button')).map(bounds);
+    const name = card.querySelector('.backoffice-event__name');
+    const range = document.createRange();
+    range.selectNodeContents(name);
+    const nameBox = bounds(name);
+    return {
+      height: cardBox.height,
+      width: cardBox.width,
+      scoreWidth: inputs[0].width,
+      scoreWidthDifference: Math.abs(inputs[0].width - inputs[1].width),
+      scoreTopDifference: Math.abs(inputs[0].top - inputs[1].top),
+      scoreLeft: inputs[0].left - cardBox.left,
+      regionCollision: overlaps(identity, controls),
+      actionCollision: overlaps(actions[0], actions[1]),
+      scoresBeforeActions: Math.max(...inputs.map((input) => input.bottom)) <= actions[0].top,
+      fullNameFits: Array.from(range.getClientRects()).every((rect) => (
+        rect.left >= nameBox.left - 1 && rect.right <= nameBox.right + 1
+        && rect.top >= nameBox.top - 1 && rect.bottom <= nameBox.bottom + 1
+      )),
+    };
+  });
+  const siblingCardIntersections = [];
+  for (let firstIndex = 0; firstIndex < cardBounds.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < cardBounds.length; secondIndex += 1) {
+      if (overlaps(cardBounds[firstIndex], cardBounds[secondIndex])) {
+        siblingCardIntersections.push([firstIndex, secondIndex]);
+      }
+    }
+  }
+  const targets = Array.from(board.querySelectorAll('input, select, button')).map(bounds);
+
+  // Resolve computed colors (including color-mix) and alpha-composite local
+  // surfaces. This checks rendered text/boundaries, not just token spelling.
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const context = canvas.getContext('2d');
+  const rgba = (color) => {
+    context.clearRect(0, 0, 1, 1);
+    context.fillStyle = color;
+    context.fillRect(0, 0, 1, 1);
+    const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data;
+    return [red, green, blue, alpha / 255];
+  };
+  const blend = (foreground, background) => {
+    const alpha = foreground[3] + background[3] * (1 - foreground[3]);
+    return [
+      ...foreground.slice(0, 3).map((channel, index) => (
+        alpha ? (channel * foreground[3] + background[index] * background[3] * (1 - foreground[3])) / alpha : 0
+      )),
+      alpha,
+    ];
+  };
+  const background = (element) => {
+    let color = [0, 0, 0, 0];
+    for (let ancestor = element; ancestor && color[3] < 1; ancestor = ancestor.parentElement) {
+      color = blend(color, rgba(getComputedStyle(ancestor).backgroundColor));
+    }
+    return blend(color, [255, 255, 255, 1]);
+  };
+  const luminance = (color) => color.slice(0, 3).map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  }).reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+  const contrast = (a, b) => {
+    const values = [luminance(a), luminance(b)];
+    return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05);
+  };
+  const texts = Array.from(board.querySelectorAll(
+    '.backoffice-event__name, .backoffice-kickoff, .backoffice-state, .form-label, .backoffice-help, .backoffice-results-heading span, .backoffice-control:not(:disabled)'
+  ));
+  const enabledControls = Array.from(board.querySelectorAll('.backoffice-control:not(:disabled)'));
+  const focused = board.querySelector(':focus');
+  return {
+    cards,
+    siblingCardIntersections,
+    boardWidth: bounds(board).width,
+    documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    overflowingComponents: Array.from(board.querySelectorAll(
+      '.backoffice-event, .backoffice-event__body, .backoffice-event__identity, .backoffice-field, .backoffice-discovery, .backoffice-feedback, .backoffice-state'
+    )).filter((element) => element.scrollWidth > element.clientWidth + 1).map((element) => element.className),
+    minTargetWidth: Math.min(...targets.map((target) => target.width)),
+    minTargetHeight: Math.min(...targets.map((target) => target.height)),
+    minTextContrast: Math.min(...texts.map((element) => contrast(rgba(getComputedStyle(element).color), background(element)))),
+    minBoundaryContrast: Math.min(...enabledControls.map((element) => contrast(
+      rgba(getComputedStyle(element).borderTopColor), background(element.parentElement)
+    ))),
+    focus: focused ? {
+      outlineWidth: parseFloat(getComputedStyle(focused).outlineWidth),
+      outlineStyle: getComputedStyle(focused).outlineStyle,
+      contrast: contrast(rgba(getComputedStyle(focused).outlineColor), background(focused.parentElement)),
+    } : null,
+  };
+});
 
 const getTokenContrastMetrics = (locator, {
   backgroundToken,
@@ -728,10 +864,277 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   expect(diagnostics.apiFailures).toEqual([]);
 });
 
+test('Backoffice discovery preserves hidden drafts, stable controls, and the independent slip', async ({ page }) => {
+  const state = createPopulatedBackofficeState();
+  state.selectSelection({ eventId: 'prematch-1', productId: 'prematch-1x2', oddsId: 'draw' });
+  const diagnostics = trackClientIssues(page);
+  await installAppApiMocks(page, state);
+  await page.goto('/backoffice?ui=v1&theme=dark');
+  const main = page.getByRole('main');
+  await expect(main.getByText('Showing 5 of 5 events')).toBeVisible();
+  await expect(page.locator('.app-shell__sidebar')).toHaveCount(2);
+  await expect(page.getByText('Top Player', { exact: true })).toBeVisible();
+  const wager = page.getByLabel('Wager for PRE-MATCH SLIP');
+  await wager.fill('17');
+  await expect(main.getByLabel('Final result', { exact: true })).toHaveValue('ALL');
+  await expect(main.getByLabel('Visibility', { exact: true })).toHaveValue('ALL');
+  await expect(main.locator('.backoffice-event__name')).toHaveText(state.backofficeEvents.map((event) => event.name));
+
+  const first = main.getByRole('article', { name: 'Northport - Lakewood', exact: true });
+  const home = first.getByRole('spinbutton', { name: 'Home score for Northport in Northport - Lakewood' });
+  await home.fill('7');
+  await first.getByRole('spinbutton', { name: 'Away score for Lakewood in Northport - Lakewood' }).fill('0');
+  await home.evaluate((element) => { window.__backofficeOriginalInput = element; });
+  await main.getByLabel('Home team', { exact: true }).fill('Draft Home');
+  await main.getByLabel('Away team', { exact: true }).fill('Draft Away');
+  const search = main.getByRole('searchbox', { name: 'Search events' });
+  await search.fill('  nOrThPoRt  ');
+  await expect(main.getByText('Showing 2 of 5 events')).toBeVisible();
+  expect(await home.evaluate((element) => element === window.__backofficeOriginalInput)).toBe(true);
+  await expect(search).toBeFocused();
+  await search.fill('Bayside');
+  await expect(first).toHaveCount(0);
+  await main.getByLabel('Final result', { exact: true }).selectOption('NO_RESULT');
+  await main.getByLabel('Visibility', { exact: true }).selectOption('OFFLINE');
+  await expect(main.getByText('Showing 1 of 5 events')).toBeVisible();
+  await main.getByLabel('Final result', { exact: true }).selectOption('RESULTED');
+  await expect(main.getByText(/No events match these filters/)).toBeVisible();
+  await expect(main.getByText('No events are available yet.')).toHaveCount(0);
+  await main.getByRole('button', { name: 'Clear filters' }).click();
+  await expect(main.getByRole('button', { name: 'Clear filters' })).toBeFocused();
+  await expect(home).toHaveValue('7');
+  await expect(first.getByRole('spinbutton', { name: /Away score/ })).toHaveValue('0');
+  await expect(main.getByLabel('Home team', { exact: true })).toHaveValue('Draft Home');
+  await expect(main.getByLabel('Away team', { exact: true })).toHaveValue('Draft Away');
+  await expect(wager).toHaveValue('17');
+  await search.fill('backoffice-open');
+  await expect(main.getByRole('article')).toHaveCount(0);
+  await search.fill('');
+  await expect(main.getByRole('article', { name: 'Willow - Birch' })).toContainText('Final result: Unknown');
+  await expect(main.getByRole('article', { name: 'Willow - Birch' })).toContainText('Visibility: Unknown');
+  await expect(main.getByRole('article', { name: 'Willow - Birch' })).toContainText('Kickoff time unavailable');
+  expect(state.requestCount('GET /api/backoffice')).toBe(1);
+  expect(state.requests.filter(({ key }) => key.startsWith('POST /api/backoffice'))).toEqual([]);
+  expect(diagnostics.pageErrors).toEqual([]);
+  expect(diagnostics.apiFailures).toEqual([]);
+  expect(state.unhandledRequests).toEqual([]);
+});
+
+test('Backoffice accepts a final result with persistent 202 feedback and guarded lost-focus recovery', async ({ page }) => {
+  const state = createPopulatedBackofficeState();
+  state.selectSelection({ eventId: 'prematch-1', productId: 'prematch-1x2', oddsId: 'draw' });
+  const recorded = { ...state.backofficeEvents[0], status: 'RESULTED', homeResult: 3, awayResult: 0 };
+  const refreshed = state.backofficeEvents.map((event) => event.eventId === recorded.eventId ? recorded : event);
+  let releaseResult;
+  state.backofficeActions.result = {
+    status: 202,
+    body: { event: recorded, message: 'Final result saved for Northport - Lakewood; publication is retrying. Downstream settlement is not yet confirmed.' },
+    nextEvents: refreshed,
+    wait: new Promise((resolve) => { releaseResult = resolve; }),
+  };
+  await installAppApiMocks(page, state);
+  await page.goto('/backoffice?ui=v1&theme=dark');
+  const main = page.getByRole('main');
+  await expect(main.getByText('Showing 5 of 5 events')).toBeVisible();
+  const wager = page.getByLabel('Wager for PRE-MATCH SLIP');
+  await wager.fill('19');
+  const sibling = main.getByRole('article', { name: 'Bayside - Hillcrest' });
+  await sibling.getByRole('spinbutton', { name: /Home score/ }).fill('8');
+  await main.getByLabel('Final result', { exact: true }).selectOption('NO_RESULT');
+  const first = main.getByRole('article', { name: recorded.name, exact: true });
+  await first.getByRole('spinbutton', { name: /Home score/ }).fill('3');
+  await first.getByRole('spinbutton', { name: /Away score/ }).fill('0');
+  const save = first.getByRole('button', { name: `Save final result for ${recorded.name}` });
+  await save.focus();
+  await page.keyboard.press('Enter');
+  await expect(save).toHaveText('Saving...');
+  await expect(main.getByRole('button', { name: 'Create', exact: true })).toBeDisabled();
+  for (const control of await main.locator('.backoffice-event input, .backoffice-event button').all()) {
+    await expect(control).toBeDisabled();
+  }
+  await expect(main.getByRole('searchbox')).toBeEnabled();
+  releaseResult();
+  await expect(first).toHaveCount(0);
+  await expect(main.getByRole('heading', { name: 'Events Showing 2 of 5 events' })).toBeFocused();
+  await expect(main.locator('.backoffice-feedback [role="status"]')).toHaveText(
+    'Final result saved for Northport - Lakewood; publication is retrying. Downstream settlement is not yet confirmed.'
+  );
+  await expect(main.locator('.backoffice-feedback [role="status"]')).toHaveClass(/alert-warning/);
+  expect(state.requests.find(({ key }) => key === 'POST /api/backoffice/result').body)
+    .toEqual({ eventId: 'backoffice-open', homeResult: 3, awayResult: 0 });
+  expect(state.requestCount('GET /api/backoffice')).toBe(2);
+  await expect(main.getByLabel('Final result', { exact: true })).toHaveValue('NO_RESULT');
+  // Existing successful-action GET reseeding is intentionally not redesigned.
+  await expect(sibling.getByRole('spinbutton', { name: /Home score/ })).toHaveValue('');
+  await main.getByRole('button', { name: 'Clear filters' }).click();
+  await expect(first.getByRole('spinbutton', { name: /Home score/ })).toHaveValue('3');
+  await expect(first.getByRole('spinbutton', { name: /Away score/ })).toHaveValue('0');
+  await expect(first.getByRole('spinbutton', { name: /Home score/ })).toBeDisabled();
+  await expect(save).toBeDisabled();
+  const offline = { ...recorded, visibility: 'OFFLINE' };
+  state.backofficeActions.event_visibility = {
+    body: { eventId: offline.eventId, visibility: 'OFFLINE' },
+    nextEvents: refreshed.map((event) => event.eventId === offline.eventId ? offline : event),
+  };
+  await first.getByRole('button', { name: `Take offline for ${recorded.name}` }).click();
+  await expect(first.getByRole('button', { name: `Make online for ${recorded.name}` })).toBeEnabled();
+  await expect(first).toContainText('Visibility: Offline');
+  expect(state.requests.find(({ key }) => key === 'POST /api/backoffice/event_visibility').body)
+    .toEqual({ eventId: 'backoffice-open', visibility: 'OFFLINE' });
+  await expect(wager).toHaveValue('19');
+});
+
+test('Backoffice refresh does not steal focus moved during a visibility request', async ({ page }) => {
+  const state = createPopulatedBackofficeState();
+  const offline = { ...state.backofficeEvents[0], visibility: 'OFFLINE' };
+  let releaseVisibility;
+  state.backofficeActions.event_visibility = {
+    body: { eventId: offline.eventId, visibility: 'OFFLINE' },
+    nextEvents: state.backofficeEvents.map((event) => event.eventId === offline.eventId ? offline : event),
+    wait: new Promise((resolve) => { releaseVisibility = resolve; }),
+  };
+  await installAppApiMocks(page, state);
+  await page.goto('/backoffice?ui=v2&theme=light');
+  const main = page.getByRole('main');
+  await expect(main.getByText('Showing 5 of 5 events')).toBeVisible();
+  await main.getByLabel('Visibility', { exact: true }).selectOption('ONLINE');
+  const first = main.getByRole('article', { name: offline.name, exact: true });
+  const changeVisibility = first.getByRole('button', { name: `Take offline for ${offline.name}` });
+  await changeVisibility.focus();
+  await page.keyboard.press('Enter');
+  await expect(changeVisibility).toHaveText('Changing...');
+  await main.getByRole('searchbox').focus();
+  releaseVisibility();
+  await expect(first).toHaveCount(0);
+  await expect(main.getByRole('searchbox')).toBeFocused();
+  await expect(main.getByText('Showing 1 of 5 events')).toBeVisible();
+  await expect(main.locator('.backoffice-feedback')).toContainText(`Visibility changed for ${offline.name}.`);
+});
+
+test('Backoffice keeps a complete conflict error visible when filters hide its event', async ({ page }) => {
+  const state = createPopulatedBackofficeState();
+  const message = 'Event already has a different result. Reload the catalog and check the recorded scores before retrying; no replacement final result was accepted.';
+  state.backofficeActions.result = { status: 409, body: { message } };
+  await installAppApiMocks(page, state);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/backoffice?ui=v1&theme=dark');
+  const main = page.getByRole('main');
+  const first = main.getByRole('article', { name: 'Northport - Lakewood', exact: true });
+  await first.getByRole('spinbutton', { name: /Home score/ }).fill('1');
+  await first.getByRole('spinbutton', { name: /Away score/ }).fill('0');
+  await first.getByRole('button', { name: /Save final result/ }).click();
+  await expect(main.getByRole('alert')).toHaveText(message);
+  await main.getByRole('searchbox').fill('not a matching team');
+  await expect(first).toHaveCount(0);
+  await expect(main.getByRole('alert')).toHaveText(message);
+  await expect(main.locator('.backoffice-feedback [role="status"]')).toHaveCount(0);
+  expect(state.requestCount('GET /api/backoffice')).toBe(1);
+  expect(await main.getByRole('alert').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
+test('Backoffice distinguishes loading, empty and load failure on the routed surface', async ({ page }) => {
+  const state = createPopulatedBackofficeState();
+  let releaseRead;
+  state.backofficeReadResponse = { body: [], wait: new Promise((resolve) => { releaseRead = resolve; }) };
+  await installAppApiMocks(page, state);
+  await page.goto('/backoffice?ui=v1&theme=dark');
+  const main = page.getByRole('main');
+  await expect(main.getByText('Loading Backoffice events...')).toBeVisible();
+  await expect(main.getByText(/Showing \d+ of/)).toHaveCount(0);
+  await expect(main.getByRole('searchbox')).toBeVisible();
+  await main.getByRole('searchbox').fill('Northport');
+  releaseRead();
+  await expect(main.getByText('Showing 0 of 0 events')).toBeVisible();
+  await expect(main.getByText('No events are available yet.')).toBeVisible();
+  await expect(main.getByText(/No events match/)).toHaveCount(0);
+  state.backofficeReadResponse = { status: 503, body: { message: 'Catalog temporarily unavailable' } };
+  await page.reload();
+  await expect(main.getByRole('alert')).toHaveText('Unable to load Backoffice events.');
+  await expect(main.getByText(/Showing \d+ of|No events are available/)).toHaveCount(0);
+  await expect(main.getByRole('button', { name: 'Create', exact: true })).toBeEnabled();
+});
+
+// Representative existing-variant coverage, not a Cartesian screenshot matrix.
+for (const scenario of [
+  { width: 1440, height: 1000, ui: 'v1', theme: 'dark' },
+  { width: 768, height: 1000, ui: 'v2', theme: 'light' },
+  { width: 390, height: 844, ui: 'v1', theme: 'dark' },
+  { width: 1440, height: 1000, ui: 'v3', theme: 'light' },
+]) {
+  test(`Backoffice compact cards align and wrap (${scenario.width}px ${scenario.ui} ${scenario.theme})`, async ({ page }, testInfo) => {
+    const state = createPopulatedBackofficeState();
+    state.currentUser = null;
+    await installAppApiMocks(page, state);
+    // Measure settled theme colors, not Bootstrap's initial dark-to-light transition.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.setViewportSize({ width: scenario.width, height: scenario.height });
+    await page.goto(`/backoffice?ui=${scenario.ui}&theme=${scenario.theme}`);
+    const main = page.getByRole('main');
+    await expect(main.getByText('Showing 5 of 5 events')).toBeVisible();
+    const longEvent = state.backofficeEvents[2];
+    expect(longEvent.home.length).toBe(80);
+    expect(longEvent.away.length).toBe(80);
+    await expect(main.getByRole('heading', { name: longEvent.name, exact: true })).toHaveText(longEvent.name);
+    const first = main.getByRole('article', { name: 'Northport - Lakewood', exact: true });
+    await expect(first.locator('time')).toHaveAttribute('datetime', '2030-01-01T12:00:00.000Z');
+    await expect(first.locator('time')).toContainText('January 1st, 2030');
+    await main.getByLabel('Home team', { exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(main.getByLabel('Away team', { exact: true })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(main.getByRole('button', { name: 'Create', exact: true })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(main.getByRole('searchbox')).toBeFocused();
+    const metrics = await getBackofficeLayout(page);
+    expect(metrics.documentOverflow).toBeLessThanOrEqual(1);
+    expect(metrics.overflowingComponents).toEqual([]);
+    expect(metrics.siblingCardIntersections).toEqual([]);
+    expect(metrics.minTargetHeight).toBeGreaterThanOrEqual(44);
+    expect(metrics.minTargetWidth).toBeGreaterThanOrEqual(44);
+    expect(metrics.minTextContrast).toBeGreaterThanOrEqual(4.5);
+    expect(metrics.minBoundaryContrast).toBeGreaterThanOrEqual(3);
+    expect(metrics.focus.outlineStyle).toBe('solid');
+    expect(metrics.focus.outlineWidth).toBeGreaterThanOrEqual(3);
+    expect(metrics.focus.contrast).toBeGreaterThanOrEqual(3);
+    for (const card of metrics.cards) {
+      expect(Math.abs(card.width - metrics.boardWidth)).toBeLessThanOrEqual(1);
+      expect(card.scoreWidthDifference).toBeLessThanOrEqual(1);
+      expect(card.scoreTopDifference).toBeLessThanOrEqual(1);
+      expect(card.scoreWidth).toBeLessThanOrEqual(100);
+      expect(card.regionCollision).toBe(false);
+      expect(card.actionCollision).toBe(false);
+      expect(card.scoresBeforeActions).toBe(true);
+      expect(card.fullNameFits).toBe(true);
+    }
+    expect(Math.max(...metrics.cards.map((card) => card.scoreLeft)) - Math.min(...metrics.cards.map((card) => card.scoreLeft)))
+      .toBeLessThanOrEqual(1);
+    const metricsPath = testInfo.outputPath('backoffice-layout-metrics.json');
+    const screenshotPath = testInfo.outputPath('backoffice-layout.png');
+    await writeFile(metricsPath, JSON.stringify(metrics, null, 2));
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    await testInfo.attach('backoffice-layout-metrics', { path: metricsPath, contentType: 'application/json' });
+    await testInfo.attach('backoffice-layout', { path: screenshotPath, contentType: 'image/png' });
+    console.info(`Backoffice ${scenario.width}px ${scenario.ui} ${scenario.theme}: ${JSON.stringify(metrics)}`);
+
+    // A bounded 200% text-size check on the primary desktop reference.
+    if (scenario.width === 1440 && scenario.ui === 'v1') {
+      await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
+      const zoomed = await getBackofficeLayout(page);
+      expect(zoomed.documentOverflow).toBeLessThanOrEqual(1);
+      expect(zoomed.overflowingComponents).toEqual([]);
+      expect(zoomed.siblingCardIntersections).toEqual([]);
+      expect(zoomed.cards.every((card) => card.fullNameFits && !card.regionCollision && !card.actionCollision)).toBe(true);
+      const zoomMetricsPath = testInfo.outputPath('backoffice-200-percent-text-metrics.json');
+      await writeFile(zoomMetricsPath, JSON.stringify(zoomed, null, 2));
+      await testInfo.attach('backoffice-200-percent-text-metrics', { path: zoomMetricsPath, contentType: 'application/json' });
+    }
+  });
+}
+
 for (const uiVariant of UI_VARIANTS) {
   for (const theme of THEMES) {
     test(`anonymous visitors can use Backoffice in ${uiVariant} ${theme}`, async ({ page }) => {
-      const state = createLiveBettingMockState();
+      const state = createPopulatedBackofficeState();
       state.currentUser = null;
       const liveFeed = await installFakeEventSource(page);
       await installAppApiMocks(page, state);
@@ -764,6 +1167,8 @@ for (const uiVariant of UI_VARIANTS) {
       await expect(page.getByText('Create new event')).toBeVisible();
       await expect(page.getByLabel('Home team')).toBeVisible();
       await expect(page.getByLabel('Away team')).toBeVisible();
+      await expect(page.getByRole('article', { name: 'Northport - Lakewood', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Take offline for Northport - Lakewood' })).toBeEnabled();
       expect(state.requestCounts['GET /api/backoffice']).toBe(1);
       await createEventThroughBackoffice(
         page,
@@ -779,7 +1184,7 @@ for (const uiVariant of UI_VARIANTS) {
     ['administrators', { email: 'admin@example.com', role: 'ADMIN' }],
   ]) {
     test(`${authLabel} can use Backoffice in ${uiVariant}`, async ({ page }) => {
-      const state = createLiveBettingMockState();
+      const state = createPopulatedBackofficeState();
       state.currentUser = currentUser;
       const liveFeed = await installFakeEventSource(page);
       await installAppApiMocks(page, state);
@@ -794,6 +1199,8 @@ for (const uiVariant of UI_VARIANTS) {
       await backofficeLink.click();
       await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
       await expect(page.getByText('Create new event')).toBeVisible();
+      await expect(page.getByRole('article', { name: 'Northport - Lakewood', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Save final result for Northport - Lakewood' })).toBeEnabled();
       expect(state.requestCounts['GET /api/backoffice']).toBe(1);
       await createEventThroughBackoffice(page, state, `${authLabel} ${uiVariant}`);
     });
