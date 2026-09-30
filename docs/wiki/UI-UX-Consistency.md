@@ -63,9 +63,9 @@ The UX result names its references and compares every applicable dimension:
 | Dimension | What to compare |
 |---|---|
 | Hierarchy and type | heading levels, emphasis, label/value relationships, number and odds prominence |
-| Space and width | spacing rhythm, alignment, container width, dense and sparse use of the stage |
+| Space and width | overall composition, spacing and alignment rhythm, container width, intentional whitespace versus unexplained dead space, dense and sparse use of the stage, visual connection between related task regions |
 | Surfaces | cards, backgrounds, borders, radii, elevation, separators |
-| Controls | height, label wrapping, odds baseline, icon placement, touch target, disabled treatment |
+| Controls | height, label wrapping, odds baseline, icon placement, touch target, disabled treatment, edge, baseline, and group-width relationships for intentional peers or shared columns |
 | Semantic status | color meaning, non-color cues, live/stale/suspended/terminal distinction |
 | Copy | product terminology, capitalization, error clarity, internal identifier leakage |
 | States | loading, empty, error, disabled, stale, suspended, live, terminal, retained |
@@ -118,11 +118,29 @@ authentication form may intentionally be narrower than an event board.
 Different treatment is valid when product semantics require it and the reason
 is explicit.
 
+Whitespace is not inherently defective, and primary and secondary actions need
+not have equal widths. Equal geometry applies only to intentional peers or
+controls occupying shared columns. A layout can still require a consistency
+fix when unexplained dead space, alignment drift, or unrelated edges disconnect
+related task regions, even if every element fits and remains operable.
+
 ## Evidence policy
 
 The specialist may identify a design inconsistency from source, stable
 references, and supplied screenshots. It must state confidence and any dynamic
 or responsive behavior that remains unverified.
+
+Source-bound regression checks and mechanical rendered measurements establish
+only the invariants they assert; they remain distinct from the specialist's
+expert judgment of the composition as a whole. A layout-affecting change cannot
+receive `UX_REVIEW_PASSED` from mechanical checks alone. Review the smallest
+representative set of exact-head rendered screenshots holistically for
+hierarchy, intentional whitespace, alignment rhythm, and the visual connection
+of related task regions. For a precise alignment claim, compare relational
+edges, baselines, or intentional peer-group/shared-column widths under matched
+content, viewport, variant, theme, and text conditions. Screenshots cannot
+prove interaction behavior, and measurements cannot prove that the overall
+composition is coherent.
 
 Rendered evidence is required for precise claims about pixel geometry,
 collision, clipping, overflow, touch-target size, focus order, layout shift, or
@@ -136,8 +154,14 @@ evidence when it proves the contract.
 
 ## Live-betting examples
 
-The compact live-betting work established reusable examples:
+Live-betting and Backoffice reviews established reusable examples:
 
+- a historical Backoffice review exposed a process failure, not an accepted or
+  corrected layout: passing overflow, collision, touch-target, density,
+  card-height, and equal-score-input checks did not justify disconnected task
+  regions, an unexplained middle void, baseline drift, or unrelated peer-group
+  edges. Approximate group widths from that render were context only, never
+  requirements;
 - one sparse card occupying only a dense-grid third is an accidental content
   island, not intentional whitespace;
 - sibling odds controls with different button heights or odds baselines are
