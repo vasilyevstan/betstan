@@ -728,6 +728,136 @@ reset_fixtures
 write_complete_oci_set
 assert_pass "$full_set"
 
+ruby -rdigest -ryaml -ropen3 -rfileutils - "$tmp_dir" "$support_dir" <<'RUBY'
+fixture_dir, support_dir = ARGV
+workflow = YAML.load_file(File.join(fixture_dir, "oci-live-betting-disable.yml"))
+steps = workflow.fetch("jobs").fetch("disable-and-drain").fetch("steps")
+validation_steps = steps.select do |step|
+  step["name"] == "Validate deployment image provenance"
+end
+abort "deployment image validation step is not unique" unless validation_steps.length == 1
+script = validation_steps.first.fetch("run")
+
+execution_root = File.join(support_dir, "live-disable-image-validation")
+repository = "ghcr.io/vasilyevstan/betstan-images"
+historical_producer_services = %w[
+  auth bet backoffice client event gamemaster moderation resulting slip
+]
+current_producer_services = historical_producer_services + %w[telemetry]
+historical_services = historical_producer_services.sort
+current_services = current_producer_services.sort
+rows_for = lambda do |services|
+  services.each_with_index.map do |service, index|
+    digest = "sha256:#{format("%064x", index + 1)}"
+    platform_digest = "sha256:#{format("%064x", index + 101)}"
+    [
+      service,
+      repository,
+      "#{repository}@#{digest}",
+      digest,
+      platform_digest
+    ].join("\t")
+  end
+end
+historical_rows = rows_for.call(historical_services)
+current_rows = rows_for.call(current_services)
+eleven_rows = rows_for.call(current_services + %w[audit])
+malformed_final_rows = current_rows.dup
+malformed_final_rows[-1] =
+  malformed_final_rows[-1].sub(/sha256:[0-9a-f]{64}\z/, "sha256:invalid")
+duplicate_rows = current_rows.dup
+duplicate_rows[-1] = duplicate_rows[-2]
+unknown_rows = current_rows.dup
+unknown_fields = unknown_rows[-1].split("\t")
+unknown_fields[0] = "unknown"
+unknown_rows[-1] = unknown_fields.join("\t")
+wrong_repository_rows = current_rows.dup
+wrong_repository_fields = wrong_repository_rows[0].split("\t")
+wrong_repository_fields[1] = "ghcr.io/vasilyevstan/other-images"
+wrong_repository_rows[0] = wrong_repository_fields.join("\t")
+wrong_reference_rows = current_rows.dup
+wrong_reference_fields = wrong_reference_rows[0].split("\t")
+wrong_reference_fields[2] = "#{repository}@sha256:#{"f" * 64}"
+wrong_reference_rows[0] = wrong_reference_fields.join("\t")
+cases = {
+  "current-ten-valid" =>
+    [current_producer_services, current_rows, :valid, true],
+  "historical-nine-valid" =>
+    [historical_producer_services, historical_rows, :valid, true],
+  "current-nine-wrong-generation" =>
+    [current_producer_services, historical_rows, :valid, false],
+  "historical-ten-wrong-generation" =>
+    [historical_producer_services, current_rows, :valid, false],
+  "current-eight" =>
+    [current_producer_services, current_rows.first(8), :valid, false],
+  "current-eleven" =>
+    [current_producer_services, eleven_rows, :valid, false],
+  "current-final-malformed" =>
+    [current_producer_services, malformed_final_rows, :valid, false],
+  "current-duplicate-service" =>
+    [current_producer_services, duplicate_rows, :valid, false],
+  "current-unknown-service" =>
+    [current_producer_services, unknown_rows, :valid, false],
+  "current-wrong-repository" =>
+    [current_producer_services, wrong_repository_rows, :valid, false],
+  "current-wrong-reference" =>
+    [current_producer_services, wrong_reference_rows, :valid, false],
+  "current-hash-mismatch" =>
+    [current_producer_services, current_rows, :mismatch, false],
+  "current-hash-missing" =>
+    [current_producer_services, current_rows, :missing, false],
+  "current-hash-duplicate" =>
+    [current_producer_services, current_rows, :duplicate, false],
+  "current-hash-malformed" =>
+    [current_producer_services, current_rows, :malformed, false]
+}
+
+cases.each do |name, (producer_services, rows, hash_mode, expected)|
+  scenario_dir = File.join(execution_root, name)
+  deployment_dir = File.join(scenario_dir, "artifacts/deployment")
+  producer_dir = File.join(scenario_dir, "infra/oci/scripts")
+  FileUtils.mkdir_p(deployment_dir)
+  FileUtils.mkdir_p(producer_dir)
+  images = "#{rows.join("\n")}\n"
+  File.write(File.join(deployment_dir, "images.tsv"), images)
+  File.write(
+    File.join(producer_dir, "build-images.sh"),
+    "services=(#{producer_services.join(" ")})\n"
+  )
+  actual_hash = Digest::SHA256.hexdigest(images)
+  hash_lines =
+    case hash_mode
+    when :valid
+      ["image_provenance_sha256=#{actual_hash}"]
+    when :mismatch
+      ["image_provenance_sha256=#{"0" * 64}"]
+    when :missing
+      []
+    when :duplicate
+      [
+        "image_provenance_sha256=#{actual_hash}",
+        "image_provenance_sha256=#{actual_hash}"
+      ]
+    when :malformed
+      ["image_provenance_sha256=invalid"]
+    else
+      abort "unknown deployment image hash mode: #{hash_mode}"
+    end
+  File.write(
+    File.join(deployment_dir, "provenance.txt"),
+    (["source_sha=#{"1" * 40}"] + hash_lines).join("\n") + "\n"
+  )
+  output, status = Open3.capture2e(
+    "bash", "-euo", "pipefail", "-c", script,
+    chdir: scenario_dir
+  )
+  unless status.success? == expected
+    abort "deployment image validation #{name} failed (exit #{status.exitstatus}): #{output}"
+  end
+end
+puts "live_betting_disable_image_validation_execution_tests=PASS"
+RUBY
+
 ruby -ryaml -rjson -ropen3 -rfileutils - "$ROOT_DIR" "$support_dir" <<'RUBY'
 root, support = ARGV
 workflow = YAML.load_file(File.join(root, ".github/workflows/common-package-publish.yml"))
@@ -1771,6 +1901,134 @@ PY
 assert_fail \
   "activation with only two release revalidations" \
   "must revalidate before mutation, acceptance, and permanent activation"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/expected_count=10/expected_count=9/' \
+  "$tmp_dir/oci-live-betting-disable.yml"
+rm "$tmp_dir/oci-live-betting-disable.yml.bak"
+assert_fail \
+  "disable with current generation downgraded to nine images" \
+  "must enforce exact generation-bound deployment image validation"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/" = "$expected_count" ]/" -ge "$expected_count" ]/' \
+  "$tmp_dir/oci-live-betting-disable.yml"
+rm "$tmp_dir/oci-live-betting-disable.yml.bak"
+assert_fail \
+  "disable with permissive minimum image count" \
+  "must enforce exact generation-bound deployment image validation"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/END { if (NR != expected_count) exit 1 }/END { exit NR == expected_count ? 0 : 1 }/' \
+  "$tmp_dir/oci-live-betting-disable.yml"
+rm "$tmp_dir/oci-live-betting-disable.yml.bak"
+assert_fail \
+  "disable with legacy terminal AWK exit" \
+  "must enforce exact generation-bound deployment image validation"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-live-betting-disable.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = "\n          ' \"$images\"\n"
+if text.count(needle) != 1:
+    raise SystemExit("disable image validator invocation is not unique")
+path.write_text(text.replace(needle, f"{needle.rstrip()} || true\n", 1))
+PY
+assert_fail \
+  "disable with suppressed image validation failure" \
+  "must enforce exact generation-bound deployment image validation"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-live-betting-disable.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+start = text.index('          [ "$(wc -l < "$images"')
+end_marker = "          ' \"$images\"\n"
+end = text.index(end_marker, start) + len(end_marker)
+block = text[start:end]
+path.write_text(
+    text[:start]
+    + "          {\n"
+    + block
+    + '          } || echo "image validation failed"\n'
+    + text[end:]
+)
+PY
+assert_fail \
+  "disable with grouped image validation suppression" \
+  "must enforce exact generation-bound deployment image validation"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\$5 !~/d' \
+  "$tmp_dir/oci-live-betting-disable.yml"
+rm "$tmp_dir/oci-live-betting-disable.yml.bak"
+assert_fail \
+  "disable without final row digest guard" \
+  "must enforce exact generation-bound deployment image validation"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-live-betting-disable.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = "      - name: Validate deployment image provenance\n        run: |\n"
+if text.count(needle) != 1:
+    raise SystemExit("disable image validation step is not unique")
+path.write_text(
+    text.replace(
+        needle,
+        "      - name: Validate deployment image provenance\n"
+        "        if: ${{ false }}\n"
+        "        run: |\n",
+        1,
+    )
+)
+PY
+assert_fail \
+  "disable with skipped image validation step" \
+  "must enforce exact generation-bound deployment image validation"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-live-betting-disable.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = "      - name: Validate deployment image provenance\n        run: |\n"
+if text.count(needle) != 1:
+    raise SystemExit("disable image validation step is not unique")
+path.write_text(
+    text.replace(
+        needle,
+        "      - name: Validate deployment image provenance\n"
+        "        continue-on-error: true\n"
+        "        run: |\n",
+        1,
+    )
+)
+PY
+assert_fail \
+  "disable with ignored image validation failure" \
+  "must enforce exact generation-bound deployment image validation"
 
 reset_fixtures
 write_complete_oci_set
