@@ -16,6 +16,62 @@ const MARKET_LABELS = Object.freeze({
 
 const deepClone = (value) => JSON.parse(JSON.stringify(value));
 
+// Public GET fields only. Unknown legacy values and a missing kickoff exercise
+// display fallbacks; no live phase or private publication fields are inferred.
+const createBackofficeEvents = () => {
+  const home = `Northport ${'N'.repeat(70)}`;
+  const away = `Lakewood ${'L'.repeat(71)}`;
+  return [
+    {
+      eventId: 'backoffice-open',
+      name: 'Northport - Lakewood',
+      home: 'Northport',
+      away: 'Lakewood',
+      time: '2030-01-01T12:00:00.000Z',
+      status: 'NO_RESULT',
+      visibility: 'ONLINE',
+    },
+    {
+      eventId: 'backoffice-offline',
+      name: 'Bayside - Hillcrest',
+      home: 'Bayside',
+      away: 'Hillcrest',
+      time: '2030-01-01T13:00:00.000Z',
+      status: 'NO_RESULT',
+      visibility: 'OFFLINE',
+    },
+    {
+      eventId: 'backoffice-long',
+      name: `${home} - ${away}`,
+      home,
+      away,
+      time: '2030-01-01T14:00:00.000Z',
+      status: 'NO_RESULT',
+      visibility: 'ONLINE',
+    },
+    {
+      eventId: 'backoffice-recorded',
+      name: 'Meadow - Ridge',
+      home: 'Meadow',
+      away: 'Ridge',
+      time: '2030-01-01T15:00:00.000Z',
+      status: 'RESULTED',
+      visibility: 'OFFLINE',
+      homeResult: 2,
+      awayResult: 0,
+    },
+    {
+      eventId: 'backoffice-unknown',
+      name: 'Willow - Birch',
+      home: 'Willow',
+      away: 'Birch',
+      time: null,
+      status: 'UNKNOWN_STATUS',
+      visibility: 'UNKNOWN_VISIBILITY',
+    },
+  ];
+};
+
 const createTelemetrySummary = () => {
   const dates = [
     '2026-08-28',
@@ -844,12 +900,24 @@ const installAppApiMocks = async (page, state) => {
     }
 
     if (key === 'GET /api/backoffice') {
-      await fulfillJson(route, {});
+      const response = state.backofficeReadResponse;
+      const snapshot = deepClone(response?.body ?? state.backofficeEvents ?? {});
+      if (response?.wait) await response.wait;
+      await fulfillJson(route, snapshot, response?.status ?? 200);
       return;
     }
 
     if (key === 'POST /api/backoffice/result' || key === 'POST /api/backoffice/event_visibility' || key === 'POST /api/backoffice/new_event') {
-      await fulfillJson(route, {});
+      // Explicit canned action + follow-up catalog per test, not a backend
+      // simulator. Existing non-Backoffice defaults stay unchanged.
+      const action = pathname.split('/').pop();
+      const response = state.backofficeActions?.[action];
+      if (response?.wait) await response.wait;
+      const status = response?.status ?? 200;
+      if (status >= 200 && status < 300 && response?.nextEvents) {
+        state.backofficeEvents = deepClone(response.nextEvents);
+      }
+      await fulfillJson(route, response?.body ?? {}, status);
       return;
     }
 
@@ -860,6 +928,7 @@ const installAppApiMocks = async (page, state) => {
 
 module.exports = {
   BET_KIND,
+  createBackofficeEvents,
   createLiveBettingMockState,
   createShellMockState,
   createTelemetrySummary,

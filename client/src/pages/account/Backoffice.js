@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { format } from 'date-fns';
 
@@ -45,9 +45,18 @@ const initialResultValues = (events) => Object.fromEntries(events.map((event) =>
   },
 ]));
 
+const captureEventFocus = (version) => {
+  const control = document.activeElement;
+  const card = control?.closest?.('.backoffice-event');
+  return card ? { control, card, version } : null;
+};
+
 const HandleBackoffice = ({ onChanged, refreshToken }) => {
   const [events, setEvents] = useState([]);
   const [eventResults, setEventResults] = useState({});
+  const [searchTerm, setSearchTerm] = useState('');
+  const [resultFilter, setResultFilter] = useState('ALL');
+  const [visibilityFilter, setVisibilityFilter] = useState('ALL');
   const [newEventHome, setNewEventHome] = useState('');
   const [newEventAway, setNewEventAway] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -57,21 +66,42 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
   const [actionMessage, setActionMessage] = useState('');
   const [actionMessageTone, setActionMessageTone] = useState('success');
   const creationRequestId = useRef('');
+  const resultsHeading = useRef(null);
+  const focusVersion = useRef(0);
+  const actionFocus = useRef(null);
+  const refreshFocus = useRef(null);
+
+  useEffect(() => {
+    const noteFocusMovement = () => { focusVersion.current += 1; };
+    document.addEventListener('focusin', noteFocusMovement);
+    document.addEventListener('pointerdown', noteFocusMovement);
+    window.addEventListener('blur', noteFocusMovement);
+    return () => {
+      document.removeEventListener('focusin', noteFocusMovement);
+      document.removeEventListener('pointerdown', noteFocusMovement);
+      window.removeEventListener('blur', noteFocusMovement);
+    };
+  }, []);
 
   useEffect(() => {
     let isActive = true;
+    // Disabling a submitting control can drop focus to body before the GET starts.
+    const beforeRefresh = actionFocus.current ?? captureEventFocus(focusVersion.current);
+    actionFocus.current = null;
     const fetchEvents = async () => {
       setIsLoading(true);
       try {
         const response = await axios.get('/api/backoffice');
         const nextEvents = normalizeEvents(response.data);
         if (isActive) {
+          refreshFocus.current = beforeRefresh;
           setEvents(nextEvents);
           setEventResults(initialResultValues(nextEvents));
           setLoadError('');
         }
       } catch (error) {
         if (isActive) {
+          refreshFocus.current = beforeRefresh;
           setEvents([]);
           setEventResults({});
           setLoadError('Unable to load Backoffice events.');
@@ -89,7 +119,49 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     };
   }, [refreshToken]);
 
+  useLayoutEffect(() => {
+    if (isLoading) return;
+    const previous = refreshFocus.current;
+    refreshFocus.current = null;
+    // One-shot recovery only for a removed card, never a surviving/disabled control
+    // or a user who focused/clicked elsewhere while the request was in flight.
+    if (
+      previous
+      && previous.version === focusVersion.current
+      && !previous.card.isConnected
+      && !previous.control.isConnected
+      && document.activeElement === document.body
+    ) {
+      resultsHeading.current?.focus();
+    }
+  }, [events, isLoading]);
+
+  const visibleEvents = useMemo(() => {
+    const search = searchTerm.trim().toLowerCase();
+    return events.filter((event) => (
+      (resultFilter === 'ALL' || event.status === resultFilter)
+      && (visibilityFilter === 'ALL' || event.visibility === visibilityFilter)
+      && (!search || [event.name, event.home, event.away].some((name) => (
+        typeof name === 'string' && name.toLowerCase().includes(search)
+      )))
+    ));
+  }, [events, searchTerm, resultFilter, visibilityFilter]);
+
+  const changeFilter = (setter, value) => {
+    // Local discovery must never trigger the asynchronous focus fallback.
+    focusVersion.current += 1;
+    setter(value);
+  };
+
+  const clearFilters = () => {
+    focusVersion.current += 1;
+    setSearchTerm('');
+    setResultFilter('ALL');
+    setVisibilityFilter('ALL');
+  };
+
   const runAction = async (actionId, action, successMessage) => {
+    const beforeAction = captureEventFocus(focusVersion.current);
     setBusyAction(actionId);
     setActionError('');
     setActionMessage('');
@@ -97,6 +169,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       const response = await action();
       setActionMessage(response?.data?.message || successMessage);
       setActionMessageTone(response?.status === 202 ? 'warning' : 'success');
+      actionFocus.current = beforeAction;
       onChanged?.();
       return true;
     } catch (error) {
@@ -188,8 +261,16 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     }
   };
 
-  const renderedEvents = events.map((event) => {
+  const renderedEvents = visibleEvents.map((event) => {
     const isResulted = event.status === 'RESULTED';
+    const eventName = event.name || `${event.home || 'Home team unavailable'} - ${event.away || 'Away team unavailable'}`;
+    const resultLabel = isResulted ? 'Recorded'
+      : event.status === 'NO_RESULT' ? 'Not recorded'
+        : event.status ? 'Unknown' : 'Unavailable';
+    const visibilityLabel = event.visibility === 'ONLINE' ? 'Online'
+      : event.visibility === 'OFFLINE' ? 'Offline'
+        : event.visibility ? 'Unknown' : 'Unavailable';
+    const visibilityActionLabel = event.visibility === 'ONLINE' ? 'Take offline' : 'Make online';
     const values = eventResults[event.eventId] ?? { home: '', away: '' };
     const homeInputId = `backoffice-home-result-${event.eventId}`;
     const awayInputId = `backoffice-away-result-${event.eventId}`;
@@ -198,85 +279,94 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     const kickoffLabel = formatKickoff(event.time);
 
     return <article className="card backoffice-event" key={event.eventId} aria-labelledby={`backoffice-event-${event.eventId}`}>
-      <div className="card-body">
-        <h2 className="h5 card-title mb-1" id={`backoffice-event-${event.eventId}`}>{event.name}</h2>
-        <div className="small text-secondary mb-3">
-          {kickoffLabel
-            ? <>Kickoff: <time dateTime={event.time}>{kickoffLabel}</time></>
-            : 'Kickoff time unavailable'}
+      <div className="card-body backoffice-event__body">
+        <div className="backoffice-event__identity">
+          <h3 className="h5 backoffice-event__name" id={`backoffice-event-${event.eventId}`}>{eventName}</h3>
+          <p className="backoffice-kickoff">
+            {kickoffLabel
+              ? <>Kickoff: <time dateTime={event.time}>{kickoffLabel}</time></>
+              : 'Kickoff time unavailable'}
+          </p>
+          <div className="backoffice-states">
+            <span className={`backoffice-state${isResulted ? ' backoffice-state--recorded' : ''}`}>
+              Final result: <strong>{resultLabel}</strong>
+            </span>
+            <span className={`backoffice-state${event.visibility === 'ONLINE' ? ' backoffice-state--online' : ''}`}>
+              Visibility: <strong>{visibilityLabel}</strong>
+            </span>
+          </div>
         </div>
-        <form className="row g-2" onSubmit={(submitEvent) => {
+        <form className="backoffice-event__controls" aria-label={`Final result for ${eventName}`}
+          aria-describedby="backoffice-result-help" onSubmit={(submitEvent) => {
           submitEvent.preventDefault();
-          setResults(event.eventId, event.name);
+          setResults(event.eventId, eventName);
         }}>
-          <div className="col-12 col-md">
-            <label className="form-label" htmlFor={homeInputId}>{event.home} score</label>
-            <input
-              id={homeInputId}
-              className="form-control"
-              type="number"
-              min="0"
-              max={MAX_SCORE}
-              step="1"
-              required
-              value={values.home}
-              disabled={isResulted || Boolean(busyAction)}
-              onChange={(changeEvent) => updateResultValue(
-                event.eventId,
-                'home',
-                changeEvent.target.value
-              )}
-            />
+          <div className="backoffice-scores">
+            <div className="backoffice-field">
+              <label className="form-label" htmlFor={homeInputId}>Home score</label>
+              <input
+                id={homeInputId}
+                aria-label={`Home score for ${event.home || 'home team unavailable'} in ${eventName}`}
+                className="form-control backoffice-control"
+                type="number"
+                min="0"
+                max={MAX_SCORE}
+                step="1"
+                required
+                value={values.home}
+                disabled={isResulted || Boolean(busyAction)}
+                onChange={(changeEvent) => updateResultValue(
+                  event.eventId,
+                  'home',
+                  changeEvent.target.value
+                )}
+              />
+            </div>
+            <div className="backoffice-field">
+              <label className="form-label" htmlFor={awayInputId}>Away score</label>
+              <input
+                id={awayInputId}
+                aria-label={`Away score for ${event.away || 'away team unavailable'} in ${eventName}`}
+                className="form-control backoffice-control"
+                type="number"
+                min="0"
+                max={MAX_SCORE}
+                step="1"
+                required
+                value={values.away}
+                disabled={isResulted || Boolean(busyAction)}
+                onChange={(changeEvent) => updateResultValue(
+                  event.eventId,
+                  'away',
+                  changeEvent.target.value
+                )}
+              />
+            </div>
           </div>
-          <div className="col-12 col-md">
-            <label className="form-label" htmlFor={awayInputId}>{event.away} score</label>
-            <input
-              id={awayInputId}
-              className="form-control"
-              type="number"
-              min="0"
-              max={MAX_SCORE}
-              step="1"
-              required
-              value={values.away}
-              disabled={isResulted || Boolean(busyAction)}
-              onChange={(changeEvent) => updateResultValue(
-                event.eventId,
-                'away',
-                changeEvent.target.value
-              )}
-            />
-          </div>
-          <div className="col-12 col-md-auto d-grid align-self-end">
+          <div className="backoffice-event__actions">
             <button
               type="submit"
-              className={`btn backoffice-action ${isResulted ? 'btn-secondary' : 'btn-danger'}`}
+              className="btn backoffice-control backoffice-action backoffice-action--primary"
               disabled={isResulted || Boolean(busyAction)}
-              aria-label={`Set results for ${event.name}`}
+              aria-label={`Save final result for ${eventName}`}
             >
-              {busyAction === resultActionId ? 'Saving...' : 'Set results'}
+              {busyAction === resultActionId ? 'Saving...' : 'Save final result'}
             </button>
-          </div>
-        </form>
-
-        <div className="row g-2 mt-1 align-items-center">
-          <div className="col-12 col-md">Event is: <strong>{event.visibility}</strong></div>
-          <div className="col-12 col-md-auto d-grid">
             <button
               type="button"
-              className="btn btn-warning backoffice-action backoffice-action--warn"
+              className="btn backoffice-control backoffice-action"
               disabled={Boolean(busyAction)}
               onClick={() => setVisibility(
                 event.eventId,
-                event.name,
+                eventName,
                 event.visibility
               )}
-              aria-label={`Change visibility for ${event.name}`}
+              aria-label={`${visibilityActionLabel} for ${eventName}`}
             >
-              {busyAction === visibilityActionId ? 'Changing...' : 'Change visibility'}
+              {busyAction === visibilityActionId ? 'Changing...' : visibilityActionLabel}
             </button>
           </div>
-        </div>
+        </form>
       </div>
     </article>;
   });
@@ -286,26 +376,19 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       <h1 className="h3 mb-1">Backoffice</h1>
       <p className="mb-0">Manage event creation, visibility, and final results.</p>
     </header>
-    {loadError && <div className="alert alert-danger" role="alert">{loadError}</div>}
-    {actionError && <div className="alert alert-danger" role="alert">{actionError}</div>}
-    {actionMessage && (
-      <div className={`alert alert-${actionMessageTone}`} role="status">
-        {actionMessage}
-      </div>
-    )}
     <div className="card backoffice-create">
       <div className="card-body">
-        <h2 className="h5 card-title mb-3">Create new event</h2>
-        <form className="row g-2" onSubmit={(submitEvent) => {
+        <h2 className="h5 card-title">Create new event</h2>
+        <form className="backoffice-create__form" onSubmit={(submitEvent) => {
           submitEvent.preventDefault();
           createNewEvent();
         }}>
-          <div className="col-12 col-md">
+          <div className="backoffice-field">
             <label className="form-label" htmlFor="backoffice-new-home">Home team</label>
             <input
               id="backoffice-new-home"
               value={newEventHome}
-              className="form-control"
+              className="form-control backoffice-control"
               maxLength={MAX_TEAM_NAME_LENGTH}
               disabled={Boolean(busyAction)}
               onChange={(event) => {
@@ -314,12 +397,12 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               }}
             />
           </div>
-          <div className="col-12 col-md">
+          <div className="backoffice-field">
             <label className="form-label" htmlFor="backoffice-new-away">Away team</label>
             <input
               id="backoffice-new-away"
               value={newEventAway}
-              className="form-control"
+              className="form-control backoffice-control"
               maxLength={MAX_TEAM_NAME_LENGTH}
               disabled={Boolean(busyAction)}
               onChange={(event) => {
@@ -328,24 +411,74 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               }}
             />
           </div>
-          <div className="col-12 col-md-auto d-grid align-self-end">
-            <button
-              type="submit"
-              className="btn btn-success backoffice-action backoffice-action--create"
-              disabled={Boolean(busyAction)}
-            >
-              {busyAction === 'create' ? 'Creating...' : 'Create'}
-            </button>
-          </div>
+          <button
+            type="submit"
+            className="btn backoffice-control backoffice-action backoffice-action--primary"
+            disabled={Boolean(busyAction)}
+          >
+            {busyAction === 'create' ? 'Creating...' : 'Create'}
+          </button>
         </form>
-        <p className="form-text mb-0">Kickoff is scheduled 15 minutes after creation.</p>
+        <p className="backoffice-help">Kickoff is scheduled 15 minutes after creation.</p>
       </div>
     </div>
-    {isLoading && <p className="mb-0" role="status">Loading Backoffice events...</p>}
-    {!isLoading && !loadError && renderedEvents.length === 0 && (
-      <p className="mb-0 backoffice-empty">No events are available yet.</p>
-    )}
-    {renderedEvents}
+    <section className="backoffice-discovery" aria-label="Find events">
+      <div className="backoffice-filters">
+        <div className="backoffice-field backoffice-search">
+          <label className="form-label" htmlFor="backoffice-search">Search events</label>
+          <input id="backoffice-search" type="search" className="form-control backoffice-control"
+            placeholder="Event or team name" value={searchTerm}
+            onChange={(event) => changeFilter(setSearchTerm, event.target.value)} />
+        </div>
+        <div className="backoffice-field">
+          <label className="form-label" htmlFor="backoffice-result-filter">Final result</label>
+          <select id="backoffice-result-filter" className="form-select backoffice-control" value={resultFilter}
+            onChange={(event) => changeFilter(setResultFilter, event.target.value)}>
+            <option value="ALL">All</option>
+            <option value="NO_RESULT">Not recorded</option>
+            <option value="RESULTED">Recorded</option>
+          </select>
+        </div>
+        <div className="backoffice-field">
+          <label className="form-label" htmlFor="backoffice-visibility-filter">Visibility</label>
+          <select id="backoffice-visibility-filter" className="form-select backoffice-control" value={visibilityFilter}
+            onChange={(event) => changeFilter(setVisibilityFilter, event.target.value)}>
+            <option value="ALL">All</option>
+            <option value="ONLINE">Online</option>
+            <option value="OFFLINE">Offline</option>
+          </select>
+        </div>
+        <button type="button" className="btn backoffice-control backoffice-action" onClick={clearFilters}>
+          Clear filters
+        </button>
+      </div>
+      <h2 className="backoffice-results-heading" ref={resultsHeading} tabIndex={-1} id="backoffice-results-heading">
+        Events
+        <span aria-live="polite">
+          {!isLoading && !loadError ? `Showing ${visibleEvents.length} of ${events.length} events` : ''}
+        </span>
+      </h2>
+      <p className="backoffice-help" id="backoffice-result-help">Final results cannot be changed once recorded.</p>
+    </section>
+    <div className="backoffice-feedback">
+      {loadError && <div className="alert alert-danger" role="alert">{loadError}</div>}
+      {actionError && <div className="alert alert-danger" role="alert">{actionError}</div>}
+      {actionMessage && (
+        <div className={`alert alert-${actionMessageTone}`} role="status">
+          {actionMessage}
+        </div>
+      )}
+    </div>
+    <section className="backoffice-events" aria-labelledby="backoffice-results-heading">
+      {isLoading && <p className="mb-0" role="status">Loading Backoffice events...</p>}
+      {!isLoading && !loadError && events.length === 0 && (
+        <p className="mb-0 backoffice-empty">No events are available yet.</p>
+      )}
+      {!isLoading && !loadError && events.length > 0 && visibleEvents.length === 0 && (
+        <p className="mb-0 backoffice-empty">No events match these filters. Try another name or clear the filters.</p>
+      )}
+      {renderedEvents}
+    </section>
   </div>;
 };
 
