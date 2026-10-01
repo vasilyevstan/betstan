@@ -117,8 +117,14 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     const cardBox = cardBounds[index];
     const identity = bounds(card.querySelector('.backoffice-event__identity'));
     const controls = bounds(card.querySelector('.backoffice-event__controls'));
-    const inputs = Array.from(card.querySelectorAll('input')).map(bounds);
-    const actions = Array.from(card.querySelectorAll('button')).map(bounds);
+    const scoreRow = bounds(card.querySelector('.backoffice-scores'));
+    const actionRow = bounds(card.querySelector('.backoffice-event__actions'));
+    const homeScoreInput = bounds(card.querySelector('input[id^="backoffice-home-result-"]'));
+    const awayScoreInput = bounds(card.querySelector('input[id^="backoffice-away-result-"]'));
+    const saveResultButton = bounds(card.querySelector('.backoffice-event__actions button[type="submit"]'));
+    const visibilityButton = bounds(card.querySelector('.backoffice-event__actions button[type="button"]'));
+    const inputs = [homeScoreInput, awayScoreInput];
+    const actions = [saveResultButton, visibilityButton];
     const name = card.querySelector('.backoffice-event__name');
     const range = document.createRange();
     range.selectNodeContents(name);
@@ -126,12 +132,19 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     return {
       height: cardBox.height,
       width: cardBox.width,
-      scoreWidth: inputs[0].width,
-      scoreWidthDifference: Math.abs(inputs[0].width - inputs[1].width),
-      scoreTopDifference: Math.abs(inputs[0].top - inputs[1].top),
-      scoreLeft: inputs[0].left - cardBox.left,
+      controlsBounds: controls,
+      scoreRowBounds: scoreRow,
+      actionRowBounds: actionRow,
+      homeScoreInputBounds: homeScoreInput,
+      awayScoreInputBounds: awayScoreInput,
+      saveResultButtonBounds: saveResultButton,
+      visibilityButtonBounds: visibilityButton,
+      scoreWidth: homeScoreInput.width,
+      scoreWidthDifference: Math.abs(homeScoreInput.width - awayScoreInput.width),
+      scoreTopDifference: Math.abs(homeScoreInput.top - awayScoreInput.top),
+      scoreLeft: homeScoreInput.left - cardBox.left,
       regionCollision: overlaps(identity, controls),
-      actionCollision: overlaps(actions[0], actions[1]),
+      actionCollision: overlaps(saveResultButton, visibilityButton),
       scoresBeforeActions: Math.max(...inputs.map((input) => input.bottom)) <= actions[0].top,
       fullNameFits: Array.from(range.getClientRects()).every((rect) => (
         rect.left >= nameBox.left - 1 && rect.right <= nameBox.right + 1
@@ -212,6 +225,68 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     } : null,
   };
 });
+
+const expectBackofficeControlGridAlignment = (card) => {
+  const alignedWithinOnePixel = (first, second, relationship) => {
+    expect(Math.abs(first - second), relationship).toBeLessThanOrEqual(1);
+  };
+
+  alignedWithinOnePixel(
+    card.scoreRowBounds.left,
+    card.controlsBounds.left,
+    'score row and controls left edges'
+  );
+  alignedWithinOnePixel(
+    card.scoreRowBounds.right,
+    card.controlsBounds.right,
+    'score row and controls right edges'
+  );
+  alignedWithinOnePixel(
+    card.actionRowBounds.left,
+    card.controlsBounds.left,
+    'action row and controls left edges'
+  );
+  alignedWithinOnePixel(
+    card.actionRowBounds.right,
+    card.controlsBounds.right,
+    'action row and controls right edges'
+  );
+  alignedWithinOnePixel(
+    card.homeScoreInputBounds.left,
+    card.saveResultButtonBounds.left,
+    'home score and Save button left edges'
+  );
+  alignedWithinOnePixel(
+    card.homeScoreInputBounds.right,
+    card.saveResultButtonBounds.right,
+    'home score and Save button right edges'
+  );
+  alignedWithinOnePixel(
+    card.awayScoreInputBounds.left,
+    card.visibilityButtonBounds.left,
+    'away score and Visibility button left edges'
+  );
+  alignedWithinOnePixel(
+    card.awayScoreInputBounds.right,
+    card.visibilityButtonBounds.right,
+    'away score and Visibility button right edges'
+  );
+  alignedWithinOnePixel(
+    card.saveResultButtonBounds.width,
+    card.visibilityButtonBounds.width,
+    'Save and Visibility button widths'
+  );
+  alignedWithinOnePixel(
+    card.saveResultButtonBounds.top,
+    card.visibilityButtonBounds.top,
+    'Save and Visibility button top edges'
+  );
+  alignedWithinOnePixel(
+    card.saveResultButtonBounds.bottom,
+    card.visibilityButtonBounds.bottom,
+    'Save and Visibility button bottom edges'
+  );
+};
 
 const getTokenContrastMetrics = (locator, {
   backgroundToken,
@@ -1100,7 +1175,7 @@ for (const scenario of [
       expect(Math.abs(card.width - metrics.boardWidth)).toBeLessThanOrEqual(1);
       expect(card.scoreWidthDifference).toBeLessThanOrEqual(1);
       expect(card.scoreTopDifference).toBeLessThanOrEqual(1);
-      expect(card.scoreWidth).toBeLessThanOrEqual(100);
+      expectBackofficeControlGridAlignment(card);
       expect(card.regionCollision).toBe(false);
       expect(card.actionCollision).toBe(false);
       expect(card.scoresBeforeActions).toBe(true);
@@ -1124,6 +1199,9 @@ for (const scenario of [
       expect(zoomed.overflowingComponents).toEqual([]);
       expect(zoomed.siblingCardIntersections).toEqual([]);
       expect(zoomed.cards.every((card) => card.fullNameFits && !card.regionCollision && !card.actionCollision)).toBe(true);
+      for (const card of zoomed.cards) {
+        expectBackofficeControlGridAlignment(card);
+      }
       const zoomMetricsPath = testInfo.outputPath('backoffice-200-percent-text-metrics.json');
       await writeFile(zoomMetricsPath, JSON.stringify(zoomed, null, 2));
       await testInfo.attach('backoffice-200-percent-text-metrics', { path: zoomMetricsPath, contentType: 'application/json' });
