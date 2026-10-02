@@ -71,8 +71,21 @@ const installApi = (options = {}) => {
 const getOffer = async ({ partial } = {}) => {
   await screen.findByText('Northern Falcons - Southern Owls');
   if (partial !== undefined) {
-    fireEvent.click(within(card()).getByRole('button', { name: 'Partial stake' }));
+    const partialMode = within(card()).getByRole('button', { name: 'Partial stake' });
+    fireEvent.click(partialMode);
+    expect(partialMode).toHaveAttribute('aria-pressed', 'true');
+    expect(partialMode.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(partialMode.querySelector('.state-mark')).toBeEmptyDOMElement();
+    expect(within(card()).getByRole('button', { name: 'Full remainder' })
+      .querySelector('.state-mark')).toBeNull();
     fireEvent.change(within(card()).getByLabelText('Stake to close (Stanbucks)'), { target: { value: partial } });
+  } else {
+    const fullMode = within(card()).getByRole('button', { name: 'Full remainder' });
+    expect(fullMode).toHaveAttribute('aria-pressed', 'true');
+    expect(fullMode.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(fullMode.querySelector('.state-mark')).toBeEmptyDOMElement();
+    expect(within(card()).getByRole('button', { name: 'Partial stake' })
+      .querySelector('.state-mark')).toBeNull();
   }
   fireEvent.click(within(card()).getByRole('button', { name: /Get (cash-back|new) offer/ }));
   return within(card()).findByRole('button', { name: partial === undefined ? 'Confirm full cash back' : 'Confirm partial cash back' });

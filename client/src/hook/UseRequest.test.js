@@ -85,7 +85,7 @@ describe('UseRequest', () => {
     await waitFor(() => expect(screen.queryByText('Temporary failure')).toBeNull());
   });
 
-  it('falls back to err.message when response payload has no message/errors array', async () => {
+  it('sanitizes a non-server exception instead of exposing its technical message', async () => {
     axios.post.mockRejectedValueOnce({
       message: 'Network timeout',
     });
@@ -93,7 +93,8 @@ describe('UseRequest', () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole('button', { name: 'submit' }));
 
-    await screen.findByText('Network timeout');
+    await screen.findByText('Request failed. Please try again.');
+    expect(screen.queryByText('Network timeout')).toBeNull();
   });
 
   it('falls back to generic message when no structured error details exist', async () => {
@@ -102,6 +103,6 @@ describe('UseRequest', () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole('button', { name: 'submit' }));
 
-    await screen.findByText('Request failed');
+    await screen.findByText('Request failed. Please try again.');
   });
 });

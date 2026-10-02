@@ -11,7 +11,9 @@ jest.mock('axios', () => ({
 }));
 
 jest.mock('./Header', () => () => <div data-testid="header">Header</div>);
-jest.mock('./pages/event/EventList', () => () => <div data-testid="events">Events</div>);
+jest.mock('./pages/event/EventList', () => () => (
+  <section data-testid="events"><h1>Events</h1></section>
+));
 jest.mock('./pages/Slip', () => () => <div data-testid="slip">Slip sidebar</div>);
 jest.mock('./pages/account/Statistics', () => () => (
   <div data-testid="leaderboard">Leaderboard sidebar</div>
@@ -63,9 +65,29 @@ describe('App telemetry routing and page-view reporting', () => {
       .toBeInTheDocument();
     expect(screen.queryByTestId('leaderboard')).not.toBeInTheDocument();
     expect(screen.queryByTestId('slip')).not.toBeInTheDocument();
-    expect(screen.getByRole('main').parentElement).toHaveClass('col-12', 'order-1');
-    expect(screen.getByRole('main').parentElement).not.toHaveClass('col-xl-8');
+    expect(screen.getByRole('main').parentElement).toHaveClass('app-desk__main');
+    expect(screen.getByRole('main').parentElement.parentElement).toHaveClass('app-desk--full');
     expect(axios.post).not.toHaveBeenCalled();
+  });
+
+  it('uses main-first semantic order and lets the skip link focus the stable main target', async () => {
+    await act(async () => {
+      renderApp('/');
+    });
+
+    const main = screen.getByRole('main');
+    const statistics = screen.getByRole('complementary', { name: 'Statistics' });
+    const slips = screen.getByRole('complementary', { name: 'Slips' });
+
+    expect(main).toHaveAttribute('id', 'main-content');
+    expect(main).toHaveAttribute('tabindex', '-1');
+    expect(main.compareDocumentPosition(statistics) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(statistics.compareDocumentPosition(slips) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+
+    fireEvent.click(screen.getByRole('link', { name: 'Skip to main content' }));
+    expect(main).toHaveFocus();
   });
 
   it.each(['/telemetry/', '/Telemetry'])(
@@ -115,6 +137,17 @@ describe('App telemetry routing and page-view reporting', () => {
     expect(screen.queryByRole('heading', { name: 'Telemetry and service health' }))
       .not.toBeInTheDocument();
     expect(axios.post).not.toHaveBeenCalled();
+  });
+
+  it('renders the wildcard as Events with exactly one route heading', async () => {
+    await act(async () => {
+      renderApp('/retained-unknown-route');
+    });
+
+    expect(screen.getByTestId('events')).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { level: 1, name: 'Events' }))
+      .toBeInTheDocument();
   });
 
   it('reports only main and Backoffice pathname entries with exact request bodies', async () => {

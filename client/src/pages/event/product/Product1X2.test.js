@@ -1,12 +1,22 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import axios from 'axios';
 import Product1X2 from './Product1X2';
 
 jest.mock('axios', () => ({
   post: jest.fn(),
 }));
+
+const createDeferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+};
 
 const product = {
   id: 'product-1',
@@ -53,6 +63,9 @@ describe('Product1X2', () => {
     expect(awayButton.querySelector('.product-button__label')).toHaveTextContent('2');
     expect(homeButton).toHaveAccessibleName(expect.stringContaining('Falcons'));
     expect(awayButton).toHaveAccessibleName(expect.stringContaining('Owls'));
+    expect(homeButton).toHaveAttribute('aria-pressed', 'false');
+    expect(drawButton).toHaveAttribute('aria-pressed', 'false');
+    expect(awayButton).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('preserves the exact odds ID and price when semantic presentation reorders the board', async () => {
@@ -159,5 +172,151 @@ describe('Product1X2', () => {
     expect(screen.getByRole('button', { name: /Select 1X2 1:/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Select 1X2 X:/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Select 1X2 2:/ })).toBeDisabled();
+  });
+
+  it('exposes a non-color selected cue without changing the exact selection identity', () => {
+    render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
+        product={product}
+        selectedSelectionKeys={new Set(['PRE_MATCH:event-1:product-1:home-odd'])}
+        uiVariant="v2"
+      />,
+    );
+
+    const homeButton = screen.getByRole('button', {
+      name: 'Select 1X2 1: Falcons in Falcons - Owls at 1.6',
+    });
+    expect(homeButton).toHaveAttribute('aria-pressed', 'true');
+    expect(homeButton.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(homeButton.querySelector('.state-mark')).toBeEmptyDOMElement();
+    const drawButton = screen.getByRole('button', { name: /Select 1X2 X:/ });
+    expect(drawButton).toHaveAttribute('aria-pressed', 'false');
+    expect(drawButton.querySelector('.state-mark')).toBeNull();
+  });
+
+  it('shows fixed adjacent feedback without exposing a technical placement error', async () => {
+    axios.post.mockRejectedValueOnce(new Error('socket hang up at event.internal'));
+    render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
+        product={product}
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Select 1X2 1:/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+    expect(screen.queryByText(/socket hang up|event\.internal/)).toBeNull();
+  });
+
+  it('keeps the latest 1X2 success authoritative when an older request fails later', async () => {
+    const olderRequest = createDeferred();
+    const latestRequest = createDeferred();
+    const onSelectionPlaced = jest.fn();
+    axios.post
+      .mockReturnValueOnce(olderRequest.promise)
+      .mockReturnValueOnce(latestRequest.promise);
+    render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
+        onSelectionPlaced={onSelectionPlaced}
+        product={product}
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+    const olderSelection = screen.getByRole('button', { name: /Select 1X2 1:/ });
+    const latestSelection = screen.getByRole('button', { name: /Select 1X2 X:/ });
+
+    fireEvent.click(olderSelection);
+    fireEvent.click(latestSelection);
+    latestSelection.focus();
+
+    expect(axios.post.mock.calls).toEqual([
+      ['/api/event/odds', {
+        eventId: 'event-1',
+        productId: 'product-1',
+        oddsId: 'home-odd',
+      }],
+      ['/api/event/odds', {
+        eventId: 'event-1',
+        productId: 'product-1',
+        oddsId: 'draw-odd',
+      }],
+    ]);
+
+    await act(async () => {
+      olderRequest.reject(new Error('older placement failed'));
+      await olderRequest.promise.catch(() => undefined);
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    await act(async () => {
+      latestRequest.resolve({ data: {} });
+      await latestRequest.promise;
+    });
+    await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: /Select 1X2 X:/ })).toBe(latestSelection);
+    expect(latestSelection).toHaveFocus();
+  });
+
+  it('keeps the latest 1X2 failure authoritative when an older request succeeds later', async () => {
+    const olderRequest = createDeferred();
+    const latestRequest = createDeferred();
+    const onSelectionPlaced = jest.fn();
+    axios.post
+      .mockReturnValueOnce(olderRequest.promise)
+      .mockReturnValueOnce(latestRequest.promise);
+    render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
+        onSelectionPlaced={onSelectionPlaced}
+        product={product}
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+    const olderSelection = screen.getByRole('button', { name: /Select 1X2 1:/ });
+    const latestSelection = screen.getByRole('button', { name: /Select 1X2 X:/ });
+
+    fireEvent.click(olderSelection);
+    fireEvent.click(latestSelection);
+    latestSelection.focus();
+
+    await act(async () => {
+      latestRequest.reject(new Error('latest placement failed'));
+      await latestRequest.promise.catch(() => undefined);
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+
+    await act(async () => {
+      olderRequest.resolve({ data: {} });
+      await olderRequest.promise;
+    });
+    await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+    expect(screen.getByRole('button', { name: /Select 1X2 X:/ })).toBe(latestSelection);
+    expect(latestSelection).toHaveFocus();
   });
 });

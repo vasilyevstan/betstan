@@ -37,7 +37,7 @@ const HandleNewUser = ({ callback }) => {
         <>
           <span>Already have an account?</span>
           <Link
-            className="auth-card__link"
+            className="auth-card__link inline-control-target"
             to={{ pathname: '/login', search: location.search }}
           >
             Log in

@@ -221,6 +221,8 @@ describe('MyBets', () => {
     const liveFilter = screen.getByRole('button', { name: 'LIVE' });
     fireEvent.click(liveFilter);
     expect(liveFilter).toHaveAttribute('aria-pressed', 'true');
+    expect(liveFilter.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(liveFilter.querySelector('.state-mark')).toBeEmptyDOMElement();
     expect(screen.getByText('Live Derby')).toBeInTheDocument();
     expect(screen.queryByText('Scheduled Derby')).toBeNull();
     expect(screen.getByText('1 bets found')).toBeInTheDocument();
@@ -229,7 +231,12 @@ describe('MyBets', () => {
     expect(screen.getByText('No bets match the active filters.')).toBeInTheDocument();
     expect(screen.getByText('0 bets found')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'ALL TYPES' }));
+    const allTypesFilter = screen.getByRole('button', { name: 'ALL TYPES' });
+    fireEvent.click(allTypesFilter);
+    expect(allTypesFilter).toHaveAttribute('aria-pressed', 'true');
+    expect(allTypesFilter.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(allTypesFilter.querySelector('.state-mark')).toBeEmptyDOMElement();
+    expect(liveFilter.querySelector('.state-mark')).toBeNull();
     expect(screen.getByText('Scheduled Derby')).toBeInTheDocument();
     expect(screen.queryByText('Live Derby')).toBeNull();
   });

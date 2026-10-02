@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import axios from 'axios';
 import { getPreMatchSelectionKey } from '../../../liveBettingUtils';
+
+const PLACEMENT_ERROR = 'Selection could not be added to your slip. Please try again.';
 
 const normalizeSelectionName = (value) => (
   typeof value === 'string' ? value.trim().toLocaleLowerCase() : ''
@@ -53,12 +55,22 @@ const Handle1X2 = ({
   selectedSelectionKeys,
   uiVariant,
 }) => {
+  const [placementError, setPlacementError] = useState('');
+  const placementAttemptSequence = useRef(0);
+
   const handleClick = async (productId, oddsId) => {
+    const attemptSequence = ++placementAttemptSequence.current;
+    setPlacementError('');
     try {
       await axios.post('/api/event/odds', { eventId, productId, oddsId });
+      if (attemptSequence === placementAttemptSequence.current) {
+        setPlacementError('');
+      }
       onSelectionPlaced?.();
-    } catch (error) {
-      // ignore
+    } catch {
+      if (attemptSequence === placementAttemptSequence.current) {
+        setPlacementError(PLACEMENT_ERROR);
+      }
     }
   };
 
@@ -93,23 +105,28 @@ const Handle1X2 = ({
     return <button
       key={odd.id}
       aria-label={accessibleLabel}
+      aria-pressed={Boolean(isSelected)}
       className={`${oddButtonBaseClass}${selectedClass}${resulted ? ' disabled' : ''}`}
       disabled={resulted}
       type="button"
       onClick={() => handleClick(product.id, odd.id)}
     >
+      {isSelected ? <span className="state-mark" aria-hidden="true" /> : null}
       <span className="product-button__label">{token}</span>
       <strong className="product-button__value">{odd.value}</strong>
     </button>;
   };
 
   return <div className="text-center product-block product-block--1x2">
-    <div className="fw-semibold mb-2 product-block__title">{product.name}</div>
+    <h4 className="fw-semibold mb-2 product-block__title">{product.name}</h4>
     <div className="product-1x2-grid" key={product.id}>
       {displayedSelections.map((selection, index) => (
         <div key={`${selection?.odd?.id ?? 'unavailable'}-${index}`}>{renderOdd(selection)}</div>
       ))}
     </div>
+    {placementError ? (
+      <p className="selection-feedback" role="alert">{placementError}</p>
+    ) : null}
   </div>;
 };
 
