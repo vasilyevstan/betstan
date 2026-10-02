@@ -97,6 +97,13 @@ obsolete.
   collision, clipping, overflow, target-size, or layout-shift claims using
   bounding boxes, computed layout, roles, labels, and interaction tests. Pixel
   claims require rendered evidence rather than visual estimation.
+- For a layout-affecting immutable review, do not issue `UX_REVIEW_PASSED`
+  from overflow, collision, contrast, touch-target, density/card-height, or
+  isolated equal-control checks alone. Require the smallest representative set
+  of exact-head rendered screenshots and a holistic composition judgment. Use
+  relational edge, baseline, or intentional peer-group/shared-column width
+  measurements under matched conditions when the claim is precise, and keep
+  source-bound regression evidence distinct from the composition assessment.
 - When layout or geometry is affected or remains unresolved, require
   bounding-box checks for sibling-card and child-control collisions; intended
   stacking may touch only where the design explicitly permits it.
@@ -206,6 +213,13 @@ contract above.
   must form one coherent header for the complete sibling product deck.
   Auto-placement that leaves the heading visually attached to only one market
   is a required hierarchy fix.
+- **Whole composition and intentional peer geometry**: review intentional
+  whitespace versus unexplained dead space, alignment rhythm, visual connection
+  between related task regions, and edge, baseline, or width relationships for
+  intentional peers and shared columns. Whitespace is not inherently defective,
+  and unlike primary and secondary actions need not have equal widths.
+  Screenshots cannot prove interaction behavior, while measurements cannot
+  prove that the overall composition is coherent.
 
 ## Boundaries
 
@@ -246,6 +260,8 @@ Include:
   by the affected behavior or an unresolved factual claim;
 - applicable collision, clipping, identifier-leakage, state-grouping, dynamic-
   density, and betting-plausibility evidence;
+- source-bound regression and mechanical evidence, plus a separate holistic
+  composition judgment for layout-affecting reviews;
 - rendered width-utilization, equal-control-geometry, and balanced-grid
   measurements when those precise claims apply;
 - blocking defects, required consistency fixes, and optional polish;

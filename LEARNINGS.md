@@ -212,6 +212,19 @@ technical gate and the separate approval rules for human-originated work.
   counts, zeros and complete supported large integers: sparse extreme-value
   layouts must not hide poor ordinary-value density. Let columns adapt rather
   than turning one measured column count into a universal requirement.
+- Mechanical geometry checks are necessary but not sufficient for visual
+  acceptance. The merged Backoffice cards passed overflow, collision, contrast,
+  touch-target, density/card-height, and equal-score-input checks, yet still
+  split identity and status from scores and actions across a large unexplained
+  middle gap, with weak baseline rhythm and unrelated group edges. The observed
+  input and action groups were approximately 176px and 242px wide; those values
+  describe the failed composition, not styling targets. This was a review
+  process failure, not a fixed or accepted layout. Layout review must separately
+  judge the whole composition, intentional use of whitespace, alignment rhythm,
+  geometry of intentional peers or shared columns, and the visual connection
+  between related task regions. Whitespace may be intentional, and unlike
+  primary and secondary actions need not share a width. Correcting the current
+  Backoffice layout remains separate future product work.
 
 ### Live timeline completeness and market alignment
 

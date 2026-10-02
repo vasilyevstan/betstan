@@ -448,9 +448,11 @@ themes use the existing semantic tokens.
 **Create new event** stays expanded and states the server-defined 15-minute
 kickoff lead time. Each displayed card shows the event name and scheduled
 kickoff alongside an always-visible, labelled **Home score** / **Away score**
-pair. **Save final result** requires both scores as whole numbers from `0` to
-`99`. Recorded scores remain visible but disabled, as does result submission:
-final results cannot be changed once recorded.
+pair. Within each event card, the score fields and action buttons share two
+equal-width columns across the full controls region. **Save final result**
+requires both scores as whole numbers from `0` to `99`. Recorded scores remain
+visible but disabled, as does result submission: final results cannot be
+changed once recorded.
 
 **Final result: Not recorded / Recorded** and **Visibility: Online / Offline**
 are independent, human-readable states, not inferred live-match phases.
