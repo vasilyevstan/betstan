@@ -111,7 +111,7 @@ const Handle1X2 = ({
       type="button"
       onClick={() => handleClick(product.id, odd.id)}
     >
-      {isSelected ? <span className="product-button__selected-cue" aria-hidden="true">✓</span> : null}
+      {isSelected ? <span className="state-mark" aria-hidden="true" /> : null}
       <span className="product-button__label">{token}</span>
       <strong className="product-button__value">{odd.value}</strong>
     </button>;

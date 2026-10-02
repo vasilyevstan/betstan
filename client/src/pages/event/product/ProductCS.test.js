@@ -47,7 +47,8 @@ describe('ProductCS', () => {
     expect(button).toHaveClass('product-button--v1');
     expect(button).toHaveClass('product-button--selected');
     expect(button).toHaveAttribute('aria-pressed', 'true');
-    expect(button.querySelector('.product-button__selected-cue')).toHaveTextContent('✓');
+    expect(button.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(button.querySelector('.state-mark')).toBeEmptyDOMElement();
     fireEvent.click(button);
 
     await waitFor(() => {

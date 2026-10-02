@@ -90,7 +90,7 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                                    key={value}
                                    to={variantLink(value)}
                                >
-                                   {uiVariant === value ? <span aria-hidden="true">✓ </span> : null}
+                                   {uiVariant === value ? <span className="state-mark" aria-hidden="true" /> : null}
                                    {label}
                                </Link>
                            ))}
@@ -106,7 +106,7 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                                to={themeLink(themeOption)}
                                className={`presentation-option${theme === themeOption ? ' presentation-option--active' : ''}`}
                            >
-                               {theme === themeOption ? <span aria-hidden="true">✓ </span> : null}
+                               {theme === themeOption ? <span className="state-mark" aria-hidden="true" /> : null}
                                {themeOption === 'dark' ? 'Dark' : 'Light'}
                            </Link>
                        ))}

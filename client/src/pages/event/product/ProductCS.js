@@ -41,7 +41,7 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
           type="button"
           onClick={() => handleClick(product.id, option.id)}
         >
-          {isSelected ? <span className="product-button__selected-cue" aria-hidden="true">✓</span> : null}
+          {isSelected ? <span className="state-mark" aria-hidden="true" /> : null}
           <span className="product-button__label">{option.name}</span>
           <strong className="product-button__value">{option.value}</strong>
         </button>;

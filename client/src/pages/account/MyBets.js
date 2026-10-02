@@ -336,7 +336,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
                 className={`btn btn-sm ${statusFilter === status ? 'btn-primary' : 'btn-shell my-bets-filter'}`}
                 onClick={() => setStatusFilter(status)}
               >
-                {statusFilter === status ? <span aria-hidden="true">✓ </span> : null}
+                {statusFilter === status ? <span className="state-mark" aria-hidden="true" /> : null}
                 {statusLabel(status)}
               </button>
             ))}
@@ -355,7 +355,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
                 className={`btn btn-sm ${betKindFilter === value ? 'btn-primary' : 'btn-shell my-bets-filter'}`}
                 onClick={() => setBetKindFilter(value)}
               >
-                {betKindFilter === value ? <span aria-hidden="true">✓ </span> : null}
+                {betKindFilter === value ? <span className="state-mark" aria-hidden="true" /> : null}
                 {label}
               </button>
             ))}

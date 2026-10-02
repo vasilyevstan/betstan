@@ -235,12 +235,12 @@ const CashBackPanel = ({ bet, ownerId, model, draft, onDraftChange }) => {
           className={`btn cash-back-control ${mode === 'FULL' ? 'btn-primary' : 'btn-shell'}`}
           aria-disabled={pendingConfirm || bet.status !== 'CONFIRMED'}
           onClick={() => { if (!pendingConfirm && bet.status === 'CONFIRMED') setDraft((old) => ({ ...old, mode: 'FULL', edited: true, validation: '' })); }}>
-          {mode === 'FULL' ? <span aria-hidden="true">✓ </span> : null}Full remainder</button>
+          {mode === 'FULL' ? <span className="state-mark" aria-hidden="true" /> : null}Full remainder</button>
         <button type="button" aria-pressed={mode === 'PARTIAL'}
           className={`btn cash-back-control ${mode === 'PARTIAL' ? 'btn-primary' : 'btn-shell'}`}
           aria-disabled={pendingConfirm || bet.status !== 'CONFIRMED'}
           onClick={() => { if (!pendingConfirm && bet.status === 'CONFIRMED') setDraft((old) => ({ ...old, mode: 'PARTIAL', edited: true, validation: '' })); }}>
-          {mode === 'PARTIAL' ? <span aria-hidden="true">✓ </span> : null}Partial stake</button>
+          {mode === 'PARTIAL' ? <span className="state-mark" aria-hidden="true" /> : null}Partial stake</button>
       </div>
       {mode === 'PARTIAL' ? <div className="cash-back-amount">
         <label htmlFor={inputId}>Stake to close (Stanbucks)</label>

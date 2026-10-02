@@ -70,10 +70,21 @@ it.each([
   expect(screen.getByRole('link', { name: 'Standard' })).toBeVisible();
   expect(screen.getByRole('link', { name: 'Compact' })).toBeVisible();
   expect(screen.getByRole('link', { name: 'Spacious' })).toBeVisible();
-  expect(screen.getByRole('link', { name: label })).toHaveAttribute('aria-current', 'true');
+  const activeLayout = screen.getByRole('link', { name: label });
+  const layoutMark = activeLayout.querySelector('.state-mark');
+  expect(activeLayout).toHaveAttribute('aria-current', 'true');
+  expect(layoutMark).toHaveAttribute('aria-hidden', 'true');
+  expect(layoutMark).toBeEmptyDOMElement();
   expect(screen.getByText('Theme')).toBeVisible();
   expect(screen.getByRole('link', { name: 'Dark' })).toBeVisible();
-  expect(screen.getByRole('link', { name: 'Light' })).toHaveAttribute('aria-current', 'true');
+  const activeTheme = screen.getByRole('link', { name: 'Light' });
+  const themeMark = activeTheme.querySelector('.state-mark');
+  expect(activeTheme).toHaveAttribute('aria-current', 'true');
+  expect(themeMark).toHaveAttribute('aria-hidden', 'true');
+  expect(themeMark).toBeEmptyDOMElement();
+  expect(screen.getByRole('link', { name: uiVariant === 'v1' ? 'Compact' : 'Standard' })
+    .querySelector('.state-mark')).toBeNull();
+  expect(screen.getByRole('link', { name: 'Dark' }).querySelector('.state-mark')).toBeNull();
 });
 
 it('preserves unrelated query keys while changing the layout or theme', () => {

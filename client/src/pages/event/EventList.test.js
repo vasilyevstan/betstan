@@ -176,6 +176,7 @@ describe('EventList', () => {
     expect(screen.getByRole('heading', { name: 'Pre-match' })).toBeInTheDocument();
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(screen.getByRole('heading', { name: 'Events', level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText('Match desk', { exact: false })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Live now', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Pre-match', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Live Derby', level: 3 })).toBeInTheDocument();
@@ -194,9 +195,11 @@ describe('EventList', () => {
     expect(liveSelection).toHaveClass('product-button--selected');
     expect(preMatchSelection).toHaveClass('product-button--selected');
     expect(liveSelection).toHaveAttribute('aria-pressed', 'true');
-    expect(liveSelection.querySelector('.event-market-button__selected-cue'))
-      .toHaveTextContent('✓');
+    expect(liveSelection.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(liveSelection.querySelector('.state-mark')).toBeEmptyDOMElement();
     expect(preMatchSelection).toHaveAttribute('aria-pressed', 'true');
+    expect(preMatchSelection.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(preMatchSelection.querySelector('.state-mark')).toBeEmptyDOMElement();
     expect(suspendedSelection).toBeDisabled();
     expect(staleSelection).toBeDisabled();
     expect(missingExpirySelection).toBeDisabled();

@@ -22,6 +22,7 @@
   --font-size-action: 0.8125rem;
   --font-size-meta: 0.75rem;
   --line-height-compact: 1rem;
+  --font-family-display: "Barlow Condensed", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --transition-duration: 150ms;
   --shadow-elevated: none;
 }
@@ -151,6 +152,19 @@ body {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, var(--surface-elevated));
   color: var(--text-main);
+}
+
+.state-mark {
+  box-sizing: border-box;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 0.6em;
+  height: 0.36em;
+  margin-inline-end: 0.4em;
+  border-bottom: 0.125em solid currentColor;
+  border-left: 0.125em solid currentColor;
+  vertical-align: 0.18em;
+  transform: translateY(-0.08em) rotate(-45deg);
 }
 
 .app-shell {
@@ -548,24 +562,16 @@ body {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.event-stage__eyebrow {
-  margin: 0 0 0.2rem;
-  color: var(--accent);
-  font-size: var(--font-size-meta);
-  font-weight: 750;
-  letter-spacing: 0.1em;
-  line-height: var(--line-height-compact);
-  text-transform: uppercase;
-}
-
 .event-stage__title,
 .backoffice-header h1,
 .my-bets-find h1,
-.telemetry-page__header h1 {
+.telemetry-page__header h1,
+.auth-card__title {
   margin: 0;
   color: var(--text-main);
+  font-family: var(--font-family-display);
   font-size: clamp(1.75rem, 3vw, 2rem);
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: -0.025em;
   line-height: 1.2;
 }
@@ -617,15 +623,13 @@ body {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
-.product-button__selected-cue,
-.event-market-button__selected-cue {
+.product-button > .state-mark,
+.event-market-button > .state-mark {
   position: absolute;
-  top: 0.35rem;
-  left: 0.45rem;
+  top: 0.55rem;
+  left: 0.55rem;
+  margin: 0;
   color: var(--text-main);
-  font-size: 0.78rem;
-  font-weight: 850;
-  line-height: var(--line-height-compact);
 }
 
 .selection-feedback {
@@ -756,7 +760,6 @@ body {
 .auth-card__title {
   margin: 0;
   font-size: clamp(1.75rem, 4vw, 2rem);
-  font-weight: 750;
   letter-spacing: -0.025em;
 }
 

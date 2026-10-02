@@ -231,6 +231,18 @@ color role. Changing numeric readouts use tabular numerals where alignment
 matters. Data cards remain grounded in the desk: they do not use glass effects,
 violet variant brands, or hover lift as alternate route identities.
 
+Primary route and task level-one headings use one self-hosted Barlow Condensed
+700 Latin face. Body text, controls, dense identities, lower-level headings,
+and tabular data retain the system font stack. The bundled face is distributed
+under the SIL Open Font License 1.1 and requires no third-party font request.
+
+Where a current or selected state has a check cue, one CSS-drawn mark uses the
+control's current text color and is hidden from assistive technology. Labels,
+`aria-current` or `aria-pressed`, visible focus, fixed geometry, and non-color
+state treatment remain independent of that decoration. These shared refinements
+preserve all three densities, both themes, responsive behavior, and the
+existing semantic rails.
+
 ## Preserving presentation choices
 
 Header links rebuild their query strings from the current location. Moving
@@ -256,12 +268,13 @@ creating separate deployments.
 
 The Match Desk redesign is a client presentation change. Existing routes,
 `ui=v1|v2|v3` links, themes, selection identities, APIs, authorization,
-schemas, and stored data remain compatible. It follows the normal client
-integration and rollout path and requires no data migration or coordinated
-backend activation. Rolling the client presentation back restores the earlier
-layout and copy; it does not reverse a logout, placed selection, Backoffice
-mutation, or other action already accepted by its owning service. This
-describes repository behavior, not a claim that the redesign is already
+schemas, and stored data remain compatible. The heading face and state mark
+ship in the client artifact. They follow the normal client integration and
+rollout path and require no data migration or coordinated backend activation.
+Rolling the client presentation back restores the earlier layout, typography,
+copy, and state-cue rendering; it does not reverse a logout, placed selection,
+Backoffice mutation, or other action already accepted by its owning service.
+This describes repository behavior, not a claim that the redesign is already
 deployed.
 
 ## Telemetry dashboard
@@ -374,9 +387,10 @@ The center stage presents match states in betting priority:
 5. upcoming pre-match events.
 
 The Events surface, including loading, empty, and wildcard-route states, has
-one **Events** level-one heading. Match-state sections use level two, event
-identity uses level three, and market or event subsections continue the
-hierarchy without turning kickoff metadata into headings.
+one **Events** level-one heading and no decorative eyebrow or kicker.
+Match-state sections use level two, event identity uses level three, and market
+or event subsections continue the hierarchy without turning kickoff metadata
+into headings.
 
 Active-live and countdown cards share one **Live now** section. Active-live
 cards form the first group and countdown cards the second. Within each group,

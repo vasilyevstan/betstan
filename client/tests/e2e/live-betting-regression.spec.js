@@ -709,7 +709,6 @@ const getEventTypographyMetrics = (page) => page.evaluate(() => {
       };
     });
   const supporting = measure([
-    '.event-stage__eyebrow',
     '.event-card__badge',
     '.event-market-meta',
     '.event-market-status',

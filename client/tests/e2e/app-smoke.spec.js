@@ -369,6 +369,74 @@ test('Events and wildcard routes expose one logical route heading', async ({ pag
     await page.goto(path, { waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('heading', { name: 'Events', level: 1 })).toBeVisible();
     await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
+    await expect(page.getByText('Match desk', { exact: false })).toHaveCount(0);
+  }
+});
+
+test('self-hosted display type loads for primary headings without changing body controls or mobile fit', async ({ page }) => {
+  await prepareShell(page);
+  await page.setViewportSize({ width: 320, height: 844 });
+
+  const fontPath = '/fonts/barlow-condensed/barlow-condensed-latin-700-normal.woff2';
+  const fontResponse = await page.request.get(fontPath);
+  expect(fontResponse.status()).toBe(200);
+  expect((await fontResponse.body()).subarray(0, 4).toString('ascii')).toBe('wOF2');
+
+  for (const theme of ['dark', 'light']) {
+    await page.goto(`/telemetry?ui=v2&theme=${theme}`, { waitUntil: 'domcontentloaded' });
+    const heading = page.getByRole('heading', {
+      level: 1,
+      name: 'Telemetry and service health',
+    });
+    await expect(heading).toBeVisible();
+
+    const metrics = await heading.evaluate(async (element, expectedFontPath) => {
+      const beforeFontsReady = element.getBoundingClientRect();
+      await document.fonts.ready;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const controlFamily = getComputedStyle(
+        document.querySelector('.telemetry-refresh'),
+      ).fontFamily;
+      return {
+        bodyFamily: getComputedStyle(document.body).fontFamily,
+        controlFamily,
+        documentOverflow:
+          document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        fontFamily: style.fontFamily,
+        fontLoaded: document.fonts.check(
+          '700 28px "Barlow Condensed"',
+          element.textContent,
+        ),
+        fontResources: performance.getEntriesByType('resource')
+          .map((entry) => new URL(entry.name).pathname)
+          .filter((pathname) => pathname === expectedFontPath),
+        fontWeight: style.fontWeight,
+        headingOverflow: element.scrollWidth - element.clientWidth,
+        fontSettlingDelta: Math.max(
+          Math.abs(bounds.height - beforeFontsReady.height),
+          Math.abs(bounds.left - beforeFontsReady.left),
+          Math.abs(bounds.top - beforeFontsReady.top),
+          Math.abs(bounds.width - beforeFontsReady.width),
+        ),
+        left: bounds.left,
+        right: bounds.right,
+        viewportWidth: document.documentElement.clientWidth,
+      };
+    }, fontPath);
+
+    expect(metrics.fontFamily).toContain('Barlow Condensed');
+    expect(metrics.fontWeight).toBe('700');
+    expect(metrics.fontLoaded).toBe(true);
+    expect(metrics.fontResources).toContain(fontPath);
+    expect(metrics.bodyFamily).not.toContain('Barlow Condensed');
+    expect(metrics.controlFamily).not.toContain('Barlow Condensed');
+    expect(metrics.fontSettlingDelta).toBeLessThanOrEqual(0.5);
+    expect(metrics.headingOverflow).toBeLessThanOrEqual(1);
+    expect(metrics.documentOverflow).toBeLessThanOrEqual(1);
+    expect(metrics.left).toBeGreaterThanOrEqual(0);
+    expect(metrics.right).toBeLessThanOrEqual(metrics.viewportWidth + 1);
   }
 });
 
@@ -418,7 +486,31 @@ test('reduced motion removes effective motion while focus and state cues remain'
   });
   await selectedBettingControl.click();
   await expect(selectedBettingControl).toHaveAttribute('aria-pressed', 'true');
-  await expect(selectedBettingControl.locator('.product-button__selected-cue')).toHaveText('✓');
+  const stateMark = selectedBettingControl.locator('.state-mark');
+  await expect(stateMark).toHaveCount(1);
+  await expect(stateMark).toHaveAttribute('aria-hidden', 'true');
+  const markStyle = await stateMark.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      borderBottomColor: style.borderBottomColor,
+      borderBottomStyle: style.borderBottomStyle,
+      borderBottomWidth: Number.parseFloat(style.borderBottomWidth),
+      borderLeftColor: style.borderLeftColor,
+      borderLeftStyle: style.borderLeftStyle,
+      borderLeftWidth: Number.parseFloat(style.borderLeftWidth),
+      childNodes: element.childNodes.length,
+      color: style.color,
+      transform: style.transform,
+    };
+  });
+  expect(markStyle.childNodes).toBe(0);
+  expect(markStyle.borderBottomStyle).toBe('solid');
+  expect(markStyle.borderLeftStyle).toBe('solid');
+  expect(markStyle.borderBottomWidth).toBeGreaterThan(0);
+  expect(markStyle.borderLeftWidth).toBeGreaterThan(0);
+  expect(markStyle.borderBottomColor).toBe(markStyle.color);
+  expect(markStyle.borderLeftColor).toBe(markStyle.color);
+  expect(markStyle.transform).not.toBe('none');
   await expectMotionlessFocus(selectedBettingControl);
 
   await page.goto('/login?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });

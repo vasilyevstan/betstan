@@ -122,7 +122,6 @@ const EMPTY_EVENT_IDS = new Set();
 const PLACEMENT_ERROR = 'Selection could not be added to your slip. Please try again.';
 
 const EventStageHeader = () => <header className="event-stage__header">
-  <p className="event-stage__eyebrow">Match desk</p>
   <h1 className="event-stage__title">Events</h1>
   <p className="event-stage__summary">
     Compare current fixtures, market availability, and prices before adding a selection to a slip.
@@ -209,7 +208,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
             type="button"
             onClick={() => handleSelection(selection.selectionId)}
           >
-            {isSelected ? <span className="event-market-button__selected-cue" aria-hidden="true">✓</span> : null}
+            {isSelected ? <span className="state-mark" aria-hidden="true" /> : null}
             <span>{getMarketSelectionLabel(market, selection, event)}</span>
             <strong>{selection.odds}</strong>
           </button>;

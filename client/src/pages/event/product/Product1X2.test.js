@@ -191,9 +191,11 @@ describe('Product1X2', () => {
       name: 'Select 1X2 1: Falcons in Falcons - Owls at 1.6',
     });
     expect(homeButton).toHaveAttribute('aria-pressed', 'true');
-    expect(homeButton.querySelector('.product-button__selected-cue')).toHaveTextContent('✓');
-    expect(screen.getByRole('button', { name: /Select 1X2 X:/ }))
-      .toHaveAttribute('aria-pressed', 'false');
+    expect(homeButton.querySelector('.state-mark')).toHaveAttribute('aria-hidden', 'true');
+    expect(homeButton.querySelector('.state-mark')).toBeEmptyDOMElement();
+    const drawButton = screen.getByRole('button', { name: /Select 1X2 X:/ });
+    expect(drawButton).toHaveAttribute('aria-pressed', 'false');
+    expect(drawButton.querySelector('.state-mark')).toBeNull();
   });
 
   it('shows fixed adjacent feedback without exposing a technical placement error', async () => {
