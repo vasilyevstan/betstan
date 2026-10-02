@@ -68,17 +68,84 @@ test('login submit does not crash UI', async ({ page }) => {
   expect(pageErrors).toEqual([]);
 });
 
-test('auth pages fit a mobile viewport', async ({ page }) => {
-  await prepareShell(page);
+test('essential auth links meet the mobile target in every density profile', async ({ page }) => {
+  const state = await prepareShell(page);
   await page.setViewportSize({ width: 390, height: 844 });
 
-  for (const { path, title } of [
-    { path: '/login', title: authCopy.login.title },
-    { path: '/signup', title: authCopy.signup.title },
-  ]) {
-    await page.goto(path, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByRole('heading', { name: title })).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const expectTarget = async (target, href) => {
+    await expect(target).toBeVisible();
+    await expect(target).toHaveAttribute('href', href);
+    const metrics = await target.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        height: bounds.height,
+        width: bounds.width,
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    expect(metrics.width).toBeGreaterThanOrEqual(44);
+    expect(metrics.height).toBeGreaterThanOrEqual(44);
+    expect(metrics.overflow).toBeLessThanOrEqual(1);
+  };
+
+  for (const uiVariant of ['v1', 'v2', 'v3']) {
+    const query = `?ui=${uiVariant}&theme=light&review=auth-target`;
+    for (const { path, title, linkName, destination } of [
+      {
+        path: '/login',
+        title: authCopy.login.title,
+        linkName: 'Create an account',
+        destination: '/signup',
+      },
+      {
+        path: '/signup',
+        title: authCopy.signup.title,
+        linkName: 'Log in',
+        destination: '/login',
+      },
+    ]) {
+      await page.goto(`${path}${query}`, { waitUntil: 'domcontentloaded' });
+      await expect(page.getByRole('heading', { name: title })).toBeVisible();
+      await expectTarget(
+        page.locator('.auth-card__link.inline-control-target').filter({ hasText: linkName }),
+        `${destination}${query}`,
+      );
+    }
+  }
+
+  state.currentUser = null;
+  for (const uiVariant of ['v1', 'v2', 'v3']) {
+    const query = `?ui=${uiVariant}&theme=dark&review=anonymous-target`;
+    await page.goto(`/bets${query}`, { waitUntil: 'domcontentloaded' });
+    await expect(page.getByText(/Log in to view your bets/)).toBeVisible();
+    await expectTarget(
+      page.locator('.empty-state-card .inline-control-target'),
+      `/login${query}`,
+    );
+  }
+
+  state.currentUser = {
+    id: 'permission-target-owner',
+    email: 'permission-target@example.com',
+  };
+  await page.route('**/api/bet', (route) => route.fulfill({
+    status: 403,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      errors: [{ message: 'Permission denied' }],
+    }),
+  }));
+
+  for (const uiVariant of ['v1', 'v2', 'v3']) {
+    const query = `?ui=${uiVariant}&theme=dark&review=permission-target`;
+    await page.goto(`/bets${query}`, { waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('alert')).toContainText(
+      'Your session could not be verified.'
+    );
+    await expectTarget(
+      page.locator('.cash-back-error .inline-control-target'),
+      `/login${query}`,
+    );
   }
 });
 

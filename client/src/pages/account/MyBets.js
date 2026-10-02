@@ -294,7 +294,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
 
   if (!currentUser?.id) {
     return <div className="card card-body empty-state-card" role="status">
-      {!isCurrentUserResolved ? 'Loading your account…' : <>Log in to view your bets and recover cash-back operations. <a href={loginHref}>Log in</a></>}
+      {!isCurrentUserResolved ? 'Loading your account…' : <>Log in to view your bets and recover cash-back operations. <a className="inline-control-target" href={loginHref}>Log in</a></>}
     </div>;
   }
 
@@ -384,7 +384,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
     {!model.listStatus.loading && model.listStatus.refreshing ? <p role="status">Refreshing bets…</p> : null}
     {model.listStatus.error ? <div role="alert" className="card card-body cash-back-error">
       {model.listStatus.error}
-      {model.listStatus.permission ? <a href={loginHref}>Log in</a> : null}
+      {model.listStatus.permission ? <a className="inline-control-target" href={loginHref}>Log in</a> : null}
     </div> : null}
     {model.storageError ? <p role="alert" className="cash-back-error">{model.storageError}</p> : null}
     {hiddenRecovery.length ? <section className="card card-body my-bets-pending" aria-label="Pending cash-back operations outside this view">

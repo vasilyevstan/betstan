@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import axios from 'axios';
 import { getPreMatchSelectionKey } from '../../../liveBettingUtils';
 
@@ -6,14 +6,21 @@ const PLACEMENT_ERROR = 'Selection could not be added to your slip. Please try a
 
 const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelectionKeys, uiVariant }) => {
   const [placementError, setPlacementError] = useState('');
+  const placementAttemptSequence = useRef(0);
 
   const handleClick = async (productId, oddsId) => {
+    const attemptSequence = ++placementAttemptSequence.current;
     setPlacementError('');
     try {
       await axios.post('/api/event/odds', { eventId, productId, oddsId });
+      if (attemptSequence === placementAttemptSequence.current) {
+        setPlacementError('');
+      }
       onSelectionPlaced?.();
     } catch {
-      setPlacementError(PLACEMENT_ERROR);
+      if (attemptSequence === placementAttemptSequence.current) {
+        setPlacementError(PLACEMENT_ERROR);
+      }
     }
   };
 

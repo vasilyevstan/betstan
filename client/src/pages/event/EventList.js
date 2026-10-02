@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { format } from 'date-fns';
 import ProductsList from './product/ProductsList';
@@ -149,8 +149,10 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
   const marketAvailability = getMarketAvailabilityLabel(event, market);
   const isLegacyScoreMarket = market?.marketType === 'SECOND_HALF_SCORE';
   const [placementError, setPlacementError] = useState('');
+  const placementAttemptSequence = useRef(0);
 
   const handleSelection = async (selectionId) => {
+    const attemptSequence = ++placementAttemptSequence.current;
     setPlacementError('');
     try {
       await axios.post('/api/event/odds', {
@@ -160,9 +162,14 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
         quoteVersion: market.quoteVersion,
         selectionId,
       });
+      if (attemptSequence === placementAttemptSequence.current) {
+        setPlacementError('');
+      }
       onSelectionPlaced?.();
     } catch {
-      setPlacementError(PLACEMENT_ERROR);
+      if (attemptSequence === placementAttemptSequence.current) {
+        setPlacementError(PLACEMENT_ERROR);
+      }
     }
   };
 

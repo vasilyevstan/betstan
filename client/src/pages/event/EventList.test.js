@@ -23,6 +23,16 @@ jest.mock('axios', () => ({
 
 jest.mock('./useLiveEvents', () => jest.fn());
 
+const createDeferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+};
+
 const buildLiveMarket = ({
   marketId,
   marketType,
@@ -102,6 +112,25 @@ const preMatchEvent = {
     },
   ],
 };
+
+const buildPlacementRaceEvent = () => ({
+  ...liveEvent,
+  live: {
+    ...liveEvent.live,
+    currentMarkets: [{
+      ...buildLiveMarket({
+        marketId: 'placement-race',
+        marketType: 'NEXT_CORNER',
+        marketVersion: 4,
+        quoteVersion: 7,
+      }),
+      selections: [
+        { selectionId: 'home-race', side: 'HOME', odds: 1.8 },
+        { selectionId: 'away-race', side: 'AWAY', odds: 2.2 },
+      ],
+    }],
+  },
+});
 
 describe('EventList', () => {
   beforeEach(() => {
@@ -232,6 +261,123 @@ describe('EventList', () => {
       'Selection could not be added to your slip. Please try again.'
     );
     expect(screen.queryByText(/ECONNRESET|event\.internal/)).toBeNull();
+  });
+
+  it('keeps the latest live placement success authoritative when an older request fails later', async () => {
+    const olderRequest = createDeferred();
+    const latestRequest = createDeferred();
+    const onSelectionPlaced = jest.fn();
+    axios.post
+      .mockReturnValueOnce(olderRequest.promise)
+      .mockReturnValueOnce(latestRequest.promise);
+    useLiveEvents.mockReturnValue({
+      events: [buildPlacementRaceEvent()],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    render(
+      <EventList
+        onSelectionPlaced={onSelectionPlaced}
+        selectedSelectionKeys={new Set()}
+      />,
+    );
+    const olderSelection = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Team A at 1.8',
+    });
+    const latestSelection = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Team B at 2.2',
+    });
+
+    fireEvent.click(olderSelection);
+    fireEvent.click(latestSelection);
+    latestSelection.focus();
+
+    expect(axios.post.mock.calls).toEqual([
+      ['/api/event/odds', {
+        eventId: 'live-1',
+        marketId: 'placement-race',
+        marketVersion: 4,
+        quoteVersion: 7,
+        selectionId: 'home-race',
+      }],
+      ['/api/event/odds', {
+        eventId: 'live-1',
+        marketId: 'placement-race',
+        marketVersion: 4,
+        quoteVersion: 7,
+        selectionId: 'away-race',
+      }],
+    ]);
+
+    await act(async () => {
+      olderRequest.reject(new Error('older placement failed'));
+      await olderRequest.promise.catch(() => undefined);
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    await act(async () => {
+      latestRequest.resolve({ data: {} });
+      await latestRequest.promise;
+    });
+    await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Team B at 2.2',
+    })).toBe(latestSelection);
+    expect(latestSelection).toHaveFocus();
+  });
+
+  it('keeps the latest live placement failure authoritative when an older request succeeds later', async () => {
+    const olderRequest = createDeferred();
+    const latestRequest = createDeferred();
+    const onSelectionPlaced = jest.fn();
+    axios.post
+      .mockReturnValueOnce(olderRequest.promise)
+      .mockReturnValueOnce(latestRequest.promise);
+    useLiveEvents.mockReturnValue({
+      events: [buildPlacementRaceEvent()],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    render(
+      <EventList
+        onSelectionPlaced={onSelectionPlaced}
+        selectedSelectionKeys={new Set()}
+      />,
+    );
+    const olderSelection = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Team A at 1.8',
+    });
+    const latestSelection = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Team B at 2.2',
+    });
+
+    fireEvent.click(olderSelection);
+    fireEvent.click(latestSelection);
+    latestSelection.focus();
+
+    await act(async () => {
+      latestRequest.reject(new Error('latest placement failed'));
+      await latestRequest.promise.catch(() => undefined);
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+
+    await act(async () => {
+      olderRequest.resolve({ data: {} });
+      await olderRequest.promise;
+    });
+    await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+    expect(screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Team B at 2.2',
+    })).toBe(latestSelection);
+    expect(latestSelection).toHaveFocus();
   });
 
   it('renders labelled Second Half Score selections with exact click identity', async () => {

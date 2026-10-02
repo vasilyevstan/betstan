@@ -37,7 +37,7 @@ const HandleLogIn = ({callback}) => {
         <>
           <span>New to BetStan?</span>
           <Link
-            className="auth-card__link"
+            className="auth-card__link inline-control-target"
             to={{ pathname: '/signup', search: location.search }}
           >
             Create an account

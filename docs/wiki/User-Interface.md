@@ -441,10 +441,9 @@ selections use a balanced two-column grid inside that card.
 ### Betting slips
 
 Live and pre-match drafts can both be open. They use separate labelled slips,
-distinct visual accents and subtly different surfaces, independent wagers, and
-independent pending/error state. The live slip uses a restrained warm tint
-derived from the current theme; the pre-match slip retains the normal
-accent/surface treatment. The UI never merges them into one combined
+the same `var(--surface-soft)` background, independent wagers, and independent
+pending/error state. Semantic rails and borders distinguish them: warm for
+live and accent for pre-match. The UI never merges them into one combined
 placement.
 
 ## Live movement and timeline presentation

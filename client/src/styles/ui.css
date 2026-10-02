@@ -119,6 +119,14 @@ body {
   min-height: var(--control-target);
 }
 
+.inline-control-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: var(--control-target);
+  min-inline-size: var(--control-target);
+}
+
 .app-shell .form-control::placeholder {
   color: var(--text-subtle);
   opacity: 1;
