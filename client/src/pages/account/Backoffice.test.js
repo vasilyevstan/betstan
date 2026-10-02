@@ -317,7 +317,7 @@ describe('public Backoffice access', () => {
     expect(screen.getByRole('searchbox')).toHaveValue('');
     expect(screen.getByLabelText('Final result')).toHaveValue('ALL');
     expect(screen.getByLabelText('Visibility')).toHaveValue('ALL');
-    expect(screen.getAllByRole('article').map((card) => within(card).getByRole('heading').textContent))
+    expect(screen.getAllByRole('article').map((card) => within(card).getByRole('heading', { level: 3 }).textContent))
       .toEqual([
         'Harbor - Valley', 'Home - Away', 'Summit - Harbor', 'Mystery fixture',
         'Home team unavailable - Away team unavailable',
@@ -348,7 +348,7 @@ describe('public Backoffice access', () => {
       ['   ', ['Harbor - Valley', 'Home - Away', 'Summit - Harbor', 'Mystery fixture', 'Home team unavailable - Away team unavailable']],
     ]) {
       fireEvent.change(search, { target: { value: query } });
-      expect(screen.queryAllByRole('article').map((card) => within(card).getByRole('heading').textContent))
+      expect(screen.queryAllByRole('article').map((card) => within(card).getByRole('heading', { level: 3 }).textContent))
         .toEqual(expectedNames);
       expect(screen.getByText(`Showing ${expectedNames.length} of 5 events`)).toBeVisible();
     }

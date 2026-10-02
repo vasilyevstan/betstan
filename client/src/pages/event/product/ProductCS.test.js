@@ -36,6 +36,8 @@ describe('ProductCS', () => {
     });
     expect(button).toHaveClass('product-button--v1');
     expect(button).toHaveClass('product-button--selected');
+    expect(button).toHaveAttribute('aria-pressed', 'true');
+    expect(button.querySelector('.product-button__selected-cue')).toHaveTextContent('✓');
     fireEvent.click(button);
 
     await waitFor(() => {
@@ -64,6 +66,10 @@ describe('ProductCS', () => {
     fireEvent.click(screen.getByRole('button'));
     await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
     expect(onSelectionPlaced).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+    expect(screen.queryByText('offline')).toBeNull();
   });
 
   it('handles a missing board and disables resulted selections', () => {

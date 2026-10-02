@@ -145,6 +145,13 @@ describe('EventList', () => {
 
     expect(screen.getByRole('heading', { name: 'Live now' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Pre-match' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Events', level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Live now', level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Pre-match', level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Live Derby', level: 3 })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Pre-match Clash', level: 3 })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Kickoff:/ })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Next live event' })).toBeNull();
     expect(screen.getByRole('progressbar', { name: 'Match progress' })).toHaveAttribute('aria-valuenow', '33');
     expect(screen.getByRole('status')).toHaveTextContent('Live feed reconnecting. Polling fallback is active.');
@@ -157,6 +164,10 @@ describe('EventList', () => {
 
     expect(liveSelection).toHaveClass('product-button--selected');
     expect(preMatchSelection).toHaveClass('product-button--selected');
+    expect(liveSelection).toHaveAttribute('aria-pressed', 'true');
+    expect(liveSelection.querySelector('.event-market-button__selected-cue'))
+      .toHaveTextContent('✓');
+    expect(preMatchSelection).toHaveAttribute('aria-pressed', 'true');
     expect(suspendedSelection).toBeDisabled();
     expect(staleSelection).toBeDisabled();
     expect(missingExpirySelection).toBeDisabled();
@@ -179,6 +190,48 @@ describe('EventList', () => {
       selectionId: 'home',
     }));
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+  });
+
+  it('keeps one Events H1 in loading and empty states', () => {
+    useLiveEvents.mockReturnValue({
+      events: [],
+      feedState: 'connecting',
+      isLoading: true,
+    });
+
+    const { rerender } = render(<EventList selectedSelectionKeys={new Set()} />);
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Events', level: 1 })).toBeInTheDocument();
+
+    useLiveEvents.mockReturnValue({
+      events: [],
+      feedState: 'polling',
+      isLoading: false,
+    });
+    rerender(<EventList selectedSelectionKeys={new Set()} />);
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Events', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText('No events are available in the current live window.'))
+      .toBeInTheDocument();
+  });
+
+  it('shows sanitized adjacent feedback when a live selection placement fails', async () => {
+    useLiveEvents.mockReturnValue({
+      events: [liveEvent],
+      feedState: 'open',
+      isLoading: false,
+    });
+    axios.post.mockRejectedValueOnce(new Error('ECONNRESET from event.internal'));
+
+    render(<EventList selectedSelectionKeys={new Set()} />);
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Team A at 1.8',
+    }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+    expect(screen.queryByText(/ECONNRESET|event\.internal/)).toBeNull();
   });
 
   it('renders labelled Second Half Score selections with exact click identity', async () => {

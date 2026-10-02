@@ -1,19 +1,24 @@
-import React from 'react';
+import React, { useState } from 'react';
 import axios from 'axios';
 import { getPreMatchSelectionKey } from '../../../liveBettingUtils';
 
+const PLACEMENT_ERROR = 'Selection could not be added to your slip. Please try again.';
+
 const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelectionKeys, uiVariant }) => {
+  const [placementError, setPlacementError] = useState('');
+
   const handleClick = async (productId, oddsId) => {
+    setPlacementError('');
     try {
       await axios.post('/api/event/odds', { eventId, productId, oddsId });
       onSelectionPlaced?.();
-    } catch (error) {
-      // ignore
+    } catch {
+      setPlacementError(PLACEMENT_ERROR);
     }
   };
 
   return <div className="product-block product-block--cs">
-    <div className="fw-semibold mb-2 product-block__title">{product.name}</div>
+    <h4 className="fw-semibold mb-2 product-block__title">{product.name}</h4>
     <div className="product-cs-grid">
       {(product.odds ?? []).map((option) => {
         const selectionKey = getPreMatchSelectionKey({ eventId, productId: product.id, oddsId: option.id });
@@ -23,16 +28,21 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
         return <button
           key={option.id}
           aria-label={`Select ${product.name} ${option.name} at ${option.value}`}
+          aria-pressed={Boolean(isSelected)}
           className={`btn product-button product-button--${uiVariant ?? 'v1'} product-button--labelled${selectedClass}${resulted ? ' disabled' : ''}`}
           disabled={resulted}
           type="button"
           onClick={() => handleClick(product.id, option.id)}
         >
+          {isSelected ? <span className="product-button__selected-cue" aria-hidden="true">✓</span> : null}
           <span className="product-button__label">{option.name}</span>
           <strong className="product-button__value">{option.value}</strong>
         </button>;
       })}
     </div>
+    {placementError ? (
+      <p className="selection-feedback" role="alert">{placementError}</p>
+    ) : null}
   </div>;
 };
 

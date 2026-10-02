@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { useState } from 'react';
 
+const GENERIC_REQUEST_ERROR = 'Request failed. Please try again.';
+
  const UseRequest = ({url, method, body, onSuccess}) => {
     // method nust be equal  to get, post, patch
     const [errors, setErrors] = useState(null);
@@ -8,7 +10,9 @@ import { useState } from 'react';
     const buildErrorMessages = (error) => {
         const responseErrors = error?.response?.data?.errors;
         if (Array.isArray(responseErrors) && responseErrors.length > 0) {
-            return responseErrors.map((entry) => entry?.msg || entry?.message || 'Request failed');
+            return responseErrors.map(
+                (entry) => entry?.msg || entry?.message || GENERIC_REQUEST_ERROR
+            );
         }
 
         const responseMessage = error?.response?.data?.message;
@@ -16,11 +20,7 @@ import { useState } from 'react';
             return [responseMessage];
         }
 
-        if (typeof error?.message === 'string' && error.message.trim()) {
-            return [error.message];
-        }
-
-        return ['Request failed'];
+        return [GENERIC_REQUEST_ERROR];
     };
 
     const doRequest = async (props = {}) => {

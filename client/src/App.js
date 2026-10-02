@@ -28,6 +28,7 @@ const App = () => {
   const location = useLocation();
   const lastReportedPath = useRef(null);
   const authRequestSequence = useRef(0);
+  const mainContent = useRef(null);
   const routeIdentity = getRouteIdentity(location.pathname);
   const uiVariant = useMemo(() => getUiVariant(location.search), [location.search]);
   const theme = useMemo(() => getTheme(location.search), [location.search]);
@@ -83,6 +84,12 @@ const App = () => {
     requestSlipRefresh();
   }, [fetchData, requestSlipRefresh]);
 
+  const focusMainContent = useCallback((event) => {
+    event.preventDefault();
+    mainContent.current?.focus({ preventScroll: true });
+    mainContent.current?.scrollIntoView?.({ block: 'start' });
+  }, []);
+
   useEffect(() => {
     document.documentElement.setAttribute('data-bs-theme', theme);
   }, [theme]);
@@ -108,19 +115,20 @@ const App = () => {
   }, [routeIdentity]);
 
   return <div className={`app-shell ui-variant-${uiVariant} ui-theme-${theme}`}>
+    <a className="skip-link" href="#main-content" onClick={focusMainContent}>
+      Skip to main content
+    </a>
     <Header currentUser={currentUser} uiVariant={uiVariant} theme={theme} />
 
     <div className={`container-fluid app-shell__content app-shell__content--${uiVariant}`}>
-      <div className="row g-3 justify-content-center">
-        {!isTelemetryRoute ? (
-          <div className="col-12 col-xl-2 order-2 order-xl-1">
-            <section className="section-panel app-shell__sidebar">
-              <Statistics refreshToken={statsRefreshToken} uiVariant={uiVariant} />
-            </section>
-          </div>
-        ) : null}
-        <div className={isTelemetryRoute ? 'col-12 order-1' : 'col-12 col-xl-8 order-1 order-xl-2'}>
-          <main className="app-shell__main">
+      <div className={`app-desk${isTelemetryRoute ? ' app-desk--full' : ''}`}>
+        <div className="app-desk__main">
+          <main
+            className="app-shell__main"
+            id="main-content"
+            ref={mainContent}
+            tabIndex="-1"
+          >
             <Routes>
               <Route
                 path="/"
@@ -161,8 +169,17 @@ const App = () => {
           </main>
         </div>
         {!isTelemetryRoute ? (
-          <div className="col-12 col-xl-2 order-3">
+          <aside className="app-desk__statistics" aria-labelledby="statistics-region-heading">
             <section className="section-panel app-shell__sidebar">
+              <h2 className="app-sidebar__title" id="statistics-region-heading">Statistics</h2>
+              <Statistics refreshToken={statsRefreshToken} uiVariant={uiVariant} />
+            </section>
+          </aside>
+        ) : null}
+        {!isTelemetryRoute ? (
+          <aside className="app-desk__slips" aria-labelledby="slips-region-heading">
+            <section className="section-panel app-shell__sidebar">
+              <h2 className="app-sidebar__title" id="slips-region-heading">Slips</h2>
               <Slip
                 currentUser={currentUser}
                 onBoardSubmitted={refreshStats}
@@ -171,7 +188,7 @@ const App = () => {
                 uiVariant={uiVariant}
               />
             </section>
-          </div>
+          </aside>
         ) : null}
       </div>
     </div>

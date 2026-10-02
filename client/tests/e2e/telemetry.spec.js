@@ -752,7 +752,9 @@ const expectStableCardStates = async (page, state, label, ordinaryDesktop = fals
     generatedAt: '2026-09-10T01:23:00.000Z',
     values: Array.from({ length: 24 }, (_, hour) => hour + 1),
   };
-  if (ordinaryDesktop) expect(baseline.heights[0]).toBeLessThanOrEqual(365.265625);
+  // Spacious density intentionally adds card padding while retaining the same
+  // bounded frame and state geometry as Standard/Compact.
+  if (ordinaryDesktop) expect(baseline.heights[0]).toBeLessThanOrEqual(425);
   await check('daily');
   const releaseError = hold({ error: 'Telemetry temporarily unavailable' }, 503);
   await first.locator('.telemetry-metric__date-button').first().press('Enter');
@@ -1100,7 +1102,7 @@ test('authenticated expanded navbar fits at 1000px', async ({ page }) => {
   await page.goto('/telemetry?ui=v2&theme=light', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('heading', { name: 'Service health', level: 2 })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
-  await expect(page.locator('#betstan-navbar')).toBeVisible();
+  await expect(page.locator('.app-navbar__content')).toBeVisible();
   await expect(page.getByText('telemetry-user', { exact: true })).toBeVisible();
   await expectNavigationFits(page, true);
   await expectRequiredLabelsNotClipped(page);
@@ -1238,16 +1240,32 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
   const first = page.locator('.telemetry-metric').first();
   const origin = first.locator('.telemetry-metric__date-button').last();
   await origin.evaluate((element) => {
-    const top = element.getBoundingClientRect().top + window.scrollY;
-    // The shell inherits Bootstrap smooth scrolling. Establish settled geometry
-    // before testing a fresh focus, rather than racing an in-progress scroll.
-    window.scrollTo({ top: top - 220, behavior: 'instant' });
+    const card = element.closest('.telemetry-metric');
+    const graph = card.querySelector('svg');
+    const headerBottom = document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0;
+    const graphBottom = graph.getBoundingClientRect().bottom + window.scrollY;
+    // Keep the origin visible below the always-labelled sticky navigation while
+    // moving the graph anchor behind it, forcing the bounded button fallback.
+    window.scrollTo({
+      top: graphBottom - Math.max(0, headerBottom - 20),
+      behavior: 'instant',
+    });
   });
   // Even an instant scroll dispatches its scroll event on a subsequent frame.
   await page.evaluate(() => new Promise((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(resolve));
   }));
-  await expect.poll(() => first.locator('svg').evaluate((element) => element.getBoundingClientRect().bottom)).toBeLessThan(200);
+  await expect.poll(() => first.locator('svg').evaluate((element) => (
+    element.getBoundingClientRect().bottom
+      - (document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0)
+  ))).toBeLessThan(0);
+  const occlusion = await first.locator('svg').evaluate((element) => ({
+    graphBottom: element.getBoundingClientRect().bottom,
+    headerBottom: document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0,
+  }));
+  expect(occlusion.graphBottom).toBeLessThan(occlusion.headerBottom);
+  const originBeforeFocus = await origin.boundingBox();
+  expect(originBeforeFocus.y).toBeGreaterThanOrEqual(occlusion.headerBottom);
   await origin.focus();
   await expectTooltipGeometry(page, first, origin, '2026-09-10', 14, 'already-focused');
   const fallback = await first.getByRole('tooltip').boundingBox();

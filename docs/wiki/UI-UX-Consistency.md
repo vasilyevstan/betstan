@@ -5,7 +5,7 @@ A page can be locally functional and still be defective when its hierarchy,
 spacing, controls, states, or interaction behavior conflict with stable
 patterns elsewhere in the product.
 
-For the implemented application shell, visual variants, themes, route
+For the implemented application shell, density layouts, themes, route
 structure, and component behavior, see [[User Interface]].
 
 ## When the specialist is required
@@ -70,8 +70,8 @@ The UX result names its references and compares every applicable dimension:
 | Copy | product terminology, capitalization, error clarity, internal identifier leakage |
 | States | loading, empty, error, disabled, stale, suspended, live, terminal, retained |
 | Responsive behavior | desktop, tablet, mobile, nested containers, long content, overflow |
-| Variants and themes | v1/v2/v3 and light/dark behavior |
-| Interaction | DOM/reading/keyboard order, focus, touch, local-state retention, live-update movement |
+| Layouts and themes | Standard/Compact/Spacious density and composition, plus light/dark semantic roles |
+| Interaction | DOM/reading/keyboard order, focus, touch, local-state retention, live-update movement, reduced motion |
 
 For each material difference, record the reference, observed divergence, user
 impact, classification, required action, evidence, and confidence.
@@ -86,13 +86,41 @@ may include:
 - multiple simultaneous live matches and recently finished retention;
 - normal, hover, focus, selected, disabled, stale, suspended, and terminal
   controls;
-- v1, v2, v3 and light/dark only where the changed primitive is shared;
+- Standard, Compact, and Spacious (`ui=v1`, `ui=v2`, and `ui=v3`) plus
+  light/dark only where the changed primitive is shared;
 - anonymous, ordinary-user, and backoffice visibility where authorization
   changes presentation.
 
 Do not demand a full Cartesian test matrix when the same shared primitive and
-evidence prove several cells. Do not omit a materially different state merely
-because the happy path looks consistent.
+evidence prove several cells. Choose representative layout/theme/state samples
+that cover each changed primitive and every materially different behavior.
+Do not omit a material difference merely because the happy path looks
+consistent.
+
+## Match Desk review baseline
+
+The shared shell adds durable review rules:
+
+- **One visual world:** Standard, Compact, and Spacious change density and
+  composition only. They share one brand, semantic role system, and state
+  grammar across routes and themes.
+- **Semantic order before visual columns:** the center task remains first in
+  DOM, reading, and keyboard order even when a wide grid places Statistics to
+  its left. Visual placement must not be used to reorder assistive-technology
+  or keyboard navigation.
+- **Boundary evidence:** shell changes that affect the three-region transition
+  exercise 1399 and 1400 CSS pixels explicitly. Evidence checks that the main
+  task is the first full row and supporting regions are non-sticky below the
+  boundary, then that only the two supporting regions become sticky in the
+  three-column desk at the boundary.
+- **Reduced motion:** representative interactive controls prove that requested
+  reduced motion removes effective transition, animation, and smooth-scroll
+  movement without removing focus outlines, pressed state, or other semantic
+  cues.
+
+These focused boundary and preference cases complement representative
+layout/theme coverage; they do not require a Cartesian expansion of every
+unchanged route and state.
 
 ## Public entry points and usable capabilities
 
@@ -136,10 +164,12 @@ expert judgment of the composition as a whole. A layout-affecting change cannot
 receive `UX_REVIEW_PASSED` from mechanical checks alone. Review the smallest
 representative set of exact-head rendered screenshots holistically for
 hierarchy, intentional whitespace, alignment rhythm, and the visual connection
-of related task regions. For a precise alignment claim, compare relational
-edges, baselines, or intentional peer-group/shared-column widths under matched
-content, viewport, variant, theme, and text conditions. Screenshots cannot
-prove interaction behavior, and measurements cannot prove that the overall
+of related task regions. Precise alignment claims are relational: compare the
+edges, baselines, or intentional peer-group/shared-column widths that should
+agree under matched content, viewport, layout, theme, and text conditions.
+Do not turn a historical absolute width or coordinate into a requirement when
+the accepted relationship is what matters. Screenshots cannot prove
+interaction behavior, and measurements cannot prove that the overall
 composition is coherent.
 
 Rendered evidence is required for precise claims about pixel geometry,
@@ -224,7 +254,7 @@ Product-specific live rules remain in [[Live Betting Production]].
 
 The pull request records:
 
-- affected routes, components, states, variants, themes, and viewport classes;
+- affected routes, components, states, layouts, themes, and viewport classes;
 - named reference screens, components, and tokens;
 - intentional exceptions and rationale;
 - baseline and final UX status, bound to the exact head SHA;

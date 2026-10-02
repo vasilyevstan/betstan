@@ -53,6 +53,9 @@ describe('Product1X2', () => {
     expect(awayButton.querySelector('.product-button__label')).toHaveTextContent('2');
     expect(homeButton).toHaveAccessibleName(expect.stringContaining('Falcons'));
     expect(awayButton).toHaveAccessibleName(expect.stringContaining('Owls'));
+    expect(homeButton).toHaveAttribute('aria-pressed', 'false');
+    expect(drawButton).toHaveAttribute('aria-pressed', 'false');
+    expect(awayButton).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('preserves the exact odds ID and price when semantic presentation reorders the board', async () => {
@@ -159,5 +162,48 @@ describe('Product1X2', () => {
     expect(screen.getByRole('button', { name: /Select 1X2 1:/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Select 1X2 X:/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Select 1X2 2:/ })).toBeDisabled();
+  });
+
+  it('exposes a non-color selected cue without changing the exact selection identity', () => {
+    render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
+        product={product}
+        selectedSelectionKeys={new Set(['PRE_MATCH:event-1:product-1:home-odd'])}
+        uiVariant="v2"
+      />,
+    );
+
+    const homeButton = screen.getByRole('button', {
+      name: 'Select 1X2 1: Falcons in Falcons - Owls at 1.6',
+    });
+    expect(homeButton).toHaveAttribute('aria-pressed', 'true');
+    expect(homeButton.querySelector('.product-button__selected-cue')).toHaveTextContent('✓');
+    expect(screen.getByRole('button', { name: /Select 1X2 X:/ }))
+      .toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('shows fixed adjacent feedback without exposing a technical placement error', async () => {
+    axios.post.mockRejectedValueOnce(new Error('socket hang up at event.internal'));
+    render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
+        product={product}
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Select 1X2 1:/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Selection could not be added to your slip. Please try again.'
+    );
+    expect(screen.queryByText(/socket hang up|event\.internal/)).toBeNull();
   });
 });

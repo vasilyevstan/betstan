@@ -23,8 +23,13 @@ it.each(['v1', 'v2', 'v3'])(
     for (const currentUser of userStates) {
       const { unmount } = renderHeader(currentUser, uiVariant);
 
+      const eventsLink = screen.getByRole('link', { name: 'Events' });
       const backofficeLink = screen.getByRole('link', { name: 'Backoffice' });
       const telemetryLink = screen.getByRole('link', { name: 'Telemetry' });
+      expect(eventsLink).toHaveAttribute(
+        'href',
+        `/?ui=${uiVariant}&theme=light`
+      );
       expect(backofficeLink).toHaveAttribute(
         'href',
         `/backoffice?ui=${uiVariant}&theme=light`
@@ -35,6 +40,7 @@ it.each(['v1', 'v2', 'v3'])(
       );
       expect(backofficeLink).toHaveTextContent('Backoffice');
       expect(telemetryLink).toHaveTextContent('Telemetry');
+      expect(eventsLink).toBeVisible();
       expect(screen.getByText('Backoffice')).toBeVisible();
       expect(screen.getByText('Telemetry')).toBeVisible();
       expect(backofficeLink).toHaveAccessibleName('Backoffice');
@@ -52,6 +58,44 @@ it.each(['v1', 'v2', 'v3'])(
     }
   },
 );
+
+it.each([
+  ['v1', 'Standard'],
+  ['v2', 'Compact'],
+  ['v3', 'Spacious'],
+])('shows human layout choices and marks %s as %s', (uiVariant, label) => {
+  renderHeader(undefined, uiVariant);
+
+  expect(screen.getByText('Layout')).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Standard' })).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Compact' })).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Spacious' })).toBeVisible();
+  expect(screen.getByRole('link', { name: label })).toHaveAttribute('aria-current', 'true');
+  expect(screen.getByText('Theme')).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Dark' })).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Light' })).toHaveAttribute('aria-current', 'true');
+});
+
+it('preserves unrelated query keys while changing the layout or theme', () => {
+  render(
+    <MemoryRouter initialEntries={[
+      '/?ui=v2&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained',
+    ]}>
+      <Header currentUser={undefined} uiVariant="v2" theme="light" />
+    </MemoryRouter>
+  );
+
+  const spacious = screen.getByRole('link', { name: 'Spacious' });
+  const dark = screen.getByRole('link', { name: 'Dark' });
+  expect(spacious).toHaveAttribute(
+    'href',
+    '/?ui=v3&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained'
+  );
+  expect(dark).toHaveAttribute(
+    'href',
+    '/?ui=v2&theme=dark&acceptanceEventIds=event-1%2Cevent-2&review=retained'
+  );
+});
 
 it('marks Telemetry as the current page without losing valid navigation query parameters', () => {
   renderHeader(undefined, 'v3', '/telemetry');

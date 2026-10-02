@@ -1,7 +1,12 @@
 const { test, expect } = require('@playwright/test');
 const authCopy = require('../../src/pages/auth/authCopy.json');
 const { installFakeEventSource } = require('./support/fakeEventSource');
-const { createShellMockState, installAppApiMocks } = require('./support/mockAppApi');
+const {
+  createBackofficeEvents,
+  createLiveBettingMockState,
+  createShellMockState,
+  installAppApiMocks,
+} = require('./support/mockAppApi');
 
 const prepareShell = async (page, overrides = {}) => {
   await installFakeEventSource(page);
@@ -75,4 +80,169 @@ test('auth pages fit a mobile viewport', async ({ page }) => {
     await expect(page.getByRole('heading', { name: title })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   }
+});
+
+test('Match Desk shell keeps semantic order and switches exactly at 1400px', async ({ page }) => {
+  await prepareShell(page);
+
+  const inspectShell = () => page.locator('.app-desk').evaluate((desk) => {
+    const box = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        width: bounds.width,
+      };
+    };
+    const main = desk.querySelector('.app-desk__main');
+    const statistics = desk.querySelector('.app-desk__statistics');
+    const slips = desk.querySelector('.app-desk__slips');
+    const statisticsPanel = statistics.querySelector('.app-shell__sidebar');
+    const slipsPanel = slips.querySelector('.app-shell__sidebar');
+    return {
+      desk: box(desk),
+      main: box(main),
+      statistics: box(statistics),
+      slips: box(slips),
+      mainPosition: getComputedStyle(main).position,
+      statisticsPosition: getComputedStyle(statisticsPanel).position,
+      slipsPosition: getComputedStyle(slipsPanel).position,
+      mainBeforeStatistics: Boolean(
+        main.compareDocumentPosition(statistics) & Node.DOCUMENT_POSITION_FOLLOWING
+      ),
+      statisticsBeforeSlips: Boolean(
+        statistics.compareDocumentPosition(slips) & Node.DOCUMENT_POSITION_FOLLOWING
+      ),
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  });
+
+  await page.setViewportSize({ width: 1399, height: 1000 });
+  await page.goto(
+    '/?ui=v2&theme=dark&acceptanceEventIds=event-1%2Cevent-2&review=retained',
+    { waitUntil: 'domcontentloaded' }
+  );
+  await expect(page.getByRole('heading', { name: 'Events', level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Events' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Backoffice' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Telemetry' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Standard' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Compact' })).toHaveAttribute('aria-current', 'true');
+  await expect(page.getByRole('link', { name: 'Spacious' })).toHaveAttribute(
+    'href',
+    '/?ui=v3&theme=dark&acceptanceEventIds=event-1%2Cevent-2&review=retained'
+  );
+  const navigationTargets = page.locator(
+    '.app-nav-link, .presentation-option, .app-navbar__auth-link'
+  );
+  for (const target of await navigationTargets.all()) {
+    const bounds = await target.boundingBox();
+    expect(bounds.width).toBeGreaterThanOrEqual(44);
+    expect(bounds.height).toBeGreaterThanOrEqual(44);
+  }
+
+  const below = await inspectShell();
+  expect(below.mainBeforeStatistics).toBe(true);
+  expect(below.statisticsBeforeSlips).toBe(true);
+  expect(below.main.top).toBeLessThan(below.statistics.top);
+  expect(Math.abs(below.main.width - below.desk.width)).toBeLessThanOrEqual(1);
+  expect(below.statisticsPosition).not.toBe('sticky');
+  expect(below.slipsPosition).not.toBe('sticky');
+  expect(below.mainPosition).not.toBe('sticky');
+  expect(below.overflow).toBeLessThanOrEqual(1);
+
+  await page.getByRole('link', { name: 'Skip to main content' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('main')).toBeFocused();
+
+  await page.setViewportSize({ width: 1400, height: 1000 });
+  const at = await inspectShell();
+  expect(at.mainBeforeStatistics).toBe(true);
+  expect(at.statisticsBeforeSlips).toBe(true);
+  expect(at.statistics.left).toBeLessThan(at.main.left);
+  expect(at.main.right).toBeLessThan(at.slips.left);
+  expect(Math.abs(at.statistics.top - at.main.top)).toBeLessThanOrEqual(1);
+  expect(Math.abs(at.slips.top - at.main.top)).toBeLessThanOrEqual(1);
+  expect(at.statisticsPosition).toBe('sticky');
+  expect(at.slipsPosition).toBe('sticky');
+  expect(at.mainPosition).not.toBe('sticky');
+  expect(at.overflow).toBeLessThanOrEqual(1);
+});
+
+test('Events and wildcard routes expose one logical route heading', async ({ page }) => {
+  await prepareShell(page);
+
+  for (const path of ['/', '/retained-wildcard']) {
+    await page.goto(path, { waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('heading', { name: 'Events', level: 1 })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
+  }
+});
+
+test('reduced motion removes effective motion while focus and state cues remain', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  state.backofficeEvents = createBackofficeEvents();
+  state.backofficeActions = {};
+  await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  const expectMotionlessFocus = async (locator) => {
+    await expect(locator).toBeVisible();
+    await locator.focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await expect(locator).toBeFocused();
+    const metrics = await locator.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const durationsAreZero = (value) => value
+        .split(',')
+        .every((part) => Number.parseFloat(part) === 0);
+      return {
+        animationDurationIsZero: durationsAreZero(style.animationDuration),
+        animationName: style.animationName,
+        outlineStyle: style.outlineStyle,
+        outlineWidth: Number.parseFloat(style.outlineWidth),
+        scrollBehavior: getComputedStyle(document.documentElement).scrollBehavior,
+        transitionDelayIsZero: durationsAreZero(style.transitionDelay),
+        transitionDurationIsZero: durationsAreZero(style.transitionDuration),
+      };
+    });
+    expect(metrics.animationDurationIsZero).toBe(true);
+    expect(metrics.animationName).toBe('none');
+    expect(metrics.transitionDelayIsZero).toBe(true);
+    expect(metrics.transitionDurationIsZero).toBe(true);
+    expect(metrics.scrollBehavior).toBe('auto');
+    expect(metrics.outlineStyle).toBe('solid');
+    expect(metrics.outlineWidth).toBeGreaterThanOrEqual(3);
+  };
+
+  await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expectMotionlessFocus(page.getByRole('link', { name: 'Events' }));
+  const selectedBettingControl = page.getByRole('button', {
+    name: state.fixtures.preMatchSelectionLabel,
+  });
+  await selectedBettingControl.click();
+  await expect(selectedBettingControl).toHaveAttribute('aria-pressed', 'true');
+  await expect(selectedBettingControl.locator('.product-button__selected-cue')).toHaveText('✓');
+  await expectMotionlessFocus(selectedBettingControl);
+
+  await page.goto('/login?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expectMotionlessFocus(page.getByRole('button', {
+    name: authCopy.login.submit,
+    exact: true,
+  }));
+
+  await page.goto('/backoffice?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByText('Target: OFFLINE', { exact: false }).first()).toBeVisible();
+  await expectMotionlessFocus(page.getByRole('button', {
+    name: 'Take offline for Northport - Lakewood',
+  }));
+
+  await page.goto('/telemetry?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByText('Healthy', { exact: true }).first()).toBeVisible();
+  await expectMotionlessFocus(page.getByRole('button', { name: 'Refresh', exact: true }));
 });

@@ -119,6 +119,15 @@ const compareUpperLiveEvents = (left, right) => {
 };
 
 const EMPTY_EVENT_IDS = new Set();
+const PLACEMENT_ERROR = 'Selection could not be added to your slip. Please try again.';
+
+const EventStageHeader = () => <header className="event-stage__header">
+  <p className="event-stage__eyebrow">Match desk</p>
+  <h1 className="event-stage__title">Events</h1>
+  <p className="event-stage__summary">
+    Compare current fixtures, market availability, and prices before adding a selection to a slip.
+  </p>
+</header>;
 
 const FeedStatus = ({ feedState }) => {
   if (feedState === 'open') {
@@ -139,8 +148,10 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
   const quoteValidLabel = formatQuoteValidity(market?.quoteValidUntil);
   const marketAvailability = getMarketAvailabilityLabel(event, market);
   const isLegacyScoreMarket = market?.marketType === 'SECOND_HALF_SCORE';
+  const [placementError, setPlacementError] = useState('');
 
   const handleSelection = async (selectionId) => {
+    setPlacementError('');
     try {
       await axios.post('/api/event/odds', {
         eventId: event.eventId,
@@ -150,8 +161,8 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
         selectionId,
       });
       onSelectionPlaced?.();
-    } catch (error) {
-      // ignore
+    } catch {
+      setPlacementError(PLACEMENT_ERROR);
     }
   };
 
@@ -162,7 +173,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
     <div className="card-body">
       <div className="event-market-card__header">
         <div className="event-market-card__title">
-          <div className="event-market-card__name fw-semibold">{formatLiveMarketType(market.marketType)}</div>
+          <h5 className="event-market-card__name fw-semibold">{formatLiveMarketType(market.marketType)}</h5>
           <div className="event-market-meta">
             <span>Quote v{market.quoteVersion}</span>
             <span>{formatMarketStatus(market.status)}</span>
@@ -184,17 +195,22 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
 
           return <button
             aria-label={buildLiveMarketButtonLabel(event, market, selection)}
+            aria-pressed={Boolean(isSelected)}
             className={`btn product-button product-button--${uiVariant} event-market-button${selectedClass}`}
             disabled={!isSelectable}
             key={selection.selectionId}
             type="button"
             onClick={() => handleSelection(selection.selectionId)}
           >
+            {isSelected ? <span className="event-market-button__selected-cue" aria-hidden="true">✓</span> : null}
             <span>{getMarketSelectionLabel(market, selection, event)}</span>
             <strong>{selection.odds}</strong>
           </button>;
         })}
       </div>
+      {placementError ? (
+        <p className="selection-feedback" role="alert">{placementError}</p>
+      ) : null}
     </div>
   </div>;
 };
@@ -222,8 +238,8 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
               <span className="event-card__badge event-card__badge--live">LIVE</span>
               <span className="event-card__badge event-card__badge--phase">{getPhaseLabel(event.live?.phase)}</span>
             </div>
-            <h5 className="card-title mb-1">{event.name}</h5>
-            <h6 className="card-subtitle text-secondary mb-0">Kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</h6>
+            <h3 className="h5 card-title mb-1">{event.name}</h3>
+            <p className="card-subtitle text-secondary mb-0">Kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</p>
           </div>
           <div className="event-scoreboard" aria-label={`Score ${event.home ?? 'Home'} ${event.live?.homeScore ?? 0}, ${event.away ?? 'Away'} ${event.live?.awayScore ?? 0}`}>
             <div className="event-scoreboard__teams">
@@ -252,7 +268,7 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
         </div>
 
         <div className="event-card__section">
-          <div className="event-card__section-title">Latest incidents</div>
+          <h4 className="event-card__section-title">Latest incidents</h4>
           {incidents.length === 0 ? (
             <div className="event-card__empty text-secondary">Waiting for live incidents…</div>
           ) : (
@@ -265,7 +281,7 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
 
       <div className="event-card__section event-card__live-markets">
         <div className="d-flex justify-content-between align-items-center gap-2 mb-2">
-          <div className="event-card__section-title">Current markets</div>
+          <h4 className="event-card__section-title">Current markets</h4>
           <small className="text-secondary">{liveMarkets.length} markets</small>
         </div>
         {liveMarkets.length === 0 ? (
@@ -307,8 +323,8 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
             <div className="event-card__badges">
               <span className="event-card__badge event-card__badge--countdown">KICKOFF SOON</span>
             </div>
-            <h5 className="card-title mb-1">{event.name}</h5>
-            <h6 className="card-subtitle text-secondary mb-0">Scheduled kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</h6>
+            <h3 className="h5 card-title mb-1">{event.name}</h3>
+            <p className="card-subtitle text-secondary mb-0">Scheduled kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</p>
           </div>
           <div
             aria-label={`Kickoff countdown: ${countdownLabel}`}
@@ -323,7 +339,7 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
 
       {preMatchProducts.length > 0 ? (
         <div className="event-card__section event-card__countdown-products">
-          <div className="event-card__section-title">Pre-match markets</div>
+          <h4 className="event-card__section-title">Pre-match markets</h4>
           {/* Same ProductsList/click path as PreMatchEventCard: pre-match boards accept selections
               up to kickoff (enforced server-side by EventOddsClicked), independent of the new
               live-slip countdown markets below. */}
@@ -342,7 +358,7 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
       ) : null}
 
       <div className="event-card__section event-card__countdown-markets">
-        <div className="event-card__section-title">Pre-kickoff markets</div>
+        <h4 className="event-card__section-title">Pre-kickoff markets</h4>
         {countdownMarkets.length === 0 ? (
           <div className="event-card__empty text-secondary">Pre-kickoff markets opening soon…</div>
         ) : (
@@ -378,10 +394,10 @@ const RetainedFinishedEventCard = ({ event }) => {
             <div className="event-card__badges">
               <span className="event-card__badge event-card__badge--finished">FULL-TIME</span>
             </div>
-            <h5 className="card-title mb-1">{event.name}</h5>
-            <h6 className="card-subtitle text-secondary mb-0">
+            <h3 className="h5 card-title mb-1">{event.name}</h3>
+            <p className="card-subtitle text-secondary mb-0">
               Kickoff <time dateTime={kickoffValue}>{formatEventTime(kickoffValue)}</time>
-            </h6>
+            </p>
           </div>
           <div className="event-scoreboard" aria-label={`Final score ${event.home ?? 'Home'} ${event.live?.homeScore ?? 0}, ${event.away ?? 'Away'} ${event.live?.awayScore ?? 0}`}>
             <div className="event-scoreboard__teams">
@@ -398,7 +414,7 @@ const RetainedFinishedEventCard = ({ event }) => {
       </div>
 
       <div className="event-card__section event-card__finished-timeline">
-        <div className="event-card__section-title">Key moments</div>
+        <h4 className="event-card__section-title">Key moments</h4>
         {keyMoments.length > 0 ? (
           <ul className="event-incidents list-unstyled mb-0">
             {keyMoments.map((entry) => (
@@ -433,8 +449,10 @@ const PreMatchEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, ui
       <div className="event-card__badges mb-2">
         <span className="event-card__badge event-card__badge--prematch">PRE-MATCH</span>
       </div>
-      <h5 className="card-title mb-1">{event.name}</h5>
-      <h6 className="card-subtitle mb-3 text-secondary">{formatEventTime(event.time)}</h6>
+      <h3 className="h5 card-title mb-1">{event.name}</h3>
+      <p className="card-subtitle mb-3 text-secondary">
+        Kickoff <time dateTime={event.time}>{formatEventTime(event.time)}</time>
+      </p>
     </div>
     <div className="event-card__product-deck">
       <ProductsList
@@ -462,7 +480,7 @@ const NextLiveEvent = ({ event, uiVariant }) => <aside
         <span className="event-card__badge event-card__badge--live">NEXT LIVE</span>
       </div>
       <h2 className="event-next-live__title" id="next-live-event-title">Next live event</h2>
-      <div className="event-next-live__name">{event.name}</div>
+      <h3 className="event-next-live__name">{event.name}</h3>
     </div>
     <div className="event-next-live__schedule">
       <span className="text-secondary">Scheduled kickoff</span>
@@ -596,12 +614,14 @@ const HandleEventList = ({
 
   if (isLoading && eventItems.length === 0) {
     return <section className={`event-stage event-stage--${uiVariant}`}>
+      <EventStageHeader />
       <div className="card event-stage__empty card-body">Loading live events…</div>
     </section>;
   }
 
   if (eventItems.length === 0 && !visibleRetainedFinishedEvent) {
     return <section className={`event-stage event-stage--${uiVariant}`}>
+      <EventStageHeader />
       <FeedStatus feedState={feedState} />
       <div className="card event-stage__empty card-body">No events are available in the current live window.</div>
     </section>;
@@ -643,6 +663,7 @@ const HandleEventList = ({
 
   if (uiVariant === 'v3') {
     return <section className={`event-stage event-stage--${uiVariant}`}>
+      <EventStageHeader />
       <div className="event-editorial">
         <div className="event-editorial__line"></div>
         <div className="event-editorial__content">{content}</div>
@@ -650,7 +671,10 @@ const HandleEventList = ({
     </section>;
   }
 
-  return <section className={`event-stage event-stage--${uiVariant}`}>{content}</section>;
+  return <section className={`event-stage event-stage--${uiVariant}`}>
+    <EventStageHeader />
+    {content}
+  </section>;
 };
 
 export default HandleEventList;
