@@ -82,6 +82,130 @@ test('auth pages fit a mobile viewport', async ({ page }) => {
   }
 });
 
+test('expanded mobile navigation scrolls away without hiding labelled controls or route content', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  state.currentUser = null;
+  state.backofficeEvents = createBackofficeEvents();
+  const liveEvent = state.events.find(({ eventId }) => eventId === 'live-1');
+  liveEvent.home = 'Raptors Athletic Club with an Exceptionally Long Home Name';
+  liveEvent.away = 'Sharks Borough United with an Exceptionally Long Away Name';
+  liveEvent.name = `${liveEvent.home} - ${liveEvent.away}`;
+  await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const expectedNavigationLabels = [
+    'BetStan home',
+    'Standard',
+    'Compact',
+    'Spacious',
+    'Dark',
+    'Light',
+    'Events',
+    'Backoffice',
+    'Telemetry',
+    'Create account',
+    'Log in',
+  ];
+
+  for (const { path, heading } of [
+    { path: '/', heading: 'Events' },
+    { path: '/backoffice', heading: 'Backoffice' },
+    { path: '/login', heading: authCopy.login.title },
+  ]) {
+    await page.goto(`${path}?ui=v2&theme=dark`, { waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
+    const header = page.locator('.app-navbar');
+    await expect(header).toBeVisible();
+
+    const initial = await header.evaluate((navigation) => {
+      const bounds = (element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          bottom: rect.bottom,
+          height: rect.height,
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          width: rect.width,
+        };
+      };
+      const controlName = (element) => {
+        const clone = element.cloneNode(true);
+        clone.querySelectorAll('[aria-hidden="true"]').forEach((hidden) => hidden.remove());
+        return element.getAttribute('aria-label')
+          || clone.textContent.trim()
+          || element.querySelector('img')?.alt
+          || '';
+      };
+      const controls = Array.from(navigation.querySelectorAll('a')).map((element) => ({
+        ...bounds(element),
+        name: controlName(element),
+      }));
+      const containers = [
+        navigation,
+        navigation.querySelector('.container-fluid'),
+        navigation.querySelector('.app-navbar__content'),
+        navigation.querySelector('.app-navbar__workspace'),
+        ...navigation.querySelectorAll('.presentation-control, .presentation-control__options, .app-navbar__links'),
+      ].filter(Boolean);
+
+      return {
+        bounds: bounds(navigation),
+        controls,
+        overflowingContainers: containers
+          .filter((element) => element.scrollWidth > element.clientWidth + 1)
+          .map((element) => element.className),
+        position: getComputedStyle(navigation).position,
+        documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+
+    expect(initial.position).toBe('static');
+    expect(initial.documentOverflow).toBeLessThanOrEqual(1);
+    expect(initial.overflowingContainers).toEqual([]);
+    expect(initial.controls.map(({ name }) => name)).toEqual(expectedNavigationLabels);
+    expect(initial.controls.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
+    expect(initial.controls.every(({ left, right }) => left >= -1 && right <= 391)).toBe(true);
+
+    await page.evaluate((headerHeight) => {
+      window.scrollTo(0, Math.ceil(headerHeight + 16));
+    }, initial.bounds.height);
+    await expect.poll(() => page.evaluate(() => window.scrollY))
+      .toBeGreaterThan(initial.bounds.height);
+
+    const scrolled = await page.locator('main').evaluate((main) => {
+      const navigation = document.querySelector('.app-navbar');
+      const headerBounds = navigation.getBoundingClientRect();
+      const mainBounds = main.getBoundingClientRect();
+      return {
+        headerBottom: headerBounds.bottom,
+        headerPosition: getComputedStyle(navigation).position,
+        mainTop: mainBounds.top,
+        mainVisibleHeight: Math.max(
+          0,
+          Math.min(window.innerHeight, mainBounds.bottom) - Math.max(0, mainBounds.top),
+        ),
+        navigationAtViewportTop: Boolean(
+          document.elementFromPoint(window.innerWidth / 2, 1)?.closest('.app-navbar')
+        ),
+      };
+    });
+
+    expect(scrolled.headerPosition).toBe('static');
+    expect(scrolled.headerBottom).toBeLessThanOrEqual(0);
+    expect(scrolled.navigationAtViewportTop).toBe(false);
+    expect(scrolled.mainTop).toBeLessThan(32);
+    expect(scrolled.mainVisibleHeight).toBeGreaterThan(300);
+
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(header).toBeVisible();
+    for (const label of expectedNavigationLabels) {
+      await expect(header.getByRole('link', { name: label, exact: true })).toBeVisible();
+    }
+  }
+});
+
 test('Match Desk shell keeps semantic order and switches exactly at 1400px', async ({ page }) => {
   await prepareShell(page);
 

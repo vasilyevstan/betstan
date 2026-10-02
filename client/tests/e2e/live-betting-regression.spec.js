@@ -612,6 +612,141 @@ const hasInternalOverflow = (page, selector) => page.evaluate((cardSelector) => 
   Array.from(document.querySelectorAll(cardSelector)).some((element) => element.scrollWidth > element.clientWidth + 1)
 ), selector);
 
+const getMobileEventIntegrity = (page, eventName) => page.evaluate((name) => {
+  const article = Array.from(document.querySelectorAll('article[aria-label]'))
+    .find((candidate) => candidate.getAttribute('aria-label') === name);
+  const stage = document.querySelector('.event-stage');
+  const box = (element) => {
+    const bounds = element.getBoundingClientRect();
+    return {
+      bottom: bounds.bottom,
+      height: bounds.height,
+      left: bounds.left,
+      right: bounds.right,
+      top: bounds.top,
+      width: bounds.width,
+    };
+  };
+  const intersects = (left, right) => (
+    left.left < right.right - 0.5
+    && right.left < left.right - 0.5
+    && left.top < right.bottom - 0.5
+    && right.top < left.bottom - 0.5
+  );
+  const containerSelector = [
+    '.event-stage',
+    '.event-group',
+    '.event-card',
+    '.event-card > .card-body',
+    '.event-market-grid',
+    '.event-market-card',
+    '.event-market-card > .card-body',
+    '.event-market-buttons',
+    '.event-market-button',
+    '.product-block',
+    '.product-1x2-grid',
+    '.product-cs-grid',
+  ].join(', ');
+  const overflowingContainers = Array.from(document.querySelectorAll(containerSelector))
+    .filter((element) => element.scrollWidth > element.clientWidth + 1)
+    .map((element) => element.className);
+  const controls = Array.from(stage.querySelectorAll('button'))
+    .filter((element) => element.checkVisibility())
+    .map(box);
+  const siblingIntersections = [];
+  for (const group of document.querySelectorAll(
+    '.event-group > .row, .event-market-grid, .event-market-buttons, .product-1x2-grid, .product-cs-grid'
+  )) {
+    const children = Array.from(group.children)
+      .filter((element) => element.checkVisibility())
+      .map((element) => ({ element, bounds: box(element) }));
+    children.forEach((left, index) => children.slice(index + 1).forEach((right) => {
+      if (intersects(left.bounds, right.bounds)) {
+        siblingIntersections.push(`${left.element.className} <> ${right.element.className}`);
+      }
+    }));
+  }
+  const articleBounds = box(article);
+  const textFailures = Array.from(article.querySelectorAll(
+    'h3, h4, h5, p, time, .event-card__badge, .event-scoreboard__teams > span, .event-scoreboard__score > span, .event-market-meta > span, .event-market-status, .product-button__label, .product-button__value, .event-market-button > span, .event-market-button > strong'
+  )).filter((element) => element.checkVisibility() && element.textContent.trim())
+    .filter((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return Array.from(range.getClientRects()).some((bounds) => (
+        bounds.width <= 0
+        || bounds.height <= 0
+        || bounds.left < articleBounds.left - 1
+        || bounds.right > articleBounds.right + 1
+        || bounds.top < articleBounds.top - 1
+        || bounds.bottom > articleBounds.bottom + 1
+      ));
+    }).map((element) => `${element.className || element.tagName}: ${element.textContent.trim()}`);
+
+  return {
+    controls,
+    documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    overflowingContainers,
+    siblingIntersections,
+    stageOverflow: stage.scrollWidth - stage.clientWidth,
+    textFailures,
+  };
+}, eventName);
+
+const getEventTypographyMetrics = (page) => page.evaluate(() => {
+  const measure = (selector) => Array.from(document.querySelectorAll(selector))
+    .filter((element) => element.checkVisibility())
+    .map((element) => {
+      const style = getComputedStyle(element);
+      const fontSize = Number.parseFloat(style.fontSize);
+      return {
+        className: element.className || element.tagName,
+        fontSize,
+        lineHeight: style.lineHeight === 'normal'
+          ? fontSize * 1.2
+          : Number.parseFloat(style.lineHeight),
+        text: element.textContent.trim(),
+      };
+    });
+  const supporting = measure([
+    '.event-stage__eyebrow',
+    '.event-card__badge',
+    '.event-market-meta',
+    '.event-market-status',
+    '.event-scoreboard__teams',
+    '.event-progress__labels',
+    '.event-card__section-title',
+    '.slip-board__title',
+    '.slip-board__meta',
+    '.slip-row-card__meta',
+    '.slip-row-card__selection',
+    '.stat-row--header > *',
+  ].join(', '));
+  const actionable = measure([
+    '.presentation-option',
+    '.app-nav-link',
+    '.product-button__label',
+    '.event-market-button',
+    '.slip-action-primary',
+    '.slip-action-secondary',
+  ].join(', '));
+  const score = measure('.event-scoreboard__score')[0];
+  const numeric = Array.from(document.querySelectorAll([
+    '.event-scoreboard__score',
+    '.product-button__value',
+    '.event-market-button strong',
+    '.stat-row__wager',
+    '.slip-row-card__odds',
+    '.slip-board__summary',
+    '.slip-board__actions input',
+  ].join(', '))).filter((element) => element.checkVisibility()).map((element) => ({
+    className: element.className || element.tagName,
+    fontVariantNumeric: getComputedStyle(element).fontVariantNumeric,
+  }));
+
+  return { actionable, numeric, score, supporting };
+});
+
 const buildSiblingPreMatchEvent = (eventId, home, away, time) => ({
   eventId,
   name: `${home} - ${away}`,
@@ -1913,6 +2048,64 @@ test('live betting layout stays usable on a mobile v3 viewport', async ({ page }
   await expect(getBoard(page, BET_KIND.LIVE)).toBeVisible();
   await expect(getBoard(page, BET_KIND.PRE_MATCH)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('mobile long-name Events keep typography floors, tabular numbers, and collision-free controls in every profile and theme', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  const liveFeed = await installFakeEventSource(page);
+  const liveEvent = state.events.find(({ eventId }) => eventId === 'live-1');
+  const longHome = 'Raptors Athletic Club with an Exceptionally Long Home Name';
+  const longAway = 'Sharks Borough United with an Exceptionally Long Away Name';
+  const longEventName = `${longHome} - ${longAway}`;
+  liveEvent.home = longHome;
+  liveEvent.away = longAway;
+  liveEvent.name = longEventName;
+  await installAppApiMocks(page, state);
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  for (const uiVariant of UI_VARIANTS) {
+    for (const theme of THEMES) {
+      await page.goto(`/?ui=${uiVariant}&theme=${theme}`, { waitUntil: 'domcontentloaded' });
+      await liveFeed.waitForSource();
+      await liveFeed.openAll();
+
+      const longArticle = page.getByRole('article', { name: longEventName });
+      await expect(longArticle).toBeVisible();
+      await expect(longArticle.getByRole('heading', { name: longEventName })).toHaveText(longEventName);
+      if (await page.getByLabel('Wager for PRE-MATCH SLIP').count() === 0) {
+        await page.getByRole('button', { name: state.fixtures.preMatchSelectionLabel }).click();
+      }
+      await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toBeVisible();
+
+      const integrity = await getMobileEventIntegrity(page, longEventName);
+      expect(integrity.documentOverflow).toBeLessThanOrEqual(1);
+      expect(integrity.stageOverflow).toBeLessThanOrEqual(1);
+      expect(integrity.overflowingContainers).toEqual([]);
+      expect(integrity.siblingIntersections).toEqual([]);
+      expect(integrity.textFailures).toEqual([]);
+      expect(integrity.controls.length).toBeGreaterThan(0);
+      expect(integrity.controls.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
+      expect(integrity.controls.every(({ left, right }) => left >= -1 && right <= 391)).toBe(true);
+
+      const typography = await getEventTypographyMetrics(page);
+      expect(typography.supporting.length).toBeGreaterThan(0);
+      expect(typography.supporting.filter(({ fontSize, lineHeight }) => (
+        fontSize < 12 || lineHeight < 16
+      ))).toEqual([]);
+      expect(typography.actionable.length).toBeGreaterThan(0);
+      expect(typography.actionable.filter(({ fontSize, lineHeight }) => (
+        fontSize < 13 || lineHeight < 16
+      ))).toEqual([]);
+      expect(typography.score.fontSize).toBeGreaterThanOrEqual(27);
+      expect(typography.score.fontSize).toBeLessThanOrEqual(29);
+      expect(typography.score.lineHeight).toBeGreaterThanOrEqual(31);
+      expect(typography.score.lineHeight).toBeLessThanOrEqual(33);
+      expect(typography.numeric.length).toBeGreaterThan(0);
+      expect(typography.numeric.every(({ fontVariantNumeric }) => (
+        fontVariantNumeric.includes('tabular-nums')
+      ))).toBe(true);
+    }
+  }
 });
 
 test('a recently finished event groups under "Recently finished" (not "Live now") with its scheduled kickoff time, across representative widths', async ({ page }) => {

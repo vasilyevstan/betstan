@@ -19,6 +19,9 @@
   --density-card-padding: 1rem;
   --density-gap: 0.75rem;
   --control-target: 44px;
+  --font-size-action: 0.8125rem;
+  --font-size-meta: 0.75rem;
+  --line-height-compact: 1rem;
   --transition-duration: 150ms;
   --shadow-elevated: none;
 }
@@ -67,6 +70,39 @@ body {
 
 .text-info {
   color: var(--info) !important;
+}
+
+.event-countdown__value,
+.event-scoreboard__score,
+.event-progress__labels,
+.event-market-meta,
+.product-button__value,
+.event-market-button strong,
+.stat-row__rank,
+.stat-row__count,
+.stat-row__wager,
+.slip-row-card__odds,
+.slip-board__summary,
+.slip-board__actions input,
+.my-bets-placed,
+.my-bets-pick,
+.my-bets-position,
+.my-bets-event-time,
+.my-bets-row [data-label='Odds / Outcome'],
+.my-bets-footer,
+.cash-back-amount input,
+.cash-back-pending-values,
+.cash-back-values dd,
+.cash-back-receipts time,
+.cash-back-receipt__values dd,
+.backoffice-kickoff,
+.backoffice-scores input,
+.telemetry-page__generated,
+.telemetry-metric__day,
+.telemetry-metric__date,
+.telemetry-metric__value,
+.telemetry-metric__tooltip {
+  font-variant-numeric: tabular-nums;
 }
 
 .app-shell .form-control,
@@ -175,7 +211,7 @@ body {
   font-size: 0.78rem;
   font-weight: 750;
   letter-spacing: 0.1em;
-  line-height: 1.25;
+  line-height: var(--line-height-compact);
   text-transform: uppercase;
 }
 
@@ -240,6 +276,11 @@ body {
   gap: 0.75rem;
 }
 
+.app-navbar .navbar-brand {
+  min-width: var(--control-target);
+  min-height: var(--control-target);
+}
+
 .brand-wordmark {
   display: block;
   width: auto;
@@ -283,9 +324,10 @@ body {
 .presentation-control__label {
   padding-inline: 0.6rem;
   color: var(--text-subtle);
-  font-size: 0.68rem;
+  font-size: var(--font-size-meta);
   font-weight: 750;
   letter-spacing: 0.08em;
+  line-height: var(--line-height-compact);
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -304,9 +346,9 @@ body {
   padding: 0.45rem 0.65rem;
   border-inline-start: 1px solid var(--border-subtle);
   color: var(--text-main);
-  font-size: 0.76rem;
+  font-size: var(--font-size-action);
   font-weight: 650;
-  line-height: 1.2;
+  line-height: var(--line-height-compact);
   text-decoration: none;
   white-space: nowrap;
   transition:
@@ -347,6 +389,7 @@ body {
   color: var(--text-main);
   font-size: 0.82rem;
   font-weight: 680;
+  line-height: var(--line-height-compact);
   text-decoration: none;
   transition:
     color var(--transition-duration) ease,
@@ -413,6 +456,17 @@ body {
     flex: 1 1 100%;
     align-items: stretch;
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .app-navbar.sticky-top {
+    position: static !important;
+    top: auto;
+  }
+
+  .app-shell__main {
+    scroll-margin-top: 1rem;
   }
 }
 
@@ -489,9 +543,10 @@ body {
 .event-stage__eyebrow {
   margin: 0 0 0.2rem;
   color: var(--accent);
-  font-size: 0.72rem;
+  font-size: var(--font-size-meta);
   font-weight: 750;
   letter-spacing: 0.1em;
+  line-height: var(--line-height-compact);
   text-transform: uppercase;
 }
 
@@ -562,7 +617,7 @@ body {
   color: var(--text-main);
   font-size: 0.78rem;
   font-weight: 850;
-  line-height: 1;
+  line-height: var(--line-height-compact);
 }
 
 .selection-feedback {
@@ -599,9 +654,9 @@ body {
   flex: 1 1 auto;
   align-items: center;
   justify-content: center;
-  font-size: 0.7rem;
+  font-size: var(--font-size-action);
   font-weight: 600;
-  line-height: 1.2;
+  line-height: var(--line-height-compact);
   letter-spacing: 0.02em;
   text-transform: uppercase;
   opacity: 0.8;
@@ -865,6 +920,7 @@ body {
 .stat-row__rank {
   font-variant-numeric: tabular-nums;
   font-size: 0.78rem;
+  line-height: var(--line-height-compact);
   opacity: 0.45;
   text-align: center;
 }
@@ -883,10 +939,15 @@ body {
 }
 
 .stat-row--header {
-  font-size: 0.7rem;
+  font-size: var(--font-size-meta);
+  line-height: var(--line-height-compact);
   letter-spacing: 0.11em;
   text-transform: uppercase;
   opacity: 0.6;
+}
+
+.stat-row--header > * {
+  line-height: var(--line-height-compact);
 }
 
 .stat-row--header .stat-row__wager,
@@ -1060,9 +1121,10 @@ body {
 
 .my-bets-filter-label {
   min-width: 4.5rem;
-  font-size: 0.7rem;
+  font-size: var(--font-size-meta);
   font-weight: 700;
   letter-spacing: 0.08em;
+  line-height: var(--line-height-compact);
   text-transform: uppercase;
   color: var(--text-subtle);
 }
@@ -1097,7 +1159,7 @@ body {
 
 .my-bets-event-time {
   margin-top: 0.12rem;
-  font-size: 0.74rem;
+  font-size: var(--font-size-meta);
   color: var(--text-subtle);
 }
 
@@ -1996,7 +2058,8 @@ body {
 }
 
 .navbar-meta {
-  font-size: 0.72rem;
+  font-size: var(--font-size-meta);
+  line-height: var(--line-height-compact);
 }
 
 .user-chip {
@@ -2018,16 +2081,17 @@ body {
   border-radius: 50%;
   background: color-mix(in srgb, var(--accent) 80%, transparent);
   color: var(--accent-contrast);
-  font-size: 0.68rem;
+  font-size: var(--font-size-meta);
   font-weight: 700;
   letter-spacing: 0;
-  line-height: 1;
+  line-height: var(--line-height-compact);
   flex-shrink: 0;
 }
 
 .user-chip__name {
-  font-size: 0.72rem;
+  font-size: var(--font-size-meta);
   font-weight: 500;
+  line-height: var(--line-height-compact);
   color: color-mix(in srgb, var(--accent) 80%, currentColor);
   letter-spacing: 0.01em;
   max-width: 8rem;
@@ -2091,6 +2155,15 @@ body {
   margin-bottom: 1rem;
 }
 
+.event-group > .row {
+  --bs-gutter-x: 0.75rem;
+  margin-inline: 0;
+}
+
+.event-group > .row > :only-child {
+  padding-inline: 0;
+}
+
 .event-group__heading {
   display: flex;
   justify-content: space-between;
@@ -2134,9 +2207,10 @@ body {
   padding: 0.15rem 0.55rem;
   border: 1px solid transparent;
   border-radius: var(--radius-pill);
-  font-size: 0.68rem;
+  font-size: var(--font-size-meta);
   font-weight: 700;
   letter-spacing: 0.08em;
+  line-height: var(--line-height-compact);
   text-transform: uppercase;
 }
 
@@ -2217,8 +2291,9 @@ body {
 .event-countdown__eyebrow {
   display: block;
   margin-bottom: 0.2rem;
-  font-size: 0.72rem;
+  font-size: var(--font-size-meta);
   letter-spacing: 0.06em;
+  line-height: var(--line-height-compact);
   text-transform: uppercase;
   color: var(--text-subtle);
 }
@@ -2291,7 +2366,8 @@ body {
   display: grid;
   gap: 0.2rem;
   margin-bottom: 0.45rem;
-  font-size: 0.76rem;
+  font-size: var(--font-size-meta);
+  line-height: var(--line-height-compact);
   color: var(--text-subtle);
 }
 
@@ -2299,8 +2375,9 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 1.35rem;
+  font-size: 1.75rem;
   font-weight: 800;
+  line-height: 2rem;
 }
 
 .event-progress {
@@ -2359,6 +2436,7 @@ body {
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.08em;
+  line-height: var(--line-height-compact);
   text-transform: uppercase;
   color: var(--text-subtle);
 }
@@ -2484,7 +2562,8 @@ body {
 .slip-row-card__moderation-meta,
 .my-bets-market-meta,
 .slip-board__meta {
-  font-size: 0.72rem;
+  font-size: var(--font-size-meta);
+  line-height: var(--line-height-compact);
   color: var(--text-subtle);
 }
 
@@ -2590,6 +2669,21 @@ body {
       minmax(20rem, 1.2fr);
   }
 
+  .event-card--countdown .event-market-card__header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+  }
+
+  .event-card--countdown .event-market-card__title {
+    flex: 0 0 auto;
+    width: 100%;
+  }
+
+  .event-card--countdown .event-market-status {
+    align-self: flex-start;
+  }
+
   .event-card__countdown-markets {
     grid-column: auto;
     grid-row: auto;
@@ -2671,7 +2765,7 @@ body {
 
 .my-bets-outcome {
   margin-top: 0.12rem;
-  font-size: 0.72rem;
+  font-size: var(--font-size-meta);
   color: var(--text-subtle);
 }
 
@@ -3065,7 +3159,8 @@ body {
 .telemetry-metric__date {
   /* Date identities use the shared normal-text role in both themes. */
   color: var(--text-main);
-  font-size: 0.72rem;
+  font-size: var(--font-size-action);
+  line-height: var(--line-height-compact);
 }
 
 .telemetry-metric__value {
