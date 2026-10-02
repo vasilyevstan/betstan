@@ -776,7 +776,42 @@ const expectStableCardStates = async (page, state, label, ordinaryDesktop = fals
   await expect(first.locator('.telemetry-metric__generated time')).toHaveAttribute('datetime', detail.generatedAt);
   await check('ready');
   if (ordinaryDesktop) {
-    expect(await first.locator('.telemetry-metric__viewport').evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+    const viewport = first.locator('.telemetry-metric__viewport');
+    const region = first.getByRole('region', { name: new RegExp(`${day} UTC`) });
+    await expect(region).toHaveAttribute('tabindex', '0');
+    await expectMetricContentsInsideCards(first);
+    const scrollFrame = await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+      return {
+        clientHeight: element.clientHeight,
+        overflow: element.scrollHeight - element.clientHeight,
+      };
+    });
+    expect(scrollFrame.overflow, `${label} bounded hourly scroll`).toBeLessThanOrEqual(
+      scrollFrame.clientHeight
+    );
+    if (scrollFrame.overflow > 1) {
+      await region.focus();
+      await expect(region).toBeFocused();
+      await page.keyboard.press('PageDown');
+      await expect.poll(() => region.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(0);
+    }
+    const reachability = await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      const frame = element.getBoundingClientRect();
+      const last = element.lastElementChild?.getBoundingClientRect();
+      const result = {
+        lastContentVisible: Boolean(last)
+          && last.bottom <= frame.top + element.clientTop + element.clientHeight + 1,
+        maximumScroll: element.scrollTop,
+        overflow: element.scrollHeight - element.clientHeight,
+      };
+      element.scrollTop = 0;
+      return result;
+    });
+    expect(Math.abs(reachability.maximumScroll - reachability.overflow)).toBeLessThanOrEqual(1);
+    expect(reachability.lastContentVisible).toBe(true);
   }
   await second.locator('.telemetry-metric__date-button').first().press('Enter');
   await expect(second.locator('rect')).toHaveCount(24);
@@ -1242,12 +1277,11 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
   await origin.evaluate((element) => {
     const card = element.closest('.telemetry-metric');
     const graph = card.querySelector('svg');
-    const headerBottom = document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0;
     const graphBottom = graph.getBoundingClientRect().bottom + window.scrollY;
-    // Keep the origin visible below the always-labelled sticky navigation while
-    // moving the graph anchor behind it, forcing the bounded button fallback.
+    // The mobile header scrolls away. Move the graph above the viewport while
+    // keeping the later date controls visible, forcing the bounded button fallback.
     window.scrollTo({
-      top: graphBottom - Math.max(0, headerBottom - 20),
+      top: graphBottom + 8,
       behavior: 'instant',
     });
   });
@@ -1257,15 +1291,20 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
   }));
   await expect.poll(() => first.locator('svg').evaluate((element) => (
     element.getBoundingClientRect().bottom
-      - (document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0)
   ))).toBeLessThan(0);
-  const occlusion = await first.locator('svg').evaluate((element) => ({
+  const viewportPlacement = await first.locator('svg').evaluate((element) => ({
     graphBottom: element.getBoundingClientRect().bottom,
     headerBottom: document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0,
+    headerPosition: getComputedStyle(document.querySelector('.app-navbar')).position,
+    viewportHeight: window.innerHeight,
   }));
-  expect(occlusion.graphBottom).toBeLessThan(occlusion.headerBottom);
+  expect(viewportPlacement.headerPosition).toBe('static');
+  expect(viewportPlacement.headerBottom).toBeLessThanOrEqual(0);
+  expect(viewportPlacement.graphBottom).toBeLessThan(0);
   const originBeforeFocus = await origin.boundingBox();
-  expect(originBeforeFocus.y).toBeGreaterThanOrEqual(occlusion.headerBottom);
+  expect(originBeforeFocus.y).toBeGreaterThanOrEqual(0);
+  expect(originBeforeFocus.y + originBeforeFocus.height)
+    .toBeLessThanOrEqual(viewportPlacement.viewportHeight);
   await origin.focus();
   await expectTooltipGeometry(page, first, origin, '2026-09-10', 14, 'already-focused');
   const fallback = await first.getByRole('tooltip').boundingBox();

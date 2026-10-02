@@ -7,19 +7,28 @@ const HandleLogOut = ({callback}) => {
   const location = useLocation();
   const [status, setStatus] = useState('pending');
   const callbackRef = useRef(callback);
+  const navigateRef = useRef(navigate);
+  const searchRef = useRef(location.search);
+  const requestPendingRef = useRef(false);
   callbackRef.current = callback;
+  navigateRef.current = navigate;
+  searchRef.current = location.search;
 
   const doRequest = useCallback(async () => {
+    if (requestPendingRef.current) return;
+    requestPendingRef.current = true;
     setStatus('pending');
     try {
       await axios.post('/api/auth/logout');
       setStatus('complete');
       callbackRef.current?.();
-      navigate({ pathname: '/', search: location.search });
+      navigateRef.current({ pathname: '/', search: searchRef.current });
     } catch {
       setStatus('error');
+    } finally {
+      requestPendingRef.current = false;
     }
-  }, [location.search, navigate]);
+  }, []);
 
   useEffect(() => {
     void doRequest();
