@@ -752,7 +752,9 @@ const expectStableCardStates = async (page, state, label, ordinaryDesktop = fals
     generatedAt: '2026-09-10T01:23:00.000Z',
     values: Array.from({ length: 24 }, (_, hour) => hour + 1),
   };
-  if (ordinaryDesktop) expect(baseline.heights[0]).toBeLessThanOrEqual(365.265625);
+  // Spacious density intentionally adds card padding while retaining the same
+  // bounded frame and state geometry as Standard/Compact.
+  if (ordinaryDesktop) expect(baseline.heights[0]).toBeLessThanOrEqual(425);
   await check('daily');
   const releaseError = hold({ error: 'Telemetry temporarily unavailable' }, 503);
   await first.locator('.telemetry-metric__date-button').first().press('Enter');
@@ -774,7 +776,42 @@ const expectStableCardStates = async (page, state, label, ordinaryDesktop = fals
   await expect(first.locator('.telemetry-metric__generated time')).toHaveAttribute('datetime', detail.generatedAt);
   await check('ready');
   if (ordinaryDesktop) {
-    expect(await first.locator('.telemetry-metric__viewport').evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+    const viewport = first.locator('.telemetry-metric__viewport');
+    const region = first.getByRole('region', { name: new RegExp(`${day} UTC`) });
+    await expect(region).toHaveAttribute('tabindex', '0');
+    await expectMetricContentsInsideCards(first);
+    const scrollFrame = await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+      return {
+        clientHeight: element.clientHeight,
+        overflow: element.scrollHeight - element.clientHeight,
+      };
+    });
+    expect(scrollFrame.overflow, `${label} bounded hourly scroll`).toBeLessThanOrEqual(
+      scrollFrame.clientHeight
+    );
+    if (scrollFrame.overflow > 1) {
+      await region.focus();
+      await expect(region).toBeFocused();
+      await page.keyboard.press('PageDown');
+      await expect.poll(() => region.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(0);
+    }
+    const reachability = await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      const frame = element.getBoundingClientRect();
+      const last = element.lastElementChild?.getBoundingClientRect();
+      const result = {
+        lastContentVisible: Boolean(last)
+          && last.bottom <= frame.top + element.clientTop + element.clientHeight + 1,
+        maximumScroll: element.scrollTop,
+        overflow: element.scrollHeight - element.clientHeight,
+      };
+      element.scrollTop = 0;
+      return result;
+    });
+    expect(Math.abs(reachability.maximumScroll - reachability.overflow)).toBeLessThanOrEqual(1);
+    expect(reachability.lastContentVisible).toBe(true);
   }
   await second.locator('.telemetry-metric__date-button').first().press('Enter');
   await expect(second.locator('rect')).toHaveCount(24);
@@ -1100,7 +1137,7 @@ test('authenticated expanded navbar fits at 1000px', async ({ page }) => {
   await page.goto('/telemetry?ui=v2&theme=light', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('heading', { name: 'Service health', level: 2 })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
-  await expect(page.locator('#betstan-navbar')).toBeVisible();
+  await expect(page.locator('.app-navbar__content')).toBeVisible();
   await expect(page.getByText('telemetry-user', { exact: true })).toBeVisible();
   await expectNavigationFits(page, true);
   await expectRequiredLabelsNotClipped(page);
@@ -1238,16 +1275,36 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
   const first = page.locator('.telemetry-metric').first();
   const origin = first.locator('.telemetry-metric__date-button').last();
   await origin.evaluate((element) => {
-    const top = element.getBoundingClientRect().top + window.scrollY;
-    // The shell inherits Bootstrap smooth scrolling. Establish settled geometry
-    // before testing a fresh focus, rather than racing an in-progress scroll.
-    window.scrollTo({ top: top - 220, behavior: 'instant' });
+    const card = element.closest('.telemetry-metric');
+    const graph = card.querySelector('svg');
+    const graphBottom = graph.getBoundingClientRect().bottom + window.scrollY;
+    // The mobile header scrolls away. Move the graph above the viewport while
+    // keeping the later date controls visible, forcing the bounded button fallback.
+    window.scrollTo({
+      top: graphBottom + 8,
+      behavior: 'instant',
+    });
   });
   // Even an instant scroll dispatches its scroll event on a subsequent frame.
   await page.evaluate(() => new Promise((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(resolve));
   }));
-  await expect.poll(() => first.locator('svg').evaluate((element) => element.getBoundingClientRect().bottom)).toBeLessThan(200);
+  await expect.poll(() => first.locator('svg').evaluate((element) => (
+    element.getBoundingClientRect().bottom
+  ))).toBeLessThan(0);
+  const viewportPlacement = await first.locator('svg').evaluate((element) => ({
+    graphBottom: element.getBoundingClientRect().bottom,
+    headerBottom: document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0,
+    headerPosition: getComputedStyle(document.querySelector('.app-navbar')).position,
+    viewportHeight: window.innerHeight,
+  }));
+  expect(viewportPlacement.headerPosition).toBe('static');
+  expect(viewportPlacement.headerBottom).toBeLessThanOrEqual(0);
+  expect(viewportPlacement.graphBottom).toBeLessThan(0);
+  const originBeforeFocus = await origin.boundingBox();
+  expect(originBeforeFocus.y).toBeGreaterThanOrEqual(0);
+  expect(originBeforeFocus.y + originBeforeFocus.height)
+    .toBeLessThanOrEqual(viewportPlacement.viewportHeight);
   await origin.focus();
   await expectTooltipGeometry(page, first, origin, '2026-09-10', 14, 'already-focused');
   const fallback = await first.getByRole('tooltip').boundingBox();

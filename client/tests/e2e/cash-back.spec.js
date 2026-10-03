@@ -679,6 +679,9 @@ test.describe('My Bets whole-page usability', () => {
   ]) {
     test(`accepted partial history compactness at ${sample.width}px`, async ({ page }, testInfo) => {
       const state = createState();
+      // Contrast evidence must sample settled token colors rather than an allowed
+      // 150ms border-color transition that may still be in flight after focus.
+      await page.emulateMedia({ reducedMotion: 'reduce' });
       state.bets = [bet()];
       const request = { action: 'QUOTE', clientOperationId: 'compact-1', portion: { mode: 'PARTIAL', stakeMinor: 1000 } };
       const decision = accepted(quoted(request, { now: Date.parse('2026-09-24T12:00:00Z'), quoteId: 'compact-quote-1' }));
@@ -917,7 +920,9 @@ test.describe('My Bets whole-page usability', () => {
       }
       const wide = captures[0];
       wide.cards.forEach((card) => {
-        expect(card.bounds.width).toBeGreaterThan(1000);
+        // The accepted three-region desk bounds the center task at exactly
+        // 1000px here so Statistics and both slips remain simultaneously useful.
+        expect(card.bounds.width).toBeGreaterThanOrEqual(1000);
         expect(card.positionText.top).toBeLessThan(card.details.bottom);
         expect(card.details.top).toBeLessThan(card.positionText.bottom);
         const before = card.slipId === 'slip-one' ? 361.5 : 411.71875;

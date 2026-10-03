@@ -1,20 +1,29 @@
-import React  from "react";
+import React from "react";
 import { Link, useLocation } from 'react-router-dom';
 import getRouteIdentity from './routeIdentity';
 
 const Header = ({ currentUser, uiVariant, theme }) => {
     const location = useLocation();
     const routeIdentity = getRouteIdentity(location.pathname);
+    const variantOptions = [
+       { value: 'v1', label: 'Standard' },
+       { value: 'v2', label: 'Compact' },
+       { value: 'v3', label: 'Spacious' },
+    ];
     const themeOptions = ['dark', 'light'];
-    const isV2 = uiVariant === 'v2';
+    const explicitRouteIdentities = new Set([
+       '/backoffice', '/bets', '/login', '/logout', '/signup', '/telemetry',
+    ]);
+    const isEventsRoute = routeIdentity === '/' || !explicitRouteIdentities.has(routeIdentity);
 
     const links = [
-       { label: 'Backoffice', href: '/backoffice', icon: '/icons/backoffice.svg' },
-       { label: 'Telemetry', href: '/telemetry', icon: '/icons/telemetry.svg' },
-       !currentUser && { label: 'Create account', href: '/signup', icon: '/icons/signup.svg' },
-       !currentUser && { label: 'Log in', href: '/login', icon: '/icons/login.svg', kind: 'login' },
-       currentUser && { label: 'My bets', href: '/bets', icon: '/icons/bets.svg' },
-       currentUser && { label: 'Log out', href: '/logout', icon: '/icons/logout.svg' }
+       { label: 'Events', href: '/', current: isEventsRoute },
+       { label: 'Backoffice', href: '/backoffice' },
+       { label: 'Telemetry', href: '/telemetry' },
+       !currentUser && { label: 'Create account', href: '/signup' },
+       !currentUser && { label: 'Log in', href: '/login', kind: 'primary' },
+       currentUser && { label: 'My bets', href: '/bets' },
+       currentUser && { label: 'Log out', href: '/logout' }
      ]
      .filter(Boolean);
 
@@ -45,20 +54,24 @@ const Header = ({ currentUser, uiVariant, theme }) => {
        pathname: location.pathname,
        search: buildSearch({ theme: nextTheme }),
     });
+    const variantLink = (nextVariant) => ({
+       pathname: location.pathname,
+       search: buildSearch({ ui: nextVariant }),
+    });
     const brandSource = theme === 'dark'
-        ? (isV2 ? '/brand/betstan-v2-mark-dark.svg' : '/brand/betstan-wordmark-dark.svg')
-        : (isV2 ? '/brand/betstan-v2-mark-light.svg' : '/brand/betstan-wordmark-light.svg');
+        ? '/brand/betstan-wordmark-dark.svg'
+        : '/brand/betstan-wordmark-light.svg';
 
-    return <nav className={`navbar navbar-expand-lg sticky-top app-navbar${isV2 ? ' app-navbar--v2' : ''} ${theme === 'light' ? 'navbar-light' : 'navbar-dark'}`}> 
+    return <nav
+       aria-label="Primary navigation"
+       className={`navbar sticky-top app-navbar ${theme === 'light' ? 'navbar-light' : 'navbar-dark'}`}
+    >
        <div className="container-fluid">
            <Link className="navbar-brand mb-0 fw-semibold d-flex align-items-center gap-2" to={logoLink}>
-               <img className={`brand-wordmark${isV2 ? ' brand-wordmark--v2' : ''}`} src={brandSource} alt="BetStan" />
+               <img className="brand-wordmark" src={brandSource} alt="BetStan home" />
            </Link>
-           <button className="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#betstan-navbar" aria-controls="betstan-navbar" aria-expanded="false" aria-label="Toggle navigation">
-               <span className="navbar-toggler-icon"></span>
-           </button>
-           <div className="collapse navbar-collapse justify-content-between" id="betstan-navbar">
-               <div className="py-2 py-lg-0 navbar-meta">
+           <div className="app-navbar__content">
+               <div className="navbar-meta">
                    {currentUser && (
                        <div className="user-chip" title={currentUser.email}>
                            <span className="user-chip__avatar">{initial}</span>
@@ -66,46 +79,50 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                        </div>
                    )}
                </div>
-               <div className="d-flex flex-column flex-lg-row align-items-lg-center gap-2">
-                   <div className="btn-group ui-switcher" role="group" aria-label="Theme switcher">
+               <div className="app-navbar__workspace">
+                   <div className="presentation-control" role="group" aria-label="Layout">
+                       <span className="presentation-control__label">Layout</span>
+                       <div className="presentation-control__options">
+                           {variantOptions.map(({ value, label }) => (
+                               <Link
+                                   aria-current={uiVariant === value ? 'true' : undefined}
+                                   className={`presentation-option${uiVariant === value ? ' presentation-option--active' : ''}`}
+                                   key={value}
+                                   to={variantLink(value)}
+                               >
+                                   {uiVariant === value ? <span className="state-mark" aria-hidden="true" /> : null}
+                                   {label}
+                               </Link>
+                           ))}
+                       </div>
+                   </div>
+                   <div className="presentation-control" role="group" aria-label="Theme">
+                       <span className="presentation-control__label">Theme</span>
+                       <div className="presentation-control__options">
                        {themeOptions.map((themeOption) => (
                            <Link
+                               aria-current={theme === themeOption ? 'true' : undefined}
                                key={themeOption}
                                to={themeLink(themeOption)}
-                               className={`btn btn-sm ${theme === themeOption ? 'btn-primary btn-primary--v2' : 'btn-shell btn-shell--v2'}`}
-                               title={`${themeOption} mode`}
+                               className={`presentation-option${theme === themeOption ? ' presentation-option--active' : ''}`}
                            >
-                               <img
-                                   className="nav-icon nav-icon--small"
-                                   src={`/icons/theme-${themeOption}.svg`}
-                                   alt=""
-                               />
+                               {theme === themeOption ? <span className="state-mark" aria-hidden="true" /> : null}
+                               {themeOption === 'dark' ? 'Dark' : 'Light'}
                            </Link>
                        ))}
+                       </div>
                    </div>
-                   <ul className="navbar-nav align-items-lg-center gap-lg-1">
-                       {links.map(({ label, href, icon, kind }) => {
-                           const isLabelledIconLink = !isV2 && (label === 'Backoffice' || label === 'Telemetry');
+                   <ul className="navbar-nav app-navbar__links">
+                       {links.map(({ label, href, kind, current }) => {
+                           const isCurrent = current ?? routeIdentity === getRouteIdentity(href);
                            return <li key={href} className="nav-item">
                                <Link
-                                   aria-current={routeIdentity === getRouteIdentity(href) ? 'page' : undefined}
-                                   className={isV2 ? `nav-picture-button${kind === 'login' ? ' nav-picture-button--login' : ''}` : `nav-icon-link${isLabelledIconLink ? ' nav-icon-link--labelled' : ''}`}
-                                   to={linkTo(href)}
+                                   aria-current={isCurrent ? 'page' : undefined}
+                                   className={`app-nav-link${kind === 'primary' ? ' app-nav-link--primary' : ''}`}
                                    title={label}
+                                   to={linkTo(href)}
                                >
-                                   {isV2 ? (
-                                       <>
-                                           <span className="nav-picture-button__icon-wrap">
-                                               <img className="nav-icon nav-icon--v2" src={icon} alt="" />
-                                           </span>
-                                           <span className="nav-picture-button__label">{label}</span>
-                                       </>
-                                   ) : (
-                                       <>
-                                           <img className="nav-icon" src={icon} alt="" />
-                                           <span className={isLabelledIconLink ? 'nav-icon-link__label' : 'visually-hidden'}>{label}</span>
-                                       </>
-                                   )}
+                                   <span className="app-nav-link__label">{label}</span>
                                </Link>
                            </li>;
                        })}

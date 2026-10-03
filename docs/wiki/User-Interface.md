@@ -1,15 +1,19 @@
 # User Interface
 
-BetStan's React client provides one product across three visual variants and
-two color themes. Variant and theme changes alter presentation, not betting
-identity, service authority, route behavior, or accessibility expectations.
+BetStan's React client presents every route in one Match Desk visual system
+with three density layouts and two color themes. Layout and theme changes alter
+presentation, not betting identity, service authority, route behavior, or
+accessibility expectations.
 
 See [[Application Processes]] for the workflows behind the screens and
 [[UI UX Consistency]] for the complete review and acceptance contract.
 
 ## Application shell
 
-At wide desktop sizes the shell has three regions:
+The routed center task is first in DOM, reading, and keyboard order. A visible
+**Skip to main content** link moves focus to that stable main region. At
+viewport widths of 1400 CSS pixels and above, the shell presents three
+regions:
 
 | Region | Purpose |
 | --- | --- |
@@ -17,10 +21,12 @@ At wide desktop sizes the shell has three regions:
 | Center stage | Events, authentication, My Bets, Backoffice, or Telemetry route |
 | Right sidebar | Independent live and pre-match slips |
 
-The sidebars are sticky when space permits. On smaller screens the center
-content appears first and the supporting panels stack below it. This preserves
-the primary task while keeping statistics and both slips available without
-creating separate mobile-only behavior.
+Only the Statistics and slips regions are sticky in this three-region desk.
+At 1399 pixels and below, the center task occupies the first full row and both
+supporting regions follow it without sticky positioning. The supporting
+regions may share the next row when space permits and stack at narrower
+widths. The semantic order remains center task, Statistics, then slips even
+when the wide layout places Statistics visually to the left.
 
 The public Telemetry route is intentionally full width. It does not mount the
 leaderboard or slip sidebars, so those supporting surfaces do not issue hidden
@@ -38,10 +44,11 @@ Primary routes are:
 | `/login` | Login |
 | `/logout` | Session logout |
 
-The header keeps **Events**, **My Bets**, **Backoffice**, **Telemetry**,
-authentication, UI variant, and theme controls discoverable. Backoffice and
-Telemetry remain visibly labelled and usable for anonymous visitors as well as
-signed-in users.
+The header keeps visibly labelled **Events**, **Backoffice**, **Telemetry**,
+authentication, **Layout**, and **Theme** choices discoverable. Signed-in
+users also receive **My bets**. Backoffice and Telemetry remain visibly
+labelled and usable for anonymous visitors as well as signed-in users. Header
+navigation and presentation choices preserve the current query parameters.
 
 My Bets opens with **All statuses**, **All types**, **All dates**, and
 **Newest first**. The compact toolbar keeps **Search bets**, the matching count,
@@ -189,18 +196,17 @@ server authority and availability limits.
 
 ## UI variants
 
-The `ui` query parameter selects a supported variant:
+The existing `ui` query parameter selects a user-facing density layout:
 
-- `?ui=v1` - the default, glass-like card treatment with rounded surfaces and
-  teal emphasis;
-- `?ui=v2` - a denser, compact operational treatment with tighter corners,
-  bordered market rows, and labelled picture navigation;
-- `?ui=v3` - an editorial treatment with a centered event stage, timeline
-  accent, larger radii, and violet emphasis.
+- `?ui=v1` - **Standard**, the default spacing and composition;
+- `?ui=v2` - **Compact**, with tighter gaps, padding, and corners;
+- `?ui=v3` - **Spacious**, with more breathing room and larger corners.
 
 Unsupported or missing values fall back to `v1`. All variants use the same
 React routes, event/slip data, semantic controls, selected-state keys, and
-click payloads. A visual experiment therefore cannot reinterpret a wager.
+click payloads. They also share one brand, palette, surface hierarchy, and
+state grammar: the variants change density and composition, not product
+identity.
 
 ## Dark and light themes
 
@@ -208,21 +214,43 @@ The `theme` query parameter accepts `dark` or `light`; dark is the default.
 The Client applies the choice to the document through Bootstrap's
 `data-bs-theme` attribute and to the application shell.
 
-The CSS layer uses semantic design tokens for base, soft and elevated
-surfaces; borders; primary and secondary text; accent; positive, warning, and
-danger states; radii; and elevation. Light mode overrides those tokens rather
-than maintaining a second markup tree. Variant-specific light overrides then
-retain each variant's identity and contrast.
+Both themes use the same semantic roles for base, soft, and elevated surfaces;
+keylines; primary and secondary text; pitch-teal accent; focus; and positive,
+warning, danger, and informational states. Light mode changes role values
+rather than creating a second markup tree or a separate variant identity.
 
-Header artwork is theme-aware, including separate light/dark wordmarks where
-needed. Theme changes preserve the active route and the selected UI variant.
+Header artwork uses the corresponding light or dark wordmark. Theme changes
+preserve the active route and selected layout.
+
+## Match Desk visual grammar
+
+Routes share opaque ink/slate surfaces, restrained pitch-teal emphasis, and
+semantic keylines or state rails. Live, pre-match, warning, failure, success,
+and informational states retain text or another non-color cue alongside their
+color role. Changing numeric readouts use tabular numerals where alignment
+matters. Data cards remain grounded in the desk: they do not use glass effects,
+violet variant brands, or hover lift as alternate route identities.
+
+Primary route and task level-one headings use one self-hosted Barlow Condensed
+700 Latin face. Body text, controls, dense identities, lower-level headings,
+and tabular data retain the system font stack. The bundled face is distributed
+under the SIL Open Font License 1.1 and requires no third-party font request.
+
+Where a current or selected state has a check cue, one CSS-drawn mark uses the
+control's current text color and is hidden from assistive technology. Labels,
+`aria-current` or `aria-pressed`, visible focus, fixed geometry, and non-color
+state treatment remain independent of that decoration. These shared refinements
+preserve all three densities, both themes, responsive behavior, and the
+existing semantic rails.
 
 ## Preserving presentation choices
 
 Header links rebuild their query strings from the current location. Moving
-between Events, My Bets, Backoffice, Telemetry, login, and signup therefore
-preserves valid `ui` and `theme` values. The switchers update one choice without
-discarding the other or unrelated accepted query state.
+between Events, My Bets, Backoffice, Telemetry, login, signup, and logout
+therefore preserves valid `ui` and `theme` values. The layout and theme choices
+update one value without discarding the other or unrelated accepted query
+state. Successful logout returns to Events with that query intact; its safe
+failure navigation does the same.
 
 Examples:
 
@@ -235,6 +263,19 @@ Examples:
 
 The URL makes a visual state reproducible for testing and review without
 creating separate deployments.
+
+## Compatibility, rollout, and rollback
+
+The Match Desk redesign is a client presentation change. Existing routes,
+`ui=v1|v2|v3` links, themes, selection identities, APIs, authorization,
+schemas, and stored data remain compatible. The heading face and state mark
+ship in the client artifact. They follow the normal client integration and
+rollout path and require no data migration or coordinated backend activation.
+Rolling the client presentation back restores the earlier layout, typography,
+copy, and state-cue rendering; it does not reverse a logout, placed selection,
+Backoffice mutation, or other action already accepted by its owning service.
+This describes repository behavior, not a claim that the redesign is already
+deployed.
 
 ## Telemetry dashboard
 
@@ -345,6 +386,12 @@ The center stage presents match states in betting priority:
 4. the recently completed live match;
 5. upcoming pre-match events.
 
+The Events surface, including loading, empty, and wildcard-route states, has
+one **Events** level-one heading and no decorative eyebrow or kicker.
+Match-state sections use level two, event identity uses level three, and market
+or event subsections continue the hierarchy without turning kickoff metadata
+into headings.
+
 Active-live and countdown cards share one **Live now** section. Active-live
 cards form the first group and countdown cards the second. Within each group,
 cards sort by the kickoff displayed by the card: `live.kickoffAt` when present,
@@ -381,6 +428,12 @@ remaining time.
 - Correct Score retains stable numeric scoreline order.
 - Both product headings share the same centered treatment.
 - Odds IDs and selection IDs remain unchanged by presentation.
+- A selected option exposes pressed semantics and a visible checkmark as well
+  as its semantic keyline; selection never depends on color alone.
+- A failed add-to-slip request produces fixed, sanitized feedback beside the
+  affected product. The message is
+  **Selection could not be added to your slip. Please try again.** Technical
+  exception details are not displayed.
 
 ### Live markets
 
@@ -395,16 +448,16 @@ occupied grid tracks, and cards sharing a row stretch to consistent bounds.
 Next-event cards use concise football labels, including **Next Corner Kick**,
 **Next Free Kick**, **Next Throw-In**, and **Next Goal Kick**. The ten-option
 **Second Half Score** market uses readable score labels instead of the shared
-internal neutral-side value and spans extra grid width where available. It
-falls back to a balanced two-column selection grid on narrow screens.
+internal neutral-side value. Like every live product, its card occupies one
+normal product-grid slot at desktop, tablet, and mobile widths; its ten
+selections use a balanced two-column grid inside that card.
 
 ### Betting slips
 
 Live and pre-match drafts can both be open. They use separate labelled slips,
-distinct visual accents and subtly different surfaces, independent wagers, and
-independent pending/error state. The live slip uses a restrained warm tint
-derived from the current theme; the pre-match slip retains the normal
-accent/surface treatment. The UI never merges them into one combined
+the same `var(--surface-soft)` background, independent wagers, and independent
+pending/error state. Semantic rails and borders distinguish them: warm for
+live and accent for pre-match. The UI never merges them into one combined
 placement.
 
 ## Live movement and timeline presentation
@@ -437,22 +490,33 @@ Every data-driven surface should represent its real state:
 Backoffice controls, slip placement, authentication, live markets, event
 catalogs, and betting history follow the same principle.
 
+Shared request handling preserves structured server validation messages. When
+a request fails without a structured public message, forms show the generic
+message **Request failed. Please try again.** rather than a network, host, or
+exception detail.
+
+Logout has distinct pending, completed, and failure states. A failure warns
+that the session may still be active and offers **Retry log out** plus
+**Return to Events**; neither path claims success before the server accepts the
+request.
+
 ## Backoffice event controls
 
-The redesigned `/backoffice` center panel uses compact, full-width event cards.
-Statistics, the betting-slip sidebars, navigation, and responsive stacking
-remain unchanged. Anonymous, ordinary, legacy roleless, and administrator
-visitors retain the same catalog and controls. All three UI variants and both
-themes use the existing semantic tokens.
+The `/backoffice` center panel uses full-width event cards within the shared
+Match Desk shell. Anonymous, ordinary, legacy roleless, and administrator
+visitors retain the same catalog and controls in all three layouts and both
+themes.
 
 **Create new event** stays expanded and states the server-defined 15-minute
-kickoff lead time. Each displayed card shows the event name and scheduled
-kickoff alongside an always-visible, labelled **Home score** / **Away score**
-pair. Within each event card, the score fields and action buttons share two
-equal-width columns across the full controls region. **Save final result**
-requires both scores as whole numbers from `0` to `99`. Recorded scores remain
-visible but disabled, as does result submission: final results cannot be
-changed once recorded.
+kickoff lead time. Each displayed card gives event identity the full card
+width, then presents adjacent **Final result** and **Visibility** task groups
+when space permits; the groups stack without changing their semantic order in
+a narrow card. The equal-column geometry remains: **Home score** and **Away
+score** are equal peers, the two wide task groups have equal width, and their
+full-width actions align as peer controls. **Save final result** requires both
+scores as whole numbers from `0` to `99`. Recorded scores remain visible but
+disabled, as does result submission: final results cannot be changed once
+recorded.
 
 **Final result: Not recorded / Recorded** and **Visibility: Online / Offline**
 are independent, human-readable states, not inferred live-match phases.
@@ -483,18 +547,18 @@ If an action refresh removes the focused card, focus moves to the Events
 heading only when it was lost and the user has not moved elsewhere; local
 filtering does not trigger that fallback.
 
-This describes repository behavior, not a claim of production deployment.
-The redesign changes no backend, authorization, schema, dependency, route,
-deployment, or operational procedure. Normal integration and rollout still
-apply; reverting the client presentation requires no data migration.
+The task-deck composition changes no mutation behavior. Search, filtering,
+draft retention, one shared mutation-busy state, result locking, explicit
+visibility targets, refresh behavior, and feedback remain as described above.
 
 ## Design principles
 
 ### Identity before decoration
 
-Visual variants may change color, density, border, and composition. They must
-not change route access, selection identity, event identity, accessible names,
-or the meaning of a status.
+Density layouts may change spacing, corner size, and composition. They do not
+introduce a separate brand or semantic palette and must not change route
+access, selection identity, event identity, accessible names, or the meaning
+of a status.
 
 ### Information hierarchy follows the user task
 
@@ -530,6 +594,8 @@ scrolling to meet a visual target.
 - Color is not the only indicator of live/pre-match, success, warning, or
   error state.
 - Light and dark themes must both retain readable contrast.
+- Reduced-motion preference removes effective transitions, animations, and
+  smooth scrolling while preserving focus outlines and state cues.
 
 ### Public access and navigation must agree
 
