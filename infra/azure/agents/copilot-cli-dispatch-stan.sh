@@ -819,15 +819,25 @@ validate_runtime_mode_binding() {
   # A finalize dispatch carries an immutable runtime mode. Prove it equals the
   # authoritative Actions environment mode before any authority exists, so an
   # OKE fleet cannot be finalized with k3s semantics or vice versa.
-  local declared observed
+  local declared observed requires_mode
+  authoritative_runtime_mode=""
   declared="$(jq -r '.fixedInputs.runtime_mode // ""' <<<"$policy_json")"
-  [[ -n "$declared" ]] || return 0
+  requires_mode="$(
+    jq -r '
+      any(.upstreamRunBindings[]?;
+        .artifactValidatorProfile == "oci-release-disk-checkpoint-v1")
+    ' <<<"$policy_json"
+  )"
+  [[ -n "$declared" || "$requires_mode" = "true" ]] || return 0
   observed="$(
     gh api \
       "repos/$repository/environments/$environment/variables/OCI_RUNTIME_MODE" \
       --jq '.value'
   )" || fail "unable to read the authoritative runtime mode for $environment"
-  [[ "$declared" = "$observed" ]] ||
+  [[ "$observed" = "k3s" || "$observed" = "oke" ]] ||
+    fail "authoritative runtime mode for $environment is unsupported"
+  authoritative_runtime_mode="$observed"
+  [[ -z "$declared" || "$declared" = "$observed" ]] ||
     fail "operation runtime mode '$declared' does not match the authoritative $environment mode '$observed'"
 }
 
@@ -849,7 +859,8 @@ validate_upstream_run_bindings() {
     --repository "$repository" \
     --policy-json "$policy_json" \
     --subject-sha "$subject_sha" \
-    --dispatch-inputs "$dispatch_inputs" >/dev/null ||
+    --dispatch-inputs "$dispatch_inputs" \
+    --runtime-mode "$authoritative_runtime_mode" >/dev/null ||
     fail "upstream run bindings were rejected before any authority was issued"
 }
 

@@ -276,6 +276,36 @@ one-use: a prerequisite discovered mid-run would otherwise consume the authority
 for that master SHA permanently, and recovery would require promoting a new
 hardened SHA.
 
+Current OCI data and deployment authority also requires the exact
+canonical-checksummed `k3s-release-disk-checkpoint.v1` artifact. The k3s shape
+seals raw root bytes, complete stable node/mount/runtime identity, exact
+candidate and rollback CRI residency, public-state status, and flat
+diagnosis/reclaim lineage; the OKE shape contains only common fields with
+`terminalStatus=RELEASE_ELIGIBLE` and `disposition=NOT_APPLICABLE`. Missing or
+extra keys, runtime-version drift, identity
+drift, incomplete residency, a rerun, or a byte count above the integer
+70-percent boundary fails closed.
+
+Failure-recovery run profiles are fixed repository contracts, not run-metadata
+shortcuts. They download their exact baseline, deployment, predecessor-v6, and
+activation artifacts; reject unsafe or incomplete ZIPs and checksum drift; and
+bind complete build, infrastructure, checkpoint, deployment, and recovery
+lineage. On an allowed descendant resume, build, infrastructure, and disk
+checkpoint identities stay bound to the original `checkpoint_source_sha`.
+The workflow/control SHA advances, while the predecessor, failed-deploy, or
+failed-activation runs bind the hash-covered `resume_source_sha`, which may be
+that SHA or the proven allowed ancestor. A nonzero baseline recovery also
+binds its explicit source and exact repository-validated artifact before
+authority. A new byte-equivalent build or infrastructure run is not a
+substitute. Failed-activation recovery must demote and verify the exact
+artifact-bound account as `USER` before bounded Slip cleanup. It recursively
+resolves the failed activation through its successful deployment and actual
+v6 handoff, then uses public revalidation and a fresh exact lock because that
+deployment released the earlier runtime hold. Slip deletion predicates bind
+each inspected document's immutable identity and board revision/fingerprint;
+a concurrent change or count conflict fails closed. Either cleanup failure
+blocks the data phase.
+
 Every OCI release requires a new exact-SHA final
 `oci-live-data-rollout` handoff before deployment. Application or schema
 changes chain `dry-run` → `apply-backfills` → `apply-slip-index`; only the
@@ -288,6 +318,16 @@ deliberately retains that maintenance state and the shared-Mongo operation lock
 until the exact deployment passes protected validation, so dispatch the bound
 deployment immediately; an incomplete deployment re-enters the same
 fail-closed state for a safe retry.
+
+The final public disk revalidation is the last read-only operation before a
+fresh data path acquires the lock; baseline and predecessor work must already
+be complete, with no intervening capture or operation. A retained hold and
+deployment use a stable-only held snapshot: raw bytes, root/Mongo mount and
+node/runtime identity, and candidate/rollback residency. Held collection must
+not call HTTP, RabbitMQ, queues, pods, Deployments, or mutable workload-health
+checks. Deployment renews the transferred lock without an acquire fallback,
+revalidates the held snapshot again after protected health, and releases lock
+before fence.
 
 That fenced state also supports an exit that is not a retry.
 `oci-production-rollback` gains a maintenance-aware mode, bound to the exact

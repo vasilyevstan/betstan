@@ -5,6 +5,12 @@ SOURCE_SHA="${SOURCE_SHA:-}"
 BUILD_RUN_ID="${BUILD_RUN_ID:-}"
 INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
 DEPLOYMENT_RUN_ID="${DEPLOYMENT_RUN_ID:-}"
+CHECKPOINT_SOURCE_SHA="${CHECKPOINT_SOURCE_SHA:-}"
+DISK_CHECKPOINT_RUN_ID="${DISK_CHECKPOINT_RUN_ID:-}"
+DISK_CHECKPOINT_SHA256="${DISK_CHECKPOINT_SHA256:-}"
+DISK_CHECKPOINT_DISPOSITION="${DISK_CHECKPOINT_DISPOSITION:-}"
+DEPLOYMENT_PROVENANCE_FILE="${DEPLOYMENT_PROVENANCE_FILE:-}"
+LIVE_SCHEMA_EVIDENCE_FILE="${LIVE_SCHEMA_EVIDENCE_FILE:-}"
 REPOSITORY="${REPOSITORY:-${GITHUB_REPOSITORY:-}}"
 
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -17,6 +23,25 @@ for run_id in "$BUILD_RUN_ID" "$INFRASTRUCTURE_RUN_ID" "$DEPLOYMENT_RUN_ID"; do
     exit 1
   }
 done
+[[ "$CHECKPOINT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "CHECKPOINT_SOURCE_SHA must be a full lowercase commit SHA" >&2
+  exit 1
+}
+[[ "$DISK_CHECKPOINT_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+  echo "DISK_CHECKPOINT_RUN_ID must be a positive integer" >&2
+  exit 1
+}
+[[ "$DISK_CHECKPOINT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "DISK_CHECKPOINT_SHA256 must be a SHA-256 digest" >&2
+  exit 1
+}
+case "$DISK_CHECKPOINT_DISPOSITION" in
+  READY_NO_RECLAIM|READY_RECLAIMED|NOT_APPLICABLE) ;;
+  *)
+    echo "DISK_CHECKPOINT_DISPOSITION is invalid" >&2
+    exit 1
+    ;;
+esac
 [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
   echo "REPOSITORY is invalid" >&2
   exit 1
@@ -46,30 +71,118 @@ git fetch --quiet origin master:refs/remotes/origin/master
   echo "approved SHA is no longer current master" >&2
   exit 1
 }
+git merge-base --is-ancestor "$CHECKPOINT_SOURCE_SHA" "$SOURCE_SHA" || {
+  echo "disk checkpoint source is not an ancestor of current master" >&2
+  exit 1
+}
+while IFS= read -r -d '' changed_path; do
+  case "$changed_path" in
+    .github/*|infra/*|*.md) ;;
+    *)
+      echo "application path changed after the disk checkpoint: $changed_path" >&2
+      exit 1
+      ;;
+  esac
+done < <(git diff --name-only -z "$CHECKPOINT_SOURCE_SHA..$SOURCE_SHA")
 
 verify_run() {
   local run_id="$1"
   local workflow_file="$2"
   local expected_event="$3"
+  local expected_head_sha="$4"
   local path event head_sha head_branch repository status conclusion attempt
 
   read -r path event head_sha head_branch repository status conclusion attempt <<<"$(
     gh api "repos/$REPOSITORY/actions/runs/$run_id" \
       --jq '[.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
   )"
-  [[ "$path" == ".github/workflows/$workflow_file" ]]
-  [[ "$event" == "$expected_event" ]]
-  [[ "$head_sha" == "$SOURCE_SHA" ]]
-  [[ "$head_branch" == "master" ]]
-  [[ "$repository" == "$REPOSITORY" ]]
-  [[ "$status" == "completed" ]]
-  [[ "$conclusion" == "success" ]]
-  [[ "$attempt" == "1" ]]
+  [[ "$path" == ".github/workflows/$workflow_file" ]] &&
+    [[ "$event" == "$expected_event" ]] &&
+    [[ "$head_sha" == "$expected_head_sha" ]] &&
+    [[ "$head_branch" == "master" ]] &&
+    [[ "$repository" == "$REPOSITORY" ]] &&
+    [[ "$status" == "completed" ]] &&
+    [[ "$conclusion" == "success" ]] &&
+    [[ "$attempt" == "1" ]]
 }
 
-verify_run "$BUILD_RUN_ID" oci-production-build.yml workflow_run
-verify_run "$INFRASTRUCTURE_RUN_ID" oci-infrastructure.yml workflow_dispatch
-verify_run "$DEPLOYMENT_RUN_ID" oci-production-deploy.yml workflow_dispatch
+verify_run \
+  "$BUILD_RUN_ID" \
+  oci-production-build.yml \
+  workflow_run \
+  "$CHECKPOINT_SOURCE_SHA" || {
+    echo "build run no longer matches the original checkpoint source" >&2
+    exit 1
+  }
+verify_run \
+  "$INFRASTRUCTURE_RUN_ID" \
+  oci-infrastructure.yml \
+  workflow_dispatch \
+  "$CHECKPOINT_SOURCE_SHA" || {
+    echo "infrastructure run no longer matches the original checkpoint source" >&2
+    exit 1
+  }
+verify_run \
+  "$DEPLOYMENT_RUN_ID" \
+  oci-production-deploy.yml \
+  workflow_dispatch \
+  "$SOURCE_SHA" || {
+    echo "deployment run no longer matches current master" >&2
+    exit 1
+  }
+
+env_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '
+    $1 == key {
+      if (found++) exit 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (found != 1) exit 1
+      print value
+    }
+  ' "$file"
+}
+
+[[ -f "$DEPLOYMENT_PROVENANCE_FILE" &&
+   ! -L "$DEPLOYMENT_PROVENANCE_FILE" ]] || {
+  echo "deployment provenance is unavailable" >&2
+  exit 1
+}
+[[ -f "$LIVE_SCHEMA_EVIDENCE_FILE" &&
+   ! -L "$LIVE_SCHEMA_EVIDENCE_FILE" ]] || {
+  echo "live schema evidence is unavailable" >&2
+  exit 1
+}
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" source_sha)" == "$SOURCE_SHA" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" deployment_run_id)" == \
+   "$DEPLOYMENT_RUN_ID" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" deployment_run_attempt)" == "1" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" build_run_id)" == "$BUILD_RUN_ID" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" infrastructure_run_id)" == \
+   "$INFRASTRUCTURE_RUN_ID" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" checkpoint_source_sha)" == \
+   "$CHECKPOINT_SOURCE_SHA" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" disk_checkpoint_run_id)" == \
+   "$DISK_CHECKPOINT_RUN_ID" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" disk_checkpoint_sha256)" == \
+   "$DISK_CHECKPOINT_SHA256" ]]
+[[ "$(env_value "$DEPLOYMENT_PROVENANCE_FILE" disk_checkpoint_disposition)" == \
+   "$DISK_CHECKPOINT_DISPOSITION" ]]
+[[ "$(env_value "$LIVE_SCHEMA_EVIDENCE_FILE" schema_version)" == \
+   "live-betting-v6" ]]
+for key in \
+  source_sha build_run_id infrastructure_run_id checkpoint_source_sha \
+  disk_checkpoint_run_id disk_checkpoint_sha256 disk_checkpoint_disposition; do
+  expected="$(env_value "$DEPLOYMENT_PROVENANCE_FILE" "$key")"
+  observed="$(env_value "$LIVE_SCHEMA_EVIDENCE_FILE" "$key")"
+  [[ "$observed" == "$expected" ]] || {
+    echo "deployment and live schema evidence differ for $key" >&2
+    exit 1
+  }
+done
 
 if [[ -n "${CASH_BACK_ACCEPTANCE_EVIDENCE_FILE:-}" ]]; then
   python3 - "$CASH_BACK_ACCEPTANCE_EVIDENCE_FILE" \

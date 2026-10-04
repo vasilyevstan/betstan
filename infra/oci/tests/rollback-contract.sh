@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-application-stan.sh"
 RECOVERY_SCRIPT="$ROOT_DIR/infra/oci/scripts/recover-partial-rollback-stan.sh"
 PARTIAL_AUTHORITY_VALIDATOR="$ROOT_DIR/infra/oci/scripts/validate-partial-recovery-authority-stan.sh"
+UPSTREAM_BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
 CAPTURE_SCRIPT="$ROOT_DIR/infra/oci/scripts/baseline-capture-stan.sh"
 READINESS_SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
 REAL_LIVE_READINESS_SCRIPT="$ROOT_DIR/infra/oci/agents/live-betting-readiness-stan.sh"
@@ -2279,7 +2280,9 @@ from pathlib import Path
 workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
 step = workflow[
     workflow.index("- name: Capture and validate pre-mutation rollback baseline"):
-    workflow.index("- name: Reject an already over-limit k3s root filesystem")
+    workflow.index(
+        "- name: Revalidate exact release disk checkpoint before lock mutation"
+    )
 ]
 body = step.split("        run: |\n", 1)[1]
 lines = []
@@ -2331,7 +2334,8 @@ SH
       OUTPUT_DIR=artifacts/oci-data-baseline-before \
       GITHUB_ENV="$case_dir/github.env" OCI_K8S_NAMESPACE=betstan-oci \
       SOURCE_SHA="$CURRENT_MASTER_SHA" PHASE="$phase" \
-      FAILED_DEPLOY_RUN_ID="$failed_deploy" BASELINE_RECOVERY_RUN_ID="$recovery" \
+      FAILED_DEPLOY_RUN_ID="$failed_deploy" FAILED_ACTIVATION_RUN_ID=0 \
+      BASELINE_RECOVERY_RUN_ID="$recovery" \
       BASELINE_RECOVERY_SOURCE_SHA="$recovery_source" \
       EXPECTED_SOURCE_SHA=stale-source EXPECTED_NAMESPACE=stale-namespace \
       EXPECTED_RECOVERY_RUN_ID=999 REQUIRE_CURRENT_DEPLOY_PROVENANCE=false \
@@ -3837,6 +3841,103 @@ run_partial_authority_validation "$WORK_DIR/partial-recovery-success" \
   >"$WORK_DIR/partial-recovery-authority-success.out"
 assert_contains "$WORK_DIR/partial-recovery-authority-success.out" \
   'partial_recovery_authority_validation=PASS'
+PYTHONDONTWRITEBYTECODE=1 python3 -I - \
+  "$UPSTREAM_BINDING_VALIDATOR" \
+  "$WORK_DIR/partial-recovery-success" \
+  "$PARTIAL_RECOVERY_RUN_ID" \
+  "$PARTIAL_RECOVERY_SOURCE_SHA" \
+  "$CURRENT_MASTER_SHA" \
+  "$TARGET_SHA" <<'PY'
+import importlib.util
+import io
+import sys
+import zipfile
+from pathlib import Path
+
+validator_path, evidence_path, run_id, source_sha, head_sha, target_sha = (
+    sys.argv[1:]
+)
+spec = importlib.util.spec_from_file_location(
+    "upstream_binding", validator_path
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+archive = io.BytesIO()
+root = Path(evidence_path)
+with zipfile.ZipFile(archive, "w") as bundle:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            bundle.writestr(path.relative_to(root).as_posix(), path.read_bytes())
+module.gh_api_bytes = lambda _: archive.getvalue()
+module.exact_artifact = lambda *_args: {"id": 2}
+authority = module.parse_env(
+    (root / "partial-recovery-authority.env").read_bytes(),
+    "partial recovery authority",
+)
+recovered_images = module.validate_recovery_image_rows(
+    (root / "images.tsv").read_bytes(), "partial recovery images"
+)
+
+
+def validate_build(_repository, selected_run, selected_source, _label):
+    assert selected_run == authority["restored_build_run_id"]
+    assert selected_source == source_sha
+    return recovered_images
+
+
+def validate_infrastructure(
+    _repository,
+    selected_run,
+    selected_hash,
+    runtime_mode,
+    runtime_fingerprint,
+    endpoints,
+    _label,
+):
+    assert selected_run == authority["infrastructure_run_id"]
+    assert selected_hash == authority["infrastructure_provenance_sha256"]
+    assert runtime_mode == authority["runtime_mode"]
+    assert runtime_fingerprint == authority["runtime_fingerprint"]
+    assert endpoints["public_host"] == authority["public_host"]
+    return source_sha
+
+
+def validate_failed(
+    _repository,
+    selected_run,
+    selected_source,
+    selected_target,
+    selected_images,
+    recovery_plan,
+    telemetry,
+    _label,
+):
+    assert selected_run == authority["source_rollback_run_id"]
+    assert selected_source == source_sha
+    assert selected_target == target_sha
+    assert selected_images == recovered_images
+    assert recovery_plan
+    assert telemetry["mode"] == "retained"
+    return {"updated_at": "2026-01-01T00:00:00Z"}
+
+
+module.validate_current_build_artifact = validate_build
+module.validate_infrastructure_artifact = validate_infrastructure
+module.validate_failed_partial_rollback_artifact = validate_failed
+module.validate_partial_recovery_artifact(
+    "example/repo",
+    run_id,
+    source_sha,
+    {"id": 1},
+    {
+        "head_sha": head_sha,
+        "display_title": f"oci-rollback {target_sha}",
+        "created_at": "2026-01-01T00:01:00Z",
+    },
+    "partial recovery",
+)
+PY
 
 partial_plan_order=(event client backoffice bet)
 for checkpoint in 0 1 2 3 4; do

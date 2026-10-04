@@ -83,6 +83,29 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   NodePorts directly to the internet.
 - Deploy only exact digest provenance, sequentially: Mongo, RabbitMQ,
   backends, client, ingress.
+- Treat `k3s-release-disk-checkpoint.v1` as exact release evidence. Validate
+  its strict runtime-specific key set, canonical checksum, raw-byte
+  70-percent boundary, complete node/mount/runtime identity, runtime versions,
+  and immutable candidate/rollback residency. OKE has only the common
+  fields with `terminalStatus=RELEASE_ELIGIBLE` and
+  `disposition=NOT_APPLICABLE`; never fabricate disk fields.
+- Public and held revalidation are different contracts. Public mode remains
+  strict about public/application state. Held mode collects only stable
+  infrastructure facts and must not call HTTP, RabbitMQ/rabbitmqctl, queues,
+  pods, Deployments, or mutable workload health.
+- On a validated descendant resume, preserve the original checkpoint-source
+  build and infrastructure run IDs; workflow control advances while
+  predecessor and failed-run evidence bind the explicit `resume_source_sha`.
+  A nonzero baseline recovery requires its explicit source and exact
+  checksum-bound fixed-profile artifact before authority. Recursively verify
+  that artifact's build/upstream/platform, infrastructure, plan-origin, or
+  failed partial-rollback lineage. Never substitute a new byte-equivalent
+  build or infrastructure run.
+- Failed-activation cleanup resolves the failed activation through its exact
+  successful deployment and actual v6 handoff. Treat the runtime as released,
+  perform public checkpoint revalidation, enter maintenance, and acquire a
+  fresh exact lock before demoting the artifact-bound account and atomically
+  deleting only unchanged draft Slips.
 - Preserve the retained Mongo volume and refuse legacy Mongo manifests.
 - Never receive or use Azure credentials. Cross-cloud data work is exclusive
   to the protected migration and stop-only recovery workflows and their

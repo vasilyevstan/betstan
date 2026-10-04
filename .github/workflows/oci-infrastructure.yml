@@ -1049,6 +1049,11 @@ jobs:
           ACQUISITION_PROVENANCE_FILE: artifacts/oci-capacity/provenance.env
           SESSION_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
           K3S_ACCESS_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
+          INFRASTRUCTURE_RUN_ID: ${{ github.run_id }}
+          CANDIDATE_IMAGES_FILE: artifacts/oci-infrastructure/verified-candidate-images.tsv
+          OUTPUT_FILE: ${{ runner.temp }}/betstan-k3s-finalize-diagnosis.json
+          CHECKPOINT_OUTPUT_FILE: artifacts/oci-release-disk-checkpoint/checkpoint.json
+          RECOVERY_WORK_DIR: ${{ runner.temp }}/betstan-k3s-finalize-disk
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: |
           set -euo pipefail
@@ -1064,6 +1069,19 @@ jobs:
             exit "$status"
           }
           trap cleanup_on_exit EXIT
+          checkpoint_candidates_ready=true
+          if ! PROVENANCE_DIR=artifacts/ghcr-build \
+              EXPECTED_BUILD_RUN_ID="$GHCR_BUILD_RUN_ID" \
+              EXPECTED_BUILD_RUN_ATTEMPT=1 \
+              OUTPUT_FILE="$CANDIDATE_IMAGES_FILE" \
+              VERIFY_REMOTE=1 \
+              BOOT_IMAGES=0 \
+              ANONYMOUS_PULL=1 \
+                ./infra/oci/scripts/verify-images.sh; then
+            checkpoint_candidates_ready=false
+            rm -f "$CANDIDATE_IMAGES_FILE" "$CHECKPOINT_OUTPUT_FILE"
+            echo "k3s_release_disk_checkpoint=INELIGIBLE reason=candidate_validation"
+          fi
           RUNNER_PUBLIC_IPV4="$(
             curl --fail --silent --show-error --max-time 15 https://api.ipify.org
           )"
@@ -1071,6 +1089,14 @@ jobs:
           ./infra/oci/scripts/configure-k3s-access.sh open
           unset OCI_K3S_SSH_PRIVATE_KEY
           ./infra/oci/scripts/finalize-k3s.sh
+          if [ "$checkpoint_candidates_ready" = "true" ]; then
+            if ! CONTROL_SHA="$SOURCE_SHA" \
+                WORK_DIR="$RECOVERY_WORK_DIR" \
+                  ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh diagnose; then
+              rm -f "$CHECKPOINT_OUTPUT_FILE"
+              echo "k3s_release_disk_checkpoint=INELIGIBLE reason=runtime_validation"
+            fi
+          fi
 
       - name: Close ephemeral OCI Bastion access
         if: always() && inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
@@ -1084,6 +1110,18 @@ jobs:
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
+      - name: Record OKE disk checkpoint disposition
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'oke'
+        run: |
+          ./infra/oci/scripts/k3s_disk_recovery_stan.py \
+            write-not-applicable-checkpoint \
+            --source-sha "$SOURCE_SHA" \
+            --control-sha "$SOURCE_SHA" \
+            --infrastructure-run-id "$GITHUB_RUN_ID" \
+            --ghcr-build-run-id "$GHCR_BUILD_RUN_ID" \
+            --producer-run-id "$GITHUB_RUN_ID" \
+            --output artifacts/oci-release-disk-checkpoint/checkpoint.json
+
       - name: Upload exact infrastructure provenance and sanitized inventory
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -1092,6 +1130,17 @@ jobs:
             artifacts/oci-infrastructure/provenance.env
             artifacts/oci-infrastructure/inventory.json
             artifacts/oci-infrastructure/application-registry-evidence.env
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload canonical release disk checkpoint
+        if: >-
+          inputs.phase == 'finalize' &&
+          hashFiles('artifacts/oci-release-disk-checkpoint/checkpoint.json') != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-release-disk-checkpoint-${{ inputs.approved_sha }}-${{ github.run_id }}-1
+          path: artifacts/oci-release-disk-checkpoint/checkpoint.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1307,6 +1356,7 @@ jobs:
           GHCR_GENERATIONS_FILE: artifacts/oci-k3s-disk-upstream/ghcr-package-validation/generations.tsv
           DIAGNOSIS_FILE: artifacts/oci-k3s-disk-upstream/diagnosis/diagnosis.json
           OUTPUT_FILE: artifacts/oci-k3s-disk/${{ inputs.phase == 'diagnose-disk' && 'diagnosis.json' || 'reclaim.json' }}
+          CHECKPOINT_OUTPUT_FILE: artifacts/oci-release-disk-checkpoint/checkpoint.json
           ACCESS_WORK_DIR: ${{ runner.temp }}/betstan-k3s-disk-access
           RECOVERY_WORK_DIR: ${{ runner.temp }}/betstan-k3s-disk-work
         run: |
@@ -1366,6 +1416,15 @@ jobs:
         with:
           name: oci-k3s-disk-reclaim-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-k3s-disk/reclaim.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload canonical release-eligible disk checkpoint
+        if: hashFiles('artifacts/oci-release-disk-checkpoint/checkpoint.json') != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-release-disk-checkpoint-${{ inputs.approved_sha }}-${{ github.run_id }}-1
+          path: artifacts/oci-release-disk-checkpoint/checkpoint.json
           if-no-files-found: error
           retention-days: 30
 

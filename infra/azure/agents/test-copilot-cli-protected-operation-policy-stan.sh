@@ -197,6 +197,26 @@ policies.select { |entry| entry["workflow"] == "oci-infrastructure.yml" }.each d
   end
 end
 
+live_data = policies.select do |entry|
+  entry["workflow"] == "oci-live-data-rollout.yml"
+end.to_h { |entry| [entry.fetch("operation"), entry] }
+live_data.reject { |operation, _| operation.include?("-resume-") }.each do |operation, policy|
+  unless policy.fetch("inputTemplates").slice(
+      "resume_source_sha", "checkpoint_source_sha"
+    ) == {
+      "resume_source_sha" => "{subject_sha}",
+      "checkpoint_source_sha" => "{subject_sha}",
+    }
+    fail("#{operation} lost current-source templates")
+  end
+end
+live_data.select { |operation, _| operation.include?("-resume-") }.each do |operation, policy|
+  if policy.fetch("inputTemplates").key?("resume_source_sha") ||
+      policy.fetch("inputTemplates").key?("checkpoint_source_sha")
+    fail("#{operation} blocks hash-covered ancestor resume inputs")
+  end
+end
+
 puts "protected_operation_policy=PASS operations=#{policies.length} workflows=#{by_workflow.length}"
 RUBY
 

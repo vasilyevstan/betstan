@@ -247,6 +247,76 @@ and sanitized. These are transport retries, not protected-workflow reruns or
 reuse of consumed authority, and do not establish that an unclassified failure
 would recover.
 
+**Release disk checkpoint authority.** Every current live-data operation and
+normal or recovered deployment binds a full `checkpoint_source_sha`, positive
+`disk_checkpoint_run_id`, canonical checkpoint checksum, and disposition from
+the exact infrastructure producer. Fresh phases require the checkpoint source
+to equal the approved SHA. A resume may use an ancestor only after the
+pre-authority and workflow checks prove that every descendant change is under
+`.github/`, `infra/`, or Markdown, candidate images are exactly equivalent,
+and the original applied source, predecessor, failed run, build,
+infrastructure, checkpoint, and data lineage all resolve recursively. A later
+phase or deployment rejects any checkpoint source, run, checksum, or
+disposition substitution.
+
+Those identities do not all advance together. Build, infrastructure, and disk
+checkpoint runs remain bound to the original `checkpoint_source_sha` and are
+serialized unchanged into every successor v6 artifact. The current workflow
+advances to the approved SHA, while the predecessor-v6, failed deployment, and
+failed activation runs bind an explicit hash-covered `resume_source_sha`.
+That source may be the approved SHA or the proven GitHub/infra/Markdown-only
+ancestor; a newly produced byte-equivalent build or infrastructure run is not
+interchangeable with the original.
+
+When `baseline_recovery_run_id` is nonzero, its hash-covered
+`baseline_recovery_source_sha` is also mandatory before authority. The shared
+fixed validator accepts only the exact successful cache-recovery or partial
+rollback run and its safe, complete, checksum-bound repository artifact. It
+recursively resolves the selected build and upstream build run, per-service
+manifest and platform identities, first-attempt infrastructure provenance,
+cache plan carrier and any distinct failed/cancelled plan origin, or the exact
+failed partial-rollback state and Telemetry lineage. Partial recovery restores
+only changed services in reverse producer rollout order; forward or otherwise
+permuted plans are rejected. Run zero requires source `none`; internally
+consistent but externally substituted recovery evidence is insufficient.
+
+The upstream binding language remains declarative: it can select an expected
+head SHA, expected `success`, one fixed disk-checkpoint validator, or one of
+the three fixed failure-recovery profiles. It cannot carry arbitrary commands,
+modules, plugins, or job expressions. Dispatcher, approver, and workflows read
+the protected operation environment's authoritative `OCI_RUNTIME_MODE` again
+at each prerequisite-decay boundary before intent, claim, or approval.
+
+Failed deployment recovery is classified exactly. A retained hold requires
+successful maintenance re-entry and accepts only lock/fence release results
+`skipped/skipped`, `failure/skipped`, or `success/failure`; the last case relies
+on re-entry having reacquired the exact lock and re-held maintenance. A
+released-runtime recovery requires its fixed failed-public-validation and
+successful-release profile. Failed activation cleanup requires its fixed
+pre-authority run evidence and sanitized acceptance user identity. Its
+authority resolves the failed activation to the exact successful deployment
+and that deployment's actual v6 handoff. An optional earlier failed deployment
+is resolved separately through that handoff's resume authority rather than
+being forced onto the successful deployment lineage. Because the successful
+deployment released the earlier runtime hold, cleanup acquires a fresh exact
+operation lock and then enters maintenance. Under that lock and maintenance
+hold it idempotently demotes the exact retained account to `USER`, verifies
+exactly one matching account, and removes only draft slips whose `_id`, user,
+bet kind, status, board revision, and board fingerprint still match the
+inspected documents. A role change, concurrent slip mutation, or cleanup-count
+conflict blocks the resumed data phase. No profile widens normal success
+authority.
+
+Each fixed profile downloads and parses its exact artifacts; run metadata and
+job conclusions alone are insufficient. ZIP paths and members must be safe and
+complete, checksum manifests and baseline capture identity must match, and the
+complete predecessor-v6, deployment, build, infrastructure, checkpoint, and
+activation tuples must resolve without substitution. Retained-hold deployment
+recovery uses the checksum-sealed intent written before lock renewal plus the
+post-rehold failure lineage. Failed-activation cleanup uses a separate exact
+recovery-authority artifact rather than treating the workflow's larger
+diagnostic evidence directory as that authority.
+
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this
 operation-specific check at the actual selected fresh or imported baseline.
 Canonical checksum/provenance validation runs first, then retained-Telemetry
@@ -306,12 +376,46 @@ already-applied cleanup without expanding its fixed target set. A retained
 hold is a safe unavailable state, not evidence that production execution
 occurred or authority to begin another operation.
 
-New sanitized evidence uses `live-betting-v5` and requires
-`backoffice_pre_september_cleanup_complete` in the final handoff. The verifier
-keeps the literal historical meanings of `live-betting-v1` through `v4` and
-rejects an unknown `v6`; a newer label cannot reinterpret older evidence. The
-cleanup command has no rollback phase, so release rollback continues to use
-the protected baseline, fence, lock, and recovery model described below.
+New sanitized evidence uses `live-betting-v6`. It preserves the v5 cleanup
+contract and adds the four bound checkpoint fields:
+`checkpoint_source_sha`, `disk_checkpoint_run_id`,
+`disk_checkpoint_sha256`, and `disk_checkpoint_disposition`. Provenance,
+journal, final schema, resume authority, deployment provenance, and activation
+lineage carry those values unchanged. The verifier keeps the literal
+historical meanings and exact key sets of `live-betting-v1` through `v5`, but
+those generations are inspection and rollback evidence only; current
+successors and deployments require v6. The cleanup command still has no
+rollback phase, so release rollback continues to use the protected baseline,
+fence, lock, and recovery model described below.
+
+Fresh and released-runtime data paths complete static, checkpoint, predecessor,
+baseline, and read-only access validation, then perform a fresh public
+checkpoint revalidation as the final read-only action immediately before
+acquiring the lock or entering maintenance; no capture or other operation may
+intervene. A retained
+hold first validates its exact recovery profile, verifies the inherited hold
+read-only, and completes a stable held checkpoint revalidation before any new
+lock action. There is no post-data held checkpoint check and no new
+failed-final-data state.
+
+Held collection is stable-only: raw bytes, root/Mongo mount and node/runtime
+identity, and immutable candidate/rollback residency. It performs no HTTP,
+RabbitMQ/rabbitmqctl, queue, pod, Deployment, or mutable workload-health
+query, so deliberate application quiescence does not invalidate the snapshot.
+Public revalidation additionally derives rollback residency from the fresh
+Deployment image generation; a different valid resident generation is drift.
+Held revalidation instead uses the sealed rollback list because Deployment
+inspection is forbidden.
+
+Deployment validates policy, build, infrastructure, final-v6, checkpoint, and
+recovery bindings before read-only runtime access. It then verifies the exact
+maintenance fence and transferred lock, validates the rollback baseline,
+revalidates the held checkpoint, and renews that exact lock without an initial
+acquire fallback. Only then may it deploy and run protected health. A second
+fresh held revalidation repeats exact byte, mount, candidate, and rollback
+checks before release; one byte above 70 percent blocks release. The lock is
+released before the fence. Existing failure handling may re-establish the hold
+and reacquire the exact lock only on its bounded post-failure path.
 
 If an already-dispatched but unissued operation loses a prerequisite, its
 exact request and run remain serialized until bounded, reviewed recovery proves

@@ -307,31 +307,78 @@ concurrent retirement fixture isolation without masking failed suites.
    that same session with bounded backoff and exact PID cleanup.
    `scripts/finalize-k3s.sh` then mounts the Mongo volume, installs
    ingress-nginx and cert-manager, and reconciles the fixed 10/10 Mbps OCI
-   load balancer.
+   load balancer. A release-eligible first-attempt k3s finalize, diagnosis, or
+   APT-only reclaim seals one canonical `k3s-release-disk-checkpoint.v1`
+   artifact named
+   `oci-release-disk-checkpoint-<source-sha>-<producer-run-id>-1`. Exact integer
+   bytes must be at or below 70 percent, and immutable CRI evidence must prove
+   all ten candidate images plus complete rollback residency. CRI reclaim,
+   incomplete or unhealthy state, reruns, and identity drift are ineligible.
+   OKE finalize emits only common fields with
+   `terminalStatus=RELEASE_ELIGIBLE` and `disposition=NOT_APPLICABLE`, without
+   fabricated disk fields. The strict k3s shape adds top-level
+   `thresholdPercent=70`, raw root bytes, complete node/root/Mongo mount
+   identity, k3s and runtime versions, immutable candidate/rollback image IDs
+   and repository digests, `publicStateStatus=PASS`, and flat
+   `diagnosisChecksumSha256`/`reclaimChecksumSha256` lineage; missing or extra
+   keys and any substitution fail closed.
 6. Before every OCI application deploy, produce a successful final
    `apply-slip-index` data handoff for the same exact current master SHA,
-   first-attempt OCI build, and finalized infrastructure run. Application or
-   schema changes use protected policy-bound phases in order: `dry-run`,
-   `apply-backfills`, then `apply-slip-index`, passing each successful run ID
-   to the next phase. CLI-created runs use their exact private authority
-   records; direct human runs remain personally gated. Only the workflow's explicitly validated
-   GitHub/infra/docs-only descendant resume may reuse an already applied data
-   chain; deployment still requires the resulting new exact-SHA final handoff.
+   first-attempt OCI build, finalized infrastructure run, and bound release
+   disk checkpoint. Application or schema changes use protected policy-bound
+   phases in order: `dry-run`, `apply-backfills`, then `apply-slip-index`,
+   passing each successful run ID and the same checkpoint source, positive run
+   ID, checksum, and disposition to the next phase. CLI-created runs use their
+   exact private authority records; direct human runs remain personally gated.
+   Only the workflow's explicitly validated GitHub/infra/docs-only descendant
+   resume with exact candidate-image and recursive lineage equivalence may
+   reuse an already applied data chain; deployment still requires the
+   resulting new exact-SHA final handoff. Build, infrastructure, and checkpoint
+   runs remain the original checkpoint-source identities. Workflow control
+   advances, while predecessor and failed-run evidence bind the explicit
+   hash-covered resume source; byte-equivalent replacement runs are rejected.
+   A nonzero recovered baseline also requires its explicit source and exact
+   checksum-bound cache-recovery or partial-rollback artifact before authority.
+   Fixed failure profiles download safe complete baseline, deployment,
+   predecessor-v6, and activation artifacts and verify checksum/capture and
+   complete lineage; metadata and jobs alone are not authority. Retained-hold
+   recovery binds the pre-lock-renewal deployment intent to its post-rehold
+   failure lineage, while activation cleanup consumes a separate exact
+   checksum-manifested recovery-authority artifact instead of the larger
+   always-uploaded diagnostics tree. That profile resolves the failed
+   activation through the exact successful deployment and its actual v6
+   handoff; an optional earlier failed deployment keeps its separate applied
+   predecessor. Because successful deployment released the old hold, cleanup
+   uses public checkpoint revalidation and a fresh exact lock. It demotes and
+   verifies the retained account as `USER`, then deletes only draft Slips whose
+   inspected identity and board revision/fingerprint still match atomically;
+   either failure blocks the resumed data phase.
    The workflow runs only compiled CLIs from the approved immutable image
-   digests. Before acquiring the shared Mongo operation lock, it captures and
-   validates a rollback baseline whose nine live references and provenance
-   are the same immutable public GHCR generation. An OCIR or mixed live
-   generation requires the exact successful cache-recovery authority and
-   cannot be labeled as a normal GHCR baseline. It then binds that baseline by
-   digest, holds the lock, and uploads sanitized hash-bound evidence. Mutating
-   phases first install the ingress write fence and scale all seven writers to
-   zero in the reviewed order: Backoffice, Gamemaster, Event, Slip, Moderation,
-   Resulting, then Bet. This prevents legacy documents and Backoffice
-   projections from racing the protected work. Auth and Client are the only
-   served application readers during mutation; `/api/backoffice` must return
-   the fenced `503` contract. When a non-final phase restores captured writer
-   replicas, it restores Bet, Event, Moderation, Resulting, Slip, Gamemaster,
-   then Backoffice. Fenced recovery also restores Backoffice last.
+   digests. Fresh and released-runtime paths finish static, predecessor,
+   baseline, and read-only access work, then make public checkpoint
+   revalidation the final read-only action before acquiring the shared Mongo
+   operation lock. A retained-hold resume validates its fixed failure
+   profile, inherited fence and lock, and held checkpoint before new lock
+   action. Held collection uses only raw bytes, root/Mongo mount and
+   node/runtime identity, and immutable candidate/rollback residency; it calls
+   no HTTP, RabbitMQ/rabbitmqctl, queues, pods, Deployments, or mutable
+   workload-health checks. Public revalidation derives rollback residency from
+   the fresh Deployment image generation, while held revalidation uses the
+   sealed rollback list because it cannot inspect Deployments. The workflow
+   captures and validates a rollback baseline whose nine
+   live references and provenance are the same immutable public GHCR
+   generation. An OCIR or mixed live generation requires the exact successful
+   cache-recovery authority and cannot be labeled as a normal GHCR baseline.
+   It then binds that baseline by digest, holds the lock, and uploads sanitized
+   hash-bound evidence. Mutating phases first install the ingress write fence
+   and scale all seven writers to zero in the reviewed order: Backoffice,
+   Gamemaster, Event, Slip, Moderation, Resulting, then Bet. This prevents
+   legacy documents and Backoffice projections from racing the protected work.
+   Auth and Client are the only served application readers during mutation;
+   `/api/backoffice` must return the fenced `503` contract. When a non-final
+   phase restores captured writer replicas, it restores Bet, Event, Moderation,
+   Resulting, Slip, Gamemaster, then Backoffice. Fenced recovery also restores
+   Backoffice last.
 
    The fixed cleanup sequence is phase-specific. `dry-run` performs the fixed
    reschedule preflight, then the Backoffice cleanup preflight, before the
@@ -348,23 +395,30 @@ concurrent retirement fixture isolation without masking failed suites.
    cleanup, and deliberately hands the quiesced runtime plus active database
    lock to deployment. Public writes and the seven writer services remain
    unavailable between that successful phase and deployment; dispatch the
-   bound deployment immediately. The evidence contract is `live-betting-v5`
-   and carries both `event_reschedule_complete` and
-   `backoffice_pre_september_cleanup_complete`. Non-final evidence may keep
-   the cleanup value false unless its preflight proves an already-applied
-   journal; the final schema requires it to be true. This describes the
-   protected contract and does not claim that the cleanup has run.
+   bound deployment immediately. The current evidence contract is
+   `live-betting-v6`; it carries both operation-completion fields and the exact
+   checkpoint source, run ID, checksum, and disposition through provenance,
+   journal, final handoff, deployment, and activation. The literal v1-v5
+   readers remain for historical inspection and rollback only. Non-final
+   evidence may keep the cleanup value false unless its preflight proves an
+   already-applied journal; the final schema requires it to be true. This
+   describes the protected contract and does not claim that the cleanup has
+   run.
    `oci-production-deploy` rejects the release unless the final evidence proves
    all six compatibility backfills complete, the fixed Backoffice cleanup
    complete, the exact Slip draft index ready, the baseline digest unchanged,
    the expected database lock active, and all seven writers still quiesced. It
-   starts the new exact-digest services under the write fence, keeps the
-   transferred lock through protected validation, then releases the lock and
-   fence in order. Any incomplete apply or validation after a successfully
-   validated handoff scales the writers back to zero, restores the fence, and
-   retains or reacquires the same lock for a bounded retry with the same data
-   run. A request that never validates that exact handoff must not enter
-   maintenance, acquire the database lock, or alter writer replicas.
+   obtains read-only runtime access, verifies the exact fence and transferred
+   lock, validates the rollback baseline and held checkpoint, then renews that
+   exact lock without an initial acquire fallback. It starts the new
+   exact-digest services under the write fence, runs protected health, and
+   performs a second fresh exact-byte/mount/candidate/rollback held checkpoint
+   revalidation. Only then does it release the lock followed by the fence. Any
+   incomplete apply or validation after a successfully validated handoff
+   scales the writers back to zero, restores the fence, and retains or
+   reacquires the same lock for a bounded retry with the same data run. A
+   request that never validates that exact handoff must not enter maintenance,
+   acquire the database lock, or alter writer replicas.
 7. `scripts/deploy.sh` creates secrets without logging values, renders exact
    image digests, and deploys Mongo, RabbitMQ, backends, client, and ingress
    sequentially.
