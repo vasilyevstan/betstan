@@ -93,8 +93,10 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   infrastructure facts and must not call HTTP, RabbitMQ/rabbitmqctl, queues,
   pods, Deployments, or mutable workload health.
 - On a validated descendant resume, preserve the original checkpoint-source
-  build and infrastructure run IDs; current workflow, predecessor, and failed
-  run evidence remains bound to the current control SHA. Never substitute a
+  build and infrastructure run IDs; workflow control advances while
+  predecessor and failed-run evidence bind the explicit `resume_source_sha`.
+  A nonzero baseline recovery requires its explicit source and exact
+  checksum-bound fixed-profile artifact before authority. Never substitute a
   new byte-equivalent build or infrastructure run.
 - Preserve the retained Mongo volume and refuse legacy Mongo manifests.
 - Never receive or use Azure credentials. Cross-cloud data work is exclusive

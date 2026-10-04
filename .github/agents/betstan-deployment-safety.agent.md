@@ -380,10 +380,15 @@ Before deployment:
   Deployments before applying images;
 - require the exact canonical `k3s-release-disk-checkpoint.v1` tuple. On a
   descendant resume, keep build, infrastructure, and checkpoint runs bound to
-  the original checkpoint source while current predecessor and failed-run
-  evidence remains bound to the current control SHA. Reject a new
+  the original checkpoint source while predecessor and failed-run evidence
+  binds the hash-covered `resume_source_sha`. Require a nonzero baseline
+  recovery's explicit source and exact checksum-bound fixed-profile artifact
+  before authority. Reject a new
   byte-equivalent build or infrastructure run, unsafe/incomplete recovery
   artifact ZIPs, checksum drift, or any v6/checkpoint substitution;
+- for failed-activation recovery, demote and verify exactly the artifact-bound
+  retained account as `USER` under the transferred lock before bounded Slip
+  cleanup; either failure blocks the resumed data phase;
 - require baseline and predecessor work to finish before the final public disk
   revalidation, with that revalidation as the last read-only action before
   lock acquisition. In held mode accept only stable infrastructure facts:

@@ -19,10 +19,12 @@ import hashlib
 import io
 import ipaddress
 import json
+import os
 import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -52,6 +54,7 @@ CURRENT_SERVICES = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip", "telemetry",
 }
+RECOVERY_APPLICATION_SERVICES = CURRENT_SERVICES - {"telemetry"}
 APPLICATION_REPOSITORY = "ghcr.io/vasilyevstan/betstan-images"
 ARTIFACT_CONTENT_KEYS = {"fileName", "format", "equals"}
 ARTIFACT_VALUE_TOKEN = re.compile(
@@ -680,7 +683,13 @@ def exact_artifact(repository, run_id, name, label):
     return artifact
 
 
-def artifact_files(repository, artifact, label):
+def artifact_files(
+    repository,
+    artifact,
+    label,
+    *,
+    allowed_empty_suffixes=frozenset(),
+):
     artifact_id = artifact.get("id")
     if type(artifact_id) is not int or artifact_id < 1:
         fail(f"{label} artifact has an invalid ID")
@@ -717,8 +726,13 @@ def artifact_files(repository, artifact, label):
                     fail(f"{label} artifact contains encrypted content")
                 if normalized in files:
                     fail(f"{label} artifact contains duplicate paths")
+                empty_allowed = any(
+                    normalized == suffix
+                    or normalized.endswith(f"/{suffix}")
+                    for suffix in allowed_empty_suffixes
+                )
                 if (
-                    info.file_size < 1
+                    (info.file_size < 1 and not empty_allowed)
                     or info.file_size > MAX_ARTIFACT_EVIDENCE_BYTES
                 ):
                     fail(f"{label} artifact evidence size is invalid")
@@ -1775,6 +1789,662 @@ def validate_run_profile(
     )
 
 
+def fixed_run_metadata(
+    repository,
+    run_id,
+    workflow,
+    conclusion,
+    label,
+    event="workflow_dispatch",
+):
+    workflow_metadata = gh_api(
+        f"repos/{repository}/actions/workflows/{workflow}"
+    )
+    if not isinstance(workflow_metadata, dict) or type(
+        workflow_metadata.get("id")
+    ) is not int:
+        fail(f"{label} workflow metadata is invalid")
+    workflow_id = workflow_metadata["id"]
+    base = gh_api(f"repos/{repository}/actions/runs/{run_id}")
+    attempt = gh_api(
+        f"repos/{repository}/actions/runs/{run_id}/attempts/1"
+    )
+    if not isinstance(base, dict) or not isinstance(attempt, dict):
+        fail(f"{label} run metadata is invalid")
+    expected_path = f".github/workflows/{workflow}"
+    checks = {
+        "id": (base.get("id"), int(run_id)),
+        "workflow_id": (base.get("workflow_id"), workflow_id),
+        "path": (base.get("path"), expected_path),
+        "repository": (
+            (base.get("head_repository") or {}).get("full_name"),
+            repository,
+        ),
+        "head_branch": (base.get("head_branch"), "master"),
+        "status": (base.get("status"), "completed"),
+        "conclusion": (base.get("conclusion"), conclusion),
+        "run_attempt": (base.get("run_attempt"), 1),
+        "event": (base.get("event"), event),
+    }
+    for field, (observed, expected) in checks.items():
+        if observed != expected:
+            fail(
+                f"{label} run {run_id} {field} is {observed!r}, "
+                f"expected {expected!r}"
+            )
+    for field in {
+        "id",
+        "workflow_id",
+        "path",
+        "head_branch",
+        "head_sha",
+        "status",
+        "conclusion",
+        "run_attempt",
+        "event",
+        "display_title",
+    }:
+        if attempt.get(field) != base.get(field):
+            fail(f"{label} first attempt {field} differs from the run")
+    if (
+        (attempt.get("head_repository") or {}).get("full_name")
+        != repository
+    ):
+        fail(f"{label} first attempt repository differs from the run")
+    head_sha = base.get("head_sha")
+    if not isinstance(head_sha, str) or FULL_SHA.fullmatch(head_sha) is None:
+        fail(f"{label} control SHA is invalid")
+    return base
+
+
+def validate_recovery_image_rows(raw, label):
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail(f"{label} images are not UTF-8")
+    rows = {}
+    digest = re.compile(r"^sha256:[0-9a-f]{64}$")
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 5:
+            fail(f"{label} images have an invalid schema")
+        service, repository, image_ref, manifest, platform = fields
+        if (
+            service in rows
+            or service not in RECOVERY_APPLICATION_SERVICES
+            or repository != APPLICATION_REPOSITORY
+            or image_ref != f"{repository}@{manifest}"
+            or digest.fullmatch(manifest) is None
+            or digest.fullmatch(platform) is None
+        ):
+            fail(f"{label} images are invalid")
+        rows[service] = {
+            "image_ref": image_ref,
+            "manifest": manifest,
+            "platform": platform,
+        }
+    if set(rows) != RECOVERY_APPLICATION_SERVICES:
+        fail(f"{label} images do not contain the exact application services")
+    return rows
+
+
+def validate_cache_recovery_artifact(
+    repository,
+    run_id,
+    source_sha,
+    artifact,
+    label,
+):
+    files = artifact_files(repository, artifact, label)
+    validate_checksum_manifest(files, label)
+    expected_files = {
+        "SHA256SUMS",
+        "images.tsv",
+        "recovery-evidence.env",
+        "transition-plan.tsv",
+        "transition-plan-evidence.env",
+        "rabbitmq-baseline.txt",
+        "rebind-provenance.env",
+        "transition-provenance.env",
+    } | {f"{service}.env" for service in RECOVERY_APPLICATION_SERVICES}
+    relatives = {path.rsplit("/", 1)[-1] for path in files}
+    if relatives != expected_files or len(files) != len(expected_files):
+        fail(f"{label} artifact has an unexpected file set")
+
+    _, images_raw = unique_artifact_file(files, "images.tsv", label)
+    images = validate_recovery_image_rows(images_raw, label)
+    image_hash = hashlib.sha256(images_raw).hexdigest()
+    _, evidence_raw = unique_artifact_file(
+        files, "recovery-evidence.env", label
+    )
+    evidence = parse_env(
+        evidence_raw,
+        f"{label} recovery evidence",
+        {
+            "schema",
+            "recovery_origin",
+            "registry_provider",
+            "registry_repository",
+            "anonymous_pull",
+            "source_sha",
+            "trusted_build_run_id",
+            "trusted_upstream_run_id",
+            "recovery_run_id",
+            "recovery_run_attempt",
+            "images_sha256",
+        },
+    )
+    if (
+        evidence["schema"] != "betstan.ghcr-cache-recovery.v1"
+        or evidence["recovery_origin"] != "containerd-cache"
+        or evidence["registry_provider"] != "ghcr"
+        or evidence["registry_repository"] != APPLICATION_REPOSITORY
+        or evidence["anonymous_pull"] != "pass"
+        or evidence["source_sha"] != source_sha
+        or evidence["recovery_run_id"] != run_id
+        or evidence["recovery_run_attempt"] != "1"
+        or evidence["images_sha256"] != image_hash
+        or POSITIVE_INTEGER.fullmatch(
+            evidence["trusted_build_run_id"]
+        ) is None
+        or POSITIVE_INTEGER.fullmatch(
+            evidence["trusted_upstream_run_id"]
+        ) is None
+    ):
+        fail(f"{label} recovery evidence is invalid")
+
+    service_keys = {
+        "schema",
+        "registry_provider",
+        "registry_host",
+        "registry_tag_prefix",
+        "registry_tag_schema",
+        "service",
+        "repository",
+        "source_sha",
+        "tag",
+        "digest",
+        "platform_digest",
+        "image_ref",
+        "platform",
+        "build_workflow",
+        "build_run_id",
+        "build_run_attempt",
+        "upstream_workflow",
+        "upstream_run_id",
+        "upstream_run_attempt",
+        "recovery_workflow",
+        "recovery_run_id",
+        "recovery_run_attempt",
+        "recovery_origin",
+        "recovery_origin_repository",
+        "recovery_origin_manifest_digest",
+        "recovery_origin_platform_digest",
+    }
+    digest = re.compile(r"^sha256:[0-9a-f]{64}$")
+    for service, image in images.items():
+        _, raw = unique_artifact_file(files, f"{service}.env", label)
+        values = parse_env(raw, f"{label} {service} provenance", service_keys)
+        if (
+            values["schema"] != "betstan.application-image-provenance.v1"
+            or values["registry_provider"] != "ghcr"
+            or values["registry_host"] != "ghcr.io"
+            or values["registry_tag_prefix"] != "arm64"
+            or values["registry_tag_schema"] != "v1"
+            or values["service"] != service
+            or values["repository"] != APPLICATION_REPOSITORY
+            or values["source_sha"] != source_sha
+            or values["tag"]
+            != f"{APPLICATION_REPOSITORY}:{service}-{source_sha}-arm64"
+            or values["digest"] != image["manifest"]
+            or values["platform_digest"] != image["platform"]
+            or values["image_ref"] != image["image_ref"]
+            or values["platform"] != "linux/arm64"
+            or values["build_workflow"] != "oci-production-build"
+            or values["build_run_id"] != evidence["trusted_build_run_id"]
+            or values["build_run_attempt"] != "1"
+            or values["upstream_workflow"] != "production-build"
+            or values["upstream_run_id"]
+            != evidence["trusted_upstream_run_id"]
+            or values["upstream_run_attempt"] != "1"
+            or values["recovery_workflow"] != "oci-ghcr-cache-recovery"
+            or values["recovery_run_id"] != run_id
+            or values["recovery_run_attempt"] != "1"
+            or values["recovery_origin"] != "containerd-cache"
+            or not values["recovery_origin_repository"]
+            or digest.fullmatch(
+                values["recovery_origin_manifest_digest"]
+            ) is None
+            or values["recovery_origin_platform_digest"] != image["platform"]
+        ):
+            fail(f"{label} {service} provenance is invalid")
+
+    transition_keys = {
+        "schema",
+        "transition_workflow",
+        "transition_run_id",
+        "transition_run_attempt",
+        "source_sha",
+        "images_sha256",
+        "infrastructure_run_id",
+        "infrastructure_run_attempt",
+        "infrastructure_provenance_sha256",
+        "runtime_mode",
+        "runtime_fingerprint",
+        "registry_provider",
+        "registry_host",
+        "registry_repository",
+        "registry_public_anonymous",
+        "public_host",
+        "canonical_host",
+        "redirect_host",
+        "diagnostic_host",
+        "transition_plan_state_sha256",
+        "rabbitmq_baseline_sha256",
+        "credential_retirement",
+        "ocir_repository_retirement",
+        "transition_status",
+    }
+    _, transition_raw = unique_artifact_file(
+        files, "transition-provenance.env", label
+    )
+    transition = parse_env(
+        transition_raw, f"{label} transition provenance", transition_keys
+    )
+    if (
+        transition["schema"]
+        != "betstan.ghcr-cache-recovery-transition.v1"
+        or transition["transition_workflow"] != "oci-ghcr-cache-recovery"
+        or transition["transition_run_id"] != run_id
+        or transition["transition_run_attempt"] != "1"
+        or transition["source_sha"] != source_sha
+        or transition["images_sha256"] != image_hash
+        or transition["runtime_mode"] != "k3s"
+        or transition["registry_provider"] != "ghcr"
+        or transition["registry_host"] != "ghcr.io"
+        or transition["registry_repository"] != APPLICATION_REPOSITORY
+        or transition["registry_public_anonymous"] != "true"
+        or transition["credential_retirement"] != "pass"
+        or transition["ocir_repository_retirement"] != "pass"
+        or transition["transition_status"] != "PASS"
+    ):
+        fail(f"{label} transition provenance is invalid")
+    for key in {
+        "infrastructure_provenance_sha256",
+        "runtime_fingerprint",
+        "transition_plan_state_sha256",
+        "rabbitmq_baseline_sha256",
+    }:
+        if re.fullmatch(r"[0-9a-f]{64}", transition[key]) is None:
+            fail(f"{label} transition hash is invalid")
+    if (
+        POSITIVE_INTEGER.fullmatch(transition["infrastructure_run_id"])
+        is None
+        or transition["infrastructure_run_attempt"] != "1"
+    ):
+        fail(f"{label} transition infrastructure lineage is invalid")
+    for key in {
+        "public_host",
+        "canonical_host",
+        "redirect_host",
+        "diagnostic_host",
+    }:
+        if re.fullmatch(r"[A-Za-z0-9.-]+", transition[key]) is None:
+            fail(f"{label} transition endpoint is invalid")
+    if transition["canonical_host"] != transition["public_host"]:
+        fail(f"{label} transition canonical endpoint differs")
+
+    _, plan_raw = unique_artifact_file(
+        files, "transition-plan.tsv", label
+    )
+    plan_rows = {}
+    try:
+        plan_lines = plan_raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail(f"{label} transition plan is not UTF-8")
+    for line in plan_lines:
+        fields = line.split("\t")
+        if len(fields) != 5:
+            fail(f"{label} transition plan is malformed")
+        service, old_ref, new_ref, platform, state = fields
+        if (
+            service in plan_rows
+            or service not in RECOVERY_APPLICATION_SERVICES
+            or new_ref != images[service]["image_ref"]
+            or platform != images[service]["platform"]
+            or re.fullmatch(
+                r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}",
+                old_ref,
+            )
+            is None
+            or state not in {"pending", "already-ghcr"}
+        ):
+            fail(f"{label} transition plan is invalid")
+        plan_rows[service] = fields
+    if set(plan_rows) != RECOVERY_APPLICATION_SERVICES:
+        fail(f"{label} transition plan service set is incomplete")
+    plan_hash = hashlib.sha256(plan_raw).hexdigest()
+    _, rabbit_raw = unique_artifact_file(
+        files, "rabbitmq-baseline.txt", label
+    )
+    rabbit_hash = hashlib.sha256(rabbit_raw).hexdigest()
+    if (
+        transition["transition_plan_state_sha256"] != plan_hash
+        or transition["rabbitmq_baseline_sha256"] != rabbit_hash
+    ):
+        fail(f"{label} transition plan hashes differ")
+
+    _, plan_evidence_raw = unique_artifact_file(
+        files, "transition-plan-evidence.env", label
+    )
+    plan_evidence = parse_env(
+        plan_evidence_raw,
+        f"{label} transition plan evidence",
+        {
+            "schema",
+            "source_sha",
+            "plan_origin_recovery_run_id",
+            "plan_carrier_recovery_run_id",
+            "plan_carrier_recovery_run_attempt",
+            "images_sha256",
+            "infrastructure_provenance_sha256",
+            "transition_plan_sha256",
+            "rabbitmq_baseline_sha256",
+        },
+    )
+    if (
+        plan_evidence["schema"]
+        != "betstan.ghcr-cache-transition-plan.v1"
+        or plan_evidence["source_sha"] != source_sha
+        or POSITIVE_INTEGER.fullmatch(
+            plan_evidence["plan_origin_recovery_run_id"]
+        )
+        is None
+        or POSITIVE_INTEGER.fullmatch(
+            plan_evidence["plan_carrier_recovery_run_id"]
+        )
+        is None
+        or plan_evidence["plan_carrier_recovery_run_attempt"] != "1"
+        or plan_evidence["images_sha256"] != image_hash
+        or plan_evidence["infrastructure_provenance_sha256"]
+        != transition["infrastructure_provenance_sha256"]
+        or plan_evidence["transition_plan_sha256"] != plan_hash
+        or plan_evidence["rabbitmq_baseline_sha256"] != rabbit_hash
+    ):
+        fail(f"{label} transition plan evidence is invalid")
+
+    _, rebind_raw = unique_artifact_file(
+        files, "rebind-provenance.env", label
+    )
+    rebind = parse_env(
+        rebind_raw,
+        f"{label} rebind provenance",
+        {
+            "schema",
+            "transition_workflow",
+            "recovery_run_id",
+            "recovery_run_attempt",
+            "source_sha",
+            "images_sha256",
+            "infrastructure_run_id",
+            "infrastructure_run_attempt",
+            "infrastructure_provenance_sha256",
+            "runtime_mode",
+            "runtime_fingerprint",
+            "registry_provider",
+            "registry_host",
+            "registry_repository",
+            "registry_public_anonymous",
+            "public_host",
+            "canonical_host",
+            "redirect_host",
+            "diagnostic_host",
+            "transition_plan_state_sha256",
+            "rabbitmq_baseline_sha256",
+            "transition_plan_evidence_sha256",
+            "plan_origin_recovery_run_id",
+            "credential_retirement",
+            "transition_status",
+        },
+    )
+    shared_keys = {
+        "source_sha",
+        "images_sha256",
+        "infrastructure_run_id",
+        "infrastructure_run_attempt",
+        "infrastructure_provenance_sha256",
+        "runtime_mode",
+        "runtime_fingerprint",
+        "registry_provider",
+        "registry_host",
+        "registry_repository",
+        "registry_public_anonymous",
+        "public_host",
+        "canonical_host",
+        "redirect_host",
+        "diagnostic_host",
+        "transition_plan_state_sha256",
+        "rabbitmq_baseline_sha256",
+    }
+    if (
+        rebind["schema"] != "betstan.ghcr-cache-recovery-rebind.v1"
+        or rebind["transition_workflow"] != "oci-ghcr-cache-recovery"
+        or rebind["recovery_run_id"] != run_id
+        or rebind["recovery_run_attempt"] != "1"
+        or any(rebind[key] != transition[key] for key in shared_keys)
+        or rebind["transition_plan_evidence_sha256"]
+        != hashlib.sha256(plan_evidence_raw).hexdigest()
+        or rebind["plan_origin_recovery_run_id"]
+        != plan_evidence["plan_origin_recovery_run_id"]
+        or rebind["credential_retirement"] != "pending"
+        or rebind["transition_status"] != "REBIND_VERIFIED"
+    ):
+        fail(f"{label} rebind provenance is invalid")
+
+    build_run = evidence["trusted_build_run_id"]
+    build = fixed_run_metadata(
+        repository,
+        build_run,
+        "oci-production-build.yml",
+        "success",
+        f"{label} historical build",
+        "workflow_run",
+    )
+    if build.get("head_sha") != source_sha:
+        fail(f"{label} historical build source differs")
+    exact_artifact(
+        repository,
+        build_run,
+        f"oci-image-provenance-{source_sha}-{build_run}-1",
+        f"{label} historical build",
+    )
+
+
+def validate_partial_recovery_artifact(
+    repository,
+    run_id,
+    source_sha,
+    artifact,
+    metadata,
+    label,
+):
+    files = artifact_files(
+        repository,
+        artifact,
+        label,
+        allowed_empty_suffixes={"rollback-readiness/failures.txt"},
+    )
+    manifest_path, _ = unique_artifact_file(
+        files, "partial-recovery-SHA256SUMS", label
+    )
+    prefix = (
+        manifest_path.rsplit("/", 1)[0] + "/"
+        if "/" in manifest_path
+        else ""
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=".upstream-binding-recovery-",
+        dir=Path.cwd(),
+    ) as temporary:
+        root = Path(temporary)
+        for path, raw in files.items():
+            if not path.startswith(prefix):
+                fail(f"{label} artifact has inconsistent paths")
+            relative = path[len(prefix):]
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(raw)
+        helper = Path(__file__).with_name(
+            "validate-partial-recovery-authority-stan.sh"
+        )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PARTIAL_RECOVERY_DIR": str(root),
+                "EXPECTED_RECOVERY_RUN_ID": run_id,
+                "EXPECTED_SOURCE_SHA": source_sha,
+            }
+        )
+        result = subprocess.run(
+            [str(helper)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        if result.returncode != 0:
+            fail(f"repository-fixed validator rejected {label}")
+        authority = parse_env(
+            (root / "partial-recovery-authority.env").read_bytes(),
+            f"{label} authority",
+        )
+    if (
+        authority.get("recovery_run_id") != run_id
+        or authority.get("recovery_head_sha") != metadata.get("head_sha")
+        or authority.get("restored_source_sha") != source_sha
+        or metadata.get("display_title")
+        != f"oci-rollback {authority.get('target_sha')}"
+    ):
+        fail(f"{label} metadata differs from its recovery authority")
+
+    build_run = authority.get("restored_build_run_id", "")
+    build = fixed_run_metadata(
+        repository,
+        build_run,
+        "oci-production-build.yml",
+        "success",
+        f"{label} restored build",
+        "workflow_run",
+    )
+    if build.get("head_sha") != source_sha:
+        fail(f"{label} restored build source differs")
+    exact_artifact(
+        repository,
+        build_run,
+        f"oci-image-provenance-{source_sha}-{build_run}-1",
+        f"{label} restored build",
+    )
+    failed_run = authority.get("source_rollback_run_id", "")
+    failed = fixed_run_metadata(
+        repository,
+        failed_run,
+        "oci-production-rollback.yml",
+        "failure",
+        f"{label} failed rollback",
+    )
+    if failed.get("display_title") != metadata.get("display_title"):
+        fail(f"{label} failed rollback target differs")
+    exact_artifact(
+        repository,
+        failed_run,
+        f"oci-production-rollback-{failed_run}-1",
+        f"{label} failed rollback",
+    )
+
+
+def validate_baseline_recovery_profile(
+    repository,
+    dispatch_inputs,
+    subject_sha,
+):
+    run_id = str(dispatch_inputs.get("baseline_recovery_run_id", ""))
+    source_sha = dispatch_inputs.get("baseline_recovery_source_sha")
+    if not run_id and source_sha is None:
+        return
+    if run_id == "0":
+        if source_sha != "none":
+            fail("zero baseline recovery run requires source none")
+        return
+    if (
+        POSITIVE_INTEGER.fullmatch(run_id) is None
+        or not isinstance(source_sha, str)
+        or FULL_SHA.fullmatch(source_sha) is None
+    ):
+        fail("baseline recovery run and source are invalid")
+
+    candidates = (
+        (
+            "oci-ghcr-cache-recovery.yml",
+            f"ghcr-cache-recovery-{source_sha}-{run_id}-1",
+            f"oci-ghcr-cache-recovery {source_sha}",
+            "cache",
+        ),
+        (
+            "oci-production-rollback.yml",
+            f"oci-production-rollback-{run_id}-1",
+            None,
+            "partial",
+        ),
+    )
+    selected = None
+    for workflow, artifact_name, title, kind in candidates:
+        workflow_metadata = gh_api(
+            f"repos/{repository}/actions/workflows/{workflow}"
+        )
+        if not isinstance(workflow_metadata, dict) or type(
+            workflow_metadata.get("id")
+        ) is not int:
+            fail("baseline recovery workflow metadata is invalid")
+        base = gh_api(f"repos/{repository}/actions/runs/{run_id}")
+        if base.get("workflow_id") == workflow_metadata["id"]:
+            selected = (workflow, artifact_name, title, kind)
+            break
+    if selected is None:
+        fail("baseline recovery run is not a fixed trusted workflow")
+    workflow, artifact_name, title, kind = selected
+    metadata = fixed_run_metadata(
+        repository,
+        run_id,
+        workflow,
+        "success",
+        "baseline recovery",
+    )
+    if title is not None and metadata.get("display_title") != title:
+        fail("baseline recovery title differs from its selected source")
+    validate_descendant_scope(metadata["head_sha"], subject_sha)
+    validate_descendant_scope(source_sha, subject_sha)
+    artifact = exact_artifact(
+        repository, run_id, artifact_name, "baseline recovery"
+    )
+    if kind == "cache":
+        validate_cache_recovery_artifact(
+            repository,
+            run_id,
+            source_sha,
+            artifact,
+            "baseline recovery",
+        )
+    else:
+        validate_partial_recovery_artifact(
+            repository,
+            run_id,
+            source_sha,
+            artifact,
+            metadata,
+            "baseline recovery",
+        )
+
+
 def validate_checkpoint_profile(
     repository,
     binding,
@@ -1860,6 +2530,11 @@ def validate_checkpoint_profile(
     ):
         fail("k3s finalize checkpoint does not bind its infrastructure run")
     validate_descendant_scope(expected_head_sha, subject_sha)
+    validate_baseline_recovery_profile(
+        repository,
+        dispatch_inputs,
+        subject_sha,
+    )
 
 
 def validate_live_predecessor_profile(
@@ -1927,6 +2602,8 @@ def validate_binding(
                 f"{binding['input']} expected head input "
                 f"{expected_head_input} is not a full SHA"
             )
+        if expected_head_input == "resume_source_sha":
+            validate_descendant_scope(expected_head_sha, subject_sha)
     expected_conclusion = binding.get("expectedConclusion", "success")
 
     workflow = gh_api(
@@ -2052,7 +2729,7 @@ def validate_binding(
     validate_run_profile(
         repository,
         run_id,
-        subject_sha,
+        expected_head_sha,
         binding.get("runProfile"),
         binding["input"],
         artifact,

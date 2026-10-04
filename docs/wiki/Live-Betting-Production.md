@@ -275,9 +275,12 @@ source, producer run, checksum, or disposition is not a resume.
 
 For an allowed descendant resume, the original checkpoint-source build and
 infrastructure run IDs also remain unchanged. Only workflow control advances:
-the predecessor, failed deployment, and failed activation runs are current-SHA
-evidence, while build, infrastructure, and checkpoint evidence stays bound to
-the original checkpoint source. A new byte-equivalent run is rejected.
+the predecessor, failed deployment, and failed activation runs bind the
+hash-covered `resume_source_sha`, which may be the approved SHA or the proven
+GitHub/infra/Markdown-only ancestor. Build, infrastructure, and checkpoint
+evidence stays bound to the original checkpoint source. A new byte-equivalent
+run is rejected. A nonzero recovered baseline likewise requires its explicit
+source and exact checksum-bound recovery artifact before authority.
 
 Compatibility is exact rather than schema-label-only: the verifier continues
 to accept the literal historical meanings and exact key sets of
@@ -300,6 +303,12 @@ Held revalidation is intentionally stable-only. It checks raw bytes,
 root/Mongo mount and node/runtime identity, and immutable candidate/rollback
 residency without HTTP, RabbitMQ/rabbitmqctl, queues, pods, Deployments, or
 mutable workload-health queries.
+
+When a failed activation left its artifact-bound acceptance account retained,
+the resumed phase first idempotently demotes that exact account to `USER` under
+the transferred lock, verifies exactly one matching account and role, then
+performs the existing bounded draft-Slip cleanup with an expected account
+count of one. Either failure blocks all later data mutation.
 
 Deployment again verifies the inherited fence, transferred lock, rollback
 baseline, and held checkpoint before renewing the exact lock; it has no initial

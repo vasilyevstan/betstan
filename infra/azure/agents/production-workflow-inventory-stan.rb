@@ -1306,9 +1306,11 @@ def validate_live_data_rollout_workflow!(file, document, content)
       infrastructure_run_id
       checkpoint_source_sha
       disk_checkpoint_run_id
+      resume_source_sha
       phase
       prerequisite_run_id
       baseline_recovery_run_id
+      baseline_recovery_source_sha
       failed_deploy_run_id
       failed_activation_run_id
       failed_activation_user_id
@@ -1353,6 +1355,10 @@ def validate_live_data_rollout_workflow!(file, document, content)
       "failed-activation artifact binding",
     "cleanup-live-acceptance-slips-stan.sh" =>
       "exact synthetic Slip cleanup",
+    "Demote and verify exact retained live-acceptance account" =>
+      "failed-activation role cleanup",
+    "EXPECTED_AUTH_USER_COUNT=1" =>
+      "artifact-bound retained-account cleanup",
     "git merge-base --is-ancestor" => "applied-data ancestry proof",
     "Application path changed after applied data" =>
       "application-change rejection",

@@ -36,6 +36,82 @@ fail() {
   exit 1
 }
 
+demotion_script="$(
+  ruby -ryaml - "$WORKFLOW" <<'RUBY'
+document = YAML.load_file(ARGV.fetch(0))
+step = document.fetch("jobs").values
+  .flat_map { |job| job.fetch("steps", []) }
+  .find { |item| item["name"] == "Demote and verify exact retained live-acceptance account" }
+abort "demotion step missing" unless step
+puts step.fetch("run")
+RUBY
+)"
+demotion_bin="$work_dir/demotion-bin"
+demotion_log="$work_dir/demotion.log"
+mkdir -p "$demotion_bin"
+cat >"$demotion_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${STUB_ROLE_LOG:?}"
+if [[ "${1:-}" == "exec" && " $* " == *" deployment/gaming-auth-depl "* ]]; then
+  [ "${STUB_ROLE_CHANGE_FAIL:-false}" != true ]
+  exit 0
+fi
+if [[ "${1:-}" == "get" && "${2:-}" == "pods" ]]; then
+  printf '%s\n' '{"items":[{"metadata":{"name":"mongo-0"},"status":{"phase":"Running"}}]}'
+  exit 0
+fi
+if [[ "${1:-}" == "exec" ]]; then
+  printf '%s\n' "${STUB_ROLE_RESULT:?}"
+  exit 0
+fi
+exit 1
+EOF
+chmod 755 "$demotion_bin/kubectl"
+run_demotion() {
+  rm -rf -- "$work_dir/artifacts"
+  mkdir -p "$work_dir/artifacts/oci-live-data-rollout/evidence"
+  (
+    cd "$work_dir"
+    PATH="$demotion_bin:$PATH" \
+    STUB_ROLE_LOG="$demotion_log" \
+    STUB_ROLE_RESULT="${STUB_ROLE_RESULT:-{\"verified\":true,\"userCount\":1,\"role\":\"USER\"}}" \
+    FAILED_ACTIVATION_RUN_ID=7788 \
+    FAILED_ACTIVATION_USER_ID=0123456789abcdef01234567 \
+    OCI_K8S_NAMESPACE=betstan-oci \
+      bash -c "$demotion_script"
+  )
+}
+: >"$demotion_log"
+run_demotion
+jq -e '
+  .schemaVersion == "failed-live-acceptance-role.v1" and
+  .failedActivationRunId == "7788" and
+  .verified == true and
+  .userCount == 1 and
+  .role == "USER" and
+  (keys | sort) == [
+    "failedActivationRunId",
+    "role",
+    "schemaVersion",
+    "userCount",
+    "verified"
+  ]
+' "$work_dir/artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-role.json" \
+  >/dev/null ||
+  fail "failed-activation account demotion evidence is incomplete"
+grep -Fq \
+  'USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:0123456789abcdef01234567:USER' \
+  "$demotion_log" ||
+  fail "account demotion did not bind the exact artifact user"
+if STUB_ROLE_CHANGE_FAIL=true run_demotion >/dev/null 2>&1; then
+  fail "role revocation failure did not block failed-activation recovery"
+fi
+if STUB_ROLE_RESULT='{"verified":true,"userCount":1,"role":"ADMIN"}' \
+  run_demotion >/dev/null 2>&1; then
+  fail "retained ADMIN role was accepted before Slip cleanup"
+fi
+
 write_manifest() {
   local directory="$1"
   python3 - "$directory" <<'PY'
@@ -785,6 +861,62 @@ grep -Fxq 'baseline_recovery_run_id=799' "$recovery_output/provenance.env"
 grep -Fxq \
   "baseline_recovery_source_sha=$recovery_source_sha" \
   "$recovery_output/provenance.env"
+EVIDENCE_DIR="$recovery_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+EXPECTED_DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+EXPECTED_DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
+EXPECTED_BASELINE_RECOVERY_RUN_ID=799 \
+EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$recovery_source_sha" \
+EXPECTED_PHASE=dry-run \
+EXPECTED_RUN_ID=4007 \
+EXPECTED_RUN_ATTEMPT=1 \
+  "$VERIFIER" >/dev/null ||
+  fail "recovered dry-run evidence was not consumable by its exact tuple"
+
+recovery_backfill_output="$work_dir/recovery-backfills"
+run_phase apply-backfills backfills 4008 "$recovery_backfill_output" \
+  799 "$recovery_source_sha"
+grep -Fxq \
+  'baseline_recovery_run_id=799' \
+  "$recovery_backfill_output/provenance.env"
+grep -Fxq \
+  "baseline_recovery_source_sha=$recovery_source_sha" \
+  "$recovery_backfill_output/provenance.env"
+EVIDENCE_DIR="$recovery_backfill_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+EXPECTED_DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+EXPECTED_DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
+EXPECTED_BASELINE_RECOVERY_RUN_ID=799 \
+EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$recovery_source_sha" \
+EXPECTED_PHASE=apply-backfills \
+EXPECTED_RUN_ID=4008 \
+EXPECTED_RUN_ATTEMPT=1 \
+  "$VERIFIER" >/dev/null ||
+  fail "recovered dry-run tuple was not preserved by apply-backfills"
+if EVIDENCE_DIR="$recovery_backfill_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+  EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+  EXPECTED_DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+  EXPECTED_DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
+  EXPECTED_BASELINE_RECOVERY_RUN_ID=799 \
+  EXPECTED_BASELINE_RECOVERY_SOURCE_SHA=cccccccccccccccccccccccccccccccccccccccc \
+  EXPECTED_PHASE=apply-backfills \
+  EXPECTED_RUN_ID=4008 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "apply-backfills accepted a substituted recovered-baseline source"
+fi
 
 blocked_output="$work_dir/reschedule-blocked"
 blocked_log="$work_dir/reschedule-blocked.out"
@@ -2501,7 +2633,7 @@ for literal in \
   'BASELINE_RECOVERY_DIR=artifacts/recovery' \
   'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
   'Bind historical recovery source through its exact artifact' \
-  'BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || '\''none'\'' }}' \
+  'BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}' \
   'failed_deploy_run_id:' \
   'attempts/1/jobs?per_page=100' \
   '.name == "deploy"' \
@@ -2549,9 +2681,13 @@ for literal in \
   'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"' \
   'EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id"' \
   'restore_or_verify_retained_hold' \
+  'Demote and verify exact retained live-acceptance account' \
+  'USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$FAILED_ACTIVATION_USER_ID:USER' \
+  'node dist/scripts/SetUserRole.js' \
+  'failed-live-acceptance-role.json' \
   'Delete exact orphaned live-acceptance slips' \
   'cleanup-live-acceptance-slips-stan.sh' \
-  'EXPECTED_AUTH_USER_COUNT=0' \
+  'EXPECTED_AUTH_USER_COUNT=1' \
   'ALLOWED_BET_KINDS=LIVE,PRE_MATCH' \
   'MAX_ACTIVE_SLIPS=2' \
   'runtime_images_sha256=' \
@@ -2725,6 +2861,7 @@ require_order(
         "Revalidate exact release disk checkpoint before lock mutation",
         "Acquire database operation lock",
         "Enter or re-establish live data maintenance",
+        "Demote and verify exact retained live-acceptance account",
         "Delete exact orphaned live-acceptance slips",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",
@@ -2879,7 +3016,7 @@ if revalidation.count("\n      - name:") != 0:
     )
 for literal in (
     "OUTPUT_DIR: artifacts/oci-data-baseline-before",
-    "BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}",
+    "BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}",
     '[ "$BASELINE_RECOVERY_SOURCE_SHA" = "none" ]',
     '"$BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$',
     'expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"',
@@ -2896,7 +3033,7 @@ if not preparation.split("oci_die \"final data handoff baseline validation faile
 
 maintenance = data[
     data.index("- name: Enter or re-establish live data maintenance"):
-    data.index("- name: Delete exact orphaned live-acceptance slips")
+    data.index("- name: Demote and verify exact retained live-acceptance account")
 ]
 for literal in (
     'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',

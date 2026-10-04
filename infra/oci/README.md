@@ -332,16 +332,20 @@ concurrent retirement fixture isolation without masking failed suites.
    resume with exact candidate-image and recursive lineage equivalence may
    reuse an already applied data chain; deployment still requires the
    resulting new exact-SHA final handoff. Build, infrastructure, and checkpoint
-   runs remain the original checkpoint-source identities, while workflow,
-   predecessor, and failed-run evidence remains bound to the current control
-   SHA; byte-equivalent replacement runs are rejected.
+   runs remain the original checkpoint-source identities. Workflow control
+   advances, while predecessor and failed-run evidence bind the explicit
+   hash-covered resume source; byte-equivalent replacement runs are rejected.
+   A nonzero recovered baseline also requires its explicit source and exact
+   checksum-bound cache-recovery or partial-rollback artifact before authority.
    Fixed failure profiles download safe complete baseline, deployment,
    predecessor-v6, and activation artifacts and verify checksum/capture and
    complete lineage; metadata and jobs alone are not authority. Retained-hold
    recovery binds the pre-lock-renewal deployment intent to its post-rehold
    failure lineage, while activation cleanup consumes a separate exact
    checksum-manifested recovery-authority artifact instead of the larger
-   always-uploaded diagnostics tree.
+   always-uploaded diagnostics tree. Under the transferred lock it demotes and
+   verifies the exact retained account as `USER` before bounded Slip cleanup;
+   either failure blocks the resumed data phase.
    The workflow runs only compiled CLIs from the approved immutable image
    digests. Fresh and released-runtime paths finish static, predecessor,
    baseline, and read-only access work, then make public checkpoint

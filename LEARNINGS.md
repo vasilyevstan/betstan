@@ -1511,11 +1511,17 @@ Durable rules:
 - Metadata is not recovery lineage. Fixed profiles must download safe complete
   ZIPs, verify checksum manifests and baseline capture identity, then parse the
   complete predecessor-v6, deployment, and activation tuples before authority.
-- An ancestor resume has two source identities. The current workflow,
-  predecessor, and failed-run evidence use the current control SHA; the
-  original build, infrastructure, and disk checkpoint remain bound to
-  `checkpoint_source_sha`. Preserve those original IDs in every successor;
-  never accept a newly produced byte-equivalent build or infrastructure run.
+- An ancestor resume has explicit source identities. The current workflow uses
+  the approved SHA; predecessor and failed-run evidence use the hash-covered
+  `resume_source_sha`; the original build, infrastructure, and disk checkpoint
+  remain bound to `checkpoint_source_sha`. A recovered baseline independently
+  binds its run and source before authority. Preserve those IDs in every
+  successor; never accept a newly produced byte-equivalent build or
+  infrastructure run.
+- Cleanup authority includes identity state, not only data rows. If failed
+  activation retains its exact account, demote and verify that artifact-bound
+  account under the transferred lock before bounded Slip cleanup, and stop on
+  either failure.
 - Put mutable observations at the authority boundary. Baseline and predecessor
   work precede the final public revalidation, which is the last read-only
   action before lock acquisition. Deployment verifies the transferred hold,

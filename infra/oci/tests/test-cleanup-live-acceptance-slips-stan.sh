@@ -141,5 +141,15 @@ expect_failure env \
   CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:${run_id}:${user_id}" \
   OUTPUT_FILE="$output" \
   "$SCRIPT"
+expect_failure env \
+  PATH="$stub_bin:$PATH" \
+  STUB_MONGO_SCRIPT="$capture" \
+  STUB_MONGO_RESULT='{"verified":true,"authUserCount":0,"matchedActiveSlips":1,"deletedActiveSlips":1,"remainingActiveSlips":0}' \
+  FAILED_ACTIVATION_RUN_ID="$run_id" \
+  FAILED_ACTIVATION_USER_ID="$user_id" \
+  CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:${run_id}:${user_id}" \
+  OUTPUT_FILE="$output" \
+  EXPECTED_AUTH_USER_COUNT=1 \
+  "$SCRIPT"
 
 echo "failed_live_acceptance_cleanup_tests=PASS"

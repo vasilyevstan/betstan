@@ -382,11 +382,12 @@ def live_data_binding(input_name, phase, *, expected_head_input=None):
 def failed_deploy_binding(profile):
     return {
         "input": "failed_deploy_run_id",
+        "expectedHeadShaInput": "resume_source_sha",
         "expectedConclusion": "failure",
         "runProfile": profile,
         "workflow": "oci-production-deploy.yml",
         "titleTemplates": {
-            "workflow_dispatch": "oci-production-deploy {subject_sha}",
+            "workflow_dispatch": "oci-deploy {subject_sha}",
         },
         "artifactTemplate": "oci-production-baseline-{run_id}-1",
     }
@@ -394,6 +395,7 @@ def failed_deploy_binding(profile):
 
 FAILED_ACTIVATION_BINDING = {
     "input": "failed_activation_run_id",
+    "expectedHeadShaInput": "resume_source_sha",
     "expectedConclusion": "failure",
     "runProfile": "oci-failed-activation-cleanup-v1",
     "workflow": "oci-live-betting-activate.yml",
@@ -437,6 +439,7 @@ GHCR_INPUTS = [
 
 LIVE_DATA_INPUTS = [
     "approved_sha",
+    "resume_source_sha",
     "build_run_id",
     "infrastructure_run_id",
     "checkpoint_source_sha",
@@ -444,6 +447,7 @@ LIVE_DATA_INPUTS = [
     "phase",
     "prerequisite_run_id",
     "baseline_recovery_run_id",
+    "baseline_recovery_source_sha",
     "failed_deploy_run_id",
     "failed_activation_run_id",
     "failed_activation_user_id",
@@ -1164,8 +1168,14 @@ POLICIES = {
             "build_run_id", "infrastructure_run_id", "disk_checkpoint_run_id"
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha", "checkpoint_source_sha"],
-        templates={"checkpoint_source_sha": "{subject_sha}"},
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
+        templates={
+            "resume_source_sha": "{subject_sha}",
+            "checkpoint_source_sha": "{subject_sha}",
+        },
         subject_input="approved_sha",
         subject_relation="current",
         upstream_run_bindings=[
@@ -1194,8 +1204,14 @@ POLICIES = {
             "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha", "checkpoint_source_sha"],
-        templates={"checkpoint_source_sha": "{subject_sha}"},
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
+        templates={
+            "resume_source_sha": "{subject_sha}",
+            "checkpoint_source_sha": "{subject_sha}",
+        },
         subject_input="approved_sha",
         subject_relation="current",
         upstream_run_bindings=[
@@ -1203,7 +1219,11 @@ POLICIES = {
             OCI_CURRENT_INFRASTRUCTURE_BINDING,
             OCI_DISK_CHECKPOINT_BINDING,
             {
-                **live_data_binding("prerequisite_run_id", "dry-run"),
+                **live_data_binding(
+                    "prerequisite_run_id",
+                    "dry-run",
+                    expected_head_input="resume_source_sha",
+                ),
                 "afterInput": "disk_checkpoint_run_id",
             },
         ],
@@ -1228,8 +1248,14 @@ POLICIES = {
             "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha", "checkpoint_source_sha"],
-        templates={"checkpoint_source_sha": "{subject_sha}"},
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
+        templates={
+            "resume_source_sha": "{subject_sha}",
+            "checkpoint_source_sha": "{subject_sha}",
+        },
         subject_input="approved_sha",
         subject_relation="current",
         upstream_run_bindings=[
@@ -1237,7 +1263,11 @@ POLICIES = {
             OCI_CURRENT_INFRASTRUCTURE_BINDING,
             OCI_DISK_CHECKPOINT_BINDING,
             {
-                **live_data_binding("prerequisite_run_id", "apply-backfills"),
+                **live_data_binding(
+                    "prerequisite_run_id",
+                    "apply-backfills",
+                    expected_head_input="resume_source_sha",
+                ),
                 "afterInput": "disk_checkpoint_run_id",
             },
         ],
@@ -1262,7 +1292,10 @@ POLICIES = {
             "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha", "checkpoint_source_sha"],
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
         subject_input="approved_sha",
         subject_relation="current",
         upstream_run_bindings=[
@@ -1273,6 +1306,7 @@ POLICIES = {
                 **live_data_binding(
                     "prerequisite_run_id",
                     "apply-slip-index",
+                    expected_head_input="resume_source_sha",
                 ),
                 "afterInput": "disk_checkpoint_run_id",
             },
@@ -1305,7 +1339,10 @@ POLICIES = {
             "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha", "checkpoint_source_sha"],
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
         subject_input="approved_sha",
         subject_relation="current",
         upstream_run_bindings=[
@@ -1316,6 +1353,7 @@ POLICIES = {
                 **live_data_binding(
                     "prerequisite_run_id",
                     "apply-slip-index",
+                    expected_head_input="resume_source_sha",
                 ),
                 "afterInput": "disk_checkpoint_run_id",
             },
@@ -1347,7 +1385,10 @@ POLICIES = {
             "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha", "checkpoint_source_sha"],
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
         object_id_or_literals={"failed_activation_user_id": []},
         subject_input="approved_sha",
         subject_relation="current",
@@ -1359,6 +1400,7 @@ POLICIES = {
                 **live_data_binding(
                     "prerequisite_run_id",
                     "apply-slip-index",
+                    expected_head_input="resume_source_sha",
                 ),
                 "afterInput": "disk_checkpoint_run_id",
             },
@@ -1395,7 +1437,10 @@ POLICIES = {
             "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha", "checkpoint_source_sha"],
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
         object_id_or_literals={"failed_activation_user_id": []},
         subject_input="approved_sha",
         subject_relation="current",
@@ -1407,6 +1452,7 @@ POLICIES = {
                 **live_data_binding(
                     "prerequisite_run_id",
                     "apply-slip-index",
+                    expected_head_input="resume_source_sha",
                 ),
                 "afterInput": "disk_checkpoint_run_id",
             },

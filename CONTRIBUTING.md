@@ -291,9 +291,14 @@ activation artifacts; reject unsafe or incomplete ZIPs and checksum drift; and
 bind complete build, infrastructure, checkpoint, deployment, and recovery
 lineage. On an allowed descendant resume, build, infrastructure, and disk
 checkpoint identities stay bound to the original `checkpoint_source_sha`.
-The workflow/control SHA and the predecessor, failed-deploy, or
-failed-activation runs stay bound to the current descendant SHA. A new
-byte-equivalent build or infrastructure run is not a substitute.
+The workflow/control SHA advances, while the predecessor, failed-deploy, or
+failed-activation runs bind the hash-covered `resume_source_sha`, which may be
+that SHA or the proven allowed ancestor. A nonzero baseline recovery also
+binds its explicit source and exact repository-validated artifact before
+authority. A new byte-equivalent build or infrastructure run is not a
+substitute. Failed-activation recovery must demote and verify the exact
+artifact-bound account as `USER` before bounded Slip cleanup; either failure
+blocks the data phase.
 
 Every OCI release requires a new exact-SHA final
 `oci-live-data-rollout` handoff before deployment. Application or schema

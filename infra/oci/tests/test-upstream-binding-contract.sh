@@ -36,6 +36,65 @@ ok() {
   printf 'PASS %s\n' "$1"
 }
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib
+import importlib.util
+import io
+import sys
+import zipfile
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("upstream_binding", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+
+def archive(entries):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        for name, raw in entries.items():
+            bundle.writestr(name, raw)
+    return output.getvalue()
+
+
+module.gh_api_bytes = lambda _: archive({
+    "rollback-readiness/failures.txt": b"",
+    "rollback-readiness/status.txt": b"PASS\n",
+})
+files = module.artifact_files(
+    "example/repo",
+    {"id": 1},
+    "partial recovery",
+    allowed_empty_suffixes={"rollback-readiness/failures.txt"},
+)
+assert files["rollback-readiness/failures.txt"] == b""
+
+for entries, allowed in (
+    ({"rollback-readiness/failures.txt": b""}, frozenset()),
+    (
+        {
+            "rollback-readiness/failures.txt": b"",
+            "rollback-readiness/status.txt": b"",
+        },
+        {"rollback-readiness/failures.txt"},
+    ),
+):
+    module.gh_api_bytes = lambda _, entries=entries: archive(entries)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            module.artifact_files(
+                "example/repo",
+                {"id": 1},
+                "partial recovery",
+                allowed_empty_suffixes=allowed,
+            )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("unexpected empty artifact evidence passed")
+PY
+ok "partial-recovery empty failures scope"
+
 mkdir -p "$WORK/bin"
 cat >"$WORK/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -1384,7 +1443,7 @@ profile_binding() {
     workflow=oci-production-deploy.yml
     input=failed_deploy_run_id
     artifact=oci-production-baseline-{run_id}-1
-    title='oci-production-deploy {subject_sha}'
+    title='oci-deploy {subject_sha}'
   fi
   jq -cn \
     --arg profile "$profile" --arg workflow "$workflow" --arg input "$input" \
@@ -1399,6 +1458,7 @@ profile_binding() {
 write_profile_run() {
   local run_id="$1" workflow="$2" title="$3"
   local workflow_id="$4" artifact="$5"
+  local head_sha="${6:-$SUBJECT_SHA}"
   fixture "repos/$REPO/actions/workflows/$workflow" <<EOF2
 {"id":$workflow_id}
 EOF2
@@ -1409,7 +1469,7 @@ EOF2
 {"id":$run_id,"run_attempt":1,"workflow_id":$workflow_id,
  "path":".github/workflows/$workflow",
  "head_repository":{"full_name":"$REPO"},"head_branch":"master",
- "head_sha":"$SUBJECT_SHA","status":"completed","conclusion":"failure",
+ "head_sha":"$head_sha","status":"completed","conclusion":"failure",
  "event":"workflow_dispatch","display_title":"$title",
  "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:01:00Z"}
 EOF2
@@ -1425,6 +1485,7 @@ profile_dispatch_inputs() {
   local checkpoint_source="${1:-$SUBJECT_SHA}"
   jq -cn --arg checkpoint_source "$checkpoint_source" '{
     checkpoint_source_sha:$checkpoint_source,
+    resume_source_sha:$checkpoint_source,
     disk_checkpoint_run_id:"44",
     build_run_id:"41",
     infrastructure_run_id:"44",
@@ -1439,11 +1500,12 @@ write_profile_artifacts() {
   local failed_run="$1"
   local include_activation="${2:-false}"
   local checkpoint_source="${3:-$SUBJECT_SHA}"
+  local operation_source="${4:-$SUBJECT_SHA}"
   local root="$WORK/profile-artifacts-$failed_run"
   rm -rf "$root"
   python3 - \
     "$root" \
-    "$SUBJECT_SHA" \
+    "$operation_source" \
     "$checkpoint_source" \
     "$failed_run" \
     "$include_activation" <<'PY'
@@ -1803,7 +1865,7 @@ EOF2
  "path":".github/workflows/oci-production-deploy.yml",
  "head_repository":{"full_name":"$REPO"},"head_branch":"master",
  "head_sha":"$SUBJECT_SHA","status":"completed","conclusion":"success",
- "event":"workflow_dispatch","display_title":"oci-production-deploy $SUBJECT_SHA",
+ "event":"workflow_dispatch","display_title":"oci-deploy $SUBJECT_SHA",
  "created_at":"2025-12-31T23:00:00Z","updated_at":"2025-12-31T23:10:00Z"}
 EOF2
     done
@@ -1907,7 +1969,7 @@ for lock in success failure skipped cancelled; do
   for fence in success failure skipped cancelled; do
     reset_fixtures
     write_profile_run 610 oci-production-deploy.yml \
-      "oci-production-deploy $SUBJECT_SHA" 7610 \
+      "oci-deploy $SUBJECT_SHA" 7610 \
       oci-production-baseline-610-1
     write_profile_artifacts 610 false
     paginated=false
@@ -1930,10 +1992,41 @@ for lock in success failure skipped cancelled; do
 done
 ok "retained-hold accepts exactly three release tuples across paginated jobs"
 
+canonical_failed_deploy_binding="$(
+  "$POLICY" get oci-live-data-resume-deploy |
+    jq -c '
+      .upstreamRunBindings[] |
+      select(.input == "failed_deploy_run_id")
+    '
+)"
+grep -Fq \
+  'run-name: oci-deploy ${{ inputs.approved_sha }}' \
+  "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" ||
+  fail "deployment workflow no longer exposes the canonical recovery title"
+reset_fixtures
+write_profile_run 610 oci-production-deploy.yml \
+  "oci-deploy $SUBJECT_SHA" 7610 oci-production-baseline-610-1
+write_profile_artifacts 610 false
+write_deploy_profile_jobs 610 failure skipped skipped skipped success
+run_custom_binding "$canonical_failed_deploy_binding" 610 \
+  "$(profile_dispatch_inputs)" oke >/dev/null ||
+  fail "real deployment title was rejected: $(cat "$WORK/err.txt")"
+stale_failed_deploy_binding="$(
+  jq -c '
+    .titleTemplates.workflow_dispatch =
+      "oci-production-deploy {subject_sha}"
+  ' <<<"$canonical_failed_deploy_binding"
+)"
+if run_custom_binding "$stale_failed_deploy_binding" 610 \
+    "$(profile_dispatch_inputs)" oke >/dev/null; then
+  fail "stale deployment recovery title was accepted"
+fi
+ok "bind failed-deploy recovery to the real workflow title and reject stale title"
+
 for mutation in deploy public reenter; do
   reset_fixtures
   write_profile_run 611 oci-production-deploy.yml \
-    "oci-production-deploy $SUBJECT_SHA" 7611 \
+    "oci-deploy $SUBJECT_SHA" 7611 \
     oci-production-baseline-611-1
   write_profile_artifacts 611 false
   deploy=failure public=skipped reenter=success
@@ -1955,7 +2048,7 @@ for lock in success failure skipped cancelled; do
   for fence in success failure skipped cancelled; do
     reset_fixtures
     write_profile_run 612 oci-production-deploy.yml \
-      "oci-production-deploy $SUBJECT_SHA" 7612 \
+      "oci-deploy $SUBJECT_SHA" 7612 \
       oci-production-baseline-612-1
     write_profile_artifacts 612 false
     write_deploy_profile_jobs 612 success failure \
@@ -2097,7 +2190,7 @@ prepare_retained_profile_artifacts() {
   local run_id="$1"
   reset_fixtures
   write_profile_run "$run_id" oci-production-deploy.yml \
-    "oci-production-deploy $SUBJECT_SHA" 7610 \
+    "oci-deploy $SUBJECT_SHA" 7610 \
     "oci-production-baseline-$run_id-1"
   write_profile_artifacts "$run_id" false
   write_deploy_profile_jobs \
@@ -2389,7 +2482,7 @@ ANCESTOR_PROFILE_SHA="bd1008081411d64d96dd0221126090577ea72c6b"
 ancestor_profile_run=622
 reset_fixtures
 write_profile_run "$ancestor_profile_run" oci-production-deploy.yml \
-  "oci-production-deploy $SUBJECT_SHA" 7610 \
+  "oci-deploy $SUBJECT_SHA" 7610 \
   "oci-production-baseline-$ancestor_profile_run-1"
 write_profile_artifacts "$ancestor_profile_run" false "$ANCESTOR_PROFILE_SHA"
 write_deploy_profile_jobs \
@@ -2436,6 +2529,55 @@ PY
 esac
 EOF
 chmod 755 "$WORK/cross-bin/git"
+
+cross_resume_run=623
+reset_fixtures
+write_profile_run "$cross_resume_run" oci-production-deploy.yml \
+  "oci-deploy $CROSS_SOURCE_SHA" 7610 \
+  "oci-production-baseline-$cross_resume_run-1" \
+  "$CROSS_SOURCE_SHA"
+write_profile_artifacts \
+  "$cross_resume_run" false "$CROSS_SOURCE_SHA" "$CROSS_SOURCE_SHA"
+write_deploy_profile_jobs \
+  "$cross_resume_run" failure skipped skipped skipped success
+fixture "repos/$REPO/actions/workflows/oci-live-data-rollout.yml" <<'EOF2'
+{"id":7633}
+EOF2
+for endpoint in \
+  "repos/$REPO/actions/runs/43" \
+  "repos/$REPO/actions/runs/43/attempts/1"; do
+  fixture "$endpoint" <<EOF2
+{"id":43,"run_attempt":1,"workflow_id":7633,
+ "path":".github/workflows/oci-live-data-rollout.yml",
+ "head_repository":{"full_name":"$REPO"},"head_branch":"master",
+ "head_sha":"$CROSS_SOURCE_SHA","status":"completed","conclusion":"success",
+ "event":"workflow_dispatch",
+ "display_title":"oci-live-data apply-slip-index $CROSS_SOURCE_SHA",
+ "created_at":"2025-12-31T22:00:00Z","updated_at":"2025-12-31T22:10:00Z"}
+EOF2
+done
+cross_resume_inputs="$(profile_dispatch_inputs "$CROSS_SOURCE_SHA")"
+cross_predecessor_binding="$(
+  "$POLICY" get oci-live-data-resume-deploy |
+    jq -c '
+      .upstreamRunBindings[] |
+      select(.input == "prerequisite_run_id")
+    '
+)"
+PATH="$WORK/cross-bin:$PATH" \
+  run_custom_binding "$cross_predecessor_binding" 43 \
+    "$cross_resume_inputs" oke >/dev/null ||
+  fail "prior-source prerequisite was not reachable: $(cat "$WORK/err.txt")"
+PATH="$WORK/cross-bin:$PATH" \
+  run_custom_binding "$canonical_failed_deploy_binding" "$cross_resume_run" \
+    "$cross_resume_inputs" oke >/dev/null ||
+  fail "prior-source failed deploy was not reachable: $(cat "$WORK/err.txt")"
+if GIT_DIFF_PATH=auth/src/index.ts PATH="$WORK/cross-bin:$PATH" \
+  run_custom_binding "$canonical_failed_deploy_binding" "$cross_resume_run" \
+    "$cross_resume_inputs" oke >/dev/null; then
+  fail "application-changing descendant accepted a prior-source failed deploy"
+fi
+ok "ancestor resume reaches exact prior-source prerequisite and failed runs"
 
 python3 - "$WORK/cross-checkpoint.json" "$WORK/cross-images.tsv" \
   "$CROSS_SOURCE_SHA" <<'PY'

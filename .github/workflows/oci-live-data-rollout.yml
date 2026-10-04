@@ -8,6 +8,10 @@ on:
         description: Exact current master SHA approved for the live-betting data phase
         required: true
         type: string
+      resume_source_sha:
+        description: Exact source SHA of the predecessor and failed runs; current SHA for fresh phases
+        required: true
+        type: string
       build_run_id:
         description: Successful first-attempt oci-production-build run ID
         required: true
@@ -41,6 +45,11 @@ on:
         description: Exact first-attempt cache or partial-rollback recovery authorizing the live GHCR baseline, or 0
         required: true
         default: "0"
+        type: string
+      baseline_recovery_source_sha:
+        description: Exact historical source restored by the selected recovery, or none
+        required: true
+        default: none
         type: string
       failed_deploy_run_id:
         description: Failed dark deploy to resume after data was already applied, or 0
@@ -79,6 +88,7 @@ jobs:
       name: oci-migration
     env:
       SOURCE_SHA: ${{ inputs.approved_sha }}
+      RESUME_SOURCE_SHA: ${{ inputs.resume_source_sha }}
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       CHECKPOINT_SOURCE_SHA: ${{ inputs.checkpoint_source_sha }}
@@ -86,6 +96,7 @@ jobs:
       PHASE: ${{ inputs.phase }}
       PREREQUISITE_RUN_ID: ${{ inputs.prerequisite_run_id }}
       BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
+      BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
       FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}
       FAILED_ACTIVATION_RUN_ID: ${{ inputs.failed_activation_run_id }}
       FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}
@@ -152,12 +163,18 @@ jobs:
           [ "$GITHUB_REF_NAME" = "master" ]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RESUME_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$CHECKPOINT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DISK_CHECKPOINT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ||
              "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
+            [ "$BASELINE_RECOVERY_SOURCE_SHA" = "none" ]
+          else
+            [[ "$BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          fi
           [[ "$FAILED_DEPLOY_RUN_ID" == "0" ||
              "$FAILED_DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$FAILED_ACTIVATION_RUN_ID" == "0" ||
@@ -173,6 +190,7 @@ jobs:
               [ "$PREREQUISITE_RUN_ID" = "0" ]
               [ "$FAILED_DEPLOY_RUN_ID" = "0" ]
               [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
+              [ "$RESUME_SOURCE_SHA" = "$SOURCE_SHA" ]
               [ "$CHECKPOINT_SOURCE_SHA" = "$SOURCE_SHA" ]
               protected_operation=oci-live-data-dry-run
               ;;
@@ -181,6 +199,7 @@ jobs:
               [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
               [ "$FAILED_DEPLOY_RUN_ID" = "0" ]
               [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
+              [ "$RESUME_SOURCE_SHA" = "$SOURCE_SHA" ]
               [ "$CHECKPOINT_SOURCE_SHA" = "$SOURCE_SHA" ]
               protected_operation=oci-live-data-apply-backfills
               ;;
@@ -189,6 +208,7 @@ jobs:
               if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
                 [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
                 [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
+                [ "$RESUME_SOURCE_SHA" = "$SOURCE_SHA" ]
                 [ "$CHECKPOINT_SOURCE_SHA" = "$SOURCE_SHA" ]
                 protected_operation=oci-live-data-apply-slip-index
               elif [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
@@ -220,6 +240,13 @@ jobs:
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          git cat-file -e "${RESUME_SOURCE_SHA}^{commit}"
+          git merge-base --is-ancestor "$RESUME_SOURCE_SHA" "$SOURCE_SHA"
+          if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
+            git cat-file -e "${BASELINE_RECOVERY_SOURCE_SHA}^{commit}"
+            git merge-base --is-ancestor \
+              "$BASELINE_RECOVERY_SOURCE_SHA" "$SOURCE_SHA"
+          fi
           policy_json="$(
             ./infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh \
               get "$protected_operation"
@@ -308,14 +335,7 @@ jobs:
             printf 'recovery_kind=%s\n' "$recovery_kind" >> "$GITHUB_OUTPUT"
           fi
           if [ "$PHASE" != "dry-run" ]; then
-            prerequisite_source_sha="$SOURCE_SHA"
-            if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
-              prerequisite_source_sha="$(
-                gh api "repos/$REPOSITORY/actions/runs/$PREREQUISITE_RUN_ID/attempts/1" \
-                  --jq '.head_sha'
-              )"
-              [[ "$prerequisite_source_sha" =~ ^[0-9a-f]{40}$ ]]
-            fi
+            prerequisite_source_sha="$RESUME_SOURCE_SHA"
             validate_run \
               oci-live-data-rollout.yml "$PREREQUISITE_RUN_ID" \
               workflow_dispatch "$prerequisite_source_sha" success
@@ -325,6 +345,8 @@ jobs:
                 --jq "[.artifacts[] | select(.name == \"$artifact_name\" and .expired == false)] | length"
             )"
             [ "$artifact_count" = "1" ]
+            printf 'resume_source_sha=%s\n' \
+              "$prerequisite_source_sha" >> "$GITHUB_OUTPUT"
             if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
               validate_run \
                 oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID" \
@@ -452,7 +474,6 @@ jobs:
                   --jq "[.artifacts[] | select(.name == \"$baseline_artifact_name\" and .expired == false)] | length"
               )"
               [ "$baseline_artifact_count" = "1" ]
-              printf 'resume_source_sha=%s\n' "$prerequisite_source_sha" >> "$GITHUB_OUTPUT"
               if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
                 activation_workflow_id="$(
                   gh api "repos/$REPOSITORY/actions/workflows/oci-live-betting-activate.yml" --jq '.id'
@@ -661,13 +682,14 @@ jobs:
             grep -Fxq 'ocir_repository_retirement=pass' "$transition"
             grep -Fxq 'transition_status=PASS' "$transition"
           fi
+          [ "$source_sha" = "$BASELINE_RECOVERY_SOURCE_SHA" ]
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Verify immutable release and phase provenance
         id: provenance
         env:
-          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
-          RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha || 'none' }}
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
+          RESUME_SOURCE_SHA: ${{ inputs.resume_source_sha }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -957,9 +979,9 @@ jobs:
       - name: Verify exact failed-deploy resume state
         if: inputs.failed_deploy_run_id != '0'
         env:
-          RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha }}
+          RESUME_SOURCE_SHA: ${{ inputs.resume_source_sha }}
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
-          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
           RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance.outputs.resume_applied_data_run_id }}
           RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance.outputs.resume_applied_source_sha }}
         run: |
@@ -1155,7 +1177,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           OUTPUT_DIR: artifacts/oci-data-baseline-before
-          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
@@ -1214,7 +1236,7 @@ jobs:
             profile=held
           fi
           SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
-          CONTROL_SHA="$SOURCE_SHA" \
+          CONTROL_SHA="$CHECKPOINT_SOURCE_SHA" \
           GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" \
           DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
           REVALIDATION_PROFILE="$profile" \
@@ -1257,16 +1279,94 @@ jobs:
             ./infra/oci/scripts/live-data-maintenance-stan.sh hold
           fi
 
+      - name: Demote and verify exact retained live-acceptance account
+        if: inputs.failed_activation_run_id != '0'
+        run: |
+          set -euo pipefail
+          kubectl exec -n "$OCI_K8S_NAMESPACE" \
+            deployment/gaming-auth-depl \
+            -c gaming-auth -- \
+            env \
+              "USER_ID=$FAILED_ACTIVATION_USER_ID" \
+              USER_ROLE=USER \
+              "USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$FAILED_ACTIVATION_USER_ID:USER" \
+              node dist/scripts/SetUserRole.js
+
+          pods_json="$(
+            kubectl get pods -n "$OCI_K8S_NAMESPACE" \
+              -l app=gaming-auth-mongo -o json
+          )"
+          mongo_pod="$(
+            jq -er '
+              [
+                .items[] |
+                select(
+                  .metadata.deletionTimestamp == null and
+                  .status.phase == "Running"
+                ) |
+                .metadata.name
+              ] |
+              if length == 1 then .[0]
+              else error("expected one running Mongo pod")
+              end
+            ' <<<"$pods_json"
+          )"
+          mongo_script="$(
+            cat <<EOF
+          const userId = "$FAILED_ACTIVATION_USER_ID";
+          const users = db.getSiblingDB("gaming_auth").users;
+          const matches = users.find(
+            {_id: ObjectId(userId)},
+            {_id: 1, role: 1}
+          ).toArray();
+          if (matches.length !== 1 || matches[0].role !== "USER") {
+            throw new Error("retained live-acceptance account role differs");
+          }
+          print(JSON.stringify({
+            verified: true,
+            userCount: matches.length,
+            role: matches[0].role
+          }));
+          EOF
+          )"
+          raw_result="$(
+            kubectl exec -n "$OCI_K8S_NAMESPACE" "$mongo_pod" -- \
+              mongosh --quiet --norc --eval "$mongo_script"
+          )"
+          result="$(tail -n 1 <<<"$raw_result")"
+          jq -e '
+            type == "object" and
+            .verified == true and
+            .userCount == 1 and
+            .role == "USER" and
+            (keys | sort) == ["role", "userCount", "verified"]
+          ' <<<"$result" >/dev/null
+
+          output=artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-role.json
+          temporary="${output}.tmp"
+          trap 'rm -f "$temporary"' EXIT
+          jq -cS \
+            --arg run_id "$FAILED_ACTIVATION_RUN_ID" '
+              {
+                schemaVersion: "failed-live-acceptance-role.v1",
+                failedActivationRunId: $run_id,
+                verified: .verified,
+                userCount: .userCount,
+                role: .role
+              }
+            ' <<<"$result" >"$temporary"
+          chmod 600 "$temporary"
+          mv "$temporary" "$output"
+          trap - EXIT
+
       - name: Delete exact orphaned live-acceptance slips
         if: inputs.failed_activation_run_id != '0'
         env:
           OUTPUT_FILE: artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-cleanup.json
         run: |
           NAMESPACE="$OCI_K8S_NAMESPACE" \
-          FAILED_ACTIVATION_RUN_ID="$FAILED_ACTIVATION_RUN_ID" \
-          FAILED_ACTIVATION_USER_ID="$FAILED_ACTIVATION_USER_ID" \
           CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:$FAILED_ACTIVATION_RUN_ID:$FAILED_ACTIVATION_USER_ID" \
-          EXPECTED_AUTH_USER_COUNT=0 \
+          EXPECTED_AUTH_USER_COUNT=1 \
           ALLOWED_BET_KINDS=LIVE,PRE_MATCH \
           MAX_ACTIVE_SLIPS=2 \
             ./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh
@@ -1284,7 +1384,7 @@ jobs:
           OPERATION_LOCK_ENFORCED: "true"
           OPERATION_LOCK_HANDOFF: ${{ inputs.phase == 'apply-slip-index' }}
           BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
-          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
           DISK_CHECKPOINT_SHA256: ${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
           DISK_CHECKPOINT_DISPOSITION: ${{ steps.provenance.outputs.disk_checkpoint_disposition }}
         run: ./infra/oci/scripts/live-betting-data-rollout-stan.sh

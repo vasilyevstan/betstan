@@ -349,7 +349,7 @@ binding_run_json() {
     51|52)
       workflow=oci-production-deploy.yml
       event=workflow_dispatch
-      title="oci-production-deploy $subject_sha"
+      title="oci-deploy $subject_sha"
       created_at=2026-01-01T00:18:00Z
       updated_at=2026-01-01T00:19:00Z
       conclusion=failure
@@ -357,9 +357,24 @@ binding_run_json() {
     54)
       workflow=oci-production-deploy.yml
       event=workflow_dispatch
-      title="oci-production-deploy $subject_sha"
+      title="oci-deploy $subject_sha"
       created_at=2026-01-01T00:18:00Z
       updated_at=2026-01-01T00:19:00Z
+      ;;
+    55)
+      workflow=oci-ghcr-cache-recovery.yml
+      event=workflow_dispatch
+      title="oci-ghcr-cache-recovery ${STUB_BASELINE_RECOVERY_SOURCE_SHA}"
+      created_at=2026-01-01T00:22:00Z
+      updated_at=2026-01-01T00:23:00Z
+      ;;
+    56)
+      workflow=oci-production-build.yml
+      event=workflow_run
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="oci-build $subject_sha upstream-39"
+      created_at=2025-12-31T22:00:00Z
+      updated_at=2025-12-31T22:01:00Z
       ;;
     53)
       workflow=oci-live-betting-activate.yml
@@ -458,6 +473,14 @@ binding_artifacts_json() {
       ;;
     53) artifact="oci-live-activation-recovery-53-1"; artifact_id=9053 ;;
     54) artifact="oci-deploy-provenance-54-1"; artifact_id=9154 ;;
+    55)
+      artifact="ghcr-cache-recovery-${STUB_BASELINE_RECOVERY_SOURCE_SHA}-55-1"
+      artifact_id=9055
+      ;;
+    56)
+      artifact="oci-image-provenance-${STUB_BASELINE_RECOVERY_SOURCE_SHA}-56-1"
+      artifact_id=9056
+      ;;
     *) return 1 ;;
   esac
   jq -cn --arg artifact "$artifact" --argjson artifact_id "$artifact_id" '{
@@ -476,7 +499,7 @@ binding_artifact_zip() {
   local file_name content
   local subject_sha="${STUB_BINDING_SHA:-$SHA}"
   case "$artifact_id" in
-    9041|9048|9049|9050|9051|9052|9053|9151|9152|9154|9251)
+    9041|9048|9049|9050|9051|9052|9053|9055|9056|9151|9152|9154|9251)
       python3 - \
         "$artifact_id" \
         "$subject_sha" \
@@ -774,7 +797,172 @@ if mutation == "malformed-zip" and artifact_id == 9051:
     sys.stdout.buffer.write(b"not-a-zip")
     raise SystemExit(0)
 
-if artifact_id == 9041:
+if artifact_id == 9055:
+    recovery_images = []
+    recovery_services = services[:-1]
+    for service in recovery_services:
+        manifest = "sha256:" + hashlib.sha256(
+            (service + "-recovery-manifest").encode()
+        ).hexdigest()
+        platform = "sha256:" + hashlib.sha256(
+            (service + "-recovery-platform").encode()
+        ).hexdigest()
+        recovery_images.append(
+            "\t".join(
+                (
+                    service,
+                    repository,
+                    f"{repository}@{manifest}",
+                    manifest,
+                    platform,
+                )
+            )
+        )
+    recovery_images_raw = ("\n".join(recovery_images) + "\n").encode()
+    recovery_image_hash = hashlib.sha256(recovery_images_raw).hexdigest()
+    plan_raw = (
+        "\n".join(
+            "\t".join(
+                (
+                    row.split("\t")[0],
+                    (
+                        "iad.ocir.io/example/images/"
+                        f"{row.split(chr(9))[0]}@{row.split(chr(9))[3]}"
+                    ),
+                    row.split("\t")[2],
+                    row.split("\t")[4],
+                    "pending",
+                )
+            )
+            for row in recovery_images
+        )
+        + "\n"
+    ).encode()
+    plan_hash = hashlib.sha256(plan_raw).hexdigest()
+    rabbit_raw = b"queue\t0\n"
+    rabbit_hash = hashlib.sha256(rabbit_raw).hexdigest()
+    infrastructure_provenance_hash = "a" * 64
+    plan_evidence = env({
+        "schema": "betstan.ghcr-cache-transition-plan.v1",
+        "source_sha": recovery_source,
+        "plan_origin_recovery_run_id": "55",
+        "plan_carrier_recovery_run_id": "55",
+        "plan_carrier_recovery_run_attempt": "1",
+        "images_sha256": recovery_image_hash,
+        "infrastructure_provenance_sha256":
+            infrastructure_provenance_hash,
+        "transition_plan_sha256": plan_hash,
+        "rabbitmq_baseline_sha256": rabbit_hash,
+    })
+    files = {
+        "images.tsv": recovery_images_raw,
+        "recovery-evidence.env": env({
+            "schema": "betstan.ghcr-cache-recovery.v1",
+            "recovery_origin": "containerd-cache",
+            "registry_provider": "ghcr",
+            "registry_repository": repository,
+            "anonymous_pull": "pass",
+            "source_sha": recovery_source,
+            "trusted_build_run_id": "56",
+            "trusted_upstream_run_id": "39",
+            "recovery_run_id": "55",
+            "recovery_run_attempt": "1",
+            "images_sha256": recovery_image_hash,
+        }),
+        "transition-plan.tsv": plan_raw,
+        "transition-plan-evidence.env": plan_evidence,
+        "rabbitmq-baseline.txt": rabbit_raw,
+    }
+    for row in recovery_images:
+        service, _, image_ref, manifest, platform = row.split("\t")
+        files[f"{service}.env"] = env({
+            "schema": "betstan.application-image-provenance.v1",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "registry_tag_prefix": "arm64",
+            "registry_tag_schema": "v1",
+            "service": service,
+            "repository": repository,
+            "source_sha": recovery_source,
+            "tag": f"{repository}:{service}-{recovery_source}-arm64",
+            "digest": manifest,
+            "platform_digest": platform,
+            "image_ref": image_ref,
+            "platform": "linux/arm64",
+            "build_workflow": "oci-production-build",
+            "build_run_id": "56",
+            "build_run_attempt": "1",
+            "upstream_workflow": "production-build",
+            "upstream_run_id": "39",
+            "upstream_run_attempt": "1",
+            "recovery_workflow": "oci-ghcr-cache-recovery",
+            "recovery_run_id": "55",
+            "recovery_run_attempt": "1",
+            "recovery_origin": "containerd-cache",
+            "recovery_origin_repository": "iad.ocir.io/example/images",
+            "recovery_origin_manifest_digest": manifest,
+            "recovery_origin_platform_digest": platform,
+        })
+    files["transition-provenance.env"] = env({
+        "schema": "betstan.ghcr-cache-recovery-transition.v1",
+        "transition_workflow": "oci-ghcr-cache-recovery",
+        "transition_run_id": "55",
+        "transition_run_attempt": "1",
+        "source_sha": recovery_source,
+        "images_sha256": recovery_image_hash,
+        "infrastructure_run_id": "38",
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            infrastructure_provenance_hash,
+        "runtime_mode": "k3s",
+        "runtime_fingerprint": "b" * 64,
+        "registry_provider": "ghcr",
+        "registry_host": "ghcr.io",
+        "registry_repository": repository,
+        "registry_public_anonymous": "true",
+        "public_host": "betstan.xyz",
+        "canonical_host": "betstan.xyz",
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+        "transition_plan_state_sha256": plan_hash,
+        "rabbitmq_baseline_sha256": rabbit_hash,
+        "credential_retirement": "pass",
+        "ocir_repository_retirement": "pass",
+        "transition_status": "PASS",
+    })
+    files["rebind-provenance.env"] = env({
+        "schema": "betstan.ghcr-cache-recovery-rebind.v1",
+        "transition_workflow": "oci-ghcr-cache-recovery",
+        "recovery_run_id": "55",
+        "recovery_run_attempt": "1",
+        "source_sha": recovery_source,
+        "images_sha256": recovery_image_hash,
+        "infrastructure_run_id": "38",
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            infrastructure_provenance_hash,
+        "runtime_mode": "k3s",
+        "runtime_fingerprint": "b" * 64,
+        "registry_provider": "ghcr",
+        "registry_host": "ghcr.io",
+        "registry_repository": repository,
+        "registry_public_anonymous": "true",
+        "public_host": "betstan.xyz",
+        "canonical_host": "betstan.xyz",
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+        "transition_plan_state_sha256": plan_hash,
+        "rabbitmq_baseline_sha256": rabbit_hash,
+        "transition_plan_evidence_sha256":
+            hashlib.sha256(plan_evidence).hexdigest(),
+        "plan_origin_recovery_run_id": "55",
+        "credential_retirement": "pending",
+        "transition_status": "REBIND_VERIFIED",
+    })
+    archive(checksummed(files))
+elif artifact_id == 9056:
+    archive({"build-chain.txt": f"source_sha={recovery_source}\n".encode()})
+elif artifact_id == 9041:
     archive({
         "build-chain.txt": env({
             "source_sha": source,
@@ -1319,6 +1507,8 @@ gh() {
     "repos/$REPOSITORY/actions/runs/52"|\
     "repos/$REPOSITORY/actions/runs/53"|\
     "repos/$REPOSITORY/actions/runs/54"|\
+    "repos/$REPOSITORY/actions/runs/55"|\
+    "repos/$REPOSITORY/actions/runs/56"|\
     "repos/$REPOSITORY/actions/runs/41/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/42/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/43/attempts/1"|\
@@ -1331,7 +1521,9 @@ gh() {
     "repos/$REPOSITORY/actions/runs/51/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/52/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/53/attempts/1"|\
-    "repos/$REPOSITORY/actions/runs/54/attempts/1")
+    "repos/$REPOSITORY/actions/runs/54/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/55/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/56/attempts/1")
       local binding_run_id
       binding_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
       binding_run_id="${binding_run_id%%/*}"
@@ -1349,7 +1541,9 @@ gh() {
     "repos/$REPOSITORY/actions/runs/51/artifacts?per_page=100"|\
     "repos/$REPOSITORY/actions/runs/52/artifacts?per_page=100"|\
     "repos/$REPOSITORY/actions/runs/53/artifacts?per_page=100"|\
-    "repos/$REPOSITORY/actions/runs/54/artifacts?per_page=100")
+    "repos/$REPOSITORY/actions/runs/54/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/55/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/56/artifacts?per_page=100")
       local binding_artifact_run_id
       binding_artifact_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
       binding_artifact_run_id="${binding_artifact_run_id%%/*}"
@@ -1368,6 +1562,8 @@ gh() {
     "repos/$REPOSITORY/actions/artifacts/9051/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9052/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9053/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9055/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9056/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9151/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9152/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9154/zip"|\
@@ -1551,6 +1747,22 @@ printf '%s\n' \
   'gh "$@"' \
   >"$tmp_dir/bin/gh"
 chmod 755 "$tmp_dir/bin/gh"
+cat >"$tmp_dir/bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-}" in
+  "merge-base --is-ancestor")
+    [ "${STUB_ANCESTOR_FAIL:-false}" != true ]
+    ;;
+  "diff --name-only")
+    printf '.github/workflows/recovery-fixture.yml\0'
+    ;;
+  *)
+    exec /usr/bin/git "$@"
+    ;;
+esac
+EOF
+chmod 755 "$tmp_dir/bin/git"
 export PATH="$tmp_dir/bin:$PATH"
 
 make_request() {
@@ -1606,6 +1818,11 @@ if "failed_deploy_run_id" in inputs and inputs["failed_deploy_run_id"] != "0":
     )
 if "failed_activation_run_id" in inputs and inputs["failed_activation_run_id"] != "0":
     inputs["failed_activation_run_id"] = "53"
+if (
+    "baseline_recovery_run_id" in inputs
+    and policy["operation"].endswith("-recovered")
+):
+    inputs["baseline_recovery_run_id"] = "55"
 for name in policy["zeroOrPositiveIntegerInputs"]:
     inputs[name] = "0"
 if (

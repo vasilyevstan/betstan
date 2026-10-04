@@ -261,10 +261,18 @@ disposition substitution.
 
 Those identities do not all advance together. Build, infrastructure, and disk
 checkpoint runs remain bound to the original `checkpoint_source_sha` and are
-serialized unchanged into every successor v6 artifact. The current workflow,
-predecessor-v6, failed deployment, and failed activation runs remain bound to
-the current control/subject SHA. A newly produced byte-equivalent build or
-infrastructure run is not interchangeable with the original.
+serialized unchanged into every successor v6 artifact. The current workflow
+advances to the approved SHA, while the predecessor-v6, failed deployment, and
+failed activation runs bind an explicit hash-covered `resume_source_sha`.
+That source may be the approved SHA or the proven GitHub/infra/Markdown-only
+ancestor; a newly produced byte-equivalent build or infrastructure run is not
+interchangeable with the original.
+
+When `baseline_recovery_run_id` is nonzero, its hash-covered
+`baseline_recovery_source_sha` is also mandatory before authority. The shared
+fixed validator accepts only the exact successful cache-recovery or partial
+rollback run and its safe, complete, checksum-bound repository artifact. Run
+zero requires source `none`; metadata-only recovery evidence is insufficient.
 
 The upstream binding language remains declarative: it can select an expected
 head SHA, expected `success`, one fixed disk-checkpoint validator, or one of
@@ -279,8 +287,11 @@ successful maintenance re-entry and accepts only lock/fence release results
 on re-entry having reacquired the exact lock and re-held maintenance. A
 released-runtime recovery requires its fixed failed-public-validation and
 successful-release profile. Failed activation cleanup requires its fixed
-pre-authority run evidence and sanitized acceptance user identity. No profile
-widens normal success authority.
+pre-authority run evidence and sanitized acceptance user identity. Under the
+transferred lock it idempotently demotes that exact retained account to
+`USER`, verifies exactly one matching account, and only then removes its exact
+bounded draft slips. A role-change or slip-cleanup failure blocks the resumed
+data phase. No profile widens normal success authority.
 
 Each fixed profile downloads and parses its exact artifacts; run metadata and
 job conclusions alone are insufficient. ZIP paths and members must be safe and

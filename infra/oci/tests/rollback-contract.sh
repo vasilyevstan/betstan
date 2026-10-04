@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-application-stan.sh"
 RECOVERY_SCRIPT="$ROOT_DIR/infra/oci/scripts/recover-partial-rollback-stan.sh"
 PARTIAL_AUTHORITY_VALIDATOR="$ROOT_DIR/infra/oci/scripts/validate-partial-recovery-authority-stan.sh"
+UPSTREAM_BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
 CAPTURE_SCRIPT="$ROOT_DIR/infra/oci/scripts/baseline-capture-stan.sh"
 READINESS_SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
 REAL_LIVE_READINESS_SCRIPT="$ROOT_DIR/infra/oci/agents/live-betting-readiness-stan.sh"
@@ -3839,6 +3840,59 @@ run_partial_authority_validation "$WORK_DIR/partial-recovery-success" \
   >"$WORK_DIR/partial-recovery-authority-success.out"
 assert_contains "$WORK_DIR/partial-recovery-authority-success.out" \
   'partial_recovery_authority_validation=PASS'
+PYTHONDONTWRITEBYTECODE=1 python3 -I - \
+  "$UPSTREAM_BINDING_VALIDATOR" \
+  "$WORK_DIR/partial-recovery-success" \
+  "$PARTIAL_RECOVERY_RUN_ID" \
+  "$PARTIAL_RECOVERY_SOURCE_SHA" \
+  "$CURRENT_MASTER_SHA" \
+  "$TARGET_SHA" <<'PY'
+import importlib.util
+import io
+import sys
+import zipfile
+from pathlib import Path
+
+validator_path, evidence_path, run_id, source_sha, head_sha, target_sha = (
+    sys.argv[1:]
+)
+spec = importlib.util.spec_from_file_location(
+    "upstream_binding", validator_path
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+archive = io.BytesIO()
+root = Path(evidence_path)
+with zipfile.ZipFile(archive, "w") as bundle:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            bundle.writestr(path.relative_to(root).as_posix(), path.read_bytes())
+module.gh_api_bytes = lambda _: archive.getvalue()
+
+
+def fixed_metadata(_repository, _run_id, workflow, *_args):
+    if workflow == "oci-production-build.yml":
+        return {"head_sha": source_sha}
+    if workflow == "oci-production-rollback.yml":
+        return {"display_title": f"oci-rollback {target_sha}"}
+    raise AssertionError(f"unexpected workflow: {workflow}")
+
+
+module.fixed_run_metadata = fixed_metadata
+module.exact_artifact = lambda *_args: None
+module.validate_partial_recovery_artifact(
+    "example/repo",
+    run_id,
+    source_sha,
+    {"id": 1},
+    {
+        "head_sha": head_sha,
+        "display_title": f"oci-rollback {target_sha}",
+    },
+    "partial recovery",
+)
+PY
 
 partial_plan_order=(event client backoffice bet)
 for checkpoint in 0 1 2 3 4; do

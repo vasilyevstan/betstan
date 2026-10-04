@@ -540,9 +540,11 @@ request = {
         "infrastructure_run_id": "43",
         "checkpoint_source_sha": control_sha,
         "disk_checkpoint_run_id": "45",
+        "resume_source_sha": control_sha,
         "phase": "apply-backfills",
         "prerequisite_run_id": "44",
         "baseline_recovery_run_id": "0",
+        "baseline_recovery_source_sha": "none",
         "failed_deploy_run_id": "0",
         "failed_activation_run_id": "0",
         "failed_activation_user_id": "0",
@@ -1626,7 +1628,9 @@ request = {
     "inputs": {
         **policy["fixedInputs"], "approved_sha": master, "build_run_id": "42",
         "infrastructure_run_id": "45", "checkpoint_source_sha": master,
-        "disk_checkpoint_run_id": "45", "baseline_recovery_run_id": "0",
+        "disk_checkpoint_run_id": "45", "resume_source_sha": master,
+        "baseline_recovery_run_id": "0",
+        "baseline_recovery_source_sha": "none",
     },
 }
 provider = temporary / "transition-provider.py"
@@ -2924,7 +2928,9 @@ TARGETS = {
         "extra_inputs": {
             "approved_sha": master, "build_run_id": "42",
             "infrastructure_run_id": "43", "checkpoint_source_sha": master,
-            "disk_checkpoint_run_id": "45", "baseline_recovery_run_id": "0",
+            "disk_checkpoint_run_id": "45", "resume_source_sha": master,
+            "baseline_recovery_run_id": "0",
+            "baseline_recovery_source_sha": "none",
         },
     },
     "activate": {
@@ -4236,11 +4242,11 @@ def run(run_id):
         48: (313, "oci-live-data-rollout.yml", "workflow_dispatch",
              f"oci-live-data apply-slip-index {source}", "success", "12", "13"),
         51: (305, "oci-production-deploy.yml", "workflow_dispatch",
-             f"oci-production-deploy {source}", "failure", "18", "19"),
+             f"oci-deploy {source}", "failure", "18", "19"),
         53: (307, "oci-live-betting-activate.yml", "workflow_dispatch",
              f"oci-live-activate {source}", "failure", "20", "21"),
         54: (305, "oci-production-deploy.yml", "workflow_dispatch",
-             f"oci-production-deploy {source}", "success", "16", "17"),
+             f"oci-deploy {source}", "success", "16", "17"),
     }[run_id]
     workflow_id, workflow, event, title, conclusion, created, updated = values
     return {
@@ -4452,8 +4458,10 @@ values = {
     "infrastructure_run_id": "47",
     "checkpoint_source_sha": source,
     "disk_checkpoint_run_id": "47",
+    "resume_source_sha": source,
     "prerequisite_run_id": "48",
     "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none",
     "failed_deploy_run_id": "51",
     "failed_activation_run_id": (
         "53" if "activation" in operation else "0"

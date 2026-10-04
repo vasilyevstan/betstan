@@ -537,11 +537,13 @@ its owner. It is never healthy by default.
   predecessor-v6, checkpoint, and activation artifacts before intent, approval,
   or mutation. Treat malformed/incomplete ZIPs, checksum or capture-run drift,
   and any lineage substitution as prerequisite decay.
-- Track both source identities on an allowed descendant resume: current
-  workflow/predecessor/failed-run evidence stays at the current control SHA,
-  while build, infrastructure, and checkpoint identities stay at the original
-  checkpoint source. Route a new byte-equivalent build or infrastructure run
-  as `BLOCKED`, not as replacement evidence.
+- Track explicit source identities on an allowed descendant resume: workflow
+  control advances to the approved SHA, predecessor and failed-run evidence
+  binds `resume_source_sha`, and build, infrastructure, and checkpoint
+  identities stay at the original checkpoint source. Require a nonzero
+  recovered baseline's exact run, source, and fixed-profile artifact before
+  authority. Route a new byte-equivalent build or infrastructure run as
+  `BLOCKED`, not as replacement evidence.
 - A jobless queued dispatch with zero jobs and zero pending approvals is not
   usable approval authority. Keep it unapproved. For global production
   exclusivity, immediately run the checked-in supersession classifier before
