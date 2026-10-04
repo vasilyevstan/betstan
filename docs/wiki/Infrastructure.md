@@ -183,24 +183,51 @@ and requires no application deployment. It performs no data cleanup, TTL or
 index change, or compaction, and its presence is not evidence that a production
 measurement has run.
 
-The fixed root-filesystem limit remains 70 percent. Root and persistent-data
-mount identities, workload and queue health, public reads, and protected
-running, candidate, and rollback image references remain fail-closed.
-Eligible infrastructure runs now seal that result as one compact,
+The fixed root-filesystem limit remains 70 percent. Registry verification of
+the ten immutable candidates is necessary, but proves registry availability
+rather than residency in the node's CRI. Current-source k3s finalization now
+orders candidate verification, infrastructure finalization, an
+authority-bound preload, and then aggregate diagnosis and checkpoint creation.
+The preload sends the service-sorted immutable public references sequentially
+through the existing k3s CRI path. It uses no registry credentials, alternate
+client, fallback, image deletion, pruning, or APT cleanup.
+
+Every attempted pull has a fresh raw-root byte measurement immediately before
+and after it. Each measurement must satisfy the unchanged exact integer limit
+`usedBytes * 100 <= capacityBytes * 70`; equality passes, while one byte over
+the limit stops further pulls. Invalid candidate evidence, an unavailable or
+over-limit measurement, or a failed pull is a candidacy failure: preloading
+stops and candidate and checkpoint evidence are removed, while otherwise-valid
+infrastructure provenance remains available to the governed diagnosis and
+reclaim path. Authority, access, host-identity, infrastructure-finalization,
+transport, and cleanup failures remain fatal.
+
+Preload completion is not release authority. Root and persistent-data mount
+identities, workload and queue health, public reads, and protected running,
+candidate, and rollback image references remain fail-closed. Eligible
+infrastructure runs seal that aggregate result as one compact,
 canonical-checksummed `k3s-release-disk-checkpoint.v1` artifact named
-`oci-release-disk-checkpoint-<source-sha>-<producer-run-id>-1`. Admission uses
-the integer comparison `usedBytes * 100 <= capacityBytes * 70`; rounded display
-percentages never grant headroom. A k3s checkpoint is release-eligible only for
-the current source and first attempt with either `READY_NO_RECLAIM`, or
-`READY_RECLAIMED` after APT-only reclaim. It requires exact immutable CRI
-evidence for all ten candidate services and complete rollback residency.
-`OBSERVED`, over-limit, incomplete, unhealthy, rerun, identity-mismatched, or
-CRI-reclaimed results produce no eligible checkpoint, and APT reclaim never
-falls through to CRI reclaim.
+`oci-release-disk-checkpoint-<source-sha>-<producer-run-id>-1`. Checkpoint
+creation and later public or held revalidation require both the kubelet
+node-filesystem measurement and an independent raw-root measurement to satisfy
+the same exact integer limit. Rounded display percentages never grant
+headroom. The separate governed diagnosis path remains available when either
+measurement is over the limit, but over-limit evidence cannot create or
+revalidate an eligible checkpoint.
+
+A k3s checkpoint is release-eligible only for the current source and first
+attempt with either `READY_NO_RECLAIM`, or `READY_RECLAIMED` after APT-only
+reclaim. It still requires exact immutable CRI evidence for all ten candidate
+services and complete rollback residency. Checkpoint creation still requires
+the aggregate public-state contract; later revalidation applies its selected
+public or held profile. The existing lineage, identity, checksum, and kubelet
+checks remain mandatory. `OBSERVED`, over-limit, incomplete, unhealthy, rerun,
+identity-mismatched, or CRI-reclaimed results produce no eligible checkpoint,
+and APT reclaim never falls through to CRI reclaim.
 
 The k3s artifact has a strict runtime-specific shape: common source/control/run
 identity with `terminalStatus=RELEASE_ELIGIBLE`, plus top-level
-`thresholdPercent=70`, raw root bytes, complete stable
+`thresholdPercent=70`, kubelet node-filesystem bytes, complete stable
 node/root/Mongo mount identity, sealed k3s and container-runtime versions,
 candidate and rollback residency with immutable image IDs and repository
 digests, `publicStateStatus=PASS`, and flat
@@ -214,14 +241,14 @@ OKE finalization emits the same schema with runtime mode `oke` and disposition
 reclaim, candidate, or rollback fields. Consumers validate the artifact with
 repository-fixed arguments and the authoritative protected-environment runtime
 mode. A later public or held revalidation must reproduce the bound identity,
-exact bytes, mount, candidate, and rollback state before release mutation; the
-checkpoint is not a durable waiver for changed runtime state.
+filesystem capacity, mount, candidate, and rollback state before release
+mutation; the checkpoint is not a durable waiver for changed runtime state.
 
 Held revalidation deliberately excludes mutable application evidence. It uses
-only raw bytes, root/Mongo mount and node/runtime identity, and immutable
-candidate/rollback residency; it does not call HTTP, RabbitMQ/rabbitmqctl,
-queues, pods, Deployments, or workload-health checks. Public mode retains its
-strict public and application-state checks.
+only fresh kubelet and raw-root byte readings, root/Mongo mount and node/runtime
+identity, and immutable candidate/rollback residency; it does not call HTTP,
+RabbitMQ/rabbitmqctl, queues, pods, Deployments, or workload-health checks.
+Public mode retains its strict public and application-state checks.
 
 The validated GHCR generation table is checksum-bound to its summary and
 provides immutable source attribution for every exact canonical digest,

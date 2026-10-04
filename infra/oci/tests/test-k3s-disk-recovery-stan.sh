@@ -60,6 +60,93 @@ for service in auth bet backoffice client event gamemaster moderation resulting 
     "$manifest" "$manifest" "$platform" >>"$candidate_images"
 done
 
+candidate_cases="$work_dir/candidate-cases"
+mkdir -p "$candidate_cases"
+python3 - "$candidate_images" "$candidate_cases" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+rows = [line.split("\t") for line in source.read_text().splitlines()]
+
+(destination / "shuffled.tsv").write_text(
+    "\n".join("\t".join(row) for row in reversed(rows)) + "\n"
+)
+(destination / "expected.json").write_text(
+    json.dumps([row[2] for row in sorted(rows)], separators=(",", ":")) + "\n"
+)
+
+cases = {}
+cases["malformed"] = rows[:]
+cases["malformed"][2] = ["event", "too", "few", "columns"]
+cases["missing"] = rows[:-1]
+cases["extra"] = rows + [["unexpected", *rows[0][1:]]]
+cases["duplicate-service"] = [row[:] for row in rows]
+cases["duplicate-service"][-1][0] = rows[0][0]
+cases["repository"] = [row[:] for row in rows]
+cases["repository"][0][1] = "ghcr.io/other/repository"
+cases["tag"] = [row[:] for row in rows]
+cases["tag"][0][2] = "ghcr.io/vasilyevstan/betstan-images:auth-latest"
+cases["manifest-digest"] = [row[:] for row in rows]
+cases["manifest-digest"][0][3] = "sha256:" + "f" * 64
+cases["platform-digest"] = [row[:] for row in rows]
+cases["platform-digest"][0][4] = "sha256:short"
+for name, value in cases.items():
+    (destination / f"{name}.tsv").write_text(
+        "\n".join("\t".join(row) for row in value) + "\n"
+    )
+(destination / "final-row.tsv").write_text(
+    "\n".join("\t".join(row) for row in rows[:-1])
+    + "\n"
+    + "\t".join(rows[-1][:-1])
+    + "\n"
+)
+
+shared = [row[:] for row in rows]
+for row in shared:
+    row[2:] = rows[0][2:]
+(destination / "shared.tsv").write_text(
+    "\n".join("\t".join(row) for row in shared) + "\n"
+)
+PY
+
+"$HELPER" candidate-image-refs \
+  --candidate-images "$candidate_cases/shuffled.tsv" \
+  >"$candidate_cases/actual.json"
+cmp "$candidate_cases/expected.json" "$candidate_cases/actual.json" ||
+  fail "candidate image references were not compact, complete, and service sorted"
+jq -e '
+  type == "array" and length == 10 and
+  all(.[]; test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$"))
+' "$candidate_cases/actual.json" >/dev/null ||
+  fail "candidate image reference payload shape is invalid"
+trailing_lf_candidate_refs="$(
+  jq -c '.[-1] += "\n"' "$candidate_cases/actual.json"
+)"
+jq -e '.[-1] | endswith("\n")' <<<"$trailing_lf_candidate_refs" >/dev/null ||
+  fail "trailing-LF candidate reference fixture is invalid"
+
+for candidate_case in \
+  malformed missing extra duplicate-service repository tag manifest-digest \
+  platform-digest final-row; do
+  if "$HELPER" candidate-image-refs \
+      --candidate-images "$candidate_cases/$candidate_case.tsv" \
+      >"$candidate_cases/$candidate_case.out" 2>/dev/null; then
+    fail "candidate image reference parser accepted $candidate_case evidence"
+  fi
+  [[ ! -s "$candidate_cases/$candidate_case.out" ]] ||
+    fail "candidate image reference parser leaked a payload for $candidate_case"
+done
+
+"$HELPER" candidate-image-refs \
+  --candidate-images "$candidate_cases/shared.tsv" \
+  >"$candidate_cases/shared.json"
+jq -e 'length == 10 and ([.[]] | unique | length) == 1' \
+  "$candidate_cases/shared.json" >/dev/null ||
+  fail "shared immutable image references were newly rejected"
+
 runtime="$work_dir/runtime.json"
 python3 - "$runtime" \
   "$CURRENT_ID" "$CANDIDATE_ID" "$RECLAIM_ID" "$FOREIGN_ID" \
@@ -844,6 +931,100 @@ jq '{
   --producer-run-id 700 \
   --profile held >/dev/null
 
+raw_over_runtime="$work_dir/checkpoint-raw-over-runtime.json"
+jq '
+  .root.df.usedBytes = 35000000001 |
+  .root.df.availableBytes = 14999999999
+' "$checkpoint_runtime" >"$raw_over_runtime"
+raw_over_diagnosis="$work_dir/checkpoint-raw-over-diagnosis.json"
+"$HELPER" diagnose \
+  --runtime "$raw_over_runtime" \
+  --capacity "$checkpoint_capacity" \
+  --candidate-images "$candidate_images" \
+  --source-sha "$SOURCE_SHA" \
+  --infrastructure-run-id 400 \
+  --ghcr-build-run-id 300 \
+  --workflow-run-id 703 \
+  --output "$raw_over_diagnosis"
+jq -e '.terminalStatus == "DIAGNOSED"' "$raw_over_diagnosis" >/dev/null ||
+  fail "diagnosis incorrectly enforced the checkpoint-only raw root veto"
+
+raw_over_checkpoint="$work_dir/checkpoint-raw-over-output.json"
+printf 'stale\n' >"$raw_over_checkpoint"
+raw_over_message="$(
+  "$HELPER" write-release-checkpoint \
+    --diagnosis "$raw_over_diagnosis" \
+    --runtime "$raw_over_runtime" \
+    --capacity "$checkpoint_capacity" \
+    --source-sha "$SOURCE_SHA" \
+    --control-sha "$SOURCE_SHA" \
+    --producer-run-id 703 \
+    --output "$raw_over_checkpoint"
+)"
+[[ "$raw_over_message" == "k3s_release_disk_checkpoint=INELIGIBLE" &&
+   ! -e "$raw_over_checkpoint" ]] ||
+  fail "raw root one-byte breach did not remove stale checkpoint output"
+
+if "$HELPER" revalidate-release-checkpoint \
+    --checkpoint "$checkpoint" \
+    --runtime "$raw_over_runtime" \
+    --capacity "$checkpoint_capacity" \
+    --candidate-images "$candidate_images" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --profile public >/dev/null 2>&1; then
+  fail "public checkpoint revalidation ignored the raw root byte veto"
+fi
+held_raw_over="$work_dir/checkpoint-held-raw-over.json"
+jq '{
+  schemaVersion:"k3s-node-disk-held-runtime.v1",
+  snapshotProfile:"held",
+  applicationRepository,
+  root,
+  mongo,
+  images,
+  runtime
+}' "$raw_over_runtime" >"$held_raw_over"
+if "$HELPER" revalidate-release-checkpoint \
+    --checkpoint "$checkpoint" \
+    --runtime "$held_raw_over" \
+    --capacity "$checkpoint_capacity" \
+    --candidate-images "$candidate_images" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --profile held >/dev/null 2>&1; then
+  fail "held checkpoint revalidation ignored the raw root byte veto"
+fi
+
+kubelet_over_capacity="$work_dir/checkpoint-kubelet-over-capacity.json"
+cat >"$kubelet_over_capacity" <<'JSON'
+{"schemaVersion":"k3s-node-filesystem-capacity.v1","nodeName":"fixture-k3s","capacityBytes":50000000000,"usedBytes":35000000001,"availableBytes":14999999999,"usedPercent":70.0,"thresholdPercent":70,"withinLimit":false}
+JSON
+kubelet_over_checkpoint="$work_dir/checkpoint-kubelet-over-output.json"
+kubelet_over_message="$(
+  "$HELPER" write-release-checkpoint \
+    --diagnosis "$checkpoint_diagnosis" \
+    --runtime "$checkpoint_runtime" \
+    --capacity "$kubelet_over_capacity" \
+    --source-sha "$SOURCE_SHA" \
+    --control-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --output "$kubelet_over_checkpoint"
+)"
+[[ "$kubelet_over_message" == "k3s_release_disk_checkpoint=INELIGIBLE" &&
+   ! -e "$kubelet_over_checkpoint" ]] ||
+  fail "kubelet one-byte breach passed checkpoint creation with raw root below limit"
+if "$HELPER" revalidate-release-checkpoint \
+    --checkpoint "$checkpoint" \
+    --runtime "$checkpoint_runtime" \
+    --capacity "$kubelet_over_capacity" \
+    --candidate-images "$candidate_images" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --profile public >/dev/null 2>&1; then
+  fail "checkpoint revalidation ignored the independent kubelet byte veto"
+fi
+
 rollback_generation_drift="$work_dir/checkpoint-rollback-generation-drift.json"
 python3 - "$checkpoint_runtime" "$rollback_generation_drift" <<'PY'
 import json
@@ -1209,6 +1390,13 @@ action="$1"
 selected="$2"
 printf '%s\t%s\n' "$action" "$selected" >>"${STUB_REMOTE_LOG:?}"
 case "$action" in
+  preload-candidate-images)
+    jq -e '
+      type == "array" and length == 10 and
+      all(.[]; type == "string")
+    ' <<<"$selected" >/dev/null
+    exit "${STUB_PRELOAD_STATUS:-0}"
+    ;;
   baseline-proof)
     baseline_count="$(awk '$1 == "baseline-proof" {count++} END {print count+0}' "$STUB_REMOTE_LOG")"
     if [[ "$baseline_count" == "2" && -n "${STUB_BASELINE_AFTER:-}" ]]; then
@@ -1253,6 +1441,15 @@ EOF
 cat >"$work_dir/infrastructure.env" <<'EOF'
 canonical_host=fixture.example
 k3s_node_name=fixture-k3s
+source_sha=1111111111111111111111111111111111111111
+infrastructure_run_id=400
+infrastructure_run_attempt=1
+ghcr_build_run_id=300
+infrastructure_finalized=true
+runtime_mode=k3s
+instance_ocid=ocid1.instance.oc1..test
+instance_fingerprint=0938f1aad31453e408d76d875f5348a89c4e9a4c636f5ca1c4c23e4eb8945ab3
+instance_private_ip=10.0.0.2
 EOF
 
 common_env=(
@@ -1276,6 +1473,146 @@ common_env=(
   WORK_DIR="$work_dir/orchestrator-work"
   GITHUB_RUN_ATTEMPT=1
 )
+
+preload_wrapper_output="$work_dir/preload-wrapper-output.json"
+preload_wrapper_checkpoint="$work_dir/preload-wrapper-checkpoint.json"
+: >"$work_dir/remote.log"
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=400 \
+  CONTROL_SHA="$SOURCE_SHA" \
+  OUTPUT_FILE="$preload_wrapper_output" \
+  CHECKPOINT_OUTPUT_FILE="$preload_wrapper_checkpoint" \
+  RECLAIM_CATEGORY=none \
+  RECLAIM_IMAGE_IDS='[]' \
+  "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-success.log"
+[[ "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" ]] ||
+  fail "preload wrapper did not issue exactly one remote preload action"
+cut -f2- "$work_dir/remote.log" >"$work_dir/preload-wrapper-transport.json"
+cmp "$candidate_cases/actual.json" "$work_dir/preload-wrapper-transport.json" ||
+  fail "preload wrapper did not transport the complete canonical candidate payload"
+if grep -Eq 'snapshot|mongo-storage|diagnos|reclaim' "$work_dir/remote.log" ||
+   [[ -e "$preload_wrapper_output" || -e "$preload_wrapper_checkpoint" ]]; then
+  fail "preload wrapper performed diagnosis, reclaim, snapshot, Mongo, or output work"
+fi
+
+: >"$work_dir/remote.log"
+preload_wrapper_status=0
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=400 \
+  CONTROL_SHA="$SOURCE_SHA" \
+  STUB_PRELOAD_STATUS=20 \
+  "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-20.log" 2>&1 ||
+  preload_wrapper_status=$?
+[[ "$preload_wrapper_status" == "20" &&
+   "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" ]] ||
+  fail "preload wrapper did not preserve remote candidacy status 20"
+
+: >"$work_dir/remote.log"
+preload_wrapper_status=0
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=400 \
+  CONTROL_SHA="$SOURCE_SHA" \
+  STUB_PRELOAD_STATUS=42 \
+  "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-fatal.log" 2>&1 ||
+  preload_wrapper_status=$?
+[[ "$preload_wrapper_status" == "42" &&
+   "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" ]] ||
+  fail "preload wrapper collapsed a fatal remote status into candidacy"
+
+: >"$work_dir/remote.log"
+preload_wrapper_status=0
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=400 \
+  CONTROL_SHA="$SOURCE_SHA" \
+  CANDIDATE_IMAGES_FILE="$candidate_cases/tag.tsv" \
+  "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-invalid.log" 2>&1 ||
+  preload_wrapper_status=$?
+[[ "$preload_wrapper_status" == "20" && ! -s "$work_dir/remote.log" ]] ||
+  fail "invalid local candidate evidence reached the preload transport"
+
+local_guard_bin="$work_dir/local-guard-bin"
+mkdir -p "$local_guard_bin"
+cat >"$local_guard_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == */k3s_disk_recovery_stan.py ]]
+[[ "$2" == "candidate-image-refs" ]]
+printf '%s\n' "${STUB_CANDIDATE_REFS:?}"
+SH
+chmod +x "$local_guard_bin/python3"
+: >"$work_dir/remote.log"
+preload_wrapper_status=0
+env "${common_env[@]}" \
+  PATH="$local_guard_bin:$stub_bin:$PATH" \
+  STUB_CANDIDATE_REFS="$trailing_lf_candidate_refs" \
+  GITHUB_RUN_ID=400 \
+  CONTROL_SHA="$SOURCE_SHA" \
+  "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-trailing-lf.log" 2>&1 ||
+  preload_wrapper_status=$?
+[[ "$preload_wrapper_status" != "0" && ! -s "$work_dir/remote.log" ]] ||
+  fail "local candidate guard normalized a final-element trailing-LF reference"
+
+for authority_case in \
+  "RECLAIM_CATEGORY=apt-package-cache" \
+  "CONTROL_SHA=2222222222222222222222222222222222222222" \
+  "GITHUB_RUN_ATTEMPT=2"; do
+  : >"$work_dir/remote.log"
+  preload_wrapper_status=0
+  env "${common_env[@]}" \
+    GITHUB_RUN_ID=400 \
+    CONTROL_SHA="$SOURCE_SHA" \
+    "$authority_case" \
+    "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-authority.log" 2>&1 ||
+    preload_wrapper_status=$?
+  [[ "$preload_wrapper_status" != "0" &&
+     "$preload_wrapper_status" != "20" &&
+     ! -s "$work_dir/remote.log" ]] ||
+    fail "preload wrapper accepted mismatched authority: $authority_case"
+done
+
+for provenance_override in \
+  "source_sha=2222222222222222222222222222222222222222" \
+  "infrastructure_run_id=401" \
+  "ghcr_build_run_id=301" \
+  "infrastructure_finalized=false" \
+  "instance_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; do
+  preload_provenance="$work_dir/preload-provenance.env"
+  cp "$work_dir/infrastructure.env" "$preload_provenance"
+  printf '%s\n' "$provenance_override" >>"$preload_provenance"
+  : >"$work_dir/remote.log"
+  preload_wrapper_status=0
+  env "${common_env[@]}" \
+    GITHUB_RUN_ID=400 \
+    CONTROL_SHA="$SOURCE_SHA" \
+    INFRA_PROVENANCE_FILE="$preload_provenance" \
+    "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-provenance.log" 2>&1 ||
+    preload_wrapper_status=$?
+  [[ "$preload_wrapper_status" != "0" &&
+     "$preload_wrapper_status" != "20" &&
+     ! -s "$work_dir/remote.log" ]] ||
+    fail "preload wrapper accepted mismatched finalized provenance: $provenance_override"
+done
+
+for session_override in \
+  "instance_ocid=ocid1.instance.oc1..other" \
+  "instance_private_ip=10.0.0.3"; do
+  preload_session="$work_dir/preload-session.env"
+  cp "$work_dir/session.env" "$preload_session"
+  printf '%s\n' "$session_override" >>"$preload_session"
+  : >"$work_dir/remote.log"
+  preload_wrapper_status=0
+  env "${common_env[@]}" \
+    GITHUB_RUN_ID=400 \
+    CONTROL_SHA="$SOURCE_SHA" \
+    SESSION_STATE_FILE="$preload_session" \
+    "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-session.log" 2>&1 ||
+    preload_wrapper_status=$?
+  [[ "$preload_wrapper_status" != "0" &&
+     "$preload_wrapper_status" != "20" &&
+     ! -s "$work_dir/remote.log" ]] ||
+    fail "preload wrapper accepted mismatched access session: $session_override"
+done
+
 env "${common_env[@]}" \
   GITHUB_RUN_ID=500 \
   RECLAIM_CATEGORY=none \
@@ -1369,6 +1706,258 @@ grep -Fq \
   "$work_dir/k3s-crictl.log" ||
   fail "remote CRI reclaim did not use bundled k3s crictl with exact endpoint and ID"
 
+preload_bin="$work_dir/preload-bin"
+mkdir -p "$preload_bin"
+ln -s "$(command -v bash)" "$preload_bin/bash"
+ln -s "$(command -v base64)" "$preload_bin/base64"
+ln -s "$(command -v jq)" "$preload_bin/jq"
+cat >"$preload_bin/uname" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${STUB_UNAME_FAIL:-0}" != "1" ]] || exit 42
+case "$1" in
+  -s) printf '%s\n' "${STUB_UNAME_KERNEL:-Linux}" ;;
+  -m) printf '%s\n' "${STUB_UNAME_MACHINE:-aarch64}" ;;
+  *) exit 42 ;;
+esac
+SH
+cat >"$preload_bin/df" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "--block-size=1 --output=size,used,target /" ]]
+count=0
+[[ ! -s "$STUB_DF_STATE" ]] || read -r count <"$STUB_DF_STATE"
+count=$((count + 1))
+printf '%s\n' "$count" >"$STUB_DF_STATE"
+printf 'df\t%s\n' "$count" >>"$STUB_PRELOAD_COMMAND_LOG"
+index=0
+measurement=""
+while IFS= read -r line; do
+  index=$((index + 1))
+  if ((index == count)); then
+    measurement="$line"
+    break
+  fi
+done <"$STUB_DF_MEASUREMENTS"
+[[ -n "$measurement" ]] || exit 42
+case "$measurement" in
+  FAIL)
+    exit 42
+    ;;
+  EMPTY)
+    exit 0
+    ;;
+  EXTRA)
+    printf 'Size Used Mounted\n10 7 /\n10 7 /\n'
+    exit 0
+    ;;
+esac
+read -r capacity used extra <<<"$measurement"
+[[ -z "$extra" ]] || exit 42
+printf 'Size Used Mounted\n%s %s /\n' "$capacity" "$used"
+SH
+cat >"$preload_bin/k3s" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == "7" ]]
+[[ "$1" == "crictl" ]]
+[[ "$2" == "--runtime-endpoint" ]]
+[[ "$3" == "unix:///run/k3s/containerd/containerd.sock" ]]
+[[ "$4" == "--image-endpoint" ]]
+[[ "$5" == "unix:///run/k3s/containerd/containerd.sock" ]]
+[[ "$6" == "pull" ]]
+[[ "$7" =~ ^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$ ]]
+count=0
+[[ ! -s "$STUB_PULL_STATE" ]] || read -r count <"$STUB_PULL_STATE"
+count=$((count + 1))
+printf '%s\n' "$count" >"$STUB_PULL_STATE"
+printf 'pull\t%s\n' "$7" >>"$STUB_PRELOAD_COMMAND_LOG"
+[[ "$count" != "${STUB_PULL_FAIL_AT:-0}" ]] || exit 42
+SH
+chmod +x "$preload_bin/uname" "$preload_bin/df" "$preload_bin/k3s"
+
+preload_measurements="$work_dir/preload-measurements"
+preload_df_state="$work_dir/preload-df-state"
+preload_pull_state="$work_dir/preload-pull-state"
+preload_command_log="$work_dir/preload-command.log"
+preload_refs="$(<"$candidate_cases/actual.json")"
+shared_preload_refs="$(<"$candidate_cases/shared.json")"
+preload_env=(
+  PATH="$preload_bin"
+  STUB_DF_MEASUREMENTS="$preload_measurements"
+  STUB_DF_STATE="$preload_df_state"
+  STUB_PULL_STATE="$preload_pull_state"
+  STUB_PRELOAD_COMMAND_LOG="$preload_command_log"
+)
+reset_preload_case() {
+  : >"$preload_df_state"
+  : >"$preload_pull_state"
+  : >"$preload_command_log"
+}
+write_safe_measurements() {
+  : >"$preload_measurements"
+  for ((measurement_index = 0; measurement_index < 20; measurement_index++)); do
+    printf '%s\n' "${1:-10} ${2:-7}" >>"$preload_measurements"
+  done
+}
+run_preload() {
+  local output="$1" payload="$2"
+  shift 2
+  local status=0
+  env "${preload_env[@]}" "$@" \
+    "$REMOTE" preload-candidate-images "$payload" >"$output" 2>&1 ||
+    status=$?
+  printf '%s' "$status"
+}
+
+reset_preload_case
+write_safe_measurements 10 7
+preload_status="$(run_preload "$work_dir/preload-success.log" "$preload_refs")"
+[[ "$preload_status" == "0" ]] ||
+  fail "candidate preload rejected exact 70 percent equality: status=$preload_status output=$(<"$work_dir/preload-success.log")"
+[[ "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "10" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "20" ]] ||
+  fail "candidate preload did not measure immediately around ten sequential pulls"
+jq -r '.[]' "$candidate_cases/actual.json" >"$work_dir/preload-expected-refs"
+awk -F '\t' '$1 == "pull" {print $2}' "$preload_command_log" \
+  >"$work_dir/preload-actual-refs"
+cmp "$work_dir/preload-expected-refs" "$work_dir/preload-actual-refs" ||
+  fail "candidate preload changed service-sorted pull order"
+
+reset_preload_case
+write_safe_measurements 11 7
+preload_status="$(run_preload "$work_dir/preload-nondivisible.log" "$shared_preload_refs")"
+[[ "$preload_status" == "0" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "10" ]] ||
+  fail "non-divisible floor boundary or shared references were rejected"
+
+reset_preload_case
+write_safe_measurements 9223372036854775807 6456360425798343064
+preload_status="$(
+  run_preload "$work_dir/preload-signed-max-boundary.log" "$shared_preload_refs"
+)"
+[[ "$preload_status" == "0" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "10" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "20" ]] ||
+  fail "maximum signed-safe capacity overflowed at its exact 70 percent floor"
+
+reset_preload_case
+printf '9223372036854775807 6456360425798343065\n' >"$preload_measurements"
+preload_status="$(
+  run_preload "$work_dir/preload-signed-max-over.log" "$preload_refs"
+)"
+[[ "$preload_status" == "20" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "0" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "1" ]] ||
+  fail "maximum signed-safe one-byte threshold breach reached CRI"
+
+reset_preload_case
+printf '11 8\n' >"$preload_measurements"
+preload_status="$(run_preload "$work_dir/preload-pre-over.log" "$preload_refs")"
+[[ "$preload_status" == "20" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "0" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "1" ]] ||
+  fail "one byte above the non-divisible pre-pull limit reached CRI"
+
+reset_preload_case
+printf '11 7\n11 8\n' >"$preload_measurements"
+preload_status="$(run_preload "$work_dir/preload-post-over.log" "$preload_refs")"
+[[ "$preload_status" == "20" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "1" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "2" ]] ||
+  fail "post-pull threshold breach did not stop before the next image"
+
+reset_preload_case
+printf '11 7\n11 7\n' >"$preload_measurements"
+preload_status="$(
+  run_preload "$work_dir/preload-pull-failure.log" "$preload_refs" \
+    STUB_PULL_FAIL_AT=1
+)"
+[[ "$preload_status" == "20" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "1" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "2" ]] ||
+  fail "failed pull did not retain failure after its post-attempt measurement"
+
+df_rejection_cases=(
+  "failed|FAIL"
+  "empty|EMPTY"
+  "extra-line|EXTRA"
+  "zero-capacity|0 0"
+  "used-over-capacity|10 11"
+  "nonnumeric-capacity|bogus 7"
+  "negative-used|11 -1"
+  "overflow-capacity|9223372036854775808 7"
+)
+for df_case in "${df_rejection_cases[@]}"; do
+  IFS='|' read -r df_case_name malformed_measurement <<<"$df_case"
+  reset_preload_case
+  printf '%s\n' "$malformed_measurement" >"$preload_measurements"
+  preload_status="$(
+    run_preload "$work_dir/preload-pre-df-$df_case_name.log" "$preload_refs"
+  )"
+  [[ "$preload_status" == "20" &&
+     "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "0" &&
+     "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "1" ]] ||
+    fail "invalid pre-pull df result did not fail before CRI: $df_case_name"
+done
+
+for df_case in "${df_rejection_cases[@]}"; do
+  IFS='|' read -r df_case_name malformed_measurement <<<"$df_case"
+  reset_preload_case
+  printf '11 7\n%s\n' "$malformed_measurement" >"$preload_measurements"
+  preload_status="$(
+    run_preload "$work_dir/preload-post-df-$df_case_name.log" "$preload_refs"
+  )"
+  [[ "$preload_status" == "20" &&
+     "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "1" &&
+     "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "2" ]] ||
+    fail "invalid post-pull df result did not stop later pulls: $df_case_name"
+done
+
+invalid_preload_payload() {
+  local name="$1" payload="$2" status
+  reset_preload_case
+  printf '10 0\n' >"$preload_measurements"
+  status="$(run_preload "$work_dir/preload-payload-$name.log" "$payload")"
+  [[ "$status" == "20" && ! -s "$preload_command_log" ]] ||
+    fail "invalid transported candidate payload reached measurement or pull: $name"
+}
+invalid_preload_payload object '{}'
+invalid_preload_payload missing "$(jq -c '.[0:9]' "$candidate_cases/actual.json")"
+invalid_preload_payload extra "$(jq -c '. + [.[0]]' "$candidate_cases/actual.json")"
+invalid_preload_payload tag "$(
+  jq -c '.[0] = "ghcr.io/vasilyevstan/betstan-images:auth-latest"' \
+    "$candidate_cases/actual.json"
+)"
+invalid_preload_payload repository "$(
+  jq -c '.[0] = "ghcr.io/other/repository@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+    "$candidate_cases/actual.json"
+)"
+invalid_preload_payload digest "$(
+  jq -c '.[0] = "ghcr.io/vasilyevstan/betstan-images@sha256:SHORT"' \
+    "$candidate_cases/actual.json"
+)"
+invalid_preload_payload trailing-lf "$trailing_lf_candidate_refs"
+
+reset_preload_case
+write_safe_measurements 10 0
+preload_status="$(
+  run_preload "$work_dir/preload-host-identity.log" "$preload_refs" \
+    STUB_UNAME_MACHINE=x86_64
+)"
+[[ "$preload_status" != "0" && "$preload_status" != "20" &&
+   ! -s "$preload_command_log" ]] ||
+  fail "host identity failure was misclassified as candidacy or reached CRI"
+
+preload_function="$work_dir/preload-function.sh"
+sed -n '/^preload_candidate_images() {$/,/^}$/p' "$REMOTE" >"$preload_function"
+[[ "$(grep -Fc 'cri pull "$image_ref"' "$preload_function")" == "1" ]] ||
+  fail "candidate preload does not contain exactly one native CRI pull pass"
+if grep -Eiq '(^|[^[:alnum:]_])(ctr|rmi|prune|apt(-get)?|docker|login|credential)([^[:alnum:]_]|$)' \
+    "$preload_function"; then
+  fail "candidate preload contains forbidden fallback, credential, deletion, prune, or APT behavior"
+fi
+
 public_bin="$work_dir/public-bin"
 mkdir -p "$public_bin"
 ln -s "$(command -v bash)" "$public_bin/bash"
@@ -1455,6 +2044,11 @@ cat >"$snapshot_bin/ssh" <<'SH'
 set -euo pipefail
 remote_command=""
 for argument in "$@"; do remote_command="$argument"; done
+if [[ "$remote_command" == "sudo K3S_DISK_SELECTED_IMAGE_IDS_B64=${STUB_EXPECTED_PRELOAD_B64:-missing} K3S_DISK_CANONICAL_HOST_B64=$K3S_DISK_CANONICAL_HOST_B64 K3S_DISK_NODE_NAME_B64=$K3S_DISK_NODE_NAME_B64 bash -s -- preload-candidate-images" ]]; then
+  while IFS= read -r _; do :; done
+  printf 'preload-transport\n' >>"$STUB_PRELOAD_TRANSPORT_LOG"
+  exit 0
+fi
 [[ "$remote_command" == "sudo K3S_DISK_SELECTED_IMAGE_IDS_B64=W10= K3S_DISK_CANONICAL_HOST_B64=$K3S_DISK_CANONICAL_HOST_B64 K3S_DISK_NODE_NAME_B64=$K3S_DISK_NODE_NAME_B64 bash -s -- snapshot" ]]
 exec bash -s -- snapshot
 SH
@@ -1532,6 +2126,23 @@ chmod +x "$snapshot_bin/jq" "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
 for snapshot_command in findmnt df du k3s systemctl; do
   ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
 done
+
+expected_preload_b64="$(printf '%s' "$preload_refs" | base64 | tr -d '\n')"
+: >"$work_dir/preload-transport.log"
+env "${common_env[@]}" \
+  PATH="$snapshot_bin:$stub_bin:$PATH" \
+  K3S_DISK_REMOTE_RUNNER= \
+  GITHUB_RUN_ID=400 \
+  CONTROL_SHA="$SOURCE_SHA" \
+  K3S_DISK_CANONICAL_HOST_B64="$encoded_host" \
+  K3S_DISK_NODE_NAME_B64="$encoded_node" \
+  STUB_REAL_JQ="$(command -v jq)" \
+  STUB_EXPECTED_PRELOAD_B64="$expected_preload_b64" \
+  STUB_PRELOAD_TRANSPORT_LOG="$work_dir/preload-transport.log" \
+  "$ORCHESTRATOR" preload >"$work_dir/preload-transport-output.log"
+grep -Fxq preload-transport "$work_dir/preload-transport.log" ||
+  fail "preload wrapper did not use the complete encoded strict-SSH transport"
+
 jq -n --arg image "ghcr.io/vasilyevstan/betstan-images@$CURRENT_ID" '
   {items:[
     ["auth","bet","backoffice","client","event","gamemaster","moderation","resulting","slip"][] |

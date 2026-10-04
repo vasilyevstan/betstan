@@ -44,6 +44,16 @@ case "$ACTION" in
     [[ "$SELECTED_IMAGE_IDS" == "[]" && "$#" == "1" ]] ||
       fail "baseline inspection does not accept arguments"
     ;;
+  preload-candidate-images)
+    required_commands=(k3s uname)
+    if [[ -n "${K3S_DISK_SELECTED_IMAGE_IDS_B64:-}" ]]; then
+      [[ "$#" == "1" ]] ||
+        fail "candidate preload encoded transport arguments are invalid"
+    else
+      [[ "$#" == "2" ]] ||
+        fail "candidate preload direct transport arguments are invalid"
+    fi
+    ;;
   reclaim-apt-package-cache)
     required_commands=(apt-get)
     ;;
@@ -95,6 +105,110 @@ cri() {
     --runtime-endpoint "$K3S_RUNTIME_ENDPOINT" \
     --image-endpoint "$K3S_RUNTIME_ENDPOINT" \
     "$@"
+}
+
+candidacy_fail() {
+  printf 'k3s candidate preload rejected: %s\n' "$*" >&2
+  exit 20
+}
+
+shell_uint() {
+  local value="$1" high low
+  [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+  ((${#value} < 19)) && return 0
+  ((${#value} == 19)) || return 1
+  high="${value:0:9}"
+  low="${value:9}"
+  ((high < 922337203)) && return 0
+  ((high == 922337203 && 10#$low <= 6854775807))
+}
+
+raw_root_measurement() {
+  local raw line capacity used target extra
+  local -a lines=()
+  raw="$(LC_ALL=C df --block-size=1 --output=size,used,target /)" || return 1
+  while IFS= read -r line; do
+    lines[${#lines[@]}]="$line"
+  done <<<"$raw"
+  ((${#lines[@]} == 2)) || return 1
+  read -r capacity used target extra <<<"${lines[1]}"
+  [[ -z "$extra" && "$target" == "/" ]] || return 1
+  shell_uint "$capacity" && shell_uint "$used" || return 1
+  ((capacity > 0 && used <= capacity)) || return 1
+  printf '%s\t%s\n' "$capacity" "$used"
+}
+
+raw_root_within_limit() {
+  local capacity="$1" used="$2" limit
+  limit=$(((capacity / 10) * 7 + ((capacity % 10) * 7) / 10))
+  ((used <= limit))
+}
+
+preload_candidate_images() {
+  local kernel machine image_ref image_lines measurement capacity used
+  local payload_status=0 post_status pull_status
+  local -a image_refs=()
+
+  jq -e '
+    type == "array" and
+    length == 10 and
+    all(.[];
+      type == "string" and
+      test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}\\z")
+    )
+  ' <<<"$SELECTED_IMAGE_IDS" >/dev/null 2>&1 || payload_status=$?
+  case "$payload_status" in
+    0) ;;
+    1 | 4)
+      candidacy_fail "candidate image reference payload is invalid"
+      ;;
+    *)
+      fail "candidate image payload validation failed with code $payload_status"
+      ;;
+  esac
+  image_lines="$(jq -r '.[]' <<<"$SELECTED_IMAGE_IDS")" ||
+    fail "candidate image payload decoding failed"
+  while IFS= read -r image_ref; do
+    image_refs[${#image_refs[@]}]="$image_ref"
+  done <<<"$image_lines"
+  ((${#image_refs[@]} == 10)) ||
+    candidacy_fail "candidate image reference payload is incomplete"
+
+  kernel="$(uname -s)" ||
+    fail "k3s candidate preload could not identify the node kernel"
+  machine="$(uname -m)" ||
+    fail "k3s candidate preload could not identify the node architecture"
+  [[ "$kernel" == "Linux" && "$machine" == "aarch64" ]] ||
+    fail "k3s candidate preload requires Linux/aarch64"
+
+  for image_ref in "${image_refs[@]}"; do
+    measurement="$(raw_root_measurement)" ||
+      candidacy_fail "raw root pre-pull measurement is unavailable"
+    IFS=$'\t' read -r capacity used <<<"$measurement"
+    raw_root_within_limit "$capacity" "$used" ||
+      candidacy_fail "raw root pre-pull byte threshold is exceeded"
+
+    if cri pull "$image_ref"; then
+      pull_status=0
+    else
+      pull_status=$?
+    fi
+
+    if measurement="$(raw_root_measurement)"; then
+      post_status=0
+    else
+      post_status=$?
+    fi
+    ((post_status == 0)) ||
+      candidacy_fail "raw root post-pull measurement is unavailable"
+    IFS=$'\t' read -r capacity used <<<"$measurement"
+    raw_root_within_limit "$capacity" "$used" ||
+      candidacy_fail "raw root post-pull byte threshold is exceeded"
+    ((pull_status == 0)) ||
+      candidacy_fail "native CRI candidate image pull failed"
+  done
+
+  printf 'k3s_candidate_preload=COMPLETE images=%s\n' "${#image_refs[@]}"
 }
 
 public_read_checks() {
@@ -828,6 +942,9 @@ snapshot() {
 }
 
 case "$ACTION" in
+  preload-candidate-images)
+    preload_candidate_images
+    ;;
   baseline-proof)
     baseline_proof
     ;;
