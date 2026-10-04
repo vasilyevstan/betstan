@@ -2653,7 +2653,7 @@ def validate_failed_partial_rollback_artifact(
         fail(f"{label} failed service did not change")
     changed_services = [
         service
-        for service in service_order
+        for service in reversed(order)
         if pre[service][2] != partial[service][1]
     ]
     if (

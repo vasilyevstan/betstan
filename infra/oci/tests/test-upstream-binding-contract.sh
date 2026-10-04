@@ -95,6 +95,137 @@ for entries, allowed in (
 PY
 ok "partial-recovery empty failures scope"
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib
+import hashlib
+import importlib.util
+import io
+import sys
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("upstream_binding", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+repository = "ghcr.io/vasilyevstan/betstan-images"
+source_sha = "1" * 40
+target_sha = "2" * 40
+services = [
+    "auth", "bet", "backoffice", "client", "event", "moderation",
+    "resulting", "slip", "gamemaster",
+]
+changed = {"auth", "bet", "backoffice"}
+restored = {}
+pre_rows = []
+partial_rows = []
+for index, service in enumerate(services, 1):
+    restored_ref = f"{repository}@sha256:{index:064x}"
+    partial_ref = (
+        f"{repository}@sha256:{index + 100:064x}"
+        if service in changed
+        else restored_ref
+    )
+    restored[service] = {"image_ref": restored_ref}
+    pre_rows.append(
+        f"{service}\tgaming-{service}-depl\t{restored_ref}\t1\t1/1"
+    )
+    partial_rows.append(f"{service}\t{partial_ref}\t1")
+
+evidence = {
+    "failure-state.env": (
+        "status=FAIL\n"
+        "failed_service=backoffice\n"
+        "failed_deployment=gaming-backoffice-depl\n"
+        "failed_step_label=failed-backoffice\n"
+        "rollback_http_mutation_fence=active\n"
+    ).encode(),
+    "pre-rollback-state.tsv": ("\n".join(pre_rows) + "\n").encode(),
+    "partial-state.tsv": ("\n".join(partial_rows) + "\n").encode(),
+    "rollout-order.tsv": b"auth\nbet\nbackoffice\n",
+    "baseline-provenance.env": (
+        f"baseline_source_sha={target_sha}\n"
+    ).encode(),
+    "telemetry-pre-run.env": (
+        f"mode=retained\nimage={repository}@sha256:{'f' * 64}\n"
+        "database_initialized=true\nqueue_present=true\n"
+    ).encode(),
+}
+module.fixed_run_metadata = lambda *_args: {
+    "head_sha": source_sha,
+    "display_title": f"oci-rollback {target_sha}",
+    "updated_at": "2026-01-01T00:00:00Z",
+}
+module.exact_artifact = lambda *_args: {"id": 1}
+module.artifact_files = lambda *_args, **_kwargs: evidence
+telemetry = {
+    "mode": "retained",
+    "image": f"{repository}@sha256:{'f' * 64}",
+    "database_initialized": "true",
+    "queue_present": "true",
+}
+
+
+def sealed_plan(order):
+    rows = []
+    for service in order:
+        rows.append([
+            service,
+            f"gaming-{service}-depl",
+            restored[service]["image_ref"],
+            next(
+                row.split("\t")[1]
+                for row in partial_rows
+                if row.startswith(f"{service}\t")
+            ),
+        ])
+    raw = (
+        "\n".join("\t".join(row) for row in rows) + "\n"
+    ).encode()
+    sealed = {
+        "recovery-plan.tsv": raw,
+        "SHA256SUMS": (
+            f"{hashlib.sha256(raw).hexdigest()}  recovery-plan.tsv\n"
+        ).encode(),
+    }
+    module.validate_checksum_manifest(sealed, "sealed recovery plan")
+    return module.parse_tsv(raw, 4, "sealed recovery plan")
+
+
+module.validate_failed_partial_rollback_artifact(
+    "example/repo",
+    "88",
+    source_sha,
+    target_sha,
+    restored,
+    sealed_plan(["backoffice", "bet", "auth"]),
+    telemetry,
+    "partial recovery",
+)
+for invalid_order in (
+    ["auth", "bet", "backoffice"],
+    ["bet", "backoffice", "auth"],
+):
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            module.validate_failed_partial_rollback_artifact(
+                "example/repo",
+                "88",
+                source_sha,
+                target_sha,
+                restored,
+                sealed_plan(invalid_order),
+                telemetry,
+                "partial recovery",
+            )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError(
+            "checksum-consistent non-producer recovery order passed"
+        )
+PY
+ok "partial recovery accepts only reverse producer order"
+
 mkdir -p "$WORK/bin"
 cat >"$WORK/bin/gh" <<'EOF'
 #!/usr/bin/env bash
