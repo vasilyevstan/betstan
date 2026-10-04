@@ -275,9 +275,10 @@ rollback run and its safe, complete, checksum-bound repository artifact. It
 recursively resolves the selected build and upstream build run, per-service
 manifest and platform identities, first-attempt infrastructure provenance,
 cache plan carrier and any distinct failed/cancelled plan origin, or the exact
-failed partial-rollback state and Telemetry lineage. Run zero requires source
-`none`; internally consistent but externally substituted recovery evidence is
-insufficient.
+failed partial-rollback state and Telemetry lineage. Partial recovery restores
+only changed services in reverse producer rollout order; forward or otherwise
+permuted plans are rejected. Run zero requires source `none`; internally
+consistent but externally substituted recovery evidence is insufficient.
 
 The upstream binding language remains declarative: it can select an expected
 head SHA, expected `success`, one fixed disk-checkpoint validator, or one of
@@ -297,13 +298,14 @@ authority resolves the failed activation to the exact successful deployment
 and that deployment's actual v6 handoff. An optional earlier failed deployment
 is resolved separately through that handoff's resume authority rather than
 being forced onto the successful deployment lineage. Because the successful
-deployment released the earlier runtime hold, cleanup enters maintenance and
-acquires a fresh exact operation lock. Under that lock it idempotently demotes
-the exact retained account to `USER`, verifies exactly one matching account,
-and removes only draft slips whose `_id`, user, bet kind, status, board
-revision, and board fingerprint still match the inspected documents. A role
-change, concurrent slip mutation, or cleanup-count conflict blocks the resumed
-data phase. No profile widens normal success authority.
+deployment released the earlier runtime hold, cleanup acquires a fresh exact
+operation lock and then enters maintenance. Under that lock and maintenance
+hold it idempotently demotes the exact retained account to `USER`, verifies
+exactly one matching account, and removes only draft slips whose `_id`, user,
+bet kind, status, board revision, and board fingerprint still match the
+inspected documents. A role change, concurrent slip mutation, or cleanup-count
+conflict blocks the resumed data phase. No profile widens normal success
+authority.
 
 Each fixed profile downloads and parses its exact artifacts; run metadata and
 job conclusions alone are insufficient. ZIP paths and members must be safe and
