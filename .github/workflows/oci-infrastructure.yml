@@ -1069,6 +1069,7 @@ jobs:
             exit "$status"
           }
           trap cleanup_on_exit EXIT
+          rm -f "$CHECKPOINT_OUTPUT_FILE"
           checkpoint_candidates_ready=true
           if ! PROVENANCE_DIR=artifacts/ghcr-build \
               EXPECTED_BUILD_RUN_ID="$GHCR_BUILD_RUN_ID" \
@@ -1090,9 +1091,25 @@ jobs:
           unset OCI_K3S_SSH_PRIVATE_KEY
           ./infra/oci/scripts/finalize-k3s.sh
           if [ "$checkpoint_candidates_ready" = "true" ]; then
+            preload_status=0
+            CONTROL_SHA="$SOURCE_SHA" \
+                WORK_DIR="$RECOVERY_WORK_DIR" \
+              ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh preload ||
+                preload_status=$?
+            if [ "$preload_status" -ne 0 ]; then
+              checkpoint_candidates_ready=false
+              rm -f "$CANDIDATE_IMAGES_FILE" "$CHECKPOINT_OUTPUT_FILE"
+              echo "k3s_release_disk_checkpoint=INELIGIBLE reason=candidate_preload"
+              if [ "$preload_status" -ne 20 ]; then
+                exit "$preload_status"
+              fi
+            fi
+          fi
+          if [ "$checkpoint_candidates_ready" = "true" ]; then
             if ! CONTROL_SHA="$SOURCE_SHA" \
                 WORK_DIR="$RECOVERY_WORK_DIR" \
                   ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh diagnose; then
+              checkpoint_candidates_ready=false
               rm -f "$CHECKPOINT_OUTPUT_FILE"
               echo "k3s_release_disk_checkpoint=INELIGIBLE reason=runtime_validation"
             fi

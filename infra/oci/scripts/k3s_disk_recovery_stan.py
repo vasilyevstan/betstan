@@ -1486,6 +1486,11 @@ def checkpoint_root(capacity):
     }
 
 
+def raw_root_within_limit(runtime):
+    root = runtime["root"]["df"]
+    return root["usedBytes"] * 100 <= root["capacityBytes"] * THRESHOLD
+
+
 def validate_release_checkpoint(value):
     common = {
         "schemaVersion",
@@ -1707,6 +1712,7 @@ def write_release_checkpoint(args):
         or "controlSha" in diagnosis
         or diagnosis["terminalStatus"] != "DIAGNOSED"
         or capacity["withinLimit"] is not True
+        or not raw_root_within_limit(runtime)
     ):
         print("k3s_release_disk_checkpoint=INELIGIBLE")
         return
@@ -1899,7 +1905,9 @@ def revalidate_release_checkpoint(args):
     validate_capacity(capacity)
     crosscheck_filesystem(runtime, capacity)
     if capacity["withinLimit"] is not True:
-        fail("fresh release checkpoint byte threshold is exceeded")
+        fail("fresh release checkpoint kubelet byte threshold is exceeded")
+    if not raw_root_within_limit(runtime):
+        fail("fresh release checkpoint raw root byte threshold is exceeded")
     candidates = parse_candidate_images(args.candidate_images)
     sealed_candidates = [
         {
@@ -1988,9 +1996,18 @@ def write_incomplete_reclaim(args):
     Path(args.output).write_text(canonical(result) + "\n", encoding="utf-8")
 
 
+def candidate_image_refs(args):
+    candidates = parse_candidate_images(args.candidate_images)
+    print(canonical([candidate["imageRef"] for candidate in candidates]))
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    refs = subparsers.add_parser("candidate-image-refs")
+    refs.add_argument("--candidate-images", required=True)
+    refs.set_defaults(handler=candidate_image_refs)
 
     diagnose = subparsers.add_parser("diagnose")
     diagnose.add_argument("--runtime", required=True)
