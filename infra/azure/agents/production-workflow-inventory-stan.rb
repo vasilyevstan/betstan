@@ -1350,9 +1350,10 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "EXPECTED_BASELINE_RECOVERY_RUN_ID" => "recovery authority phase-chain binding",
     "oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1" =>
       "failed-deploy rollback baseline binding",
-    "oci-live-betting-activate.yml" => "failed-activation workflow binding",
-    "oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1" =>
-      "failed-activation artifact binding",
+    "protected_operation=oci-live-data-resume-activation" =>
+      "fixed failed-activation profile selection",
+    "--policy-json \"$policy_json\"" =>
+      "shared recursive failed-activation authority validation",
     "cleanup-live-acceptance-slips-stan.sh" =>
       "exact synthetic Slip cleanup",
     "Demote and verify exact retained live-acceptance account" =>

@@ -1483,15 +1483,19 @@ EOF2
 
 profile_dispatch_inputs() {
   local checkpoint_source="${1:-$SUBJECT_SHA}"
-  jq -cn --arg checkpoint_source "$checkpoint_source" '{
+  local resume_source="${2:-$checkpoint_source}"
+  jq -cn \
+    --arg checkpoint_source "$checkpoint_source" \
+    --arg resume_source "$resume_source" '{
     checkpoint_source_sha:$checkpoint_source,
-    resume_source_sha:$checkpoint_source,
+    resume_source_sha:$resume_source,
     disk_checkpoint_run_id:"44",
     build_run_id:"41",
     infrastructure_run_id:"44",
     prerequisite_run_id:"43",
     baseline_recovery_run_id:"0",
     baseline_recovery_source_sha:"none",
+    failed_deploy_run_id:"0",
     failed_activation_user_id:"0123456789abcdef01234567"
   }'
 }
@@ -1841,6 +1845,22 @@ EOF2
 {"total_count":1,"artifacts":[{"name":"oci-live-data-rollout-43-1","id":9814,"expired":false,"size_in_bytes":8192}]}
 EOF2
   artifact_zip_directory_fixture 9814 "$root/predecessor"
+  fixture "repos/$REPO/actions/workflows/oci-live-data-rollout.yml" <<'EOF2'
+{"id":7643}
+EOF2
+  for endpoint in \
+    "repos/$REPO/actions/runs/43" \
+    "repos/$REPO/actions/runs/43/attempts/1"; do
+    fixture "$endpoint" <<EOF2
+{"id":43,"run_attempt":1,"workflow_id":7643,
+ "path":".github/workflows/oci-live-data-rollout.yml",
+ "head_repository":{"full_name":"$REPO"},"head_branch":"master",
+ "head_sha":"$operation_source","status":"completed","conclusion":"success",
+ "event":"workflow_dispatch",
+ "display_title":"oci-live-data apply-slip-index $operation_source",
+ "created_at":"2025-12-31T22:00:00Z","updated_at":"2025-12-31T22:10:00Z"}
+EOF2
+  done
 
   if [[ "$include_activation" == "true" ]]; then
     fixture "repos/$REPO/actions/runs/$failed_run/artifacts?per_page=100" <<EOF2
@@ -2477,6 +2497,313 @@ for mutation in missing modified duplicate additional; do
   fi
   ok "reject activation recovery artifact with $mutation member evidence"
 done
+
+APPLIED_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+prepare_activation_chain() {
+  local activation_run="$1"
+  local failed_deploy_run="$2"
+  reset_fixtures
+  write_profile_run "$activation_run" \
+    oci-live-betting-activate.yml \
+    "oci-live-activate $SUBJECT_SHA" \
+    7613 \
+    "oci-live-activation-recovery-$activation_run-1"
+  write_profile_artifacts \
+    "$activation_run" true "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA"
+  write_activation_jobs \
+    "$activation_run" failure success failure success success success
+
+  local activation_root="$WORK/profile-artifacts-$activation_run"
+  python3 - \
+    "$activation_root" \
+    "$APPLIED_SOURCE_SHA" \
+    "$SUBJECT_SHA" \
+    "$failed_deploy_run" <<'PY'
+import hashlib
+from pathlib import Path
+import shutil
+import sys
+
+root = Path(sys.argv[1])
+applied_source = sys.argv[2]
+current_source = sys.argv[3]
+failed_run = sys.argv[4]
+
+def read_env(path):
+    return dict(
+        line.split("=", 1)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    )
+
+def write_env(path, values):
+    path.write_text(
+        "".join(f"{key}={value}\n" for key, value in values.items()),
+        encoding="utf-8",
+    )
+
+def seal(directory):
+    manifest = directory / "SHA256SUMS"
+    members = sorted(
+        path
+        for path in directory.rglob("*")
+        if path.is_file() and path != manifest
+    )
+    manifest.write_text(
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+            f"{path.relative_to(directory).as_posix()}\n"
+            for path in members
+        ),
+        encoding="utf-8",
+    )
+    return hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+baseline = root / "baseline"
+baseline_values = read_env(baseline / "baseline-provenance.env")
+baseline_values["baseline_source_sha"] = applied_source
+baseline_values["baseline_capture_run_id"] = "42"
+write_env(baseline / "baseline-provenance.env", baseline_values)
+baseline_sha = seal(baseline)
+
+resumed = root / "predecessor"
+applied = root / "applied-predecessor"
+shutil.copytree(resumed, applied)
+applied_values = read_env(applied / "provenance.env")
+applied_values.update({
+    "source_sha": applied_source,
+    "workflow_run_id": "42",
+    "baseline_sha256": baseline_sha,
+    "completed_at": "2025-12-31T21:10:00Z",
+})
+write_env(applied / "provenance.env", applied_values)
+applied_manifest_sha = seal(applied)
+
+resumed_values = read_env(resumed / "provenance.env")
+resumed_values.update({
+    "source_sha": current_source,
+    "workflow_run_id": "43",
+    "baseline_sha256": baseline_sha,
+    "completed_at": "2025-12-31T22:10:00Z",
+})
+write_env(resumed / "provenance.env", resumed_values)
+resume_images = (root / "build" / "images.tsv").read_bytes()
+(resumed / "resume-images.tsv").write_bytes(resume_images)
+resume_authority = {
+    "schema_version": "live-betting-data-resume-v2",
+    "applied_data_run_id": "42",
+    "applied_source_sha": applied_source,
+    "failed_deploy_run_id": failed_run,
+    "resume_maintenance_mode": "retained-hold",
+    "failed_deploy_job_conclusion": "failure",
+    "public_validate_job_conclusion": "skipped",
+    "lock_release_step_conclusion": "skipped",
+    "fence_release_step_conclusion": "skipped",
+    "rehold_step_conclusion": "success",
+    "failed_activation_run_id": "0",
+    "current_source_sha": current_source,
+    "baseline_sha256": baseline_sha,
+    "runtime_images_sha256": hashlib.sha256(resume_images).hexdigest(),
+    "checkpoint_source_sha": applied_source,
+    "disk_checkpoint_run_id": "44",
+    "disk_checkpoint_sha256": resumed_values["disk_checkpoint_sha256"],
+    "disk_checkpoint_disposition":
+        resumed_values["disk_checkpoint_disposition"],
+    "application_change_scope": "github-infra-docs-only",
+    "status": "PASS",
+}
+write_env(resumed / "resume-authority.env", resume_authority)
+resumed_manifest_sha = seal(resumed)
+
+successful = root / "successful-deployment" / "provenance.txt"
+successful_values = read_env(successful)
+successful_values["data_run_id"] = "43"
+successful_values["data_evidence_sha256"] = resumed_manifest_sha
+write_env(successful, successful_values)
+schema_path = root / "successful-deployment" / "live-schema.env"
+schema = read_env(schema_path)
+for key in {
+    "source_sha",
+    "build_run_id",
+    "infrastructure_run_id",
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
+    "disk_checkpoint_sha256",
+    "disk_checkpoint_disposition",
+    "baseline_sha256",
+    "baseline_recovery_run_id",
+    "baseline_recovery_source_sha",
+}:
+    schema[key] = resumed_values[key]
+schema["data_run_id"] = "43"
+write_env(schema_path, schema)
+
+intent_path = root / "deployment-recovery" / "deployment-intent.env"
+intent = read_env(intent_path)
+intent.update({
+    "source_sha": applied_source,
+    "deployment_run_id": failed_run,
+    "data_run_id": "42",
+    "data_evidence_sha256": applied_manifest_sha,
+    "baseline_sha256": baseline_sha,
+    "baseline_capture_run_id": "42",
+})
+write_env(intent_path, intent)
+intent_sha = hashlib.sha256(intent_path.read_bytes()).hexdigest()
+(root / "deployment-recovery" / "deployment-intent.sha256").write_text(
+    f"{intent_sha}  deployment-intent.env\n",
+    encoding="utf-8",
+)
+failure_path = root / "deployment-recovery" / "failure-lineage.env"
+failure = read_env(failure_path)
+failure.update({
+    "source_sha": applied_source,
+    "deployment_run_id": failed_run,
+    "intent_sha256": intent_sha,
+    "lock_release_outcome": "skipped",
+    "fence_release_outcome": "skipped",
+    "rehold_outcome": "success",
+})
+write_env(failure_path, failure)
+seal(root / "deployment-recovery")
+PY
+
+  local failed_root="$WORK/profile-artifacts-$failed_deploy_run"
+  rm -rf "$failed_root"
+  mkdir -p "$failed_root"
+  cp -R \
+    "$activation_root/baseline" \
+    "$activation_root/failed-deployment" \
+    "$activation_root/deployment-recovery" \
+    "$failed_root/"
+
+  fixture "repos/$REPO/actions/runs/42" <<EOF2
+{"id":42,"run_attempt":1,"workflow_id":7643,
+ "path":".github/workflows/oci-live-data-rollout.yml",
+ "head_repository":{"full_name":"$REPO"},"head_branch":"master",
+ "head_sha":"$APPLIED_SOURCE_SHA","status":"completed","conclusion":"success",
+ "event":"workflow_dispatch",
+ "display_title":"oci-live-data apply-slip-index $APPLIED_SOURCE_SHA",
+ "created_at":"2025-12-31T21:00:00Z","updated_at":"2025-12-31T21:10:00Z"}
+EOF2
+  cp \
+    "$FIXTURE_DIR/$(printf '%s' "repos/$REPO/actions/runs/42" | tr '/?=&' '____')" \
+    "$FIXTURE_DIR/$(printf '%s' "repos/$REPO/actions/runs/42/attempts/1" | tr '/?=&' '____')"
+  fixture "repos/$REPO/actions/runs/42/artifacts?per_page=100" <<'EOF2'
+{"total_count":1,"artifacts":[{"name":"oci-live-data-rollout-42-1","id":9817,"expired":false,"size_in_bytes":8192}]}
+EOF2
+  artifact_zip_directory_fixture 9817 "$activation_root/applied-predecessor"
+  artifact_zip_directory_fixture 9814 "$activation_root/predecessor"
+  artifact_zip_directory_fixture 9816 "$activation_root/successful-deployment"
+
+  for endpoint in \
+    "repos/$REPO/actions/runs/$failed_deploy_run" \
+    "repos/$REPO/actions/runs/$failed_deploy_run/attempts/1"; do
+    fixture "$endpoint" <<EOF2
+{"id":$failed_deploy_run,"run_attempt":1,"workflow_id":7645,
+ "path":".github/workflows/oci-production-deploy.yml",
+ "head_repository":{"full_name":"$REPO"},"head_branch":"master",
+ "head_sha":"$APPLIED_SOURCE_SHA","status":"completed","conclusion":"failure",
+ "event":"workflow_dispatch","display_title":"oci-deploy $APPLIED_SOURCE_SHA",
+ "created_at":"2025-12-31T21:20:00Z","updated_at":"2025-12-31T21:30:00Z"}
+EOF2
+  done
+  fixture \
+    "repos/$REPO/actions/runs/$failed_deploy_run/artifacts?per_page=100" <<EOF2
+{"total_count":3,"artifacts":[
+ {"name":"oci-production-baseline-$failed_deploy_run-1","id":$((9700 + failed_deploy_run)),"expired":false,"size_in_bytes":8192},
+ {"name":"oci-deploy-provenance-$failed_deploy_run-1","id":$((20000 + failed_deploy_run)),"expired":false,"size_in_bytes":8192},
+ {"name":"oci-deploy-recovery-authority-$failed_deploy_run-1","id":$((21000 + failed_deploy_run)),"expired":false,"size_in_bytes":8192}]}
+EOF2
+  artifact_zip_directory_fixture \
+    "$((9700 + failed_deploy_run))" "$failed_root/baseline"
+  artifact_zip_directory_fixture \
+    "$((20000 + failed_deploy_run))" "$failed_root/failed-deployment"
+  artifact_zip_directory_fixture \
+    "$((21000 + failed_deploy_run))" "$failed_root/deployment-recovery"
+  write_deploy_profile_jobs \
+    "$failed_deploy_run" failure skipped skipped skipped success
+}
+
+activation_chain_run=623
+activation_chain_failed_run=610
+prepare_activation_chain \
+  "$activation_chain_run" "$activation_chain_failed_run"
+activation_chain_inputs="$(
+  profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA" |
+    jq -c --arg failed "$activation_chain_failed_run" \
+      '.failed_deploy_run_id = $failed'
+)"
+run_custom_binding "$activation_binding" "$activation_chain_run" \
+  "$activation_chain_inputs" oke >/dev/null ||
+  fail "producer-realistic P-D-R-S-A activation chain was rejected: $(cat "$WORK/err.txt")"
+ok "accept producer-realistic P-D-R-S-A activation chain with distinct sources"
+
+for restarted_run in \
+  "$activation_chain_run" \
+  45 \
+  43 \
+  "$activation_chain_failed_run"; do
+  prepare_activation_chain \
+    "$activation_chain_run" "$activation_chain_failed_run"
+  run_fixture="$FIXTURE_DIR/$(
+    printf '%s' "repos/$REPO/actions/runs/$restarted_run" |
+      tr '/?=&' '____'
+  )"
+  python3 - "$run_fixture" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["run_attempt"] = 2
+path.write_text(json.dumps(value), encoding="utf-8")
+PY
+  if run_custom_binding "$activation_binding" "$activation_chain_run" \
+      "$activation_chain_inputs" oke >/dev/null; then
+    fail "activation chain accepted restarted run $restarted_run"
+  fi
+done
+ok "reject restarted activation, deployment, predecessor, and failed-deploy runs"
+
+for mutation in deployment-predecessor failed-deploy applied-run applied-source; do
+  prepare_activation_chain \
+    "$activation_chain_run" "$activation_chain_failed_run"
+  activation_root="$WORK/profile-artifacts-$activation_chain_run"
+  case "$mutation" in
+    deployment-predecessor)
+      rewrite_profile_env \
+        "$activation_root/successful-deployment" \
+        provenance.txt data_run_id 42 false
+      artifact_zip_directory_fixture \
+        9816 "$activation_root/successful-deployment"
+      ;;
+    failed-deploy)
+      rewrite_profile_env \
+        "$activation_root/predecessor" \
+        resume-authority.env failed_deploy_run_id 611
+      artifact_zip_directory_fixture 9814 "$activation_root/predecessor"
+      ;;
+    applied-run)
+      rewrite_profile_env \
+        "$activation_root/predecessor" \
+        resume-authority.env applied_data_run_id 41
+      artifact_zip_directory_fixture 9814 "$activation_root/predecessor"
+      ;;
+    applied-source)
+      rewrite_profile_env \
+        "$activation_root/predecessor" \
+        resume-authority.env applied_source_sha \
+        bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      artifact_zip_directory_fixture 9814 "$activation_root/predecessor"
+      ;;
+  esac
+  if run_custom_binding "$activation_binding" "$activation_chain_run" \
+      "$activation_chain_inputs" oke >/dev/null; then
+    fail "activation chain accepted cross-link substitution: $mutation"
+  fi
+done
+ok "reject deployment, failed-deploy, and applied-predecessor cross-links"
 
 ANCESTOR_PROFILE_SHA="bd1008081411d64d96dd0221126090577ea72c6b"
 ancestor_profile_run=622

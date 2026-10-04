@@ -1511,6 +1511,9 @@ Durable rules:
 - Metadata is not recovery lineage. Fixed profiles must download safe complete
   ZIPs, verify checksum manifests and baseline capture identity, then parse the
   complete predecessor-v6, deployment, and activation tuples before authority.
+  Cache and partial-recovery authority must also recurse into the exact build
+  and upstream run, per-service platform identities, infrastructure
+  provenance, cache plan carrier/origin, or failed partial-rollback state.
 - An ancestor resume has explicit source identities. The current workflow uses
   the approved SHA; predecessor and failed-run evidence use the hash-covered
   `resume_source_sha`; the original build, infrastructure, and disk checkpoint
@@ -1519,9 +1522,13 @@ Durable rules:
   successor; never accept a newly produced byte-equivalent build or
   infrastructure run.
 - Cleanup authority includes identity state, not only data rows. If failed
-  activation retains its exact account, demote and verify that artifact-bound
-  account under the transferred lock before bounded Slip cleanup, and stop on
-  either failure.
+  activation retains its exact account, resolve the failed activation through
+  the successful deployment and its actual v6 handoff. The successful
+  deployment released the old hold, so enter maintenance and acquire a fresh
+  exact lock before demotion and cleanup. Delete each inspected draft Slip
+  with an atomic predicate that includes `_id`, user, bet kind, status, board
+  revision, and board fingerprint; concurrent mutation must leave the row and
+  fail closed.
 - Put mutable observations at the authority boundary. Baseline and predecessor
   work precede the final public revalidation, which is the last read-only
   action before lock acquisition. Deployment verifies the transferred hold,

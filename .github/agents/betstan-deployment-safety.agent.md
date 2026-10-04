@@ -383,12 +383,17 @@ Before deployment:
   the original checkpoint source while predecessor and failed-run evidence
   binds the hash-covered `resume_source_sha`. Require a nonzero baseline
   recovery's explicit source and exact checksum-bound fixed-profile artifact
-  before authority. Reject a new
+  before authority. Recursively resolve that artifact's exact build/upstream
+  and platform identities, infrastructure provenance, cache plan
+  carrier/origin, or failed partial-rollback state. Reject a new
   byte-equivalent build or infrastructure run, unsafe/incomplete recovery
   artifact ZIPs, checksum drift, or any v6/checkpoint substitution;
-- for failed-activation recovery, demote and verify exactly the artifact-bound
-  retained account as `USER` under the transferred lock before bounded Slip
-  cleanup; either failure blocks the resumed data phase;
+- for failed-activation recovery, recursively resolve the failed activation,
+  successful deployment, and actual v6 handoff. Because that deployment
+  released the old hold, use public revalidation and a fresh exact lock before
+  demoting the artifact-bound account. Bind every Slip deletion to its
+  inspected identity and board revision/fingerprint; either role cleanup or an
+  atomic deletion conflict blocks the resumed phase;
 - require baseline and predecessor work to finish before the final public disk
   revalidation, with that revalidation as the last read-only action before
   lock acquisition. In held mode accept only stable infrastructure facts:

@@ -297,7 +297,12 @@ that SHA or the proven allowed ancestor. A nonzero baseline recovery also
 binds its explicit source and exact repository-validated artifact before
 authority. A new byte-equivalent build or infrastructure run is not a
 substitute. Failed-activation recovery must demote and verify the exact
-artifact-bound account as `USER` before bounded Slip cleanup; either failure
+artifact-bound account as `USER` before bounded Slip cleanup. It recursively
+resolves the failed activation through its successful deployment and actual
+v6 handoff, then uses public revalidation and a fresh exact lock because that
+deployment released the earlier runtime hold. Slip deletion predicates bind
+each inspected document's immutable identity and board revision/fingerprint;
+a concurrent change or count conflict fails closed. Either cleanup failure
 blocks the data phase.
 
 Every OCI release requires a new exact-SHA final

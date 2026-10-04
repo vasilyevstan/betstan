@@ -271,8 +271,13 @@ interchangeable with the original.
 When `baseline_recovery_run_id` is nonzero, its hash-covered
 `baseline_recovery_source_sha` is also mandatory before authority. The shared
 fixed validator accepts only the exact successful cache-recovery or partial
-rollback run and its safe, complete, checksum-bound repository artifact. Run
-zero requires source `none`; metadata-only recovery evidence is insufficient.
+rollback run and its safe, complete, checksum-bound repository artifact. It
+recursively resolves the selected build and upstream build run, per-service
+manifest and platform identities, first-attempt infrastructure provenance,
+cache plan carrier and any distinct failed/cancelled plan origin, or the exact
+failed partial-rollback state and Telemetry lineage. Run zero requires source
+`none`; internally consistent but externally substituted recovery evidence is
+insufficient.
 
 The upstream binding language remains declarative: it can select an expected
 head SHA, expected `success`, one fixed disk-checkpoint validator, or one of
@@ -287,10 +292,17 @@ successful maintenance re-entry and accepts only lock/fence release results
 on re-entry having reacquired the exact lock and re-held maintenance. A
 released-runtime recovery requires its fixed failed-public-validation and
 successful-release profile. Failed activation cleanup requires its fixed
-pre-authority run evidence and sanitized acceptance user identity. Under the
-transferred lock it idempotently demotes that exact retained account to
-`USER`, verifies exactly one matching account, and only then removes its exact
-bounded draft slips. A role-change or slip-cleanup failure blocks the resumed
+pre-authority run evidence and sanitized acceptance user identity. Its
+authority resolves the failed activation to the exact successful deployment
+and that deployment's actual v6 handoff. An optional earlier failed deployment
+is resolved separately through that handoff's resume authority rather than
+being forced onto the successful deployment lineage. Because the successful
+deployment released the earlier runtime hold, cleanup enters maintenance and
+acquires a fresh exact operation lock. Under that lock it idempotently demotes
+the exact retained account to `USER`, verifies exactly one matching account,
+and removes only draft slips whose `_id`, user, bet kind, status, board
+revision, and board fingerprint still match the inspected documents. A role
+change, concurrent slip mutation, or cleanup-count conflict blocks the resumed
 data phase. No profile widens normal success authority.
 
 Each fixed profile downloads and parses its exact artifacts; run metadata and

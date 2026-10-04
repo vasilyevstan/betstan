@@ -2334,7 +2334,8 @@ SH
       OUTPUT_DIR=artifacts/oci-data-baseline-before \
       GITHUB_ENV="$case_dir/github.env" OCI_K8S_NAMESPACE=betstan-oci \
       SOURCE_SHA="$CURRENT_MASTER_SHA" PHASE="$phase" \
-      FAILED_DEPLOY_RUN_ID="$failed_deploy" BASELINE_RECOVERY_RUN_ID="$recovery" \
+      FAILED_DEPLOY_RUN_ID="$failed_deploy" FAILED_ACTIVATION_RUN_ID=0 \
+      BASELINE_RECOVERY_RUN_ID="$recovery" \
       BASELINE_RECOVERY_SOURCE_SHA="$recovery_source" \
       EXPECTED_SOURCE_SHA=stale-source EXPECTED_NAMESPACE=stale-namespace \
       EXPECTED_RECOVERY_RUN_ID=999 REQUIRE_CURRENT_DEPLOY_PROVENANCE=false \
@@ -3869,18 +3870,61 @@ with zipfile.ZipFile(archive, "w") as bundle:
         if path.is_file():
             bundle.writestr(path.relative_to(root).as_posix(), path.read_bytes())
 module.gh_api_bytes = lambda _: archive.getvalue()
+module.exact_artifact = lambda *_args: {"id": 2}
+authority = module.parse_env(
+    (root / "partial-recovery-authority.env").read_bytes(),
+    "partial recovery authority",
+)
+recovered_images = module.validate_recovery_image_rows(
+    (root / "images.tsv").read_bytes(), "partial recovery images"
+)
 
 
-def fixed_metadata(_repository, _run_id, workflow, *_args):
-    if workflow == "oci-production-build.yml":
-        return {"head_sha": source_sha}
-    if workflow == "oci-production-rollback.yml":
-        return {"display_title": f"oci-rollback {target_sha}"}
-    raise AssertionError(f"unexpected workflow: {workflow}")
+def validate_build(_repository, selected_run, selected_source, _label):
+    assert selected_run == authority["restored_build_run_id"]
+    assert selected_source == source_sha
+    return recovered_images
 
 
-module.fixed_run_metadata = fixed_metadata
-module.exact_artifact = lambda *_args: None
+def validate_infrastructure(
+    _repository,
+    selected_run,
+    selected_hash,
+    runtime_mode,
+    runtime_fingerprint,
+    endpoints,
+    _label,
+):
+    assert selected_run == authority["infrastructure_run_id"]
+    assert selected_hash == authority["infrastructure_provenance_sha256"]
+    assert runtime_mode == authority["runtime_mode"]
+    assert runtime_fingerprint == authority["runtime_fingerprint"]
+    assert endpoints["public_host"] == authority["public_host"]
+    return source_sha
+
+
+def validate_failed(
+    _repository,
+    selected_run,
+    selected_source,
+    selected_target,
+    selected_images,
+    recovery_plan,
+    telemetry,
+    _label,
+):
+    assert selected_run == authority["source_rollback_run_id"]
+    assert selected_source == source_sha
+    assert selected_target == target_sha
+    assert selected_images == recovered_images
+    assert recovery_plan
+    assert telemetry["mode"] == "retained"
+    return {"updated_at": "2026-01-01T00:00:00Z"}
+
+
+module.validate_current_build_artifact = validate_build
+module.validate_infrastructure_artifact = validate_infrastructure
+module.validate_failed_partial_rollback_artifact = validate_failed
 module.validate_partial_recovery_artifact(
     "example/repo",
     run_id,
@@ -3889,6 +3933,7 @@ module.validate_partial_recovery_artifact(
     {
         "head_sha": head_sha,
         "display_title": f"oci-rollback {target_sha}",
+        "created_at": "2026-01-01T00:01:00Z",
     },
     "partial recovery",
 )

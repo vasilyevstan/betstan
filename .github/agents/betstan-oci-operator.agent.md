@@ -96,8 +96,15 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   build and infrastructure run IDs; workflow control advances while
   predecessor and failed-run evidence bind the explicit `resume_source_sha`.
   A nonzero baseline recovery requires its explicit source and exact
-  checksum-bound fixed-profile artifact before authority. Never substitute a
-  new byte-equivalent build or infrastructure run.
+  checksum-bound fixed-profile artifact before authority. Recursively verify
+  that artifact's build/upstream/platform, infrastructure, plan-origin, or
+  failed partial-rollback lineage. Never substitute a new byte-equivalent
+  build or infrastructure run.
+- Failed-activation cleanup resolves the failed activation through its exact
+  successful deployment and actual v6 handoff. Treat the runtime as released,
+  perform public checkpoint revalidation, enter maintenance, and acquire a
+  fresh exact lock before demoting the artifact-bound account and atomically
+  deleting only unchanged draft Slips.
 - Preserve the retained Mongo volume and refuse legacy Mongo manifests.
 - Never receive or use Azure credentials. Cross-cloud data work is exclusive
   to the protected migration and stop-only recovery workflows and their

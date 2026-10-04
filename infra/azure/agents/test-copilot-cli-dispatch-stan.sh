@@ -4462,7 +4462,9 @@ values = {
     "prerequisite_run_id": "48",
     "baseline_recovery_run_id": "0",
     "baseline_recovery_source_sha": "none",
-    "failed_deploy_run_id": "51",
+    "failed_deploy_run_id": (
+        "0" if "activation" in operation else "51"
+    ),
     "failed_activation_run_id": (
         "53" if "activation" in operation else "0"
     ),

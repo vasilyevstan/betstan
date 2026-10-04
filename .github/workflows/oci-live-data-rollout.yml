@@ -205,28 +205,27 @@ jobs:
               ;;
             apply-slip-index)
               [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-              if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
-                [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
-                [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
-                [ "$RESUME_SOURCE_SHA" = "$SOURCE_SHA" ]
-                [ "$CHECKPOINT_SOURCE_SHA" = "$SOURCE_SHA" ]
-                protected_operation=oci-live-data-apply-slip-index
-              elif [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
-                case "$CONFIRMATION" in
-                  "RESUME APPLIED LIVE DATA EXACT SHA")
-                    protected_operation=oci-live-data-resume-deploy ;;
-                  "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA")
-                    protected_operation=oci-live-data-resume-deploy-released ;;
-                  *)
-                    exit 1
-                    ;;
-                esac
-              else
+              if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
                 case "$CONFIRMATION" in
                   "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA")
                     protected_operation=oci-live-data-resume-activation ;;
                   "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA")
                     protected_operation=oci-live-data-resume-activation-released ;;
+                  *)
+                    exit 1
+                    ;;
+                esac
+              elif [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+                [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
+                [ "$RESUME_SOURCE_SHA" = "$SOURCE_SHA" ]
+                [ "$CHECKPOINT_SOURCE_SHA" = "$SOURCE_SHA" ]
+                protected_operation=oci-live-data-apply-slip-index
+              else
+                case "$CONFIRMATION" in
+                  "RESUME APPLIED LIVE DATA EXACT SHA")
+                    protected_operation=oci-live-data-resume-deploy ;;
+                  "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA")
+                    protected_operation=oci-live-data-resume-deploy-released ;;
                   *)
                     exit 1
                     ;;
@@ -347,7 +346,8 @@ jobs:
             [ "$artifact_count" = "1" ]
             printf 'resume_source_sha=%s\n' \
               "$prerequisite_source_sha" >> "$GITHUB_OUTPUT"
-            if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
+            if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
+               [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
               validate_run \
                 oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID" \
                 workflow_dispatch "$prerequisite_source_sha" failure
@@ -442,19 +442,11 @@ jobs:
                   exit 1
                   ;;
               esac
-              if [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
-                if [ "$resume_maintenance_mode" = "released-runtime" ]; then
-                  [ "$CONFIRMATION" = \
-                    "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA" ]
-                else
-                  [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA EXACT SHA" ]
-                fi
-              elif [ "$resume_maintenance_mode" = "released-runtime" ]; then
+              if [ "$resume_maintenance_mode" = "released-runtime" ]; then
                 [ "$CONFIRMATION" = \
-                  "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA" ]
+                  "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA" ]
               else
-                [ "$CONFIRMATION" = \
-                  "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" ]
+                [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA EXACT SHA" ]
               fi
               printf 'resume_maintenance_mode=%s\n' \
                 "$resume_maintenance_mode" >> "$GITHUB_OUTPUT"
@@ -474,38 +466,10 @@ jobs:
                   --jq "[.artifacts[] | select(.name == \"$baseline_artifact_name\" and .expired == false)] | length"
               )"
               [ "$baseline_artifact_count" = "1" ]
-              if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
-                activation_workflow_id="$(
-                  gh api "repos/$REPOSITORY/actions/workflows/oci-live-betting-activate.yml" --jq '.id'
-                )"
-                read -r activation_workflow_id_observed activation_path activation_event \
-                  activation_source_sha activation_branch activation_repository \
-                  activation_status activation_conclusion activation_attempt activation_title <<<"$(
-                    gh api \
-                      "repos/$REPOSITORY/actions/runs/$FAILED_ACTIVATION_RUN_ID/attempts/1" \
-                      --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt,.display_title] | @tsv'
-                  )"
-                [ "$activation_workflow_id_observed" = "$activation_workflow_id" ]
-                [ "$activation_path" = ".github/workflows/oci-live-betting-activate.yml" ]
-                [ "$activation_event" = "workflow_dispatch" ]
-                [[ "$activation_source_sha" =~ ^[0-9a-f]{40}$ ]]
-                [ "$activation_branch" = "master" ]
-                [ "$activation_repository" = "$REPOSITORY" ]
-                [ "$activation_status" = "completed" ]
-                [ "$activation_conclusion" = "failure" ]
-                [ "$activation_attempt" = "1" ]
-                [ "$activation_title" = "oci-live-activate $activation_source_sha" ]
-                git cat-file -e "${activation_source_sha}^{commit}"
-                git merge-base --is-ancestor \
-                  "$activation_source_sha" "$prerequisite_source_sha"
-                activation_artifact_name="oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1"
-                activation_artifact_count="$(
-                  gh api \
-                    "repos/$REPOSITORY/actions/runs/$FAILED_ACTIVATION_RUN_ID/artifacts?per_page=100" \
-                    --jq "[.artifacts[] | select(.name == \"$activation_artifact_name\" and .expired == false)] | length"
-                )"
-                [ "$activation_artifact_count" = "1" ]
-              fi
+            fi
+            if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
+              printf 'resume_maintenance_mode=released-runtime\n' \
+                >> "$GITHUB_OUTPUT"
             fi
           fi
 
@@ -554,7 +518,9 @@ jobs:
           run-id: ${{ inputs.prerequisite_run_id }}
 
       - name: Download failed deploy protected baseline
-        if: inputs.failed_deploy_run_id != '0'
+        if: >-
+          inputs.failed_deploy_run_id != '0' &&
+          inputs.failed_activation_run_id == '0'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1
@@ -760,7 +726,23 @@ jobs:
           set_output redirect_url "https://$redirect_host"
           set_output diagnostic_url "https://$diagnostic_host"
 
-          if [ "$PHASE" != "dry-run" ] && [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+          if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
+            EVIDENCE_DIR=artifacts/prerequisite \
+            EXPECTED_SOURCE_SHA="$RESUME_SOURCE_SHA" \
+            EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+            EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+            EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+            EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+            EXPECTED_DISK_CHECKPOINT_SHA256="$disk_checkpoint_sha256" \
+            EXPECTED_DISK_CHECKPOINT_DISPOSITION="$disk_checkpoint_disposition" \
+            EXPECTED_PHASE=apply-slip-index \
+            EXPECTED_RUN_ID="$PREREQUISITE_RUN_ID" \
+            EXPECTED_RUN_ATTEMPT=1 \
+            EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+            EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
+              ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
+          elif [ "$PHASE" != "dry-run" ] &&
+               [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
             expected_phase=dry-run
             [ "$PHASE" != "apply-slip-index" ] || expected_phase=apply-backfills
             EVIDENCE_DIR=artifacts/prerequisite \
@@ -977,7 +959,9 @@ jobs:
           ./infra/oci/scripts/configure-k3s-access.sh open
 
       - name: Verify exact failed-deploy resume state
-        if: inputs.failed_deploy_run_id != '0'
+        if: >-
+          inputs.failed_deploy_run_id != '0' &&
+          inputs.failed_activation_run_id == '0'
         env:
           RESUME_SOURCE_SHA: ${{ inputs.resume_source_sha }}
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
@@ -1183,7 +1167,8 @@ jobs:
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           SSE_REQUIREMENT: deployed-source
         run: |
-          if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
+          if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
+             [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
             [ -f artifacts/oci-data-baseline-before/SHA256SUMS ]
           elif [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
             ./infra/oci/scripts/baseline-capture-stan.sh
@@ -1198,7 +1183,8 @@ jobs:
             if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
               [ "$BASELINE_RECOVERY_SOURCE_SHA" = "none" ] ||
                 oci_die "baseline recovery source requires a selected recovery run"
-              if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+              if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
+                 [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
                 expected_recovery_run_id=0
               fi
             else
@@ -1232,6 +1218,7 @@ jobs:
           set -euo pipefail
           profile=public
           if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
+             [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
              [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
             profile=held
           fi
@@ -1246,6 +1233,7 @@ jobs:
         id: operation_lock
         run: |
           if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
+             [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
              [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = "retained-hold" ]; then
             NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="live-data-${{ steps.provenance.outputs.resume_applied_data_run_id }}-1" \
@@ -1268,7 +1256,8 @@ jobs:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
           set -euo pipefail
-          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
+          if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ] ||
+             [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
              [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh enter
           else

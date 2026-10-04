@@ -68,12 +68,120 @@ for contract in \
   'const scope = {userId}' \
   'candidates.length > maxActiveSlips' \
   'slip.status !== "DRAFT"' \
+  '!Number.isSafeInteger(slip.boardRevision)' \
+  '!/^[0-9a-f]{24}$/.test(slip.boardFingerprint)' \
   'slip.rows.length > 10' \
   'expectedEventNames.has(row.eventName)' \
   'row.marketId.startsWith(`${row.eventId}:`)' \
-  'slips.deleteMany({_id: {$in: ids}, ...scope})'; do
+  'const deletionPredicates = candidates.map((slip) => ({' \
+  'status: "DRAFT"' \
+  'boardRevision: slip.boardRevision' \
+  'boardFingerprint: slip.boardFingerprint' \
+  'slips.deleteMany({$or: deletionPredicates})'; do
   grep -Fq "$contract" "$capture" ||
     fail "Mongo cleanup query omits safety contract: $contract"
+done
+
+cat >"$work_dir/interleaving-test.js" <<'EOF_NODE'
+const fs = require("fs");
+const vm = require("vm");
+
+const [scriptPath, mode, runId, userId] = process.argv.slice(2);
+const suffix = runId.slice(-10);
+const eventId = "0123456789abcdef01234567";
+const documents = [{
+  _id: "slip-1",
+  userId,
+  betKind: "LIVE",
+  status: "DRAFT",
+  boardRevision: 1,
+  boardFingerprint: "111111111111111111111111",
+  rows: [{
+    betKind: "LIVE",
+    eventId,
+    eventName: `E2E-${suffix}-Alpha - E2E-${suffix}-Bravo`,
+    marketId: `${eventId}:winner`
+  }]
+}];
+
+const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+const matches = (document, query) => {
+  if (query.$or) {
+    return query.$or.some((predicate) => matches(document, predicate));
+  }
+  return Object.entries(query).every(
+    ([key, value]) => equal(document[key], value)
+  );
+};
+const slips = {
+  find(query) {
+    const snapshot = documents
+      .filter((document) => matches(document, query))
+      .map((document) => JSON.parse(JSON.stringify(document)));
+    return {
+      limit() {
+        return {toArray: () => snapshot};
+      }
+    };
+  },
+  deleteMany(query) {
+    if (mode === "placement") {
+      documents[0].status = "SUBMITTED";
+      documents[0].boardRevision = 2;
+      documents[0].boardFingerprint = "222222222222222222222222";
+    } else if (mode === "row") {
+      documents[0].rows[0].marketId = `${eventId}:changed`;
+      documents[0].boardRevision = 2;
+      documents[0].boardFingerprint = "333333333333333333333333";
+    }
+    let deletedCount = 0;
+    for (let index = documents.length - 1; index >= 0; index -= 1) {
+      if (matches(documents[index], query)) {
+        documents.splice(index, 1);
+        deletedCount += 1;
+      }
+    }
+    return {deletedCount};
+  },
+  countDocuments(query) {
+    return documents.filter((document) => matches(document, query)).length;
+  }
+};
+const users = {countDocuments: () => 0};
+let printed = "";
+const context = {
+  db: {
+    getSiblingDB(name) {
+      return name === "gaming_auth" ? {users} : {slips};
+    }
+  },
+  ObjectId: (value) => value,
+  print: (value) => { printed = value; },
+  quit: () => {}
+};
+
+let failed = false;
+try {
+  vm.runInNewContext(fs.readFileSync(scriptPath, "utf8"), context);
+} catch (error) {
+  failed = true;
+}
+if (mode === "none") {
+  if (failed || documents.length !== 0 || !printed.includes('"deletedActiveSlips":1')) {
+    process.exit(1);
+  }
+} else {
+  const expectedStatus = mode === "placement" ? "SUBMITTED" : "DRAFT";
+  if (!failed || documents.length !== 1 || documents[0].status !== expectedStatus) {
+    process.exit(1);
+  }
+}
+EOF_NODE
+
+for mode in none placement row; do
+  node "$work_dir/interleaving-test.js" \
+    "$capture" "$mode" "$run_id" "$user_id" ||
+    fail "atomic Mongo cleanup failed interleaving case: $mode"
 done
 
 run_cleanup \

@@ -2650,8 +2650,8 @@ for literal in \
   'failed_activation_run_id:' \
   'failed_activation_user_id:' \
   'oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1' \
-  'oci-live-betting-activate.yml' \
-  'oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1' \
+  'protected_operation=oci-live-data-resume-activation' \
+  'policy-json "$policy_json"' \
   'Verify exact failed-deploy resume state' \
   'git merge-base --is-ancestor "$prior_source_sha" "$SOURCE_SHA"' \
   '.github/*|infra/*|*.md' \
@@ -2921,14 +2921,43 @@ for literal in (
     "FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}",
     "FAILED_ACTIVATION_RUN_ID: ${{ inputs.failed_activation_run_id }}",
     "FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}",
-    "if: inputs.failed_deploy_run_id != '0'",
+    "inputs.failed_deploy_run_id != '0' &&",
     "if: inputs.failed_activation_run_id != '0'",
     "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID",
     "failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID",
-    'activation_artifact_name="oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1"',
 ):
     if literal not in data:
         raise SystemExit(f"data workflow is missing lock handoff contract: {literal}")
+
+selection = data[
+    data.index("- name: Validate exact SHA phase and trusted upstream runs"):
+    data.index("- name: Reject competing production activity")
+]
+if selection.index('if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then') > (
+    selection.index('elif [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then')
+):
+    raise SystemExit("failed activation is still forced through failed-deploy selection")
+if (
+    'if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then\n'
+    "              printf 'resume_maintenance_mode=released-runtime"
+) not in selection:
+    raise SystemExit("failed activation does not establish released-runtime semantics")
+
+checkpoint_revalidation = data[
+    data.index("- name: Revalidate exact release disk checkpoint before lock mutation"):
+    data.index("- name: Acquire database operation lock")
+]
+if '[ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&' not in checkpoint_revalidation:
+    raise SystemExit("failed activation can still select retained held revalidation")
+
+lock_acquisition = data[
+    data.index("- name: Acquire database operation lock"):
+    data.index("- name: Enter or re-establish live data maintenance")
+]
+if '[ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&' not in lock_acquisition:
+    raise SystemExit("failed activation can still release or reuse the historical lock")
+if lock_acquisition.count("shared-mongo-operation-lock-stan.sh acquire") != 1:
+    raise SystemExit("failed activation does not use one fresh exact lock acquisition")
 
 resume = data[
     data.index("- name: Verify exact failed-deploy resume state"):
@@ -2986,7 +3015,8 @@ preparation = data[
 require_order(
     preparation,
     [
-        'if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then',
+        'if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&',
+        '[ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then',
         'elif [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then',
         "baseline-capture-stan.sh",
         "BASELINE_RECOVERY_DIR=artifacts/recovery",
@@ -3036,7 +3066,8 @@ maintenance = data[
     data.index("- name: Demote and verify exact retained live-acceptance account")
 ]
 for literal in (
-    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
+    'if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ] ||',
+    '[ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
     '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
     '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
     "live-data-maintenance-stan.sh enter",

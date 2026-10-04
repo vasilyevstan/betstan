@@ -248,6 +248,28 @@ ACTIVATION_PROVENANCE_KEYS = {
     "revoke_runner_outcome",
     "close_bastion_outcome",
 }
+LIVE_RESUME_AUTHORITY_V2_KEYS = {
+    "schema_version",
+    "applied_data_run_id",
+    "applied_source_sha",
+    "failed_deploy_run_id",
+    "resume_maintenance_mode",
+    "failed_deploy_job_conclusion",
+    "public_validate_job_conclusion",
+    "lock_release_step_conclusion",
+    "fence_release_step_conclusion",
+    "rehold_step_conclusion",
+    "failed_activation_run_id",
+    "current_source_sha",
+    "baseline_sha256",
+    "runtime_images_sha256",
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
+    "disk_checkpoint_sha256",
+    "disk_checkpoint_disposition",
+    "application_change_scope",
+    "status",
+}
 
 
 def fail(message):
@@ -945,7 +967,7 @@ def parse_checkpoint_artifact(
     return checkpoint
 
 
-def parse_live_v6_artifact(repository, run_id, label):
+def parse_live_v6_artifact(repository, run_id, label, *, include_files=False):
     artifact = exact_artifact(
         repository,
         run_id,
@@ -982,6 +1004,8 @@ def parse_live_v6_artifact(repository, run_id, label):
         )
     ):
         fail(f"{label} is not complete live-betting-v6 evidence")
+    if include_files:
+        return values, manifest_sha256, files
     return values, manifest_sha256
 
 
@@ -1543,6 +1567,99 @@ def activation_file_checksum(files, relative, expected, label):
         fail(f"{label} checksum differs for {relative}")
 
 
+def require_fixed_run(
+    repository,
+    run_id,
+    workflow,
+    conclusion,
+    head_sha,
+    title,
+    label,
+):
+    metadata = fixed_run_metadata(
+        repository, run_id, workflow, conclusion, label
+    )
+    if metadata.get("head_sha") != head_sha:
+        fail(f"{label} source SHA differs from its artifact lineage")
+    if metadata.get("display_title") != title:
+        fail(f"{label} title differs from its fixed workflow title")
+    return metadata
+
+
+def parse_resume_authority(files, predecessor, label):
+    matches = [
+        raw
+        for path, raw in files.items()
+        if path == "resume-authority.env"
+        or path.endswith("/resume-authority.env")
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        fail(f"{label} has duplicate resume authority")
+    authority = parse_env(
+        matches[0],
+        f"{label} resume authority",
+        LIVE_RESUME_AUTHORITY_V2_KEYS,
+    )
+    expected = {
+        "schema_version": "live-betting-data-resume-v2",
+        "current_source_sha": predecessor["source_sha"],
+        "baseline_sha256": predecessor["baseline_sha256"],
+        "checkpoint_source_sha": predecessor["checkpoint_source_sha"],
+        "disk_checkpoint_run_id": predecessor["disk_checkpoint_run_id"],
+        "disk_checkpoint_sha256": predecessor["disk_checkpoint_sha256"],
+        "disk_checkpoint_disposition":
+            predecessor["disk_checkpoint_disposition"],
+        "application_change_scope": "github-infra-docs-only",
+        "status": "PASS",
+        "failed_activation_run_id": "0",
+    }
+    for key, expected_value in expected.items():
+        if authority.get(key) != expected_value:
+            fail(f"{label} resume authority substituted {key}")
+    for key in {"applied_data_run_id", "failed_deploy_run_id"}:
+        if POSITIVE_INTEGER.fullmatch(authority[key]) is None:
+            fail(f"{label} resume authority has an invalid {key}")
+    if FULL_SHA.fullmatch(authority["applied_source_sha"]) is None:
+        fail(f"{label} resume authority applied source is invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", authority["runtime_images_sha256"]) is None:
+        fail(f"{label} resume authority runtime images checksum is invalid")
+    _, resume_images = unique_artifact_file(
+        files, "resume-images.tsv", f"{label} resume images"
+    )
+    if (
+        hashlib.sha256(resume_images).hexdigest()
+        != authority["runtime_images_sha256"]
+    ):
+        fail(f"{label} resume authority runtime images were substituted")
+    outcome = (
+        authority["failed_deploy_job_conclusion"],
+        authority["public_validate_job_conclusion"],
+        authority["lock_release_step_conclusion"],
+        authority["fence_release_step_conclusion"],
+        authority["rehold_step_conclusion"],
+    )
+    mode = authority["resume_maintenance_mode"]
+    if mode == "released-runtime":
+        if outcome != ("success", "failure", "success", "success", "skipped"):
+            fail(f"{label} released resume authority outcome is invalid")
+    elif mode == "retained-hold":
+        if (
+            outcome[0:2] != ("failure", "skipped")
+            or outcome[2:4] not in {
+                ("skipped", "skipped"),
+                ("failure", "skipped"),
+                ("success", "failure"),
+            }
+            or outcome[4] != "success"
+        ):
+            fail(f"{label} retained resume authority outcome is invalid")
+    else:
+        fail(f"{label} resume authority maintenance mode is invalid")
+    return authority
+
+
 def validate_failed_activation_artifacts(
     repository,
     run_id,
@@ -1554,19 +1671,6 @@ def validate_failed_activation_artifacts(
 ):
     checkpoint = parse_checkpoint_artifact(
         repository, dispatch_inputs, runtime_mode, f"{label} checkpoint"
-    )
-    predecessor_run = require_dispatch_run(dispatch_inputs, "prerequisite_run_id")
-    predecessor, predecessor_manifest_sha256 = parse_live_v6_artifact(
-        repository, predecessor_run, f"{label} predecessor"
-    )
-    validate_live_v6_lineage(
-        predecessor,
-        checkpoint,
-        dispatch_inputs,
-        predecessor_run,
-        subject_sha,
-        "apply-slip-index",
-        f"{label} predecessor",
     )
     files = artifact_files(repository, artifact, label)
     validate_checksum_manifest(files, label)
@@ -1597,29 +1701,67 @@ def validate_failed_activation_artifacts(
     deployment_run = activation["deployment_run_id"]
     if POSITIVE_INTEGER.fullmatch(deployment_run) is None:
         fail(f"{label} deployment run is invalid")
-    deployment = gh_api(
-        f"repos/{repository}/actions/runs/{deployment_run}"
+    deployment_artifact = exact_artifact(
+        repository,
+        deployment_run,
+        f"oci-deploy-provenance-{deployment_run}-1",
+        f"{label} deployment",
     )
-    workflow = gh_api(
-        f"repos/{repository}/actions/workflows/oci-production-deploy.yml"
+    deployment_files = artifact_files(
+        repository, deployment_artifact, f"{label} deployment"
     )
+    _, deployment_raw = unique_artifact_file(
+        deployment_files, "provenance.txt", f"{label} deployment"
+    )
+    deployment_provenance = parse_env(
+        deployment_raw,
+        f"{label} deployment provenance",
+        DEPLOYMENT_PROVENANCE_KEYS,
+    )
+    if deployment_provenance["source_sha"] != subject_sha:
+        fail(f"{label} deployment source differs from activation source")
+    predecessor_run = deployment_provenance["data_run_id"]
     if (
-        not isinstance(deployment, dict)
-        or not isinstance(workflow, dict)
-        or deployment.get("id") != int(deployment_run)
-        or deployment.get("run_attempt") != 1
-        or deployment.get("workflow_id") != workflow.get("id")
-        or deployment.get("path")
-        != ".github/workflows/oci-production-deploy.yml"
-        or deployment.get("head_sha") != subject_sha
-        or deployment.get("head_branch") != "master"
-        or (deployment.get("head_repository") or {}).get("full_name")
-        != repository
-        or deployment.get("status") != "completed"
-        or deployment.get("conclusion") != "success"
-        or deployment.get("event") != "workflow_dispatch"
+        POSITIVE_INTEGER.fullmatch(predecessor_run) is None
+        or predecessor_run
+        != require_dispatch_run(dispatch_inputs, "prerequisite_run_id")
     ):
-        fail(f"{label} deployment run metadata is invalid")
+        fail(f"{label} deployment substituted its v6 handoff")
+    predecessor, predecessor_manifest_sha256, predecessor_files = (
+        parse_live_v6_artifact(
+            repository,
+            predecessor_run,
+            f"{label} predecessor",
+            include_files=True,
+        )
+    )
+    validate_live_v6_lineage(
+        predecessor,
+        checkpoint,
+        dispatch_inputs,
+        predecessor_run,
+        subject_sha,
+        "apply-slip-index",
+        f"{label} predecessor",
+    )
+    predecessor_metadata = require_fixed_run(
+        repository,
+        predecessor_run,
+        "oci-live-data-rollout.yml",
+        "success",
+        subject_sha,
+        f"oci-live-data apply-slip-index {subject_sha}",
+        f"{label} predecessor",
+    )
+    deployment_metadata = require_fixed_run(
+        repository,
+        deployment_run,
+        "oci-production-deploy.yml",
+        "success",
+        subject_sha,
+        f"oci-deploy {subject_sha}",
+        f"{label} deployment",
+    )
     parse_deployment_artifact(
         repository,
         deployment_run,
@@ -1631,6 +1773,148 @@ def validate_failed_activation_artifacts(
         runtime_mode,
         f"{label} deployment",
     )
+    if activation["deployment_run_id"] != deployment_run:
+        fail(f"{label} activation deployment lineage is inconsistent")
+    resume_authority = parse_resume_authority(
+        predecessor_files, predecessor, f"{label} predecessor"
+    )
+    failed_deploy_input = str(dispatch_inputs.get("failed_deploy_run_id", ""))
+    if failed_deploy_input == "0":
+        if resume_authority is not None:
+            fail(f"{label} omitted the predecessor failed deployment")
+    else:
+        if (
+            POSITIVE_INTEGER.fullmatch(failed_deploy_input) is None
+            or resume_authority is None
+            or resume_authority["failed_deploy_run_id"]
+            != failed_deploy_input
+        ):
+            fail(f"{label} failed deployment lineage is inconsistent")
+        applied_run = resume_authority["applied_data_run_id"]
+        applied_source = resume_authority["applied_source_sha"]
+        applied, applied_manifest_sha256 = parse_live_v6_artifact(
+            repository, applied_run, f"{label} applied predecessor"
+        )
+        applied_metadata = require_fixed_run(
+            repository,
+            applied_run,
+            "oci-live-data-rollout.yml",
+            "success",
+            applied_source,
+            f"oci-live-data apply-slip-index {applied_source}",
+            f"{label} applied predecessor",
+        )
+        historical_dispatch = dict(dispatch_inputs)
+        historical_dispatch.update({
+            "checkpoint_source_sha": applied["checkpoint_source_sha"],
+            "disk_checkpoint_run_id": applied["disk_checkpoint_run_id"],
+            "build_run_id": applied["build_run_id"],
+            "infrastructure_run_id": applied["infrastructure_run_id"],
+            "prerequisite_run_id": applied_run,
+            "baseline_recovery_run_id": applied["baseline_recovery_run_id"],
+            "baseline_recovery_source_sha":
+                applied["baseline_recovery_source_sha"],
+        })
+        validate_live_v6_lineage(
+            applied,
+            checkpoint,
+            historical_dispatch,
+            applied_run,
+            applied_source,
+            "apply-slip-index",
+            f"{label} applied predecessor",
+        )
+        for key in {
+            "build_run_id",
+            "infrastructure_run_id",
+            "checkpoint_source_sha",
+            "disk_checkpoint_run_id",
+            "disk_checkpoint_sha256",
+            "disk_checkpoint_disposition",
+            "baseline_sha256",
+            "baseline_recovery_run_id",
+            "baseline_recovery_source_sha",
+        }:
+            if predecessor[key] != applied[key]:
+                fail(f"{label} resumed predecessor substituted {key}")
+        failed_metadata = fixed_run_metadata(
+            repository,
+            failed_deploy_input,
+            "oci-production-deploy.yml",
+            "failure",
+            f"{label} failed deployment",
+        )
+        if (
+            failed_metadata.get("head_sha") != applied_source
+            or failed_metadata.get("display_title")
+            != f"oci-deploy {applied_source}"
+        ):
+            fail(f"{label} failed deployment source lineage is invalid")
+        failed_baseline = exact_artifact(
+            repository,
+            failed_deploy_input,
+            f"oci-production-baseline-{failed_deploy_input}-1",
+            f"{label} failed deployment",
+        )
+        failed_profile = (
+            "oci-failed-deploy-retained-hold-v1"
+            if resume_authority["resume_maintenance_mode"] == "retained-hold"
+            else "oci-failed-deploy-released-runtime-v1"
+        )
+        lock_outcome, fence_outcome, rehold_outcome = (
+            validate_failed_deploy_jobs(
+                repository,
+                failed_deploy_input,
+                failed_profile,
+                f"{label} failed deployment",
+            )
+        )
+        validate_failed_deploy_artifacts(
+            repository,
+            failed_deploy_input,
+            applied_source,
+            failed_baseline,
+            historical_dispatch,
+            runtime_mode,
+            failed_profile,
+            lock_outcome,
+            fence_outcome,
+            rehold_outcome,
+            f"{label} failed deployment",
+        )
+        if not (
+            parse_timestamp(
+                applied_metadata.get("updated_at"),
+                f"{label} applied predecessor completion",
+            )
+            <= parse_timestamp(
+                failed_metadata.get("created_at"),
+                f"{label} failed deployment creation",
+            )
+            <= parse_timestamp(
+                predecessor_metadata.get("created_at"),
+                f"{label} predecessor creation",
+            )
+        ):
+            fail(f"{label} failed-deployment recovery chronology is invalid")
+    activation_metadata = gh_api(
+        f"repos/{repository}/actions/runs/{run_id}"
+    )
+    if not (
+        parse_timestamp(
+            predecessor_metadata.get("updated_at"),
+            f"{label} predecessor completion",
+        )
+        <= parse_timestamp(
+            deployment_metadata.get("created_at"),
+            f"{label} deployment creation",
+        )
+        <= parse_timestamp(
+            activation_metadata.get("created_at"),
+            f"{label} activation creation",
+        )
+    ):
+        fail(f"{label} activation recovery chronology is invalid")
     checksum_files = {
         "activate_control_sha256": "activate/control.env",
         "acceptance_sha256": "acceptance/evidence.json",
@@ -1675,6 +1959,66 @@ def validate_failed_activation_artifacts(
         fail(f"{label} artifact is incomplete")
 
 
+def validate_failed_deploy_jobs(repository, run_id, profile, label):
+    jobs = jobs_for_run(repository, run_id, label)
+    deploy = exact_job(jobs, "deploy", label)
+    public = exact_job(jobs, "public-validate", label)
+    lock = step_conclusion(
+        deploy, "Release transferred lock after protected validation", label
+    )
+    fence = step_conclusion(
+        deploy, "Release live data maintenance fence", label
+    )
+    reenter = step_conclusion(
+        deploy, "Re-enter maintenance after an incomplete deployment", label
+    )
+    if profile == "oci-failed-deploy-retained-hold-v1":
+        recovery_intent = step_conclusion(
+            deploy,
+            "Write checksum-bound deployment recovery intent",
+            label,
+        )
+        recovery_finalize = step_conclusion(
+            deploy,
+            "Finalize deployment recovery authority",
+            label,
+        )
+        recovery_upload = step_conclusion(
+            deploy,
+            "Upload deployment recovery authority",
+            label,
+        )
+        if (
+            deploy.get("conclusion") != "failure"
+            or public.get("conclusion") != "skipped"
+            or reenter != "success"
+            or recovery_intent != "success"
+            or recovery_finalize != "success"
+            or recovery_upload != "success"
+            or (lock, fence) not in {
+                ("skipped", "skipped"),
+                ("failure", "skipped"),
+                ("success", "failure"),
+            }
+        ):
+            fail("failed deployment does not match the retained-hold profile")
+    elif (
+        profile == "oci-failed-deploy-released-runtime-v1"
+        and (
+            deploy.get("conclusion") != "success"
+            or public.get("conclusion") != "failure"
+            or lock != "success"
+            or fence != "success"
+            or reenter != "skipped"
+        )
+    ):
+        fail("failed deployment does not match the released-runtime profile")
+    else:
+        if profile != "oci-failed-deploy-released-runtime-v1":
+            fail("failed deployment profile is invalid")
+    return lock, fence, reenter
+
+
 def validate_run_profile(
     repository,
     run_id,
@@ -1687,60 +2031,13 @@ def validate_run_profile(
 ):
     if profile is None:
         return
-    jobs = jobs_for_run(repository, run_id, label)
     if profile in {
         "oci-failed-deploy-retained-hold-v1",
         "oci-failed-deploy-released-runtime-v1",
     }:
-        deploy = exact_job(jobs, "deploy", label)
-        public = exact_job(jobs, "public-validate", label)
-        lock = step_conclusion(
-            deploy, "Release transferred lock after protected validation", label
+        lock, fence, reenter = validate_failed_deploy_jobs(
+            repository, run_id, profile, label
         )
-        fence = step_conclusion(
-            deploy, "Release live data maintenance fence", label
-        )
-        reenter = step_conclusion(
-            deploy, "Re-enter maintenance after an incomplete deployment", label
-        )
-        if profile == "oci-failed-deploy-retained-hold-v1":
-            recovery_intent = step_conclusion(
-                deploy,
-                "Write checksum-bound deployment recovery intent",
-                label,
-            )
-            recovery_finalize = step_conclusion(
-                deploy,
-                "Finalize deployment recovery authority",
-                label,
-            )
-            recovery_upload = step_conclusion(
-                deploy,
-                "Upload deployment recovery authority",
-                label,
-            )
-            if (
-                deploy.get("conclusion") != "failure"
-                or public.get("conclusion") != "skipped"
-                or reenter != "success"
-                or recovery_intent != "success"
-                or recovery_finalize != "success"
-                or recovery_upload != "success"
-                or (lock, fence) not in {
-                    ("skipped", "skipped"),
-                    ("failure", "skipped"),
-                    ("success", "failure"),
-                }
-            ):
-                fail("failed deployment does not match the retained-hold profile")
-        elif (
-            deploy.get("conclusion") != "success"
-            or public.get("conclusion") != "failure"
-            or lock != "success"
-            or fence != "success"
-            or reenter != "skipped"
-        ):
-            fail("failed deployment does not match the released-runtime profile")
         validate_failed_deploy_artifacts(
             repository,
             run_id,
@@ -1755,6 +2052,7 @@ def validate_run_profile(
             label,
         )
         return
+    jobs = jobs_for_run(repository, run_id, label)
     activation = exact_job(jobs, "activate-and-validate", label)
     if (
         activation.get("conclusion") != "failure"
@@ -1888,6 +2186,501 @@ def validate_recovery_image_rows(raw, label):
     return rows
 
 
+def artifact_sibling_files(files, required_names, label):
+    locations = {}
+    for name in required_names:
+        path, raw = unique_artifact_file(files, name, label)
+        locations[name] = (path, raw)
+    prefixes = {
+        path.rsplit("/", 1)[0] if "/" in path else ""
+        for path, _ in locations.values()
+    }
+    if len(prefixes) != 1:
+        fail(f"{label} artifact has inconsistent evidence roots")
+    return {name: raw for name, (_, raw) in locations.items()}
+
+
+def validate_production_upstream_run(
+    repository, run_id, source_sha, label
+):
+    metadata = fixed_run_metadata(
+        repository,
+        run_id,
+        "production-build.yml",
+        "success",
+        label,
+        "push",
+    )
+    if metadata.get("head_sha") != source_sha:
+        fail(f"{label} source differs from the image build")
+
+
+def validate_legacy_build_artifact(
+    repository, run_id, source_sha, label
+):
+    metadata = fixed_run_metadata(
+        repository,
+        run_id,
+        "oci-production-build.yml",
+        "success",
+        label,
+        "workflow_run",
+    )
+    if metadata.get("head_sha") != source_sha:
+        fail(f"{label} source differs")
+    artifact = exact_artifact(
+        repository,
+        run_id,
+        f"oci-image-provenance-{source_sha}-{run_id}-1",
+        label,
+    )
+    files = artifact_files(repository, artifact, label)
+    names = {"build-chain.txt"} | {
+        f"{service}.env" for service in RECOVERY_APPLICATION_SERVICES
+    }
+    evidence = artifact_sibling_files(files, names, label)
+    with tempfile.TemporaryDirectory(
+        prefix=".upstream-binding-legacy-build-",
+        dir=Path.cwd(),
+    ) as temporary:
+        root = Path(temporary)
+        for name, raw in evidence.items():
+            (root / name).write_bytes(raw)
+        helper = Path(__file__).with_name(
+            "validate-legacy-oci-provenance.py"
+        )
+        result = subprocess.run(
+            [sys.executable, str(helper), str(root), source_sha, run_id],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            fail(f"repository-fixed validator rejected {label}")
+        match = re.fullmatch(
+            r"TRUSTED_UPSTREAM_RUN_ID=([1-9][0-9]*)\n?",
+            result.stdout,
+        )
+        if match is None:
+            fail(f"{label} upstream build result is invalid")
+    services = {}
+    for service in RECOVERY_APPLICATION_SERVICES:
+        values = parse_env(
+            evidence[f"{service}.env"], f"{label} {service}"
+        )
+        services[service] = {
+            "repository": values["repository"],
+            "manifest": values["digest"],
+            "platform": values["platform_digest"],
+        }
+    upstream_run = match.group(1)
+    if (
+        metadata.get("display_title")
+        != f"oci-build {source_sha} upstream-{upstream_run}"
+    ):
+        fail(f"{label} title differs from its upstream build")
+    validate_production_upstream_run(
+        repository, upstream_run, source_sha, f"{label} upstream"
+    )
+    return services, upstream_run
+
+
+def validate_current_build_artifact(
+    repository, run_id, source_sha, label
+):
+    metadata = fixed_run_metadata(
+        repository,
+        run_id,
+        "oci-production-build.yml",
+        "success",
+        label,
+        "workflow_run",
+    )
+    if metadata.get("head_sha") != source_sha:
+        fail(f"{label} source differs")
+    artifact = exact_artifact(
+        repository,
+        run_id,
+        f"oci-image-provenance-{source_sha}-{run_id}-1",
+        label,
+    )
+    files = artifact_files(repository, artifact, label)
+    names = {"build-chain.txt"} | {
+        f"{service}.env" for service in RECOVERY_APPLICATION_SERVICES
+    }
+    evidence = artifact_sibling_files(files, names, label)
+    chain = parse_env(evidence["build-chain.txt"], f"{label} build chain")
+    chain_keys = {
+        "source_sha",
+        "upstream_workflow",
+        "upstream_run_id",
+        "upstream_run_attempt",
+        "build_run_id",
+        "build_run_attempt",
+        "build_trigger_workflow",
+        "build_trigger_run_id",
+        "repair_mode",
+        "image_mode",
+        "platform",
+        "registry_provider",
+        "registry_host",
+        "registry_repository",
+        "registry_public",
+        "anonymous_pull",
+    }
+    if chain.get("image_mode") == "reuse":
+        chain_keys |= {"reuse_source_sha", "reuse_build_run_id"}
+    if (
+        set(chain) != chain_keys
+        or chain["source_sha"] != source_sha
+        or chain["upstream_workflow"] != "production-build"
+        or POSITIVE_INTEGER.fullmatch(chain["upstream_run_id"]) is None
+        or chain["upstream_run_attempt"] != "1"
+        or chain["build_run_id"] != run_id
+        or chain["build_run_attempt"] != "1"
+        or chain["image_mode"] not in {"build", "reuse"}
+        or chain["platform"] != "linux/arm64"
+        or chain["registry_provider"] != "ghcr"
+        or chain["registry_host"] != "ghcr.io"
+        or chain["registry_repository"] != APPLICATION_REPOSITORY
+        or chain["registry_public"] != "true"
+        or chain["anonymous_pull"] != "pass"
+    ):
+        fail(f"{label} build chain is invalid")
+    with tempfile.TemporaryDirectory(
+        prefix=".upstream-binding-current-build-",
+        dir=Path.cwd(),
+    ) as temporary:
+        root = Path(temporary)
+        for name, raw in evidence.items():
+            (root / name).write_bytes(raw)
+        output = root / "validated-images.tsv"
+        helper = Path(__file__).with_name("verify-images.sh")
+        environment = os.environ.copy()
+        environment.update({
+            "PROVENANCE_DIR": str(root),
+            "SOURCE_SHA": source_sha,
+            "OUTPUT_FILE": str(output),
+            "VERIFY_REMOTE": "0",
+            "BOOT_IMAGES": "0",
+            "EXPECTED_BUILD_RUN_ID": run_id,
+            "EXPECTED_BUILD_RUN_ATTEMPT": "1",
+            "EXPECTED_UPSTREAM_RUN_ID": chain["upstream_run_id"],
+            "GENERATION_PROFILE": "compatible",
+        })
+        result = subprocess.run(
+            [str(helper)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        if result.returncode != 0:
+            fail(f"repository-fixed validator rejected {label}")
+        images = validate_recovery_image_rows(
+            b"\n".join(
+                line
+                for line in output.read_bytes().splitlines()
+                if not line.startswith(b"telemetry\t")
+            )
+            + b"\n",
+            label,
+        )
+    validate_production_upstream_run(
+        repository,
+        chain["upstream_run_id"],
+        source_sha,
+        f"{label} upstream",
+    )
+    if (
+        metadata.get("display_title")
+        != f"oci-build {source_sha} upstream-{chain['upstream_run_id']}"
+    ):
+        fail(f"{label} title differs from its upstream build")
+    return images
+
+
+def validate_infrastructure_artifact(
+    repository,
+    run_id,
+    expected_hash,
+    runtime_mode,
+    runtime_fingerprint,
+    endpoints,
+    label,
+):
+    metadata = fixed_run_metadata(
+        repository,
+        run_id,
+        "oci-infrastructure.yml",
+        "success",
+        label,
+    )
+    artifact = exact_artifact(
+        repository,
+        run_id,
+        f"oci-infrastructure-provenance-{run_id}-1",
+        label,
+    )
+    raw = artifact_member(repository, artifact, "provenance.env", label)
+    if hashlib.sha256(raw).hexdigest() != expected_hash:
+        fail(f"{label} provenance checksum differs")
+    values = parse_env(raw, f"{label} provenance")
+    source_sha = values.get("source_sha")
+    fingerprint_key = (
+        "cluster_fingerprint"
+        if runtime_mode == "oke"
+        else "instance_fingerprint"
+    )
+    expected = {
+        "source_sha": metadata.get("head_sha"),
+        "infrastructure_run_id": run_id,
+        "infrastructure_run_attempt": "1",
+        "runtime_mode": runtime_mode,
+        fingerprint_key: runtime_fingerprint,
+        **endpoints,
+    }
+    for key, expected_value in expected.items():
+        if values.get(key) != expected_value:
+            fail(f"{label} substituted {key}")
+    allowed_titles = {
+        f"oci-infrastructure finalize {runtime_mode} {source_sha}",
+        f"oci-infrastructure finalize {source_sha}",
+    }
+    if metadata.get("display_title") not in allowed_titles:
+        fail(f"{label} title differs from its finalized source")
+    return source_sha
+
+
+def validate_cache_plan_artifact(
+    repository,
+    run_id,
+    source_sha,
+    plan_raw,
+    rabbit_raw,
+    expected_origin,
+    label,
+):
+    artifact = exact_artifact(
+        repository,
+        run_id,
+        f"ghcr-cache-recovery-plan-{source_sha}-{run_id}-1",
+        label,
+    )
+    files = artifact_files(repository, artifact, label)
+    expected = {
+        "transition-plan.tsv",
+        "rabbitmq-baseline.txt",
+        "transition-plan-evidence.env",
+    }
+    if (
+        {path.rsplit("/", 1)[-1] for path in files} != expected
+        or len(files) != len(expected)
+    ):
+        fail(f"{label} artifact has an unexpected file set")
+    siblings = artifact_sibling_files(files, expected, label)
+    if (
+        siblings["transition-plan.tsv"] != plan_raw
+        or siblings["rabbitmq-baseline.txt"] != rabbit_raw
+    ):
+        fail(f"{label} plan payload differs")
+    evidence = parse_env(
+        siblings["transition-plan-evidence.env"],
+        f"{label} evidence",
+        {
+            "schema",
+            "source_sha",
+            "plan_origin_recovery_run_id",
+            "plan_carrier_recovery_run_id",
+            "plan_carrier_recovery_run_attempt",
+            "images_sha256",
+            "infrastructure_provenance_sha256",
+            "transition_plan_sha256",
+            "rabbitmq_baseline_sha256",
+        },
+    )
+    if (
+        evidence["schema"] != "betstan.ghcr-cache-transition-plan.v1"
+        or evidence["source_sha"] != source_sha
+        or evidence["plan_origin_recovery_run_id"] != expected_origin
+        or evidence["plan_carrier_recovery_run_id"] != run_id
+        or evidence["plan_carrier_recovery_run_attempt"] != "1"
+        or evidence["transition_plan_sha256"]
+        != hashlib.sha256(plan_raw).hexdigest()
+        or evidence["rabbitmq_baseline_sha256"]
+        != hashlib.sha256(rabbit_raw).hexdigest()
+    ):
+        fail(f"{label} evidence is invalid")
+    return evidence
+
+
+def parse_tsv(raw, width, label, *, allow_empty=False):
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail(f"{label} is not UTF-8")
+    rows = [line.split("\t") for line in lines]
+    if (
+        (not rows and not allow_empty)
+        or any(len(row) != width for row in rows)
+    ):
+        fail(f"{label} is malformed")
+    return rows
+
+
+def validate_failed_partial_rollback_artifact(
+    repository,
+    run_id,
+    source_sha,
+    target_sha,
+    restored_images,
+    recovery_plan,
+    recovered_telemetry,
+    label,
+):
+    failed = fixed_run_metadata(
+        repository,
+        run_id,
+        "oci-production-rollback.yml",
+        "failure",
+        label,
+    )
+    if (
+        failed.get("head_sha") != source_sha
+        or failed.get("display_title") != f"oci-rollback {target_sha}"
+    ):
+        fail(f"{label} target title differs")
+    artifact = exact_artifact(
+        repository,
+        run_id,
+        f"oci-production-rollback-{run_id}-1",
+        label,
+    )
+    files = artifact_files(repository, artifact, label)
+    required = {
+        "failure-state.env",
+        "pre-rollback-state.tsv",
+        "partial-state.tsv",
+        "rollout-order.tsv",
+        "baseline-provenance.env",
+        "telemetry-pre-run.env",
+    }
+    evidence = {
+        name: unique_artifact_file(files, name, label)[1]
+        for name in required
+    }
+    failure = parse_env(
+        evidence["failure-state.env"], f"{label} failure state"
+    )
+    failed_service = failure.get("failed_service")
+    service_order = [
+        "auth",
+        "bet",
+        "backoffice",
+        "client",
+        "event",
+        "moderation",
+        "resulting",
+        "slip",
+        "gamemaster",
+    ]
+    if (
+        failure.get("status") != "FAIL"
+        or failed_service not in set(service_order) | {"post-rollback"}
+        or failure.get("rollback_http_mutation_fence")
+        not in {"active", "not-required", "legacy-not-recorded"}
+    ):
+        fail(f"{label} failure state is invalid")
+    if failed_service in service_order and (
+        failure.get("failed_deployment")
+        != f"gaming-{failed_service}-depl"
+        or failure.get("failed_step_label") != f"failed-{failed_service}"
+    ):
+        fail(f"{label} failed service lineage is invalid")
+    baseline = parse_env(
+        evidence["baseline-provenance.env"], f"{label} baseline"
+    )
+    if baseline.get("baseline_source_sha") != target_sha:
+        fail(f"{label} baseline target differs")
+
+    pre_rows = parse_tsv(
+        evidence["pre-rollback-state.tsv"], 5, f"{label} pre-rollback state"
+    )
+    partial_rows = parse_tsv(
+        evidence["partial-state.tsv"], 3, f"{label} partial state"
+    )
+    if (
+        [row[0] for row in pre_rows] != service_order
+        or [row[0] for row in partial_rows] != service_order
+    ):
+        fail(f"{label} service order is invalid")
+    pre = {row[0]: row for row in pre_rows}
+    partial = {row[0]: row for row in partial_rows}
+    image_pattern = re.compile(
+        r"^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$"
+    )
+    for service in service_order:
+        if (
+            pre[service][1] != f"gaming-{service}-depl"
+            or image_pattern.fullmatch(pre[service][2]) is None
+            or image_pattern.fullmatch(partial[service][1]) is None
+            or pre[service][2] != restored_images[service]["image_ref"]
+        ):
+            fail(f"{label} {service} pre-rollback image lineage is invalid")
+    order = [
+        row[0]
+        for row in parse_tsv(
+            evidence["rollout-order.tsv"], 1, f"{label} rollout order"
+        )
+    ]
+    if (
+        len(order) != len(set(order))
+        or order != service_order[:len(order)]
+        or (
+            failed_service in service_order
+            and (not order or order[-1] != failed_service)
+        )
+        or (failed_service == "post-rollback" and order != service_order)
+    ):
+        fail(f"{label} rollout order is invalid")
+    for service in service_order[len(order):]:
+        if pre[service][2] != partial[service][1]:
+            fail(f"{label} unattempted service changed")
+    if (
+        failed_service in service_order
+        and pre[failed_service][2] == partial[failed_service][1]
+    ):
+        fail(f"{label} failed service did not change")
+    changed_services = [
+        service
+        for service in service_order
+        if pre[service][2] != partial[service][1]
+    ]
+    if (
+        [row[0] for row in recovery_plan] != changed_services
+        or any(
+            row[2] != pre[row[0]][2]
+            or row[3] != partial[row[0]][1]
+            for row in recovery_plan
+        )
+    ):
+        fail(f"{label} recovery plan differs from the failed partial state")
+
+    telemetry = parse_env(
+        evidence["telemetry-pre-run.env"], f"{label} telemetry"
+    )
+    if (
+        telemetry.get("mode") != "retained"
+        or telemetry.get("image") != recovered_telemetry.get("image")
+        or telemetry.get("database_initialized")
+        != recovered_telemetry.get("database_initialized")
+        or telemetry.get("queue_present") != "true"
+        or recovered_telemetry.get("queue_present") != "true"
+    ):
+        fail(f"{label} telemetry lineage differs")
+    return failed
+
+
 def validate_cache_recovery_artifact(
     repository,
     run_id,
@@ -1982,6 +2775,7 @@ def validate_cache_recovery_artifact(
         "recovery_origin_platform_digest",
     }
     digest = re.compile(r"^sha256:[0-9a-f]{64}$")
+    service_provenance = {}
     for service, image in images.items():
         _, raw = unique_artifact_file(files, f"{service}.env", label)
         values = parse_env(raw, f"{label} {service} provenance", service_keys)
@@ -2018,6 +2812,7 @@ def validate_cache_recovery_artifact(
             or values["recovery_origin_platform_digest"] != image["platform"]
         ):
             fail(f"{label} {service} provenance is invalid")
+        service_provenance[service] = values
 
     transition_keys = {
         "schema",
@@ -2164,6 +2959,7 @@ def validate_cache_recovery_artifact(
             plan_evidence["plan_carrier_recovery_run_id"]
         )
         is None
+        or plan_evidence["plan_carrier_recovery_run_id"] != run_id
         or plan_evidence["plan_carrier_recovery_run_attempt"] != "1"
         or plan_evidence["images_sha256"] != image_hash
         or plan_evidence["infrastructure_provenance_sha256"]
@@ -2241,23 +3037,96 @@ def validate_cache_recovery_artifact(
     ):
         fail(f"{label} rebind provenance is invalid")
 
+    current_plan_evidence = validate_cache_plan_artifact(
+        repository,
+        run_id,
+        source_sha,
+        plan_raw,
+        rabbit_raw,
+        plan_evidence["plan_origin_recovery_run_id"],
+        f"{label} plan carrier",
+    )
+    if current_plan_evidence != plan_evidence:
+        fail(f"{label} plan carrier evidence differs from final evidence")
+    origin_run = plan_evidence["plan_origin_recovery_run_id"]
+    if origin_run != run_id:
+        origin_base = gh_api(f"repos/{repository}/actions/runs/{origin_run}")
+        origin_conclusion = (
+            origin_base.get("conclusion")
+            if isinstance(origin_base, dict)
+            else None
+        )
+        if origin_conclusion not in {"failure", "cancelled"}:
+            fail(f"{label} plan origin is not a failed or cancelled run")
+        origin_metadata = fixed_run_metadata(
+            repository,
+            origin_run,
+            "oci-ghcr-cache-recovery.yml",
+            origin_conclusion,
+            f"{label} plan origin",
+        )
+        if (
+            origin_metadata.get("display_title")
+            != f"oci-ghcr-cache-recovery {source_sha}"
+        ):
+            fail(f"{label} plan origin title differs")
+        origin_evidence = validate_cache_plan_artifact(
+            repository,
+            origin_run,
+            source_sha,
+            plan_raw,
+            rabbit_raw,
+            origin_run,
+            f"{label} plan origin",
+        )
+        for key in {
+            "schema",
+            "source_sha",
+            "plan_origin_recovery_run_id",
+            "images_sha256",
+            "infrastructure_provenance_sha256",
+            "transition_plan_sha256",
+            "rabbitmq_baseline_sha256",
+        }:
+            if origin_evidence[key] != plan_evidence[key]:
+                fail(f"{label} plan origin substituted {key}")
+
+    infrastructure_source = validate_infrastructure_artifact(
+        repository,
+        transition["infrastructure_run_id"],
+        transition["infrastructure_provenance_sha256"],
+        transition["runtime_mode"],
+        transition["runtime_fingerprint"],
+        {
+            "public_host": transition["public_host"],
+            "canonical_host": transition["canonical_host"],
+            "redirect_host": transition["redirect_host"],
+            "diagnostic_host": transition["diagnostic_host"],
+        },
+        f"{label} infrastructure",
+    )
+    if infrastructure_source != source_sha:
+        fail(f"{label} infrastructure source differs")
+
     build_run = evidence["trusted_build_run_id"]
-    build = fixed_run_metadata(
+    legacy_services, upstream_run = validate_legacy_build_artifact(
         repository,
         build_run,
-        "oci-production-build.yml",
-        "success",
-        f"{label} historical build",
-        "workflow_run",
-    )
-    if build.get("head_sha") != source_sha:
-        fail(f"{label} historical build source differs")
-    exact_artifact(
-        repository,
-        build_run,
-        f"oci-image-provenance-{source_sha}-{build_run}-1",
+        source_sha,
         f"{label} historical build",
     )
+    if upstream_run != evidence["trusted_upstream_run_id"]:
+        fail(f"{label} trusted upstream build differs")
+    for service, values in service_provenance.items():
+        legacy = legacy_services[service]
+        if (
+            values["recovery_origin_repository"] != legacy["repository"]
+            or values["recovery_origin_manifest_digest"]
+            != legacy["manifest"]
+            or values["recovery_origin_platform_digest"]
+            != legacy["platform"]
+        ):
+            fail(f"{label} {service} recovery origin differs from the build")
 
 
 def validate_partial_recovery_artifact(
@@ -2282,6 +3151,29 @@ def validate_partial_recovery_artifact(
         if "/" in manifest_path
         else ""
     )
+    expected_relatives = {
+        "images.tsv",
+        "partial-recovery-authority.env",
+        "partial-recovery-summary.env",
+        "recovery-plan.tsv",
+        "recovery-rollout-order.tsv",
+        "final-state.tsv",
+        "rollback-readiness/summary.env",
+        "rollback-readiness/workload-state.tsv",
+        "rollback-readiness/failures.txt",
+        "telemetry-recovery.env",
+        "partial-recovery-SHA256SUMS",
+    }
+    relatives = {
+        path[len(prefix):]
+        for path in files
+        if path.startswith(prefix)
+    }
+    if (
+        len(relatives) != len(files)
+        or relatives != expected_relatives
+    ):
+        fail(f"{label} artifact has an unexpected file set")
     with tempfile.TemporaryDirectory(
         prefix=".upstream-binding-recovery-",
         dir=Path.cwd(),
@@ -2327,39 +3219,66 @@ def validate_partial_recovery_artifact(
     ):
         fail(f"{label} metadata differs from its recovery authority")
 
+    _, images_raw = unique_artifact_file(files, "images.tsv", label)
+    recovered_images = validate_recovery_image_rows(images_raw, label)
     build_run = authority.get("restored_build_run_id", "")
-    build = fixed_run_metadata(
+    build_images = validate_current_build_artifact(
         repository,
         build_run,
-        "oci-production-build.yml",
-        "success",
+        source_sha,
         f"{label} restored build",
-        "workflow_run",
     )
-    if build.get("head_sha") != source_sha:
-        fail(f"{label} restored build source differs")
-    exact_artifact(
+    if build_images != recovered_images:
+        fail(f"{label} restored images differ from the selected build")
+
+    infrastructure_source = validate_infrastructure_artifact(
         repository,
-        build_run,
-        f"oci-image-provenance-{source_sha}-{build_run}-1",
-        f"{label} restored build",
+        authority["infrastructure_run_id"],
+        authority["infrastructure_provenance_sha256"],
+        authority["runtime_mode"],
+        authority["runtime_fingerprint"],
+        {
+            "public_host": authority["public_host"],
+            "canonical_host": authority["canonical_host"],
+            "redirect_host": authority["redirect_host"],
+            "diagnostic_host": authority["diagnostic_host"],
+        },
+        f"{label} infrastructure",
+    )
+    if infrastructure_source != source_sha:
+        fail(f"{label} infrastructure source differs")
+    _, recovery_plan_raw = unique_artifact_file(
+        files, "recovery-plan.tsv", label
+    )
+    recovery_plan = parse_tsv(
+        recovery_plan_raw, 4, f"{label} recovery plan"
+    )
+    _, telemetry_raw = unique_artifact_file(
+        files, "telemetry-recovery.env", label
+    )
+    recovered_telemetry = parse_env(
+        telemetry_raw, f"{label} recovered telemetry"
     )
     failed_run = authority.get("source_rollback_run_id", "")
-    failed = fixed_run_metadata(
+    failed = validate_failed_partial_rollback_artifact(
         repository,
         failed_run,
-        "oci-production-rollback.yml",
-        "failure",
+        source_sha,
+        authority["target_sha"],
+        recovered_images,
+        recovery_plan,
+        recovered_telemetry,
         f"{label} failed rollback",
     )
-    if failed.get("display_title") != metadata.get("display_title"):
-        fail(f"{label} failed rollback target differs")
-    exact_artifact(
-        repository,
-        failed_run,
-        f"oci-production-rollback-{failed_run}-1",
-        f"{label} failed rollback",
-    )
+    if not (
+        parse_timestamp(
+            failed.get("updated_at"), f"{label} failed rollback completion"
+        )
+        <= parse_timestamp(
+            metadata.get("created_at"), f"{label} recovery creation"
+        )
+    ):
+        fail(f"{label} failed rollback chronology is invalid")
 
 
 def validate_baseline_recovery_profile(

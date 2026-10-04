@@ -343,8 +343,13 @@ concurrent retirement fixture isolation without masking failed suites.
    recovery binds the pre-lock-renewal deployment intent to its post-rehold
    failure lineage, while activation cleanup consumes a separate exact
    checksum-manifested recovery-authority artifact instead of the larger
-   always-uploaded diagnostics tree. Under the transferred lock it demotes and
-   verifies the exact retained account as `USER` before bounded Slip cleanup;
+   always-uploaded diagnostics tree. That profile resolves the failed
+   activation through the exact successful deployment and its actual v6
+   handoff; an optional earlier failed deployment keeps its separate applied
+   predecessor. Because successful deployment released the old hold, cleanup
+   uses public checkpoint revalidation and a fresh exact lock. It demotes and
+   verifies the retained account as `USER`, then deletes only draft Slips whose
+   inspected identity and board revision/fingerprint still match atomically;
    either failure blocks the resumed data phase.
    The workflow runs only compiled CLIs from the approved immutable image
    digests. Fresh and released-runtime paths finish static, predecessor,

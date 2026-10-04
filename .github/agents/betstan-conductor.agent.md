@@ -535,8 +535,14 @@ its owner. It is never healthy by default.
   classify a run from metadata and jobs alone. Require the repository-fixed
   profile to download and validate its exact baseline, deployment,
   predecessor-v6, checkpoint, and activation artifacts before intent, approval,
-  or mutation. Treat malformed/incomplete ZIPs, checksum or capture-run drift,
-  and any lineage substitution as prerequisite decay.
+  or mutation. Baseline recovery must recursively resolve its exact build and
+  upstream run, platforms, infrastructure provenance, plan carrier/origin, or
+  failed partial-rollback state. Activation cleanup must resolve failed
+  activation → successful deployment → actual v6 handoff, then acquire a fresh
+  lock after public revalidation; an earlier failed deployment remains a
+  distinct predecessor lineage. Treat malformed/incomplete ZIPs, checksum or
+  capture-run drift, an atomic Slip cleanup conflict, and any lineage
+  substitution as prerequisite decay.
 - Track explicit source identities on an allowed descendant resume: workflow
   control advances to the approved SHA, predecessor and failed-run evidence
   binds `resume_source_sha`, and build, infrastructure, and checkpoint

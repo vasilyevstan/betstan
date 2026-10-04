@@ -1380,11 +1380,10 @@ POLICIES = {
             "build_run_id",
             "infrastructure_run_id",
             "prerequisite_run_id",
-            "failed_deploy_run_id",
             "failed_activation_run_id",
             "disk_checkpoint_run_id",
         ],
-        zero_or_positive=["baseline_recovery_run_id"],
+        zero_or_positive=["baseline_recovery_run_id", "failed_deploy_run_id"],
         full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
         patterns={
             "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
@@ -1405,14 +1404,8 @@ POLICIES = {
                 "afterInput": "disk_checkpoint_run_id",
             },
             {
-                **failed_deploy_binding(
-                    "oci-failed-deploy-retained-hold-v1"
-                ),
-                "afterInput": "prerequisite_run_id",
-            },
-            {
                 **FAILED_ACTIVATION_BINDING,
-                "afterInput": "failed_deploy_run_id",
+                "afterInput": "prerequisite_run_id",
             },
         ],
     ),
@@ -1432,11 +1425,10 @@ POLICIES = {
             "build_run_id",
             "infrastructure_run_id",
             "prerequisite_run_id",
-            "failed_deploy_run_id",
             "failed_activation_run_id",
             "disk_checkpoint_run_id",
         ],
-        zero_or_positive=["baseline_recovery_run_id"],
+        zero_or_positive=["baseline_recovery_run_id", "failed_deploy_run_id"],
         full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
         patterns={
             "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
@@ -1457,14 +1449,8 @@ POLICIES = {
                 "afterInput": "disk_checkpoint_run_id",
             },
             {
-                **failed_deploy_binding(
-                    "oci-failed-deploy-released-runtime-v1"
-                ),
-                "afterInput": "prerequisite_run_id",
-            },
-            {
                 **FAILED_ACTIVATION_BINDING,
-                "afterInput": "failed_deploy_run_id",
+                "afterInput": "prerequisite_run_id",
             },
         ],
     ),

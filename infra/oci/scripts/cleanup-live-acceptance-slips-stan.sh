@@ -93,6 +93,10 @@ for (const slip of candidates) {
   if (
     !allowedBetKinds.has(slip.betKind) ||
     slip.status !== "DRAFT" ||
+    !Number.isSafeInteger(slip.boardRevision) ||
+    slip.boardRevision < 1 ||
+    typeof slip.boardFingerprint !== "string" ||
+    !/^[0-9a-f]{24}$/.test(slip.boardFingerprint) ||
     !Array.isArray(slip.rows) ||
     slip.rows.length < 1 ||
     slip.rows.length > 10
@@ -117,10 +121,17 @@ for (const slip of candidates) {
     }
   }
 }
-const ids = candidates.map((slip) => slip._id);
-const deletion = slips.deleteMany({_id: {$in: ids}, ...scope});
+const deletionPredicates = candidates.map((slip) => ({
+  _id: slip._id,
+  userId: slip.userId,
+  betKind: slip.betKind,
+  status: "DRAFT",
+  boardRevision: slip.boardRevision,
+  boardFingerprint: slip.boardFingerprint
+}));
+const deletion = slips.deleteMany({$or: deletionPredicates});
 if (deletion.deletedCount !== candidates.length) {
-  throw new Error("exact synthetic active-slip deletion count changed");
+  throw new Error("exact synthetic active-slip identity changed before deletion");
 }
 const remainingActiveSlips = slips.countDocuments(scope);
 if (remainingActiveSlips !== 0) {

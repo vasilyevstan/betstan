@@ -280,7 +280,12 @@ hash-covered `resume_source_sha`, which may be the approved SHA or the proven
 GitHub/infra/Markdown-only ancestor. Build, infrastructure, and checkpoint
 evidence stays bound to the original checkpoint source. A new byte-equivalent
 run is rejected. A nonzero recovered baseline likewise requires its explicit
-source and exact checksum-bound recovery artifact before authority.
+source and exact checksum-bound recovery artifact before authority. Cache
+recovery recursively resolves its historical build, upstream run, per-service
+platforms, infrastructure provenance, and current plus distinct-origin plan
+artifacts. Partial recovery resolves its restored build and upstream run,
+infrastructure provenance, and the exact failed rollback's target, images,
+rollout order, partial state, and retained Telemetry evidence.
 
 Compatibility is exact rather than schema-label-only: the verifier continues
 to accept the literal historical meanings and exact key sets of
@@ -305,10 +310,17 @@ residency without HTTP, RabbitMQ/rabbitmqctl, queues, pods, Deployments, or
 mutable workload-health queries.
 
 When a failed activation left its artifact-bound acceptance account retained,
-the resumed phase first idempotently demotes that exact account to `USER` under
-the transferred lock, verifies exactly one matching account and role, then
-performs the existing bounded draft-Slip cleanup with an expected account
-count of one. Either failure blocks all later data mutation.
+the fixed profile first resolves failed activation → successful deployment →
+that deployment's actual v6 handoff. If that handoff records an earlier failed
+deployment, its applied predecessor is validated as a separate lineage. The
+successful deployment released the old lock and fence, so the resumed phase
+uses public checkpoint revalidation, enters maintenance, and acquires a fresh
+exact lock. It then idempotently demotes the exact account to `USER`, verifies
+one matching account and role, and deletes each bounded draft Slip only with an
+atomic predicate over `_id`, user, bet kind, `DRAFT`, board revision, and board
+fingerprint. A concurrent placement or row revision changes that predicate,
+causes a deletion-count conflict, leaves the changed Slip intact, and blocks
+all later data mutation.
 
 Deployment again verifies the inherited fence, transferred lock, rollback
 baseline, and held checkpoint before renewing the exact lock; it has no initial
