@@ -215,11 +215,11 @@ python3 - "$WORKFLOW" <<'PY'
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
-guard = text.index("- name: Reject an already over-limit k3s root filesystem")
+guard = text.index("- name: Revalidate exact release disk checkpoint before lock mutation")
 lock = text.index("- name: Acquire database operation lock")
 maintenance = text.index("- name: Enter or re-establish live data maintenance")
 if not guard < lock < maintenance:
-    raise SystemExit("capacity guard is not before lock and maintenance mutation")
+    raise SystemExit("checkpoint revalidation is not before lock and maintenance mutation")
 PY
 
 run_maintenance() {

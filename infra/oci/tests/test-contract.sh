@@ -202,7 +202,7 @@ grep -Fq 'for service in auth client; do' "$deploy_script" ||
   fail "deploy failure cleanup does not restrict runtime restoration to readers"
 
 for literal in \
-  'schema_version=live-betting-v5' \
+  'schema_version=live-betting-v6' \
   'backoffice_pre_september_cleanup_complete' \
   'backoffice-events-before:2026-09-01T00:00:00Z' \
   'backoffice-pre-september-events-cleanup-v1' \
@@ -213,7 +213,7 @@ for literal in \
 done
 for literal in \
   'elif schema_version == "live-betting-v4":' \
-  'elif schema_version == "live-betting-v5":' \
+  'elif schema_version in {"live-betting-v5", "live-betting-v6"}:' \
   'backoffice_pre_september_cleanup_complete' \
   'reports/preflight-backoffice-pre-september-cleanup.json' \
   'reports/apply-backoffice-pre-september-cleanup.json' \
@@ -3092,8 +3092,12 @@ grep -Fq '"$TESTS_DIR/test-service-ops-stan.sh"' "$OCI_DIR/tests/run-contracts.s
   fail "OCI scripts use the unsupported NSG rule argument --network-security-group-id"
 grep -Fq -- '--nsg-id "$nsg_id"' "$OCI_DIR/scripts/provision.sh" ||
   fail "OCI network reconciliation does not use the supported NSG rule argument"
-! grep -Eq 'AZURE_|azure/' "$infra_workflow" "$deploy_workflow" ||
+! grep -Eq 'AZURE_' "$infra_workflow" "$deploy_workflow" ||
   fail "Azure credentials leaked into OCI infrastructure/deployment"
+while IFS= read -r azure_reference; do
+  [[ "$azure_reference" == *'./infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh'* ]] ||
+    fail "unexpected Azure path leaked into OCI infrastructure/deployment: $azure_reference"
+done < <(grep -Hn -E 'azure/' "$infra_workflow" "$deploy_workflow" || true)
 
 while IFS= read -r use; do
   [[ "$use" =~ @[0-9a-f]{40}$ ]] ||

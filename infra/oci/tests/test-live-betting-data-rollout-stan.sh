@@ -7,10 +7,15 @@ VERIFIER="$ROOT_DIR/infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
 MAINTENANCE="$ROOT_DIR/infra/oci/scripts/live-data-maintenance-stan.sh"
 WORKFLOW="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 DEPLOY_WORKFLOW="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
+ACTIVATION_WORKFLOW="$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml"
 WORK_PARENT="$ROOT_DIR/infra/oci/tests/.live-data-rollout-workdirs"
 SOURCE_SHA=1111111111111111111111111111111111111111
 BUILD_RUN_ID=2001
 INFRASTRUCTURE_RUN_ID=3001
+CHECKPOINT_SOURCE_SHA="$SOURCE_SHA"
+DISK_CHECKPOINT_RUN_ID=3002
+DISK_CHECKPOINT_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+DISK_CHECKPOINT_DISPOSITION=READY_NO_RECLAIM
 
 "$ROOT_DIR/infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh" >/dev/null
 
@@ -30,6 +35,82 @@ fail() {
   echo "live data rollout contract test failed: $*" >&2
   exit 1
 }
+
+demotion_script="$(
+  ruby -ryaml - "$WORKFLOW" <<'RUBY'
+document = YAML.load_file(ARGV.fetch(0))
+step = document.fetch("jobs").values
+  .flat_map { |job| job.fetch("steps", []) }
+  .find { |item| item["name"] == "Demote and verify exact retained live-acceptance account" }
+abort "demotion step missing" unless step
+puts step.fetch("run")
+RUBY
+)"
+demotion_bin="$work_dir/demotion-bin"
+demotion_log="$work_dir/demotion.log"
+mkdir -p "$demotion_bin"
+cat >"$demotion_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${STUB_ROLE_LOG:?}"
+if [[ "${1:-}" == "exec" && " $* " == *" deployment/gaming-auth-depl "* ]]; then
+  [ "${STUB_ROLE_CHANGE_FAIL:-false}" != true ]
+  exit 0
+fi
+if [[ "${1:-}" == "get" && "${2:-}" == "pods" ]]; then
+  printf '%s\n' '{"items":[{"metadata":{"name":"mongo-0"},"status":{"phase":"Running"}}]}'
+  exit 0
+fi
+if [[ "${1:-}" == "exec" ]]; then
+  printf '%s\n' "${STUB_ROLE_RESULT:?}"
+  exit 0
+fi
+exit 1
+EOF
+chmod 755 "$demotion_bin/kubectl"
+run_demotion() {
+  rm -rf -- "$work_dir/artifacts"
+  mkdir -p "$work_dir/artifacts/oci-live-data-rollout/evidence"
+  (
+    cd "$work_dir"
+    PATH="$demotion_bin:$PATH" \
+    STUB_ROLE_LOG="$demotion_log" \
+    STUB_ROLE_RESULT="${STUB_ROLE_RESULT:-{\"verified\":true,\"userCount\":1,\"role\":\"USER\"}}" \
+    FAILED_ACTIVATION_RUN_ID=7788 \
+    FAILED_ACTIVATION_USER_ID=0123456789abcdef01234567 \
+    OCI_K8S_NAMESPACE=betstan-oci \
+      bash -c "$demotion_script"
+  )
+}
+: >"$demotion_log"
+run_demotion
+jq -e '
+  .schemaVersion == "failed-live-acceptance-role.v1" and
+  .failedActivationRunId == "7788" and
+  .verified == true and
+  .userCount == 1 and
+  .role == "USER" and
+  (keys | sort) == [
+    "failedActivationRunId",
+    "role",
+    "schemaVersion",
+    "userCount",
+    "verified"
+  ]
+' "$work_dir/artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-role.json" \
+  >/dev/null ||
+  fail "failed-activation account demotion evidence is incomplete"
+grep -Fq \
+  'USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:0123456789abcdef01234567:USER' \
+  "$demotion_log" ||
+  fail "account demotion did not bind the exact artifact user"
+if STUB_ROLE_CHANGE_FAIL=true run_demotion >/dev/null 2>&1; then
+  fail "role revocation failure did not block failed-activation recovery"
+fi
+if STUB_ROLE_RESULT='{"verified":true,"userCount":1,"role":"ADMIN"}' \
+  run_demotion >/dev/null 2>&1; then
+  fail "retained ADMIN role was accepted before Slip cleanup"
+fi
 
 write_manifest() {
   local directory="$1"
@@ -655,6 +736,7 @@ run_phase() {
   local recovery_run_id="${5:-0}"
   local recovery_source_sha="${6:-none}"
   local baseline_sha="${7:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+  local checkpoint_source_sha="${8:-$CHECKPOINT_SOURCE_SHA}"
   local job_timeout="${JOB_TIMEOUT_OVERRIDE_SECONDS:-10}"
   local terminal_grace="${JOB_TERMINAL_GRACE_OVERRIDE_SECONDS:-30}"
   local maintenance_fence=false
@@ -678,6 +760,10 @@ run_phase() {
   SOURCE_SHA="$SOURCE_SHA" \
   BUILD_RUN_ID="$BUILD_RUN_ID" \
   INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  CHECKPOINT_SOURCE_SHA="$checkpoint_source_sha" \
+  DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+  DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+  DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
   IMAGE_PROVENANCE_FILE="$images_file" \
   OUTPUT_DIR="$output" \
   OCI_K8S_NAMESPACE=betstan-oci \
@@ -706,7 +792,11 @@ run_phase dry-run pending 4001 "$pending_output"
 [[ "$(job_sequence_summary)" == \
   "reschedule:dry-run backoffice-cleanup:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run index:dry-run" ]] ||
   fail "dry-run did not sequence reschedule, cleanup, compatibility, and index preflights"
-grep -Fxq 'schema_version=live-betting-v5' "$pending_output/provenance.env"
+grep -Fxq 'schema_version=live-betting-v6' "$pending_output/provenance.env"
+grep -Fxq "checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA" "$pending_output/provenance.env"
+grep -Fxq "disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID" "$pending_output/provenance.env"
+grep -Fxq "disk_checkpoint_sha256=$DISK_CHECKPOINT_SHA256" "$pending_output/provenance.env"
+grep -Fxq "disk_checkpoint_disposition=$DISK_CHECKPOINT_DISPOSITION" "$pending_output/provenance.env"
 grep -Fxq 'phase=dry-run' "$pending_output/provenance.env"
 grep -Fxq 'backfill_complete=false' "$pending_output/provenance.env"
 grep -Fxq 'index_ready=false' "$pending_output/provenance.env"
@@ -771,6 +861,62 @@ grep -Fxq 'baseline_recovery_run_id=799' "$recovery_output/provenance.env"
 grep -Fxq \
   "baseline_recovery_source_sha=$recovery_source_sha" \
   "$recovery_output/provenance.env"
+EVIDENCE_DIR="$recovery_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+EXPECTED_DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+EXPECTED_DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
+EXPECTED_BASELINE_RECOVERY_RUN_ID=799 \
+EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$recovery_source_sha" \
+EXPECTED_PHASE=dry-run \
+EXPECTED_RUN_ID=4007 \
+EXPECTED_RUN_ATTEMPT=1 \
+  "$VERIFIER" >/dev/null ||
+  fail "recovered dry-run evidence was not consumable by its exact tuple"
+
+recovery_backfill_output="$work_dir/recovery-backfills"
+run_phase apply-backfills backfills 4008 "$recovery_backfill_output" \
+  799 "$recovery_source_sha"
+grep -Fxq \
+  'baseline_recovery_run_id=799' \
+  "$recovery_backfill_output/provenance.env"
+grep -Fxq \
+  "baseline_recovery_source_sha=$recovery_source_sha" \
+  "$recovery_backfill_output/provenance.env"
+EVIDENCE_DIR="$recovery_backfill_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+EXPECTED_DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+EXPECTED_DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
+EXPECTED_BASELINE_RECOVERY_RUN_ID=799 \
+EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$recovery_source_sha" \
+EXPECTED_PHASE=apply-backfills \
+EXPECTED_RUN_ID=4008 \
+EXPECTED_RUN_ATTEMPT=1 \
+  "$VERIFIER" >/dev/null ||
+  fail "recovered dry-run tuple was not preserved by apply-backfills"
+if EVIDENCE_DIR="$recovery_backfill_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+  EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+  EXPECTED_DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+  EXPECTED_DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
+  EXPECTED_BASELINE_RECOVERY_RUN_ID=799 \
+  EXPECTED_BASELINE_RECOVERY_SOURCE_SHA=cccccccccccccccccccccccccccccccccccccccc \
+  EXPECTED_PHASE=apply-backfills \
+  EXPECTED_RUN_ID=4008 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "apply-backfills accepted a substituted recovered-baseline source"
+fi
 
 blocked_output="$work_dir/reschedule-blocked"
 blocked_log="$work_dir/reschedule-blocked.out"
@@ -1239,7 +1385,7 @@ run_phase apply-backfills backfills 4002 "$backfill_output"
 [[ "$(job_sequence_summary)" == \
   "reschedule:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run index:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run reschedule:apply reschedule:verify backoffice-cleanup:dry-run index:dry-run" ]] ||
   fail "backfill phase did not run cleanup preflight after reschedule verification"
-grep -Fxq 'schema_version=live-betting-v5' "$backfill_output/provenance.env"
+grep -Fxq 'schema_version=live-betting-v6' "$backfill_output/provenance.env"
 grep -Fxq 'phase=apply-backfills' "$backfill_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$backfill_output/provenance.env"
 grep -Fxq 'event_reschedule_complete=true' "$backfill_output/provenance.env"
@@ -1260,8 +1406,8 @@ run_phase apply-slip-index final 4003 "$final_output" 0 none "$normal_baseline_s
 [[ "$(job_sequence_summary)" == \
   "reschedule:verify backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run index:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run index:dry-run index:apply index:dry-run backoffice-cleanup:dry-run backoffice-cleanup:apply backoffice-cleanup:verify" ]] ||
   fail "final phase did not leave cleanup apply as its final database mutation"
-grep -Fxq 'schema_version=live-betting-v5' "$final_output/provenance.env"
-grep -Fxq 'schema_version=live-betting-v5' "$final_output/schema.env"
+grep -Fxq 'schema_version=live-betting-v6' "$final_output/provenance.env"
+grep -Fxq 'schema_version=live-betting-v6' "$final_output/schema.env"
 grep -Fxq 'phase=apply-slip-index' "$final_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$final_output/schema.env"
 grep -Fxq 'index_ready=true' "$final_output/schema.env"
@@ -1399,14 +1545,14 @@ for name in ("provenance.env", "schema.env"):
     path = root / name
     path.write_text(
         path.read_text(encoding="utf-8").replace(
-            "schema_version=live-betting-v5",
             "schema_version=live-betting-v6",
+            "schema_version=live-betting-v7",
         ),
         encoding="utf-8",
     )
 journal_path = root / "journal.json"
 journal = json.loads(journal_path.read_text(encoding="utf-8"))
-journal["schema_version"] = "live-betting-v6"
+journal["schema_version"] = "live-betting-v7"
 journal_path.write_text(
     json.dumps(journal, separators=(",", ":")) + "\n",
     encoding="utf-8",
@@ -1441,11 +1587,17 @@ for name in ("provenance.env", "schema.env"):
     path = root / name
     lines = [
         line.replace(
-            "schema_version=live-betting-v5",
+            "schema_version=live-betting-v6",
             "schema_version=live-betting-v4",
         )
         for line in path.read_text(encoding="utf-8").splitlines()
-        if not line.startswith("backoffice_pre_september_cleanup_complete=")
+        if not line.startswith((
+            "backoffice_pre_september_cleanup_complete=",
+            "checkpoint_source_sha=",
+            "disk_checkpoint_run_id=",
+            "disk_checkpoint_sha256=",
+            "disk_checkpoint_disposition=",
+        ))
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1453,6 +1605,13 @@ journal_path = root / "journal.json"
 journal = json.loads(journal_path.read_text(encoding="utf-8"))
 journal["schema_version"] = "live-betting-v4"
 journal.pop("backoffice_pre_september_cleanup_complete")
+for key in (
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
+    "disk_checkpoint_sha256",
+    "disk_checkpoint_disposition",
+):
+    journal.pop(key)
 journal["reports"] = [
     json.loads(path.read_text(encoding="utf-8"))
     for path in sorted((root / "reports").glob("*.json"))
@@ -1909,7 +2068,7 @@ for name in ("provenance.env", "schema.env"):
     path = root / name
     path.write_text(
         path.read_text(encoding="utf-8").replace(
-            "schema_version=live-betting-v5",
+            "schema_version=live-betting-v6",
             "schema_version=live-betting-v4",
         ),
         encoding="utf-8",
@@ -1940,23 +2099,29 @@ chained_baseline_sha="$(make_resume_baseline "$chained_baseline" 3999 0)"
 chained_output="$work_dir/chained"
 mkdir -p "$chained_output"
 cat >"$chained_output/resume-authority.env" <<EOF
-schema_version=live-betting-data-resume-v1
+schema_version=live-betting-data-resume-v2
 applied_data_run_id=3999
 applied_source_sha=$original_applied_source
 failed_deploy_run_id=4999
 resume_maintenance_mode=released-runtime
 failed_deploy_job_conclusion=success
 public_validate_job_conclusion=failure
-release_step_conclusion=success
+lock_release_step_conclusion=success
+fence_release_step_conclusion=success
 rehold_step_conclusion=skipped
 failed_activation_run_id=0
 current_source_sha=$SOURCE_SHA
 baseline_sha256=$chained_baseline_sha
 runtime_images_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+checkpoint_source_sha=$original_applied_source
+disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+disk_checkpoint_sha256=$DISK_CHECKPOINT_SHA256
+disk_checkpoint_disposition=$DISK_CHECKPOINT_DISPOSITION
 application_change_scope=github-infra-docs-only
 status=PASS
 EOF
-run_phase apply-slip-index final 4008 "$chained_output" 0 none "$chained_baseline_sha"
+run_phase apply-slip-index final 4008 "$chained_output" 0 none \
+  "$chained_baseline_sha" "$original_applied_source"
 chained_resolution="$(
   EVIDENCE_DIR="$chained_output" \
   EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
@@ -2201,10 +2366,20 @@ cp \
   "${BASELINE_DIR:?}/live-images-template.tsv" \
   "$BASELINE_DIR/live-images.tsv"
 SH
+cat >"$resume_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "verify" ]]
+[[ "${LOCK_TOKEN:-}" == "live-data-4007-1" ]]
+[[ "${OPERATION_ID:-}" == "live-data-apply-slip-index" ]]
+[[ "${SOURCE_SHA:-}" == "1111111111111111111111111111111111111111" ]]
+printf 'lock:verify\n' >>"${RESUME_TEST_LOG:?}"
+SH
 chmod +x \
   "$resume_fixture/bin/git" \
   "$resume_fixture/bin/kubectl" \
   "$resume_fixture/infra/oci/scripts/live-data-maintenance-stan.sh" \
+  "$resume_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" \
   "$resume_fixture/infra/oci/scripts/validate-rollback-baseline-stan.sh"
 
 : >"$resume_fixture/artifacts/oci-live-data-rollout/resume-images.tsv"
@@ -2416,13 +2591,13 @@ for literal in \
   'backoffice-events-before:2026-09-01T00:00:00Z' \
   'backoffice-pre-september-events-cleanup-v1' \
   'backoffice_pre_september_cleanup_complete' \
-  'schema_version=live-betting-v5'; do
+  'schema_version=live-betting-v6'; do
   grep -Fq "$literal" "$RUNNER" ||
     fail "data runner is missing Backoffice cleanup safety contract: $literal"
 done
 for literal in \
   'elif schema_version == "live-betting-v4":' \
-  'elif schema_version == "live-betting-v5":' \
+  'elif schema_version in {"live-betting-v5", "live-betting-v6"}:' \
   'backoffice_pre_september_cleanup_complete' \
   'reports/preflight-backoffice-pre-september-cleanup.json' \
   'reports/apply-backoffice-pre-september-cleanup.json' \
@@ -2458,28 +2633,32 @@ for literal in \
   'BASELINE_RECOVERY_DIR=artifacts/recovery' \
   'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
   'Bind historical recovery source through its exact artifact' \
-  'BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || '\''none'\'' }}' \
+  'BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}' \
   'failed_deploy_run_id:' \
   'attempts/1/jobs?per_page=100' \
   '.name == "deploy"' \
   '.name == "public-validate"' \
+  'Release transferred lock after protected validation' \
   'Release live data maintenance fence' \
   'Re-enter maintenance after an incomplete deployment' \
-  'success:failure:success:skipped' \
-  'failure:skipped:failure:success' \
-  'failure:skipped:skipped:success' \
+  'success:failure:success:success:skipped' \
+  'failure:skipped:skipped:skipped:success' \
+  'failure:skipped:failure:skipped:success' \
+  'failure:skipped:success:failure:success' \
   'resume_maintenance_mode=released-runtime' \
   'resume_maintenance_mode=retained-hold' \
   'failed_activation_run_id:' \
   'failed_activation_user_id:' \
   'oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1' \
-  'oci-live-betting-activate.yml' \
-  'oci-live-activation-${FAILED_ACTIVATION_RUN_ID}-1' \
+  'protected_operation=oci-live-data-resume-activation' \
+  'policy-json "$policy_json"' \
   'Verify exact failed-deploy resume state' \
   'git merge-base --is-ancestor "$prior_source_sha" "$SOURCE_SHA"' \
   '.github/*|infra/*|*.md' \
   'Application path changed after applied data' \
   'EXPECTED_PHASE=apply-slip-index' \
+  'resume_artifact_name="oci-image-provenance-${prior_checkpoint_source_sha}-${prior_build_run_id}-1"' \
+  'SOURCE_SHA="$prior_checkpoint_source_sha"' \
   'OUTPUT_FILE=artifacts/oci-live-data-rollout/resume-images.tsv' \
   'Resume candidate-only deployment image mismatch' \
   'Retained-hold writer image mismatch' \
@@ -2502,9 +2681,13 @@ for literal in \
   'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"' \
   'EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id"' \
   'restore_or_verify_retained_hold' \
+  'Demote and verify exact retained live-acceptance account' \
+  'USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$FAILED_ACTIVATION_USER_ID:USER' \
+  'node dist/scripts/SetUserRole.js' \
+  'failed-live-acceptance-role.json' \
   'Delete exact orphaned live-acceptance slips' \
   'cleanup-live-acceptance-slips-stan.sh' \
-  'EXPECTED_AUTH_USER_COUNT=0' \
+  'EXPECTED_AUTH_USER_COUNT=1' \
   'ALLOWED_BET_KINDS=LIVE,PRE_MATCH' \
   'MAX_ACTIVE_SLIPS=2' \
   'runtime_images_sha256=' \
@@ -2522,6 +2705,10 @@ for literal in \
   grep -Fq "$literal" "$WORKFLOW" ||
     fail "data workflow is missing safety contract: $literal"
 done
+! grep -Fq \
+  'resume_artifact_name="oci-image-provenance-${prior_source_sha}-${prior_build_run_id}-1"' \
+  "$WORKFLOW" ||
+  fail "chained resume still binds the build artifact to the predecessor source"
 [[ "$(grep -Fc 'SSE_REQUIREMENT: deployed-source' "$WORKFLOW")" == "2" ]] ||
   fail "data workflow does not source-gate both baseline SSE checks"
 for literal in \
@@ -2546,12 +2733,113 @@ done
 [[ -x "$MAINTENANCE" ]] ||
   fail "maintenance operator is not executable"
 
-python3 - "$WORKFLOW" "$DEPLOY_WORKFLOW" <<'PY'
+ordering_fixture="$work_dir/pre-lock-revalidation"
+ordering_script="$ordering_fixture/ordered-steps.sh"
+mkdir -p \
+  "$ordering_fixture/infra/oci/scripts" \
+  "$ordering_fixture/infra/azure/agents" \
+  "$ordering_fixture/artifacts/oci-data-baseline-before"
+python3 - "$WORKFLOW" "$ordering_script" <<'PY'
+from pathlib import Path
+import sys
+
+workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+names = [
+    "Capture and validate pre-mutation rollback baseline",
+    "Revalidate exact release disk checkpoint before lock mutation",
+    "Acquire database operation lock",
+]
+bodies = []
+for name in names:
+    start = workflow.index(f"      - name: {name}")
+    run = workflow.index("        run: |\n", start) + len("        run: |\n")
+    end = workflow.find("\n      - name:", run)
+    if end < 0:
+        raise SystemExit(f"could not delimit workflow step: {name}")
+    lines = []
+    for line in workflow[run:end].splitlines():
+        if line:
+            if not line.startswith("          "):
+                raise SystemExit(f"invalid shell indentation in step: {name}")
+            lines.append(line[10:])
+        else:
+            lines.append("")
+    bodies.append("\n".join(lines))
+Path(sys.argv[2]).write_text(
+    "#!/usr/bin/env bash\nset -euo pipefail\n" + "\n".join(bodies) + "\n",
+    encoding="utf-8",
+)
+PY
+chmod +x "$ordering_script"
+cat >"$ordering_fixture/infra/oci/scripts/baseline-capture-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' \
+  'root_used_bytes=35000000001' \
+  'candidate_residency=missing' \
+  >"${ORDERING_STATE:?}"
+printf 'baseline\n' >>"${ORDERING_LOG:?}"
+printf 'fixture baseline\n' \
+  >artifacts/oci-data-baseline-before/SHA256SUMS
+SH
+cat >"$ordering_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "revalidate" ]]
+printf 'revalidate\n' >>"${ORDERING_LOG:?}"
+grep -Fxq 'root_used_bytes=35000000000' "${ORDERING_STATE:?}"
+grep -Fxq 'candidate_residency=complete' "${ORDERING_STATE:?}"
+SH
+cat >"$ordering_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'lock:%s\n' "${1:-missing}" >>"${ORDERING_LOG:?}"
+SH
+cp \
+  "$ordering_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" \
+  "$ordering_fixture/infra/azure/agents/shared-mongo-operation-lock-stan.sh"
+chmod +x \
+  "$ordering_fixture/infra/oci/scripts/baseline-capture-stan.sh" \
+  "$ordering_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" \
+  "$ordering_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" \
+  "$ordering_fixture/infra/azure/agents/shared-mongo-operation-lock-stan.sh"
+printf '%s\n' \
+  'root_used_bytes=35000000000' \
+  'candidate_residency=complete' \
+  >"$ordering_fixture/state"
+: >"$ordering_fixture/order.log"
+if (
+  cd "$ordering_fixture"
+  ORDERING_STATE="$ordering_fixture/state" \
+  ORDERING_LOG="$ordering_fixture/order.log" \
+  FAILED_DEPLOY_RUN_ID=0 \
+  BASELINE_RECOVERY_RUN_ID=0 \
+  BASELINE_RECOVERY_SOURCE_SHA=none \
+  PHASE=dry-run \
+  GITHUB_ENV="$ordering_fixture/github.env" \
+  RESUME_MAINTENANCE_MODE=none \
+  CHECKPOINT_SOURCE_SHA=1111111111111111111111111111111111111111 \
+  SOURCE_SHA=2222222222222222222222222222222222222222 \
+  BUILD_RUN_ID=41 \
+  DISK_CHECKPOINT_RUN_ID=44 \
+  OCI_K8S_NAMESPACE=betstan-oci \
+  SHARED_MONGO_LOCK_TOKEN=fixture-token \
+  SHARED_MONGO_LOCK_OPERATION=live-data-dry-run \
+  SHARED_MONGO_LOCK_LEASE_SECONDS=300 \
+    bash "$ordering_script"
+); then
+  fail "baseline-induced disk and residency drift reached lock acquisition"
+fi
+[[ "$(cat "$ordering_fixture/order.log")" == $'baseline\nrevalidate' ]] ||
+  fail "final public revalidation was not the last action before lock mutation"
+
+python3 - "$WORKFLOW" "$DEPLOY_WORKFLOW" "$ACTIVATION_WORKFLOW" <<'PY'
 import sys
 from pathlib import Path
 
 data = Path(sys.argv[1]).read_text(encoding="utf-8")
 deploy = Path(sys.argv[2]).read_text(encoding="utf-8")
+activation = Path(sys.argv[3]).read_text(encoding="utf-8")
 
 
 def require_order(text: str, markers: list[str], label: str) -> None:
@@ -2570,9 +2858,10 @@ require_order(
     [
         "Verify exact failed-deploy resume state",
         "Capture and validate pre-mutation rollback baseline",
-        "Reject an already over-limit k3s root filesystem",
+        "Revalidate exact release disk checkpoint before lock mutation",
         "Acquire database operation lock",
         "Enter or re-establish live data maintenance",
+        "Demote and verify exact retained live-acceptance account",
         "Delete exact orphaned live-acceptance slips",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",
@@ -2587,18 +2876,44 @@ require_order(
     deploy,
     [
         "Download exact live data readiness evidence",
+        "Download exact release disk checkpoint",
         "Download exact pre-mutation rollback baseline",
         "Verify immutable image and infrastructure provenance",
         "Verify transferred database lock and maintenance fence",
+        "Validate executable pre-deploy rollback baseline",
+        "Revalidate held release disk checkpoint before lock renewal",
+        "Write checksum-bound deployment recovery intent",
+        "Renew exact transferred database lock",
         "Deploy immutable images sequentially",
         "Bind schema evidence to deployment provenance",
         "Run protected OCI cluster validation loop",
+        "Revalidate held release disk checkpoint after protected health",
         "Release transferred lock after protected validation",
         "Release live data maintenance fence",
         "Re-enter maintenance after an incomplete deployment",
+        "Finalize deployment recovery authority",
+        "Upload deployment recovery authority",
     ],
     "deploy workflow",
 )
+require_order(
+    activation,
+    [
+        "Write final activation provenance",
+        "Prepare activation recovery authority",
+        "Upload activation recovery authority",
+        "Upload protected activation evidence",
+    ],
+    "activation workflow",
+)
+for literal in (
+    "oci-deploy-recovery-authority-${{ github.run_id }}-${{ github.run_attempt }}",
+    "if: always() && steps.recovery_intent.outcome == 'success'",
+    "oci-live-activation-recovery-${{ github.run_id }}-${{ github.run_attempt }}",
+    "path: artifacts/live-activation-recovery",
+):
+    if literal not in deploy and literal not in activation:
+        raise SystemExit(f"recovery artifact producer is missing: {literal}")
 for literal in (
     "SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}",
     "SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}",
@@ -2606,13 +2921,43 @@ for literal in (
     "FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}",
     "FAILED_ACTIVATION_RUN_ID: ${{ inputs.failed_activation_run_id }}",
     "FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}",
-    "if: inputs.failed_deploy_run_id != '0'",
+    "inputs.failed_deploy_run_id != '0' &&",
     "if: inputs.failed_activation_run_id != '0'",
     "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID",
     "failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID",
 ):
     if literal not in data:
         raise SystemExit(f"data workflow is missing lock handoff contract: {literal}")
+
+selection = data[
+    data.index("- name: Validate exact SHA phase and trusted upstream runs"):
+    data.index("- name: Reject competing production activity")
+]
+if selection.index('if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then') > (
+    selection.index('elif [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then')
+):
+    raise SystemExit("failed activation is still forced through failed-deploy selection")
+if (
+    'if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then\n'
+    "              printf 'resume_maintenance_mode=released-runtime"
+) not in selection:
+    raise SystemExit("failed activation does not establish released-runtime semantics")
+
+checkpoint_revalidation = data[
+    data.index("- name: Revalidate exact release disk checkpoint before lock mutation"):
+    data.index("- name: Acquire database operation lock")
+]
+if '[ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&' not in checkpoint_revalidation:
+    raise SystemExit("failed activation can still select retained held revalidation")
+
+lock_acquisition = data[
+    data.index("- name: Acquire database operation lock"):
+    data.index("- name: Enter or re-establish live data maintenance")
+]
+if '[ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&' not in lock_acquisition:
+    raise SystemExit("failed activation can still release or reuse the historical lock")
+if lock_acquisition.count("shared-mongo-operation-lock-stan.sh acquire") != 1:
+    raise SystemExit("failed activation does not use one fresh exact lock acquisition")
 
 resume = data[
     data.index("- name: Verify exact failed-deploy resume state"):
@@ -2665,12 +3010,13 @@ if '[ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]' in
 
 preparation = data[
     data.index("- name: Capture and validate pre-mutation rollback baseline"):
-    data.index("- name: Reject an already over-limit k3s root filesystem")
+    data.index("- name: Acquire database operation lock")
 ]
 require_order(
     preparation,
     [
-        'if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then',
+        'if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&',
+        '[ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then',
         'elif [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then',
         "baseline-capture-stan.sh",
         "BASELINE_RECOVERY_DIR=artifacts/recovery",
@@ -2685,12 +3031,22 @@ require_order(
         'oci_require_retained_telemetry_restore_profile "$OUTPUT_DIR" ||',
         'oci_die "final data handoff baseline validation failed"',
         "BASELINE_SHA256=%s",
+        "Revalidate exact release disk checkpoint before lock mutation",
     ],
     "final data handoff admission",
 )
+revalidation = data[
+    data.index("- name: Revalidate exact release disk checkpoint before lock mutation"):
+    data.index("- name: Acquire database operation lock")
+]
+if revalidation.count("\n      - name:") != 0:
+    raise SystemExit(
+        "another workflow operation intervenes between checkpoint revalidation "
+        "and lock acquisition"
+    )
 for literal in (
     "OUTPUT_DIR: artifacts/oci-data-baseline-before",
-    "BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}",
+    "BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}",
     '[ "$BASELINE_RECOVERY_SOURCE_SHA" = "none" ]',
     '"$BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$',
     'expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"',
@@ -2707,10 +3063,11 @@ if not preparation.split("oci_die \"final data handoff baseline validation faile
 
 maintenance = data[
     data.index("- name: Enter or re-establish live data maintenance"):
-    data.index("- name: Delete exact orphaned live-acceptance slips")
+    data.index("- name: Demote and verify exact retained live-acceptance account")
 ]
 for literal in (
-    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
+    'if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ] ||',
+    '[ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
     '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
     '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
     "live-data-maintenance-stan.sh enter",
@@ -2811,9 +3168,9 @@ resume_mode_env = (
     "RESUME_MAINTENANCE_MODE: "
     "${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}"
 )
-if data.count(resume_mode_env) != 2:
+if data.count(resume_mode_env) != 3:
     raise SystemExit(
-        "data workflow must bind resume mode only to entry and non-final restoration"
+        "data workflow must bind resume mode only to checkpoint, entry and restoration"
     )
 
 for literal in (
@@ -2832,8 +3189,14 @@ acquire_indexes = [
     for index, line in enumerate(deploy_lines)
     if "shared-mongo-operation-lock-stan.sh acquire" in line
 ]
-if len(acquire_indexes) != 2:
-    raise SystemExit("deploy workflow must have exactly two guarded lock acquisitions")
+if len(acquire_indexes) != 1:
+    raise SystemExit("deploy workflow may acquire only during post-failure rehold")
+if acquire_indexes[0] < next(
+    index
+    for index, line in enumerate(deploy_lines)
+    if "Re-enter maintenance after an incomplete deployment" in line
+):
+    raise SystemExit("deploy workflow retains an initial lock acquire fallback")
 for index in acquire_indexes:
     invocation = "\n".join(deploy_lines[max(0, index - 6) : index + 1])
     if (

@@ -378,6 +378,28 @@ Before deployment:
   already applied chain. Require the baseline digest, active transferred
   database lock, ingress write fence, and seven quiesced writer
   Deployments before applying images;
+- require the exact canonical `k3s-release-disk-checkpoint.v1` tuple. On a
+  descendant resume, keep build, infrastructure, and checkpoint runs bound to
+  the original checkpoint source while predecessor and failed-run evidence
+  binds the hash-covered `resume_source_sha`. Require a nonzero baseline
+  recovery's explicit source and exact checksum-bound fixed-profile artifact
+  before authority. Recursively resolve that artifact's exact build/upstream
+  and platform identities, infrastructure provenance, cache plan
+  carrier/origin, or failed partial-rollback state. Reject a new
+  byte-equivalent build or infrastructure run, unsafe/incomplete recovery
+  artifact ZIPs, checksum drift, or any v6/checkpoint substitution;
+- for failed-activation recovery, recursively resolve the failed activation,
+  successful deployment, and actual v6 handoff. Because that deployment
+  released the old hold, use public revalidation and a fresh exact lock before
+  demoting the artifact-bound account. Bind every Slip deletion to its
+  inspected identity and board revision/fingerprint; either role cleanup or an
+  atomic deletion conflict blocks the resumed phase;
+- require baseline and predecessor work to finish before the final public disk
+  revalidation, with that revalidation as the last read-only action before
+  lock acquisition. In held mode accept only stable infrastructure facts:
+  exact bytes, root/Mongo mount and node/runtime identity, and immutable
+  candidate/rollback residency; no HTTP, RabbitMQ, queue, pod, Deployment, or
+  mutable workload-health query is held evidence;
 - treat a successful final data phase as an active maintenance handoff, not a
   completed release, and proceed directly to its bound deployment.
 
@@ -391,6 +413,10 @@ During deployment:
   quiesced, the write fence active, and deployment-failure recovery armed;
 - after protected validation, release the transferred database lock before
   removing the public write fence;
+- renew the exact transferred OCI lock without an initial-acquire fallback,
+  perform the second fresh held revalidation after protected health, and block
+  release on the exact integer 70-percent boundary before releasing lock then
+  fence;
 - treat lock acquisition or release failure as deployment failure;
 - apply shared infrastructure without causing intermediate untagged application rollouts;
 - apply SHA-pinned application Deployments sequentially;

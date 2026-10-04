@@ -279,9 +279,30 @@ approval_state_for() {
 
 binding_run_json() {
   local run_id="$1"
-  local workflow workflow_id event title created_at updated_at
+  local workflow workflow_id event title created_at updated_at target_sha
+  local conclusion=success
   local subject_sha="${STUB_BINDING_SHA:-$SHA}"
+  target_sha="$TARGET_SHA"
+  if [[ "${STUB_PROFILE_ARTIFACT_MUTATION:-}" == "partial-target" ]]; then
+    target_sha="ffffffffffffffffffffffffffffffffffffffff"
+  fi
   case "$run_id" in
+    38)
+      workflow=oci-infrastructure.yml
+      event=workflow_dispatch
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="oci-infrastructure finalize k3s $subject_sha"
+      created_at=2025-12-31T21:00:00Z
+      updated_at=2025-12-31T21:01:00Z
+      ;;
+    39)
+      workflow=production-build.yml
+      event=push
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="historical production build"
+      created_at=2025-12-31T21:10:00Z
+      updated_at=2025-12-31T21:11:00Z
+      ;;
     41)
       workflow=oci-production-build.yml
       event=workflow_run
@@ -317,6 +338,130 @@ binding_run_json() {
       created_at=2026-01-01T00:08:00Z
       updated_at=2026-01-01T00:09:00Z
       ;;
+    47)
+      workflow=oci-infrastructure.yml
+      event=workflow_dispatch
+      title="oci-infrastructure finalize oke $subject_sha"
+      created_at=2026-01-01T00:10:00Z
+      updated_at=2026-01-01T00:11:00Z
+      ;;
+    48)
+      workflow=oci-live-data-rollout.yml
+      event=workflow_dispatch
+      title="oci-live-data apply-slip-index $subject_sha"
+      created_at=2026-01-01T00:16:00Z
+      updated_at=2026-01-01T00:17:00Z
+      ;;
+    49)
+      workflow=oci-live-data-rollout.yml
+      event=workflow_dispatch
+      title="oci-live-data dry-run $subject_sha"
+      created_at=2026-01-01T00:12:00Z
+      updated_at=2026-01-01T00:13:00Z
+      ;;
+    50)
+      workflow=oci-live-data-rollout.yml
+      event=workflow_dispatch
+      title="oci-live-data apply-backfills $subject_sha"
+      created_at=2026-01-01T00:14:00Z
+      updated_at=2026-01-01T00:15:00Z
+      ;;
+    51|52)
+      workflow=oci-production-deploy.yml
+      event=workflow_dispatch
+      title="oci-deploy $subject_sha"
+      created_at=2026-01-01T00:18:00Z
+      updated_at=2026-01-01T00:19:00Z
+      conclusion=failure
+      ;;
+    54)
+      workflow=oci-production-deploy.yml
+      event=workflow_dispatch
+      title="oci-deploy $subject_sha"
+      created_at=2026-01-01T00:18:00Z
+      updated_at=2026-01-01T00:19:00Z
+      ;;
+    55)
+      workflow=oci-ghcr-cache-recovery.yml
+      event=workflow_dispatch
+      title="oci-ghcr-cache-recovery ${STUB_BASELINE_RECOVERY_SOURCE_SHA}"
+      created_at=2026-01-01T00:22:00Z
+      updated_at=2026-01-01T00:23:00Z
+      ;;
+    56)
+      workflow=oci-production-build.yml
+      event=workflow_run
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="oci-build $subject_sha upstream-39"
+      created_at=2025-12-31T22:00:00Z
+      updated_at=2025-12-31T22:01:00Z
+      ;;
+    57)
+      workflow=oci-ghcr-cache-recovery.yml
+      event=workflow_dispatch
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="oci-ghcr-cache-recovery $subject_sha"
+      created_at=2026-01-01T00:20:00Z
+      updated_at=2026-01-01T00:21:00Z
+      conclusion=failure
+      ;;
+    58)
+      workflow=oci-production-rollback.yml
+      event=workflow_dispatch
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="oci-rollback $target_sha"
+      created_at=2026-01-01T00:26:00Z
+      updated_at=2026-01-01T00:27:00Z
+      ;;
+    59)
+      workflow=oci-production-build.yml
+      event=workflow_run
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="oci-build $subject_sha upstream-60"
+      created_at=2026-01-01T00:22:00Z
+      updated_at=2026-01-01T00:23:00Z
+      ;;
+    60)
+      workflow=production-build.yml
+      event=push
+      subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      title="production build"
+      created_at=2026-01-01T00:20:00Z
+      updated_at=2026-01-01T00:21:00Z
+      ;;
+    61)
+      workflow=oci-infrastructure.yml
+      event=workflow_dispatch
+      if [[ "${STUB_PROFILE_ARTIFACT_MUTATION:-}" == "partial-infra-source" ]]; then
+        subject_sha="ffffffffffffffffffffffffffffffffffffffff"
+      else
+        subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      fi
+      title="oci-infrastructure finalize k3s $subject_sha"
+      created_at=2026-01-01T00:18:00Z
+      updated_at=2026-01-01T00:19:00Z
+      ;;
+    62)
+      workflow=oci-production-rollback.yml
+      event=workflow_dispatch
+      if [[ "${STUB_PROFILE_ARTIFACT_MUTATION:-}" == "partial-failed-source" ]]; then
+        subject_sha="ffffffffffffffffffffffffffffffffffffffff"
+      else
+        subject_sha="$STUB_BASELINE_RECOVERY_SOURCE_SHA"
+      fi
+      title="oci-rollback $target_sha"
+      created_at=2026-01-01T00:24:00Z
+      updated_at=2026-01-01T00:25:00Z
+      conclusion=failure
+      ;;
+    53)
+      workflow=oci-live-betting-activate.yml
+      event=workflow_dispatch
+      title="oci-live-activate $subject_sha"
+      created_at=2026-01-01T00:20:00Z
+      updated_at=2026-01-01T00:21:00Z
+      conclusion=failure
+      ;;
     *)
       return 1
       ;;
@@ -332,6 +477,7 @@ binding_run_json() {
     --arg repo "$REPOSITORY" \
     --arg created_at "$created_at" \
     --arg updated_at "$updated_at" \
+    --arg conclusion "$conclusion" \
     '{
       id:$id,
       workflow_id:$workflow_id,
@@ -343,7 +489,7 @@ binding_run_json() {
       head_repository:{full_name:$repo},
       run_attempt:1,
       status:"completed",
-      conclusion:"success",
+      conclusion:$conclusion,
       created_at:$created_at,
       updated_at:$updated_at
     }'
@@ -354,11 +500,105 @@ binding_artifacts_json() {
   local artifact artifact_id
   local subject_sha="${STUB_BINDING_SHA:-$SHA}"
   case "$run_id" in
+    38)
+      artifact="oci-infrastructure-provenance-38-1"
+      artifact_id=9038
+      ;;
     41) artifact="oci-image-provenance-$subject_sha-41-1"; artifact_id=9041 ;;
     42) artifact="ghcr-package-management-validate-42-1"; artifact_id=9042 ;;
     43) artifact="oci-capacity-provenance-43-1"; artifact_id=9043 ;;
     44) artifact="oci-infrastructure-provenance-44-1"; artifact_id=9044 ;;
     45) artifact="oci-k3s-disk-diagnosis-45-1"; artifact_id=9045 ;;
+    47)
+      jq -cn --arg subject_sha "$subject_sha" '{
+        total_count:2,
+        artifacts:[
+          {
+            id:9047,
+            name:"oci-infrastructure-provenance-47-1",
+            expired:false,
+            size_in_bytes:4096
+          },
+          {
+            id:9147,
+            name:("oci-release-disk-checkpoint-" + $subject_sha + "-47-1"),
+            expired:false,
+            size_in_bytes:4096
+          }
+        ]
+      }'
+      return
+      ;;
+    48) artifact="oci-live-data-rollout-48-1"; artifact_id=9048 ;;
+    49) artifact="oci-live-data-rollout-49-1"; artifact_id=9049 ;;
+    50) artifact="oci-live-data-rollout-50-1"; artifact_id=9050 ;;
+    51)
+      jq -cn '{
+        total_count:3,
+        artifacts:[
+          {id:9051,name:"oci-production-baseline-51-1",expired:false,size_in_bytes:4096},
+          {id:9151,name:"oci-deploy-provenance-51-1",expired:false,size_in_bytes:4096},
+          {id:9251,name:"oci-deploy-recovery-authority-51-1",expired:false,size_in_bytes:4096}
+        ]
+      }'
+      return
+      ;;
+    52)
+      jq -cn '{
+        total_count:2,
+        artifacts:[
+          {id:9052,name:"oci-production-baseline-52-1",expired:false,size_in_bytes:4096},
+          {id:9152,name:"oci-deploy-provenance-52-1",expired:false,size_in_bytes:4096}
+        ]
+      }'
+      return
+      ;;
+    53) artifact="oci-live-activation-recovery-53-1"; artifact_id=9053 ;;
+    54) artifact="oci-deploy-provenance-54-1"; artifact_id=9154 ;;
+    55)
+      jq -cn --arg source "$STUB_BASELINE_RECOVERY_SOURCE_SHA" '{
+        total_count:2,
+        artifacts:[
+          {
+            id:9055,
+            name:("ghcr-cache-recovery-" + $source + "-55-1"),
+            expired:false,
+            size_in_bytes:4096
+          },
+          {
+            id:9155,
+            name:("ghcr-cache-recovery-plan-" + $source + "-55-1"),
+            expired:false,
+            size_in_bytes:4096
+          }
+        ]
+      }'
+      return
+      ;;
+    56)
+      artifact="oci-image-provenance-${STUB_BASELINE_RECOVERY_SOURCE_SHA}-56-1"
+      artifact_id=9056
+      ;;
+    57)
+      artifact="ghcr-cache-recovery-plan-${STUB_BASELINE_RECOVERY_SOURCE_SHA}-57-1"
+      artifact_id=9157
+      ;;
+    58)
+      artifact="oci-production-rollback-58-1"
+      artifact_id=9058
+      ;;
+    59)
+      artifact="oci-image-provenance-${STUB_BASELINE_RECOVERY_SOURCE_SHA}-59-1"
+      artifact_id=9059
+      ;;
+    61)
+      artifact="oci-infrastructure-provenance-61-1"
+      artifact_id=9061
+      ;;
+    62)
+      artifact="oci-production-rollback-62-1"
+      artifact_id=9062
+      ;;
     *) return 1 ;;
   esac
   jq -cn --arg artifact "$artifact" --argjson artifact_id "$artifact_id" '{
@@ -376,6 +616,982 @@ binding_artifact_zip() {
   local artifact_id="$1"
   local file_name content
   local subject_sha="${STUB_BINDING_SHA:-$SHA}"
+  case "$artifact_id" in
+    9038|9041|9048|9049|9050|9051|9052|9053|9055|9056|9058|9059|9061|9062|9151|9152|9154|9155|9157|9251)
+      python3 - \
+        "$artifact_id" \
+        "$subject_sha" \
+        "${STUB_BASELINE_RECOVERY_RUN_ID:-0}" \
+        "${STUB_BASELINE_RECOVERY_SOURCE_SHA:-none}" \
+        "${STUB_PROFILE_ARTIFACT_MUTATION:-}" \
+        "$TARGET_SHA" <<'PY'
+import hashlib
+import io
+import json
+import sys
+import zipfile
+
+artifact_id = int(sys.argv[1])
+source = sys.argv[2]
+recovery_run = sys.argv[3]
+recovery_source = sys.argv[4]
+mutation = sys.argv[5]
+target_sha = sys.argv[6]
+repository = "ghcr.io/vasilyevstan/betstan-images"
+services = [
+    "auth", "bet", "backoffice", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip", "telemetry",
+]
+
+def env(values):
+    return "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+
+def checksummed(files):
+    lines = []
+    for name in sorted(files):
+        lines.append(f"{hashlib.sha256(files[name]).hexdigest()}  {name}\n")
+    result = dict(files)
+    result["SHA256SUMS"] = "".join(lines).encode()
+    return result
+
+def archive(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for name, raw in files.items():
+            bundle.writestr(name, raw)
+    sys.stdout.buffer.write(output.getvalue())
+
+def rewrite_checked_env(files, file_name, key, value):
+    values = {}
+    for line in files[file_name].decode().splitlines():
+        current_key, current_value = line.split("=", 1)
+        values[current_key] = current_value
+    values[key] = value
+    payload = {
+        name: raw for name, raw in files.items()
+        if name != "SHA256SUMS"
+    }
+    payload[file_name] = env(values)
+    return checksummed(payload)
+
+images = []
+for service in services:
+    manifest = "sha256:" + hashlib.sha256(
+        (service + "-manifest").encode()
+    ).hexdigest()
+    platform = "sha256:" + hashlib.sha256(
+        (service + "-platform").encode()
+    ).hexdigest()
+    images.append(
+        "\t".join(
+            (service, repository, f"{repository}@{manifest}", manifest, platform)
+        )
+    )
+images_raw = ("\n".join(images) + "\n").encode()
+
+partial_services = [
+    "auth", "bet", "backoffice", "client", "event", "moderation",
+    "resulting", "slip", "gamemaster",
+]
+
+def partial_image_values(service, *, recovered=True):
+    manifest = "sha256:" + hashlib.sha256(
+        (service + "-manifest").encode()
+    ).hexdigest()
+    platform = "sha256:" + hashlib.sha256(
+        (service + "-platform").encode()
+    ).hexdigest()
+    if recovered and mutation == "partial-image" and service == "auth":
+        manifest = "sha256:" + "d" * 64
+    if recovered and mutation == "partial-build-platform" and service == "auth":
+        platform = "sha256:" + "e" * 64
+    return manifest, platform, f"{repository}@{manifest}"
+
+def partial_infrastructure_raw():
+    public_host = (
+        "other.betstan.xyz"
+        if mutation == "partial-infra-provenance"
+        else "betstan.xyz"
+    )
+    infrastructure_source = (
+        "f" * 40 if mutation == "partial-infra-source" else recovery_source
+    )
+    return env({
+        "source_sha": infrastructure_source,
+        "infrastructure_run_id": "61",
+        "infrastructure_run_attempt": "1",
+        "runtime_mode": "k3s",
+        "instance_fingerprint": "c" * 64,
+        "public_host": public_host,
+        "canonical_host": public_host,
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+    })
+
+checkpoint = {
+    "schemaVersion": "k3s-release-disk-checkpoint.v1",
+    "sourceSha": source,
+    "controlSha": source,
+    "infrastructureRunId": "47",
+    "ghcrBuildRunId": "41",
+    "producerRunId": "47",
+    "producerRunAttempt": "1",
+    "runtimeMode": "oke",
+    "disposition": "NOT_APPLICABLE",
+    "terminalStatus": "RELEASE_ELIGIBLE",
+}
+checkpoint["contentChecksumSha256"] = hashlib.sha256(
+    json.dumps(checkpoint, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+
+infrastructure_raw = (
+    f"source_sha={source}\n"
+    "infrastructure_run_id=47\n"
+    "infrastructure_run_attempt=1\n"
+    "infrastructure_finalized=true\n"
+    "runtime_mode=oke\n"
+    "ghcr_build_run_id=41\n"
+    "ghcr_package_validation_run_id=42\n"
+    "capacity_acquisition_run_id=0\n"
+).encode()
+
+baseline = {
+    "baseline_source_sha": source,
+    "baseline_deploy_workflow": "oci-production-deploy",
+    "baseline_deploy_run_id": "40",
+    "baseline_deploy_run_attempt": "1",
+    "baseline_build_workflow": "oci-production-build",
+    "baseline_build_run_id": "39",
+    "baseline_build_run_attempt": "1",
+    "baseline_recovery_run_id": "0",
+    "baseline_recovery_run_attempt": "0",
+    "baseline_transition_provenance_file": "none",
+    "baseline_capture_run_id": "48",
+    "baseline_capture_run_attempt": "1",
+    "namespace": "betstan-oci",
+    "public_url": "https://betstan.xyz",
+    "redirect_url": "https://www.betstan.xyz",
+    "diagnostic_url": "https://192.0.2.1.nip.io",
+    "http_attempts": "1",
+    "http_retry_seconds": "0",
+    "alias_probe_mode": "strict",
+    "sse_path": "/api/event/events",
+    "sse_requirement": "deployed-source",
+    "sse_required": "true",
+    "database_restore": "disabled",
+    "registry_provider": "ghcr",
+    "registry_host": "ghcr.io",
+    "registry_repository": repository,
+    "registry_public_anonymous": "true",
+}
+baseline_files = checksummed({
+    "baseline-provenance.env": env(baseline),
+    "evidence.txt": b"baseline\n",
+})
+baseline_sha = hashlib.sha256(baseline_files["SHA256SUMS"]).hexdigest()
+
+def predecessor(run_id, phase):
+    controls = {
+        "backfill_complete": "false",
+        "index_ready": "false",
+        "event_reschedule_complete": "false",
+        "backoffice_pre_september_cleanup_complete": "false",
+        "maintenance_fence_enforced": "false",
+        "writers_quiesced": "false",
+        "runtime_held_for_deploy": "false",
+        "operation_lock_enforced": "true",
+        "operation_lock_handoff": "false",
+    }
+    if phase == "apply-backfills":
+        controls.update({
+            "backfill_complete": "true",
+            "event_reschedule_complete": "true",
+            "maintenance_fence_enforced": "true",
+            "writers_quiesced": "true",
+        })
+    elif phase == "apply-slip-index":
+        controls.update({key: "true" for key in controls})
+    values = {
+        "schema_version": "live-betting-v6",
+        "source_sha": source,
+        "build_run_id": "41",
+        "infrastructure_run_id": "47",
+        "checkpoint_source_sha": source,
+        "disk_checkpoint_run_id": "47",
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": "NOT_APPLICABLE",
+        "baseline_sha256": baseline_sha,
+        "baseline_recovery_run_id": recovery_run,
+        "baseline_recovery_source_sha": recovery_source,
+        "workflow_run_id": str(run_id),
+        "workflow_run_attempt": "1",
+        "phase": phase,
+        "status": "PASS",
+        **controls,
+        "completed_at": "2026-01-01T00:00:00Z",
+    }
+    return checksummed({"provenance.env": env(values)}), values
+
+predecessor_files, predecessor_values = predecessor(48, "apply-slip-index")
+predecessor_sha = hashlib.sha256(
+    predecessor_files["SHA256SUMS"]
+).hexdigest()
+
+schema = {
+    "schema_version": "live-betting-v6",
+    "source_sha": source,
+    "build_run_id": "41",
+    "infrastructure_run_id": "47",
+    "checkpoint_source_sha": source,
+    "disk_checkpoint_run_id": "47",
+    "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+    "disk_checkpoint_disposition": "NOT_APPLICABLE",
+    "baseline_sha256": baseline_sha,
+    "baseline_recovery_run_id": recovery_run,
+    "baseline_recovery_source_sha": recovery_source,
+    "data_run_id": "48",
+    "data_run_attempt": "1",
+    "backfill_complete": "true",
+    "index_ready": "true",
+    "event_reschedule_complete": "true",
+    "backoffice_pre_september_cleanup_complete": "true",
+    "maintenance_fence_enforced": "true",
+    "writers_quiesced": "true",
+    "runtime_held_for_deploy": "true",
+    "operation_lock_enforced": "true",
+    "operation_lock_handoff": "true",
+}
+rabbit_raw = b"queue\t0\n"
+
+def deployment(run_id):
+    values = {
+        "source_sha": source,
+        "source_ref": "refs/heads/master",
+        "run_attempt": "1",
+        "runtime_mode": "oke",
+        "runtime_fingerprint": hashlib.sha256(b"runtime").hexdigest(),
+        "image_provenance_sha256": hashlib.sha256(images_raw).hexdigest(),
+        "rendered_manifest_sha256": hashlib.sha256(b"manifest").hexdigest(),
+        "rabbitmq_baseline_sha256": hashlib.sha256(rabbit_raw).hexdigest(),
+        "public_host": "betstan.xyz",
+        "canonical_host": "betstan.xyz",
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+        "deployment_workflow": "oci-production-deploy",
+        "deployment_run_id": str(run_id),
+        "deployment_run_attempt": "1",
+        "registry_provider": "ghcr",
+        "registry_host": "ghcr.io",
+        "registry_repository": repository,
+        "registry_public_anonymous": "true",
+        "build_run_id": "41",
+        "data_run_id": "48",
+        "data_run_attempt": "1",
+        "data_evidence_sha256": predecessor_sha,
+        "infrastructure_run_id": "47",
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            hashlib.sha256(infrastructure_raw).hexdigest(),
+        "checkpoint_source_sha": source,
+        "disk_checkpoint_run_id": "47",
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": "NOT_APPLICABLE",
+    }
+    return {
+        "provenance.txt": env(values),
+        "images.tsv": images_raw,
+        "rabbitmq-baseline.txt": rabbit_raw,
+        "live-schema.env": env(schema),
+    }
+
+def deployment_recovery(run_id):
+    intent = env({
+        "schema_version": "oci-deployment-recovery-authority-v1",
+        "source_sha": source,
+        "source_ref": "refs/heads/master",
+        "deployment_workflow": "oci-production-deploy",
+        "deployment_run_id": str(run_id),
+        "deployment_run_attempt": "1",
+        "runtime_mode": "oke",
+        "build_run_id": "41",
+        "candidate_images_sha256": hashlib.sha256(images_raw).hexdigest(),
+        "data_run_id": "48",
+        "data_run_attempt": "1",
+        "data_evidence_sha256": predecessor_sha,
+        "infrastructure_run_id": "47",
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            hashlib.sha256(infrastructure_raw).hexdigest(),
+        "checkpoint_source_sha": source,
+        "disk_checkpoint_run_id": "47",
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": "NOT_APPLICABLE",
+        "baseline_sha256": baseline_sha,
+        "baseline_capture_run_id": "48",
+        "baseline_recovery_run_id": recovery_run,
+        "baseline_recovery_source_sha": recovery_source,
+    })
+    intent_sha = hashlib.sha256(intent).hexdigest()
+    return checksummed({
+        "deployment-intent.env": intent,
+        "deployment-intent.sha256":
+            f"{intent_sha}  deployment-intent.env\n".encode(),
+        "failure-lineage.env": env({
+            "schema_version": "oci-deployment-failure-lineage-v1",
+            "source_sha": source,
+            "deployment_run_id": str(run_id),
+            "deployment_run_attempt": "1",
+            "intent_sha256": intent_sha,
+            "workflow_result": "failure",
+            "lock_release_outcome": "skipped",
+            "fence_release_outcome": "skipped",
+            "rehold_outcome": "success",
+        }),
+        "images.tsv": images_raw,
+    })
+
+if mutation == "metadata-only" and artifact_id == 9051:
+    raise SystemExit("artifact bytes intentionally unavailable")
+if mutation == "malformed-zip" and artifact_id == 9051:
+    sys.stdout.buffer.write(b"not-a-zip")
+    raise SystemExit(0)
+
+if artifact_id in {9055, 9155, 9157}:
+    trusted_build_run = "57" if mutation == "cache-build-run" else "56"
+    trusted_upstream_run = (
+        "40" if mutation == "cache-upstream-run" else "39"
+    )
+    infrastructure_run = "37" if mutation == "cache-infra-run" else "38"
+    plan_origin_run = "54" if mutation == "cache-plan-origin" else "57"
+    plan_carrier_run = (
+        "54"
+        if mutation == "cache-plan-carrier"
+        else "57" if artifact_id == 9157 else "55"
+    )
+    recovery_images = []
+    recovery_services = services[:-1]
+    for service in recovery_services:
+        manifest = "sha256:" + hashlib.sha256(
+            (service + "-recovery-manifest").encode()
+        ).hexdigest()
+        platform = "sha256:" + hashlib.sha256(
+            (service + "-recovery-platform").encode()
+        ).hexdigest()
+        recovery_images.append(
+            "\t".join(
+                (
+                    service,
+                    repository,
+                    f"{repository}@{manifest}",
+                    manifest,
+                    platform,
+                )
+            )
+        )
+    recovery_images_raw = ("\n".join(recovery_images) + "\n").encode()
+    recovery_image_hash = hashlib.sha256(recovery_images_raw).hexdigest()
+    plan_raw = (
+        "\n".join(
+            "\t".join(
+                (
+                    row.split("\t")[0],
+                    (
+                        "iad.ocir.io/example/images/"
+                        f"{row.split(chr(9))[0]}@{row.split(chr(9))[3]}"
+                    ),
+                    row.split("\t")[2],
+                    row.split("\t")[4],
+                    "pending",
+                )
+            )
+            for row in recovery_images
+        )
+        + "\n"
+    ).encode()
+    plan_hash = hashlib.sha256(plan_raw).hexdigest()
+    rabbit_raw = b"queue\t0\n"
+    rabbit_hash = hashlib.sha256(rabbit_raw).hexdigest()
+    infrastructure_public_host = (
+        "other.betstan.xyz"
+        if mutation == "cache-infra-provenance"
+        else "betstan.xyz"
+    )
+    infrastructure_raw = env({
+        "source_sha": recovery_source,
+        "infrastructure_run_id": infrastructure_run,
+        "infrastructure_run_attempt": "1",
+        "runtime_mode": "k3s",
+        "instance_fingerprint": "b" * 64,
+        "public_host": infrastructure_public_host,
+        "canonical_host": infrastructure_public_host,
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+    })
+    infrastructure_provenance_hash = hashlib.sha256(
+        infrastructure_raw
+    ).hexdigest()
+    plan_evidence = env({
+        "schema": "betstan.ghcr-cache-transition-plan.v1",
+        "source_sha": recovery_source,
+        "plan_origin_recovery_run_id": plan_origin_run,
+        "plan_carrier_recovery_run_id": plan_carrier_run,
+        "plan_carrier_recovery_run_attempt": "1",
+        "images_sha256": recovery_image_hash,
+        "infrastructure_provenance_sha256":
+            infrastructure_provenance_hash,
+        "transition_plan_sha256": plan_hash,
+        "rabbitmq_baseline_sha256": rabbit_hash,
+    })
+    if artifact_id in {9155, 9157}:
+        archive({
+            "transition-plan.tsv": plan_raw,
+            "rabbitmq-baseline.txt": rabbit_raw,
+            "transition-plan-evidence.env": plan_evidence,
+        })
+        raise SystemExit(0)
+    files = {
+        "images.tsv": recovery_images_raw,
+        "recovery-evidence.env": env({
+            "schema": "betstan.ghcr-cache-recovery.v1",
+            "recovery_origin": "containerd-cache",
+            "registry_provider": "ghcr",
+            "registry_repository": repository,
+            "anonymous_pull": "pass",
+            "source_sha": recovery_source,
+            "trusted_build_run_id": trusted_build_run,
+            "trusted_upstream_run_id": trusted_upstream_run,
+            "recovery_run_id": "55",
+            "recovery_run_attempt": "1",
+            "images_sha256": recovery_image_hash,
+        }),
+        "transition-plan.tsv": plan_raw,
+        "transition-plan-evidence.env": plan_evidence,
+        "rabbitmq-baseline.txt": rabbit_raw,
+    }
+    for row in recovery_images:
+        service, _, image_ref, manifest, platform = row.split("\t")
+        files[f"{service}.env"] = env({
+            "schema": "betstan.application-image-provenance.v1",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "registry_tag_prefix": "arm64",
+            "registry_tag_schema": "v1",
+            "service": service,
+            "repository": repository,
+            "source_sha": recovery_source,
+            "tag": f"{repository}:{service}-{recovery_source}-arm64",
+            "digest": manifest,
+            "platform_digest": platform,
+            "image_ref": image_ref,
+            "platform": "linux/arm64",
+            "build_workflow": "oci-production-build",
+            "build_run_id": trusted_build_run,
+            "build_run_attempt": "1",
+            "upstream_workflow": "production-build",
+            "upstream_run_id": trusted_upstream_run,
+            "upstream_run_attempt": "1",
+            "recovery_workflow": "oci-ghcr-cache-recovery",
+            "recovery_run_id": "55",
+            "recovery_run_attempt": "1",
+            "recovery_origin": "containerd-cache",
+            "recovery_origin_repository": "iad.ocir.io/example/images",
+            "recovery_origin_manifest_digest": (
+                "sha256:" + "f" * 64
+                if mutation == "cache-image-origin" and service == "auth"
+                else manifest
+            ),
+            "recovery_origin_platform_digest": platform,
+        })
+    files["transition-provenance.env"] = env({
+        "schema": "betstan.ghcr-cache-recovery-transition.v1",
+        "transition_workflow": "oci-ghcr-cache-recovery",
+        "transition_run_id": "55",
+        "transition_run_attempt": "1",
+        "source_sha": recovery_source,
+        "images_sha256": recovery_image_hash,
+        "infrastructure_run_id": infrastructure_run,
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            infrastructure_provenance_hash,
+        "runtime_mode": "k3s",
+        "runtime_fingerprint": "b" * 64,
+        "registry_provider": "ghcr",
+        "registry_host": "ghcr.io",
+        "registry_repository": repository,
+        "registry_public_anonymous": "true",
+        "public_host": "betstan.xyz",
+        "canonical_host": "betstan.xyz",
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+        "transition_plan_state_sha256": plan_hash,
+        "rabbitmq_baseline_sha256": rabbit_hash,
+        "credential_retirement": "pass",
+        "ocir_repository_retirement": "pass",
+        "transition_status": "PASS",
+    })
+    files["rebind-provenance.env"] = env({
+        "schema": "betstan.ghcr-cache-recovery-rebind.v1",
+        "transition_workflow": "oci-ghcr-cache-recovery",
+        "recovery_run_id": "55",
+        "recovery_run_attempt": "1",
+        "source_sha": recovery_source,
+        "images_sha256": recovery_image_hash,
+        "infrastructure_run_id": infrastructure_run,
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            infrastructure_provenance_hash,
+        "runtime_mode": "k3s",
+        "runtime_fingerprint": "b" * 64,
+        "registry_provider": "ghcr",
+        "registry_host": "ghcr.io",
+        "registry_repository": repository,
+        "registry_public_anonymous": "true",
+        "public_host": "betstan.xyz",
+        "canonical_host": "betstan.xyz",
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+        "transition_plan_state_sha256": plan_hash,
+        "rabbitmq_baseline_sha256": rabbit_hash,
+        "transition_plan_evidence_sha256":
+            hashlib.sha256(plan_evidence).hexdigest(),
+        "plan_origin_recovery_run_id": plan_origin_run,
+        "credential_retirement": "pending",
+        "transition_status": "REBIND_VERIFIED",
+    })
+    archive(checksummed(files))
+elif artifact_id == 9056:
+    legacy_upstream_run = "40" if mutation == "cache-upstream-run" else "39"
+    files = {
+        "build-chain.txt": env({
+            "source_sha": recovery_source,
+            "upstream_workflow": "production-build",
+            "upstream_run_id": legacy_upstream_run,
+            "upstream_run_attempt": "1",
+            "build_run_id": "56",
+            "build_run_attempt": "1",
+            "image_mode": "build",
+            "platform": "linux/arm64",
+        }),
+    }
+    for service in services[:-1]:
+        manifest = "sha256:" + hashlib.sha256(
+            (service + "-recovery-manifest").encode()
+        ).hexdigest()
+        platform = "sha256:" + hashlib.sha256(
+            (service + "-recovery-platform").encode()
+        ).hexdigest()
+        if mutation == "cache-build-platform" and service == "auth":
+            platform = "sha256:" + "e" * 64
+        origin_repository = "iad.ocir.io/example/images"
+        files[f"{service}.env"] = env({
+            "service": service,
+            "repository": origin_repository,
+            "source_sha": recovery_source,
+            "tag": f"{origin_repository}:oci-{service}-{recovery_source}",
+            "digest": manifest,
+            "platform_digest": platform,
+            "image_ref": f"{origin_repository}@{manifest}",
+            "platform": "linux/arm64",
+            "build_run_id": "56",
+            "build_run_attempt": "1",
+        })
+    archive(files)
+elif artifact_id == 9058:
+    effective_target = (
+        "f" * 40 if mutation == "partial-target" else target_sha
+    )
+    restored_build_run = "63" if mutation == "partial-build-run" else "59"
+    infrastructure_run = "63" if mutation == "partial-infra-run" else "61"
+    source_rollback_run = (
+        "63" if mutation == "partial-source-rollback" else "62"
+    )
+    image_lines = []
+    final_lines = []
+    readiness_lines = []
+    recovered = {}
+    for service in partial_services:
+        manifest, platform, image_ref = partial_image_values(service)
+        recovered[service] = image_ref
+        image_lines.append(
+            "\t".join(
+                (service, repository, image_ref, manifest, platform)
+            )
+        )
+        final_lines.append(
+            f"{service}\tgaming-{service}-depl\t{image_ref}\t1\t1\t1\t1"
+        )
+        readiness_lines.append(f"{service}\t{image_ref}\t1\t1\t1\t1")
+    partial_auth = (
+        f"{repository}@sha256:"
+        + hashlib.sha256(b"auth-partial").hexdigest()
+    )
+    if mutation == "partial-plan-state":
+        partial_auth = f"{repository}@sha256:" + "b" * 64
+    images_payload = ("\n".join(image_lines) + "\n").encode()
+    final_payload = ("\n".join(final_lines) + "\n").encode()
+    plan_payload = (
+        f"auth\tgaming-auth-depl\t{recovered['auth']}\t{partial_auth}\n"
+    ).encode()
+    rollout_payload = b"auth\trestored\n"
+    summary_payload = env({
+        "status": "PASS",
+        "mode": "abort-partial-rollback",
+        "target_sha": effective_target,
+        "source_rollback_run_id": source_rollback_run,
+        "recovered_services": "auth",
+        "database_restore": "disabled",
+        "telemetry_state": "retained",
+        "rollback_http_mutation_fence": "released",
+    })
+    readiness_summary = env({
+        "rollback_readiness": "GO",
+        "mode": "application-rollback",
+        "target_sha": effective_target,
+    })
+    readiness_workload = (
+        "\n".join(readiness_lines) + "\n"
+    ).encode()
+    readiness_failures = b""
+    telemetry_payload = env({
+        "mode": "retained",
+        "image": (
+            f"{repository}@sha256:"
+            + hashlib.sha256(b"retained-telemetry").hexdigest()
+        ),
+        "database_initialized": "true",
+        "queue_present": "true",
+    })
+    infrastructure_hash = hashlib.sha256(
+        partial_infrastructure_raw()
+    ).hexdigest()
+    if mutation == "partial-infra-hash":
+        infrastructure_hash = "f" * 64
+    authority = {
+        "schema": "betstan.partial-rollback-recovery-authority.v1",
+        "recovery_workflow": "oci-production-rollback",
+        "recovery_run_id": "58",
+        "recovery_run_attempt": "1",
+        "recovery_head_sha": recovery_source,
+        "source_rollback_run_id": source_rollback_run,
+        "target_sha": effective_target,
+        "restored_source_sha": recovery_source,
+        "restored_build_workflow": "oci-production-build",
+        "restored_build_run_id": restored_build_run,
+        "restored_build_run_attempt": "1",
+        "restored_build_artifact": (
+            f"oci-image-provenance-{recovery_source}-"
+            f"{restored_build_run}-1"
+        ),
+        "infrastructure_run_id": infrastructure_run,
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256": infrastructure_hash,
+        "runtime_mode": "k3s",
+        "runtime_fingerprint": "c" * 64,
+        "registry_provider": "ghcr",
+        "registry_host": "ghcr.io",
+        "registry_repository": repository,
+        "registry_public_anonymous": "true",
+        "public_host": "betstan.xyz",
+        "canonical_host": "betstan.xyz",
+        "redirect_host": "www.betstan.xyz",
+        "diagnostic_host": "192.0.2.1.nip.io",
+        "images_sha256": hashlib.sha256(images_payload).hexdigest(),
+        "final_state_sha256": hashlib.sha256(final_payload).hexdigest(),
+        "recovery_plan_sha256": hashlib.sha256(plan_payload).hexdigest(),
+        "recovery_rollout_order_sha256": hashlib.sha256(
+            rollout_payload
+        ).hexdigest(),
+        "recovery_summary_sha256": hashlib.sha256(
+            summary_payload
+        ).hexdigest(),
+        "rollback_readiness_summary_sha256": hashlib.sha256(
+            readiness_summary
+        ).hexdigest(),
+        "rollback_readiness_workload_sha256": hashlib.sha256(
+            readiness_workload
+        ).hexdigest(),
+        "rollback_readiness_failures_sha256": hashlib.sha256(
+            readiness_failures
+        ).hexdigest(),
+        "telemetry_state_sha256": hashlib.sha256(
+            telemetry_payload
+        ).hexdigest(),
+        "database_restore": "disabled",
+        "status": "PASS",
+    }
+    files = {
+        "images.tsv": images_payload,
+        "partial-recovery-authority.env": env(authority),
+        "partial-recovery-summary.env": summary_payload,
+        "recovery-plan.tsv": plan_payload,
+        "recovery-rollout-order.tsv": rollout_payload,
+        "final-state.tsv": final_payload,
+        "rollback-readiness/summary.env": readiness_summary,
+        "rollback-readiness/workload-state.tsv": readiness_workload,
+        "rollback-readiness/failures.txt": readiness_failures,
+        "telemetry-recovery.env": telemetry_payload,
+    }
+    files["partial-recovery-SHA256SUMS"] = "".join(
+        f"{hashlib.sha256(files[name]).hexdigest()}  {name}\n"
+        for name in sorted(files)
+    ).encode()
+    if mutation == "partial-additional-member":
+        files["unexpected.txt"] = b"unexpected\n"
+    archive(files)
+elif artifact_id == 9059:
+    build_upstream_run = (
+        "63" if mutation == "partial-upstream-run" else "60"
+    )
+    files = {
+        "build-chain.txt": env({
+            "source_sha": recovery_source,
+            "upstream_workflow": "production-build",
+            "upstream_run_id": build_upstream_run,
+            "upstream_run_attempt": "1",
+            "build_run_id": "59",
+            "build_run_attempt": "1",
+            "build_trigger_workflow": "production-build",
+            "build_trigger_run_id": build_upstream_run,
+            "repair_mode": "false",
+            "image_mode": "build",
+            "platform": "linux/arm64",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "registry_repository": repository,
+            "registry_public": "true",
+            "anonymous_pull": "pass",
+        }),
+    }
+    for service in partial_services:
+        manifest, platform, image_ref = partial_image_values(
+            service, recovered=False
+        )
+        files[f"{service}.env"] = env({
+            "schema": "betstan.application-image-provenance.v1",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "registry_tag_prefix": "arm64",
+            "registry_tag_schema": "v1",
+            "service": service,
+            "repository": repository,
+            "source_sha": recovery_source,
+            "tag": f"{repository}:arm64-{service}-{recovery_source}",
+            "digest": manifest,
+            "platform_digest": platform,
+            "image_ref": image_ref,
+            "platform": "linux/arm64",
+            "build_run_id": "59",
+            "build_run_attempt": "1",
+            "build_workflow": "oci-production-build",
+            "upstream_workflow": "production-build",
+            "upstream_run_id": build_upstream_run,
+            "upstream_run_attempt": "1",
+        })
+    archive(files)
+elif artifact_id == 9061:
+    archive({"provenance.env": partial_infrastructure_raw()})
+elif artifact_id == 9062:
+    failed_target = target_sha
+    restored = {
+        service: partial_image_values(service, recovered=False)[2]
+        for service in partial_services
+    }
+    partial_auth = (
+        f"{repository}@sha256:"
+        + hashlib.sha256(b"auth-partial").hexdigest()
+    )
+    pre_lines = []
+    partial_lines = []
+    for service in partial_services:
+        pre_image = restored[service]
+        if mutation == "partial-pre-state" and service == "auth":
+            pre_image = f"{repository}@sha256:" + "e" * 64
+        pre_lines.append(
+            f"{service}\tgaming-{service}-depl\t{pre_image}\t1\t1/1"
+        )
+        partial_image = partial_auth if service == "auth" else restored[service]
+        if mutation == "partial-failed-partial-state" and service == "auth":
+            partial_image = f"{repository}@sha256:" + "c" * 64
+        partial_lines.append(f"{service}\t{partial_image}\t1")
+    rollout = b"auth\n"
+    if mutation == "partial-rollout-order":
+        rollout = b"auth\nbet\n"
+    telemetry_image = (
+        f"{repository}@sha256:"
+        + hashlib.sha256(b"retained-telemetry").hexdigest()
+    )
+    if mutation == "partial-telemetry":
+        telemetry_image = f"{repository}@sha256:" + "a" * 64
+    archive({
+        "failure-state.env": env({
+            "status": "FAIL",
+            "failed_service": "auth",
+            "failed_deployment": "gaming-auth-depl",
+            "failed_stage": "public-api",
+            "failed_step_label": "failed-auth",
+            "rollback_http_mutation_fence": "active",
+            "message": "synthetic failed rollback",
+        }),
+        "pre-rollback-state.tsv": (
+            "\n".join(pre_lines) + "\n"
+        ).encode(),
+        "partial-state.tsv": (
+            "\n".join(partial_lines) + "\n"
+        ).encode(),
+        "rollout-order.tsv": rollout,
+        "baseline-provenance.env": env({
+            "baseline_source_sha": failed_target,
+        }),
+        "telemetry-pre-run.env": env({
+            "mode": "retained",
+            "image": telemetry_image,
+            "database_initialized": "true",
+            "queue_present": "true",
+        }),
+    })
+elif artifact_id == 9038:
+    infrastructure_public_host = (
+        "other.betstan.xyz"
+        if mutation == "cache-infra-provenance"
+        else "betstan.xyz"
+    )
+    infrastructure_raw = env({
+            "source_sha": recovery_source,
+            "infrastructure_run_id": "38",
+            "infrastructure_run_attempt": "1",
+            "runtime_mode": "k3s",
+            "instance_fingerprint": "b" * 64,
+            "public_host": infrastructure_public_host,
+            "canonical_host": infrastructure_public_host,
+            "redirect_host": "www.betstan.xyz",
+            "diagnostic_host": "192.0.2.1.nip.io",
+        })
+    if mutation == "cache-infra-artifact":
+        infrastructure_raw += b"unexpected=tampered\n"
+    archive({"provenance.env": infrastructure_raw})
+elif artifact_id == 9041:
+    archive({
+        "build-chain.txt": env({
+            "source_sha": source,
+            "build_run_id": "41",
+            "build_run_attempt": "1",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "registry_repository": repository,
+            "registry_public": "true",
+            "anonymous_pull": "pass",
+        }),
+        "images.tsv": images_raw,
+    })
+elif artifact_id in {9048, 9049, 9050}:
+    run_id, phase = {
+        9048: (48, "apply-slip-index"),
+        9049: (49, "dry-run"),
+        9050: (50, "apply-backfills"),
+    }[artifact_id]
+    files = predecessor(run_id, phase)[0]
+    v6_mutations = {
+        "v6-source_sha": ("source_sha", "b" * 40),
+        "v6-build_run_id": ("build_run_id", "99"),
+        "v6-infrastructure_run_id": ("infrastructure_run_id", "99"),
+        "v6-checkpoint_source_sha": ("checkpoint_source_sha", "b" * 40),
+        "v6-disk_checkpoint_run_id": ("disk_checkpoint_run_id", "99"),
+        "v6-disk_checkpoint_sha256": ("disk_checkpoint_sha256", "d" * 64),
+        "v6-disk_checkpoint_disposition": (
+            "disk_checkpoint_disposition", "READY_NO_RECLAIM"
+        ),
+        "v6-baseline_sha256": ("baseline_sha256", "e" * 64),
+        "v6-recovery_tuple": ("baseline_recovery_run_id", "99"),
+        "v6-workflow_run_id": ("workflow_run_id", "99"),
+        "v6-phase": ("phase", "dry-run"),
+    }
+    if artifact_id == 9048 and mutation in v6_mutations:
+        files = rewrite_checked_env(
+            files, "provenance.env", *v6_mutations[mutation]
+        )
+    archive(files)
+elif artifact_id in {9051, 9052}:
+    files = dict(baseline_files)
+    if artifact_id == 9051 and mutation == "missing-zip-content":
+        files.pop("evidence.txt")
+    elif artifact_id == 9051 and mutation == "bad-checksum":
+        files["evidence.txt"] = b"substituted\n"
+    elif artifact_id == 9051 and mutation == "bad-capture-run":
+        files = rewrite_checked_env(
+            files, "baseline-provenance.env",
+            "baseline_capture_run_id", "99",
+        )
+    archive(files)
+elif artifact_id in {9151, 9152, 9154}:
+    archive(deployment({9151: 51, 9152: 52, 9154: 54}[artifact_id]))
+elif artifact_id == 9251:
+    archive(deployment_recovery(51))
+else:
+    control = b"after_flag=false\nafter_lease_until_epoch=0\n"
+    control_sha = hashlib.sha256(control).hexdigest()
+    activation = {
+        "source_sha": source,
+        "build_run_id": "41",
+        "infrastructure_run_id": "47",
+        "deployment_run_id": "54",
+        "checkpoint_source_sha": source,
+        "disk_checkpoint_run_id": "47",
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": "NOT_APPLICABLE",
+        "live_acceptance_user_id": "0123456789abcdef01234567",
+        "activation_run_id": "53",
+        "activation_run_attempt": "1",
+        "activate_control_sha256": "none",
+        "acceptance_sha256": "none",
+        "accepted_sha256": "none",
+        "commit_control_sha256": "none",
+        "failure_disable_sha256": control_sha,
+        "final_disable_sha256": "none",
+        "final_control_file":
+            "artifacts/live-control/failure-disable/control.env",
+        "final_control_sha256": control_sha,
+        "live_kickoffs_enabled": "false",
+        "activation_state": "dark",
+        "activation_lease_until_epoch": "0",
+        "workflow_result": "failure",
+        "workflow_phase": "acceptance-fallback",
+        "accepted_outcome": "failure",
+        "accepted_evidence_upload_outcome": "skipped",
+        "commit_preflight_outcome": "skipped",
+        "commit_outcome": "skipped",
+        "failure_disable_outcome": "success",
+        "final_disable_outcome": "skipped",
+        "post_commit_status": "not-applicable",
+        "revoke_runner_outcome": "success",
+        "close_bastion_outcome": "success",
+    }
+    activation_mutations = {
+        "activation-source_sha": ("source_sha", "b" * 40),
+        "activation-build_run_id": ("build_run_id", "99"),
+        "activation-infrastructure_run_id": ("infrastructure_run_id", "99"),
+        "activation-deployment_run_id": ("deployment_run_id", "51"),
+        "activation-checkpoint_source_sha": (
+            "checkpoint_source_sha", "b" * 40
+        ),
+        "activation-disk_checkpoint_run_id": ("disk_checkpoint_run_id", "99"),
+        "activation-disk_checkpoint_sha256": (
+            "disk_checkpoint_sha256", "d" * 64
+        ),
+        "activation-disk_checkpoint_disposition": (
+            "disk_checkpoint_disposition", "READY_NO_RECLAIM"
+        ),
+    }
+    if mutation in activation_mutations:
+        key, value = activation_mutations[mutation]
+        activation[key] = value
+    archive(checksummed({
+        "provenance.env": env(activation),
+        "failure-disable/control.env": control,
+    }))
+PY
+      return
+      ;;
+  esac
   case "$artifact_id" in
     9041)
       file_name=build-chain.txt
@@ -443,6 +1659,92 @@ capacity_acquisition_run_id=43
         thresholdPercent:70
       }')"
       ;;
+    9047)
+      file_name=provenance.env
+      content="source_sha=$subject_sha
+infrastructure_run_id=47
+infrastructure_run_attempt=1
+infrastructure_finalized=true
+runtime_mode=oke
+ghcr_build_run_id=41
+ghcr_package_validation_run_id=42
+capacity_acquisition_run_id=0
+"
+      ;;
+    9147)
+      file_name=checkpoint.json
+      content="$(python3 - "$subject_sha" <<'PY'
+import hashlib
+import json
+import sys
+
+checkpoint = {
+    "schemaVersion": "k3s-release-disk-checkpoint.v1",
+    "sourceSha": sys.argv[1],
+    "controlSha": sys.argv[1],
+    "infrastructureRunId": "47",
+    "ghcrBuildRunId": "41",
+    "producerRunId": "47",
+    "producerRunAttempt": "1",
+    "runtimeMode": "oke",
+    "disposition": "NOT_APPLICABLE",
+    "terminalStatus": "RELEASE_ELIGIBLE",
+}
+canonical = json.dumps(checkpoint, sort_keys=True, separators=(",", ":"))
+checkpoint["contentChecksumSha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+print(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")))
+PY
+)"
+      ;;
+    9048)
+      file_name=provenance.env
+      content="source_sha=$subject_sha
+workflow_run_id=48
+workflow_run_attempt=1
+phase=apply-slip-index
+schema_version=live-betting-v6
+checkpoint_source_sha=$subject_sha
+disk_checkpoint_run_id=47
+"
+      ;;
+    9049)
+      file_name=provenance.env
+      content="source_sha=$subject_sha
+workflow_run_id=49
+workflow_run_attempt=1
+phase=dry-run
+schema_version=live-betting-v6
+checkpoint_source_sha=$subject_sha
+disk_checkpoint_run_id=47
+"
+      ;;
+    9050)
+      file_name=provenance.env
+      content="source_sha=$subject_sha
+workflow_run_id=50
+workflow_run_attempt=1
+phase=apply-backfills
+schema_version=live-betting-v6
+checkpoint_source_sha=$subject_sha
+disk_checkpoint_run_id=47
+"
+      ;;
+    9051|9052)
+      file_name=baseline.env
+      content="source_sha=$subject_sha
+"
+      ;;
+    9053)
+      file_name=provenance.env
+      content="source_sha=$subject_sha
+activation_run_id=53
+activation_run_attempt=1
+activation_state=dark
+live_kickoffs_enabled=false
+workflow_result=failure
+live_acceptance_user_id=0123456789abcdef01234567
+"
+      ;;
     *)
       return 1
       ;;
@@ -458,6 +1760,67 @@ with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
     bundle.writestr(file_name, content)
 sys.stdout.buffer.write(archive.getvalue())
 PY
+}
+
+binding_jobs_json() {
+  local run_id="$1"
+  case "$run_id" in
+    51)
+      jq -cn '{
+        total_count:2,
+        jobs:[
+          {
+            name:"deploy",
+            conclusion:"failure",
+            steps:[
+              {name:"Write checksum-bound deployment recovery intent",conclusion:"success"},
+              {name:"Release transferred lock after protected validation",conclusion:"skipped"},
+              {name:"Release live data maintenance fence",conclusion:"skipped"},
+              {name:"Re-enter maintenance after an incomplete deployment",conclusion:"success"},
+              {name:"Finalize deployment recovery authority",conclusion:"success"},
+              {name:"Upload deployment recovery authority",conclusion:"success"}
+            ]
+          },
+          {name:"public-validate",conclusion:"skipped",steps:[]}
+        ]
+      }'
+      ;;
+    52)
+      jq -cn '{
+        total_count:2,
+        jobs:[
+          {
+            name:"deploy",
+            conclusion:"success",
+            steps:[
+              {name:"Release transferred lock after protected validation",conclusion:"success"},
+              {name:"Release live data maintenance fence",conclusion:"success"},
+              {name:"Re-enter maintenance after an incomplete deployment",conclusion:"skipped"}
+            ]
+          },
+          {name:"public-validate",conclusion:"failure",steps:[]}
+        ]
+      }'
+      ;;
+    53)
+      jq -cn '{
+        total_count:1,
+        jobs:[{
+          name:"activate-and-validate",
+          conclusion:"failure",
+          steps:[
+            {name:"Resolve reusable validation account",conclusion:"success"},
+            {name:"Revoke and clean reusable validation account",conclusion:"failure"},
+            {name:"Enforce dark mode unless activation committed",conclusion:"success"},
+            {name:"Write final activation provenance",conclusion:"success"},
+            {name:"Upload protected activation evidence",conclusion:"success"},
+            {name:"Upload activation recovery authority",conclusion:"success"}
+          ]
+        }]
+      }'
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 git() {
@@ -638,39 +2001,120 @@ gh() {
     "repos/$REPOSITORY/environments/"*"/variables/OCI_RUNTIME_MODE")
       printf '%s\n' "${STUB_OCI_RUNTIME_MODE:-k3s}"
       ;;
+    "repos/$REPOSITORY/actions/runs/38"|\
+    "repos/$REPOSITORY/actions/runs/39"|\
     "repos/$REPOSITORY/actions/runs/41"|\
     "repos/$REPOSITORY/actions/runs/42"|\
     "repos/$REPOSITORY/actions/runs/43"|\
     "repos/$REPOSITORY/actions/runs/44"|\
     "repos/$REPOSITORY/actions/runs/45"|\
+    "repos/$REPOSITORY/actions/runs/47"|\
+    "repos/$REPOSITORY/actions/runs/48"|\
+    "repos/$REPOSITORY/actions/runs/49"|\
+    "repos/$REPOSITORY/actions/runs/50"|\
+    "repos/$REPOSITORY/actions/runs/51"|\
+    "repos/$REPOSITORY/actions/runs/52"|\
+    "repos/$REPOSITORY/actions/runs/53"|\
+    "repos/$REPOSITORY/actions/runs/54"|\
+    "repos/$REPOSITORY/actions/runs/55"|\
+    "repos/$REPOSITORY/actions/runs/56"|\
+    "repos/$REPOSITORY/actions/runs/57"|\
+    "repos/$REPOSITORY/actions/runs/58"|\
+    "repos/$REPOSITORY/actions/runs/59"|\
+    "repos/$REPOSITORY/actions/runs/60"|\
+    "repos/$REPOSITORY/actions/runs/61"|\
+    "repos/$REPOSITORY/actions/runs/62"|\
+    "repos/$REPOSITORY/actions/runs/38/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/39/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/41/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/42/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/43/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/44/attempts/1"|\
-    "repos/$REPOSITORY/actions/runs/45/attempts/1")
+    "repos/$REPOSITORY/actions/runs/45/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/47/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/48/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/49/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/50/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/51/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/52/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/53/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/54/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/55/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/56/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/57/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/58/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/59/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/60/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/61/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/62/attempts/1")
       local binding_run_id
       binding_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
       binding_run_id="${binding_run_id%%/*}"
       binding_run_json "$binding_run_id"
       ;;
+    "repos/$REPOSITORY/actions/runs/38/artifacts?per_page=100"|\
     "repos/$REPOSITORY/actions/runs/41/artifacts?per_page=100"|\
     "repos/$REPOSITORY/actions/runs/42/artifacts?per_page=100"|\
     "repos/$REPOSITORY/actions/runs/43/artifacts?per_page=100"|\
     "repos/$REPOSITORY/actions/runs/44/artifacts?per_page=100"|\
-    "repos/$REPOSITORY/actions/runs/45/artifacts?per_page=100")
+    "repos/$REPOSITORY/actions/runs/45/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/47/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/48/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/49/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/50/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/51/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/52/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/53/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/54/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/55/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/56/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/57/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/58/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/59/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/61/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/62/artifacts?per_page=100")
       local binding_artifact_run_id
       binding_artifact_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
       binding_artifact_run_id="${binding_artifact_run_id%%/*}"
       binding_artifacts_json "$binding_artifact_run_id"
       ;;
+    "repos/$REPOSITORY/actions/artifacts/9038/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9041/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9042/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9043/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9044/zip"|\
-    "repos/$REPOSITORY/actions/artifacts/9045/zip")
+    "repos/$REPOSITORY/actions/artifacts/9045/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9047/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9147/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9048/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9049/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9050/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9051/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9052/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9053/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9055/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9056/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9157/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9058/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9059/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9061/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9062/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9155/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9151/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9152/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9154/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9251/zip")
       local binding_artifact_id
       binding_artifact_id="${endpoint%/zip}"
       binding_artifact_zip "${binding_artifact_id##*/}"
+      ;;
+    "repos/$REPOSITORY/actions/runs/51/attempts/1/jobs?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/52/attempts/1/jobs?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/53/attempts/1/jobs?per_page=100")
+      local binding_jobs_run_id
+      binding_jobs_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
+      binding_jobs_run_id="${binding_jobs_run_id%%/*}"
+      binding_jobs_json "$binding_jobs_run_id"
       ;;
     "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID")
       local status="${STUB_RUN_STATUS:-waiting}"
@@ -828,6 +2272,7 @@ PY
 }
 export -f git gh authority_is_inflight workflow_id_for approval_state_for
 export -f binding_run_json binding_artifacts_json binding_artifact_zip
+export -f binding_jobs_json
 export ROOT_DIR SHA TARGET_SHA BLOB REPOSITORY post_count_file approval_history_file
 export workflow_state_count_file
 export STUB_PACKAGE_CANDIDATE_BUILD_ID
@@ -838,6 +2283,22 @@ printf '%s\n' \
   'gh "$@"' \
   >"$tmp_dir/bin/gh"
 chmod 755 "$tmp_dir/bin/gh"
+cat >"$tmp_dir/bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-}" in
+  "merge-base --is-ancestor")
+    [ "${STUB_ANCESTOR_FAIL:-false}" != true ]
+    ;;
+  "diff --name-only")
+    printf '.github/workflows/recovery-fixture.yml\0'
+    ;;
+  *)
+    exec /usr/bin/git "$@"
+    ;;
+esac
+EOF
+chmod 755 "$tmp_dir/bin/git"
 export PATH="$tmp_dir/bin:$PATH"
 
 make_request() {
@@ -867,16 +2328,46 @@ if policy["operation"] == "oci-k3s-disk-reclaim-cri":
 for name in policy["positiveIntegerInputs"]:
     inputs[name] = "42"
 for name, value in {
+    "build_run_id": "41",
     "ghcr_build_run_id": "41",
     "ghcr_package_validation_run_id": "42",
     "capacity_acquisition_run_id": "43",
     "infrastructure_run_id": "44",
     "diagnosis_run_id": "45",
+    "disk_checkpoint_run_id": "47",
+    "data_run_id": "48",
 }.items():
     if name in inputs and inputs[name] != "":
         inputs[name] = value
+if "disk_checkpoint_run_id" in inputs and "infrastructure_run_id" in inputs:
+    inputs["infrastructure_run_id"] = "47"
+if "prerequisite_run_id" in inputs:
+    if policy["operation"] == "oci-live-data-apply-backfills":
+        inputs["prerequisite_run_id"] = "49"
+    elif policy["operation"] == "oci-live-data-apply-slip-index":
+        inputs["prerequisite_run_id"] = "50"
+    elif policy["fixedInputs"].get("phase") == "apply-slip-index":
+        inputs["prerequisite_run_id"] = "48"
+if "failed_deploy_run_id" in inputs and inputs["failed_deploy_run_id"] != "0":
+    inputs["failed_deploy_run_id"] = (
+        "52" if policy["operation"].endswith("-released") else "51"
+    )
+if "failed_activation_run_id" in inputs and inputs["failed_activation_run_id"] != "0":
+    inputs["failed_activation_run_id"] = "53"
+if (
+    "baseline_recovery_run_id" in inputs
+    and policy["operation"].endswith("-recovered")
+):
+    inputs["baseline_recovery_run_id"] = os.environ.get(
+        "STUB_REQUEST_BASELINE_RECOVERY_RUN_ID", "55"
+    )
 for name in policy["zeroOrPositiveIntegerInputs"]:
     inputs[name] = "0"
+if (
+    inputs.get("baseline_recovery_run_id") == "0"
+    and "baseline_recovery_source_sha" in inputs
+):
+    inputs["baseline_recovery_source_sha"] = "none"
 for name in policy["fullShaInputs"]:
     inputs[name] = control_sha
 for name in policy["objectIdOrLiterals"]:
@@ -1047,8 +2538,19 @@ make_record() {
 
 load_record_stub() {
   local operation="$1"
+  local selected_run_id="${2:-}"
   local row runtime_mode
-  row="$(awk -F '\t' -v operation="$operation" '$1 == operation { print; exit }' "$records_file")"
+  if [[ -n "$selected_run_id" ]]; then
+    row="$(
+      awk -F '\t' \
+        -v operation="$operation" \
+        -v run_id="$selected_run_id" \
+        '$1 == operation && $2 == run_id { print; exit }' \
+        "$records_file"
+    )"
+  else
+    row="$(awk -F '\t' -v operation="$operation" '$1 == operation { print; exit }' "$records_file")"
+  fi
   [[ -n "$row" ]] || {
     echo "missing test record for $operation" >&2
     exit 1
@@ -1073,11 +2575,24 @@ load_record_stub() {
   unset STUB_PACKAGE_CANDIDATE_BUILD_ID
   unset STUB_DISK_DIAGNOSIS_SCHEMA
   unset STUB_ANCESTOR_FAIL
+  unset STUB_PROFILE_ARTIFACT_MUTATION
   STUB_BINDING_SHA="$SHA"
   if [[ -f "$tmp_dir/request-$STUB_RUN_ID.json" ]]; then
     STUB_BINDING_SHA="$(jq -er '.subjectSha // .controlSha' "$tmp_dir/request-$STUB_RUN_ID.json")"
+    STUB_BASELINE_RECOVERY_RUN_ID="$(
+      jq -er '.inputs.baseline_recovery_run_id // "0"' \
+        "$tmp_dir/request-$STUB_RUN_ID.json"
+    )"
+    STUB_BASELINE_RECOVERY_SOURCE_SHA="$(
+      jq -er '.inputs.baseline_recovery_source_sha // "none"' \
+        "$tmp_dir/request-$STUB_RUN_ID.json"
+    )"
+  else
+    STUB_BASELINE_RECOVERY_RUN_ID=0
+    STUB_BASELINE_RECOVERY_SOURCE_SHA=none
   fi
   export STUB_BINDING_SHA
+  export STUB_BASELINE_RECOVERY_RUN_ID STUB_BASELINE_RECOVERY_SOURCE_SHA
   unset STUB_UPSTREAM_RUN_ID STUB_UPSTREAM_WORKFLOW STUB_UPSTREAM_WORKFLOW_ID
   unset STUB_UPSTREAM_TITLE STUB_UPSTREAM_EVENT STUB_UPSTREAM_CONCLUSION
   runtime_mode="$(
@@ -1085,6 +2600,10 @@ load_record_stub() {
   )"
   if [[ -n "$runtime_mode" ]]; then
     STUB_OCI_RUNTIME_MODE="$runtime_mode"
+    export STUB_OCI_RUNTIME_MODE
+  elif jq -e '.inputs.disk_checkpoint_run_id? != null' \
+    "$tmp_dir/request-$STUB_RUN_ID.json" >/dev/null 2>&1; then
+    STUB_OCI_RUNTIME_MODE=oke
     export STUB_OCI_RUNTIME_MODE
   fi
 }
@@ -1167,6 +2686,96 @@ done < <(
   "$POLICY" all |
     jq -r '.[] | select(.authority == "dispatch-record") | .operation'
 )
+
+partial_recovery_dispatch_run=8901
+STUB_REQUEST_BASELINE_RECOVERY_RUN_ID=58 \
+  make_record oci-production-deploy-recovered \
+    "$partial_recovery_dispatch_run"
+load_record_stub \
+  oci-production-deploy-recovered \
+  "$partial_recovery_dispatch_run"
+run_approver "$STUB_RUN_ID" >"$output_file"
+grep -qF "status=ELIGIBLE" "$output_file"
+
+assert_profile_artifact_rejected() {
+  local operation="$1"
+  local mutation="$2"
+  local selected_run_id="${3:-}"
+  load_record_stub "$operation" "$selected_run_id"
+  if STUB_PROFILE_ARTIFACT_MUTATION="$mutation" \
+    run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
+    echo "approver accepted fixed-profile artifact mutation: $mutation" >&2
+    exit 1
+  fi
+  jq -e '.state == "issued" and .inflightApproval == null' \
+    "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+}
+
+for mutation in \
+  metadata-only malformed-zip missing-zip-content bad-checksum bad-capture-run; do
+  assert_profile_artifact_rejected oci-live-data-resume-deploy "$mutation"
+done
+for mutation in \
+  cache-build-run \
+  cache-upstream-run \
+  cache-build-platform \
+  cache-image-origin \
+  cache-infra-run \
+  cache-infra-artifact \
+  cache-infra-provenance \
+  cache-plan-carrier \
+  cache-plan-origin; do
+  assert_profile_artifact_rejected oci-production-deploy-recovered "$mutation"
+done
+for mutation in \
+  partial-build-run \
+  partial-upstream-run \
+  partial-image \
+  partial-build-platform \
+  partial-infra-run \
+  partial-infra-hash \
+  partial-infra-provenance \
+  partial-infra-source \
+  partial-failed-source \
+  partial-source-rollback \
+  partial-target \
+  partial-additional-member \
+  partial-plan-state \
+  partial-failed-partial-state \
+  partial-pre-state \
+  partial-rollout-order \
+  partial-telemetry; do
+  assert_profile_artifact_rejected \
+    oci-production-deploy-recovered \
+    "$mutation" \
+    "$partial_recovery_dispatch_run"
+done
+for mutation in \
+  v6-source_sha \
+  v6-build_run_id \
+  v6-infrastructure_run_id \
+  v6-checkpoint_source_sha \
+  v6-disk_checkpoint_run_id \
+  v6-disk_checkpoint_sha256 \
+  v6-disk_checkpoint_disposition \
+  v6-baseline_sha256 \
+  v6-recovery_tuple \
+  v6-workflow_run_id \
+  v6-phase; do
+  assert_profile_artifact_rejected oci-live-data-resume-deploy "$mutation"
+done
+for mutation in \
+  activation-source_sha \
+  activation-build_run_id \
+  activation-infrastructure_run_id \
+  activation-deployment_run_id \
+  activation-checkpoint_source_sha \
+  activation-disk_checkpoint_run_id \
+  activation-disk_checkpoint_sha256 \
+  activation-disk_checkpoint_disposition; do
+  assert_profile_artifact_rejected oci-live-data-resume-activation "$mutation"
+done
+echo "copilot_cli_profile_artifact_rejection_tests=PASS"
 
 load_record_stub oci-k3s-disk-diagnose
 [[ "$STUB_BINDING_SHA" == "$TARGET_SHA" && "$STUB_BINDING_SHA" != "$SHA" ]]

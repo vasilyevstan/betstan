@@ -5,6 +5,10 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-${1:-}}"
 EXPECTED_SOURCE_SHA="${EXPECTED_SOURCE_SHA:-}"
 EXPECTED_BUILD_RUN_ID="${EXPECTED_BUILD_RUN_ID:-}"
 EXPECTED_INFRASTRUCTURE_RUN_ID="${EXPECTED_INFRASTRUCTURE_RUN_ID:-}"
+EXPECTED_CHECKPOINT_SOURCE_SHA="${EXPECTED_CHECKPOINT_SOURCE_SHA:-}"
+EXPECTED_DISK_CHECKPOINT_RUN_ID="${EXPECTED_DISK_CHECKPOINT_RUN_ID:-}"
+EXPECTED_DISK_CHECKPOINT_SHA256="${EXPECTED_DISK_CHECKPOINT_SHA256:-}"
+EXPECTED_DISK_CHECKPOINT_DISPOSITION="${EXPECTED_DISK_CHECKPOINT_DISPOSITION:-}"
 EXPECTED_PHASE="${EXPECTED_PHASE:-}"
 EXPECTED_RUN_ID="${EXPECTED_RUN_ID:-}"
 EXPECTED_RUN_ATTEMPT="${EXPECTED_RUN_ATTEMPT:-1}"
@@ -26,6 +30,27 @@ fail() {
   fail "expected build run ID must be a positive integer"
 [[ "$EXPECTED_INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
   fail "expected infrastructure run ID must be a positive integer"
+checkpoint_expectation_count=0
+for value in \
+  "$EXPECTED_CHECKPOINT_SOURCE_SHA" "$EXPECTED_DISK_CHECKPOINT_RUN_ID" \
+  "$EXPECTED_DISK_CHECKPOINT_SHA256" "$EXPECTED_DISK_CHECKPOINT_DISPOSITION"; do
+  [[ -z "$value" ]] || checkpoint_expectation_count=$((checkpoint_expectation_count + 1))
+done
+[[ "$checkpoint_expectation_count" == "0" ||
+   "$checkpoint_expectation_count" == "4" ]] ||
+  fail "expected disk checkpoint binding is incomplete"
+if [[ "$checkpoint_expectation_count" == "4" ]]; then
+  [[ "$EXPECTED_CHECKPOINT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "expected checkpoint source SHA is invalid"
+  [[ "$EXPECTED_DISK_CHECKPOINT_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+    fail "expected disk checkpoint run ID is invalid"
+  [[ "$EXPECTED_DISK_CHECKPOINT_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "expected disk checkpoint checksum is invalid"
+  case "$EXPECTED_DISK_CHECKPOINT_DISPOSITION" in
+    READY_NO_RECLAIM|READY_RECLAIMED|NOT_APPLICABLE) ;;
+    *) fail "expected disk checkpoint disposition is invalid" ;;
+  esac
+fi
 [[ "$EXPECTED_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
   fail "expected workflow run ID must be a positive integer"
 [[ "$EXPECTED_RUN_ATTEMPT" == "1" ]] ||
@@ -64,6 +89,10 @@ python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_RUN_ATTEMPT" \
   "$EXPECTED_BASELINE_RECOVERY_RUN_ID" \
   "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" \
+  "$EXPECTED_CHECKPOINT_SOURCE_SHA" \
+  "$EXPECTED_DISK_CHECKPOINT_RUN_ID" \
+  "$EXPECTED_DISK_CHECKPOINT_SHA256" \
+  "$EXPECTED_DISK_CHECKPOINT_DISPOSITION" \
   "$RESUME_BASELINE_DIR" <<'PY'
 import hashlib
 import json
@@ -82,7 +111,14 @@ expected = {
     "baseline_recovery_run_id": sys.argv[8],
     "baseline_recovery_source_sha": sys.argv[9],
 }
-resume_baseline_dir = sys.argv[10]
+checkpoint_expected = {
+    "checkpoint_source_sha": sys.argv[10],
+    "disk_checkpoint_run_id": sys.argv[11],
+    "disk_checkpoint_sha256": sys.argv[12],
+    "disk_checkpoint_disposition": sys.argv[13],
+}
+checkpoint_required = all(checkpoint_expected.values())
+resume_baseline_dir = sys.argv[14]
 
 
 def fail(message: str) -> None:
@@ -176,7 +212,7 @@ elif schema_version in {
 }:
     operation_complete_key = "event_reschedule_complete"
     operation_complete_keys = {operation_complete_key}
-elif schema_version == "live-betting-v5":
+elif schema_version in {"live-betting-v5", "live-betting-v6"}:
     operation_complete_key = "event_reschedule_complete"
     operation_complete_keys = {
         operation_complete_key,
@@ -184,11 +220,32 @@ elif schema_version == "live-betting-v5":
     }
 else:
     fail("unexpected schema evidence version")
-if set(provenance) != common_provenance_keys | operation_complete_keys:
+checkpoint_keys = {
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
+    "disk_checkpoint_sha256",
+    "disk_checkpoint_disposition",
+} if schema_version == "live-betting-v6" else set()
+if checkpoint_required and schema_version != "live-betting-v6":
+    fail("current successor requires live-betting-v6 checkpoint evidence")
+if set(provenance) != common_provenance_keys | operation_complete_keys | checkpoint_keys:
     fail("provenance.env does not contain the exact reviewed key set")
 for key, value in expected.items():
     if provenance.get(key) != value:
         fail(f"provenance mismatch for {key}")
+if schema_version == "live-betting-v6":
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", provenance["checkpoint_source_sha"])
+        or not re.fullmatch(r"[1-9][0-9]*", provenance["disk_checkpoint_run_id"])
+        or not re.fullmatch(r"[0-9a-f]{64}", provenance["disk_checkpoint_sha256"])
+        or provenance["disk_checkpoint_disposition"]
+        not in {"READY_NO_RECLAIM", "READY_RECLAIMED", "NOT_APPLICABLE"}
+    ):
+        fail("v6 disk checkpoint provenance is invalid")
+    if checkpoint_required:
+        for key, value in checkpoint_expected.items():
+            if provenance[key] != value:
+                fail(f"provenance mismatch for {key}")
 if provenance["status"] != "PASS":
     fail("data rollout did not complete successfully")
 if provenance["backfill_complete"] not in {"true", "false"}:
@@ -217,11 +274,19 @@ if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", provenance["complet
 phase = expected["phase"]
 resolved_applied_data_run_id = expected["workflow_run_id"]
 resolved_applied_source_sha = expected["source_sha"]
+resolved_checkpoint = {
+    key: provenance.get(key, "") for key in (
+        "checkpoint_source_sha",
+        "disk_checkpoint_run_id",
+        "disk_checkpoint_sha256",
+        "disk_checkpoint_disposition",
+    )
+}
 resume_authority_path = root / "resume-authority.env"
 if resume_authority_path.exists():
     if phase != "apply-slip-index":
         fail("only final data evidence may carry resume authority")
-    resume_authority_keys = {
+    resume_v1_keys = {
         "schema_version",
         "applied_data_run_id",
         "applied_source_sha",
@@ -238,8 +303,35 @@ if resume_authority_path.exists():
         "application_change_scope",
         "status",
     }
-    resume_authority = read_env(resume_authority_path, resume_authority_keys)
-    if resume_authority["schema_version"] != "live-betting-data-resume-v1":
+    resume_v2_keys = (resume_v1_keys - {"release_step_conclusion"}) | {
+        "lock_release_step_conclusion",
+        "fence_release_step_conclusion",
+        "checkpoint_source_sha",
+        "disk_checkpoint_run_id",
+        "disk_checkpoint_sha256",
+        "disk_checkpoint_disposition",
+    }
+    resume_authority = read_env(resume_authority_path)
+    resume_version = resume_authority.get("schema_version")
+    if resume_version == "live-betting-data-resume-v1":
+        if set(resume_authority) != resume_v1_keys:
+            fail("historical resume authority key set is invalid")
+        if schema_version == "live-betting-v6":
+            fail("v6 data evidence requires resume authority v2")
+    elif resume_version == "live-betting-data-resume-v2":
+        if set(resume_authority) != resume_v2_keys:
+            fail("current resume authority key set is invalid")
+        if schema_version != "live-betting-v6":
+            fail("resume authority v2 requires live-betting-v6 evidence")
+        for key in checkpoint_keys:
+            if resume_authority[key] != provenance[key]:
+                fail(f"resume authority substituted {key}")
+        if (
+            resume_authority["applied_source_sha"]
+            != resume_authority["checkpoint_source_sha"]
+        ):
+            fail("resume authority checkpoint source differs from original applied source")
+    else:
         fail("unexpected live data resume authority version")
     if not re.fullmatch(r"[1-9][0-9]*", resume_authority["applied_data_run_id"]):
         fail("resume authority applied data run ID is invalid")
@@ -264,22 +356,45 @@ if resume_authority_path.exists():
         fail("resume authority application change scope is invalid")
     if resume_authority["status"] != "PASS":
         fail("resume authority did not complete successfully")
-    outcome = (
-        resume_authority["failed_deploy_job_conclusion"],
-        resume_authority["public_validate_job_conclusion"],
-        resume_authority["release_step_conclusion"],
-        resume_authority["rehold_step_conclusion"],
-    )
+    if resume_version == "live-betting-data-resume-v1":
+        outcome = (
+            resume_authority["failed_deploy_job_conclusion"],
+            resume_authority["public_validate_job_conclusion"],
+            resume_authority["release_step_conclusion"],
+            resume_authority["rehold_step_conclusion"],
+        )
+    else:
+        outcome = (
+            resume_authority["failed_deploy_job_conclusion"],
+            resume_authority["public_validate_job_conclusion"],
+            resume_authority["lock_release_step_conclusion"],
+            resume_authority["fence_release_step_conclusion"],
+            resume_authority["rehold_step_conclusion"],
+        )
     mode = resume_authority["resume_maintenance_mode"]
-    if mode == "released-runtime":
+    if mode == "released-runtime" and resume_version == "live-betting-data-resume-v1":
         if outcome != ("success", "failure", "success", "skipped"):
             fail("released-runtime resume authority has an invalid outcome tuple")
-    elif mode == "retained-hold":
+    elif mode == "retained-hold" and resume_version == "live-betting-data-resume-v1":
         if outcome not in {
             ("failure", "skipped", "failure", "success"),
             ("failure", "skipped", "skipped", "success"),
         }:
             fail("retained-hold resume authority has an invalid outcome tuple")
+    elif mode == "released-runtime":
+        if outcome != ("success", "failure", "success", "success", "skipped"):
+            fail("released-runtime resume authority has an invalid v2 tuple")
+    elif mode == "retained-hold":
+        if (
+            outcome[0:2] != ("failure", "skipped")
+            or outcome[2:4] not in {
+                ("skipped", "skipped"),
+                ("failure", "skipped"),
+                ("success", "failure"),
+            }
+            or outcome[4] != "success"
+        ):
+            fail("retained-hold resume authority has an invalid v2 tuple")
     else:
         fail("resume authority maintenance mode is invalid")
     resolved_applied_data_run_id = resume_authority["applied_data_run_id"]
@@ -325,7 +440,7 @@ if phase in {"apply-backfills", "apply-slip-index"}:
 if phase == "apply-slip-index" and provenance["index_ready"] != "true":
     fail("final phase did not prove the Slip index")
 if (
-    schema_version == "live-betting-v5"
+    schema_version in {"live-betting-v5", "live-betting-v6"}
     and phase == "apply-slip-index"
     and provenance["backoffice_pre_september_cleanup_complete"] != "true"
 ):
@@ -405,7 +520,7 @@ else:
             "reports/apply-event-reschedule.json",
             "reports/verify-event-reschedule.json",
         })
-if schema_version == "live-betting-v5":
+if schema_version in {"live-betting-v5", "live-betting-v6"}:
     required_reports.add(
         "reports/preflight-backoffice-pre-september-cleanup.json"
     )
@@ -571,7 +686,7 @@ elif schema_version == "live-betting-v4":
         )
         if operation.get("state") not in {"verified", "completed"}:
             fail("final phase did not inherit completed event reschedule")
-elif schema_version == "live-betting-v5":
+elif schema_version in {"live-betting-v5", "live-betting-v6"}:
     operation_reports = sorted(
         relative
         for relative in actual_files
@@ -816,6 +931,9 @@ if journal.get("schema_version") != schema_version:
 for key, value in expected.items():
     if str(journal.get(key, "")) != value:
         fail(f"journal mismatch for {key}")
+for key in checkpoint_keys:
+    if str(journal.get(key, "")) != provenance[key]:
+        fail(f"journal substituted {key}")
 if journal.get("status") != "PASS":
     fail("journal does not record a successful phase")
 if journal.get("baseline_sha256") != provenance["baseline_sha256"]:
@@ -861,7 +979,7 @@ if phase == "apply-slip-index":
         "operation_lock_handoff",
     }
     schema = read_env(root / "schema.env")
-    if set(schema) != common_schema_keys | operation_complete_keys:
+    if set(schema) != common_schema_keys | operation_complete_keys | checkpoint_keys:
         fail("schema.env does not contain the exact reviewed key set")
     required_schema = {
         "schema_version": schema_version,
@@ -882,7 +1000,11 @@ if phase == "apply-slip-index":
         "operation_lock_enforced": "true",
         "operation_lock_handoff": "true",
     }
-    if schema_version == "live-betting-v5":
+    if schema_version == "live-betting-v6":
+        required_schema.update({
+            key: provenance[key] for key in checkpoint_keys
+        })
+    if schema_version in {"live-betting-v5", "live-betting-v6"}:
         required_schema["backoffice_pre_september_cleanup_complete"] = "true"
     if schema != required_schema:
         fail("schema.env does not bind final readiness to the exact rollout")
@@ -899,6 +1021,11 @@ if resume_baseline_dir:
                 f"applied_data_run_id={resolved_applied_data_run_id}",
                 f"applied_source_sha={resolved_applied_source_sha}",
                 f"baseline_sha256={provenance['baseline_sha256']}",
+                *(
+                    f"{key}={resolved_checkpoint[key]}"
+                    for key in sorted(resolved_checkpoint)
+                    if resolved_checkpoint[key]
+                ),
             )
         )
     )

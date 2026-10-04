@@ -149,6 +149,30 @@ on:
       approved_sha:
         required: true
         type: string
+      build_run_id:
+        required: true
+        type: string
+      infrastructure_run_id:
+        required: true
+        type: string
+      data_run_id:
+        required: true
+        type: string
+      checkpoint_source_sha:
+        required: true
+        type: string
+      disk_checkpoint_run_id:
+        required: true
+        type: string
+      baseline_recovery_run_id:
+        required: true
+        type: string
+      baseline_recovery_source_sha:
+        required: true
+        type: string
+      confirmation:
+        required: true
+        type: string
 jobs:
   deploy:
     if: github.run_attempt == 1
@@ -170,14 +194,30 @@ jobs:
           printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
           printf 'infrastructure_run_attempt=1\n'
           printf 'infrastructure_provenance_sha256=%s\n' "$INFRASTRUCTURE_SHA256"
+          printf 'checkpoint_source_sha=%s\n' "$CHECKPOINT_SOURCE_SHA"
+          printf 'disk_checkpoint_run_id=%s\n' "$DISK_CHECKPOINT_RUN_ID"
+          printf 'disk_checkpoint_sha256=%s\n' "$DISK_CHECKPOINT_SHA256"
+          printf 'disk_checkpoint_disposition=%s\n' "$DISK_CHECKPOINT_DISPOSITION"
+          echo 'oci-release-disk-checkpoint-${{ inputs.checkpoint_source_sha }}-${{ inputs.disk_checkpoint_run_id }}-1'
+          ./infra/oci/scripts/k3s_disk_recovery_stan.py validate-release-checkpoint
           echo ".github/workflows/oci-production-rollback.yml"
           echo 'oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1'
           ./infra/oci/scripts/validate-rollback-baseline-stan.sh
-          LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
-            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
+          echo "- name: Verify transferred database lock and maintenance fence"
+          echo "- name: Validate executable pre-deploy rollback baseline"
+          echo "- name: Revalidate held release disk checkpoint before lock renewal"
+          echo "- name: Renew exact transferred database lock"
           ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
+          echo "- name: Deploy immutable images sequentially"
+          echo "- name: Run protected OCI cluster validation loop"
+          echo "- name: Revalidate held release disk checkpoint after protected health"
+          echo "- name: Release transferred lock after protected validation"
+          echo "- name: Release live data maintenance fence"
+          if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
+            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify; then
           LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
             ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
+          fi
           ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           echo "steps.handoff.outcome == 'success'"
           echo "steps.release_runtime.outcome != 'success'"

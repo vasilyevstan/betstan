@@ -182,25 +182,54 @@ def validate_capacity(capacity):
         fail("kubelet capacity limit result is inconsistent")
 
 
-def validate_runtime(runtime):
-    required = {
-        "schemaVersion",
-        "applicationRepository",
-        "root",
-        "mongo",
-        "consumers",
-        "images",
-        "containerImageReferences",
-        "kubernetesImageReferences",
-        "workload",
-        "queue",
-        "publicRead",
-        "runtime",
-    }
+def validate_runtime(runtime, expected_profile=None):
+    schema = runtime.get("schemaVersion")
+    held_version = schema == "k3s-node-disk-held-runtime.v1"
+    version_two = schema == "k3s-node-disk-runtime.v2"
+    if held_version:
+        required = {
+            "schemaVersion",
+            "snapshotProfile",
+            "applicationRepository",
+            "root",
+            "mongo",
+            "images",
+            "runtime",
+        }
+        profile = "held"
+    else:
+        required = {
+            "schemaVersion",
+            "applicationRepository",
+            "root",
+            "mongo",
+            "consumers",
+            "images",
+            "containerImageReferences",
+            "kubernetesImageReferences",
+            "workload",
+            "queue",
+            "publicRead",
+            "runtime",
+        }
+        if version_two:
+            required.update(("snapshotProfile", "applicationImages"))
+        profile = runtime.get("snapshotProfile", "public")
     if set(runtime) != required:
         fail("runtime snapshot has an unexpected schema")
-    if runtime["schemaVersion"] != "k3s-node-disk-runtime.v1":
+    if schema not in {
+        "k3s-node-disk-runtime.v1",
+        "k3s-node-disk-runtime.v2",
+        "k3s-node-disk-held-runtime.v1",
+    }:
         fail("runtime snapshot schema version is unsupported")
+    if (
+        profile not in {"public", "held"}
+        or (held_version and runtime["snapshotProfile"] != "held")
+        or (not held_version and profile != "public")
+        or (expected_profile is not None and profile != expected_profile)
+    ):
+        fail("runtime snapshot profile is invalid")
     if runtime["applicationRepository"] != REPOSITORY:
         fail("runtime snapshot application repository differs")
     root = runtime["root"]
@@ -216,7 +245,11 @@ def validate_runtime(runtime):
         ("root", root["mount"], "/"),
         ("Mongo", mongo["mount"], "/var/lib/betstan/mongo"),
     ):
-        if not isinstance(mount, dict) or mount.get("target") != target:
+        if (
+            not isinstance(mount, dict)
+            or set(mount) != {"target", "source", "fstype", "size", "used", "avail"}
+            or mount.get("target") != target
+        ):
             fail(f"{label} mount target is invalid")
         for name in ("source", "fstype"):
             if not isinstance(mount.get(name), str) or not mount[name]:
@@ -243,6 +276,46 @@ def validate_runtime(runtime):
     if root_df["capacityBytes"] <= 0 or root_df["usedBytes"] > root_df["capacityBytes"]:
         fail("root df byte values are inconsistent")
 
+    images = runtime["images"]
+    if not isinstance(images, list):
+        fail("CRI image inventory is malformed")
+    seen_ids = set()
+    for image in images:
+        if set(image) != {"id", "repoTags", "repoDigests", "sizeBytes", "pinned"}:
+            fail("CRI image record has an unexpected schema")
+        if not IMAGE_ID.fullmatch(image["id"]) or image["id"] in seen_ids:
+            fail("CRI image inventory contains an invalid or duplicate ID")
+        seen_ids.add(image["id"])
+        if (
+            not isinstance(image["repoTags"], list)
+            or not all(isinstance(item, str) for item in image["repoTags"])
+            or not isinstance(image["repoDigests"], list)
+            or not all(isinstance(item, str) for item in image["repoDigests"])
+            or type(image["sizeBytes"]) is not int
+            or image["sizeBytes"] < 0
+            or type(image["pinned"]) is not bool
+        ):
+            fail("CRI image ownership evidence is invalid")
+    identity = runtime["runtime"]
+    if (
+        not isinstance(identity, dict)
+        or set(identity)
+        != {"nodeName", "k3sVersion", "containerRuntimeVersion", "k3sActive"}
+        or not isinstance(identity["nodeName"], str)
+        or not DNS_LABEL.fullmatch(identity["nodeName"])
+        or not isinstance(identity["k3sVersion"], str)
+        or not re.fullmatch(r"k3s version v[0-9][^\r\n]*", identity["k3sVersion"])
+        or not isinstance(identity["containerRuntimeVersion"], str)
+        or not re.fullmatch(
+            r"containerd://[A-Za-z0-9.+_-]+",
+            identity["containerRuntimeVersion"],
+        )
+        or identity["k3sActive"] is not True
+    ):
+        fail("runtime identity is invalid")
+    if held_version:
+        return
+
     expected_consumers = {
         "apt-package-cache": "/var/cache/apt",
         "k3s-containerd": "/var/lib/rancher/k3s/agent/containerd",
@@ -265,27 +338,6 @@ def validate_runtime(runtime):
             or item["bytes"] < 0
         ):
             fail("fixed-path aggregate consumer evidence is invalid")
-
-    images = runtime["images"]
-    if not isinstance(images, list):
-        fail("CRI image inventory is malformed")
-    seen_ids = set()
-    for image in images:
-        if set(image) != {"id", "repoTags", "repoDigests", "sizeBytes", "pinned"}:
-            fail("CRI image record has an unexpected schema")
-        if not IMAGE_ID.fullmatch(image["id"]) or image["id"] in seen_ids:
-            fail("CRI image inventory contains an invalid or duplicate ID")
-        seen_ids.add(image["id"])
-        if (
-            not isinstance(image["repoTags"], list)
-            or not all(isinstance(item, str) for item in image["repoTags"])
-            or not isinstance(image["repoDigests"], list)
-            or not all(isinstance(item, str) for item in image["repoDigests"])
-            or type(image["sizeBytes"]) is not int
-            or image["sizeBytes"] < 0
-            or type(image["pinned"]) is not bool
-        ):
-            fail("CRI image ownership evidence is invalid")
     refs = runtime["containerImageReferences"]
     if not isinstance(refs, list):
         fail("CRI container reference evidence is malformed")
@@ -299,6 +351,24 @@ def validate_runtime(runtime):
         for item in runtime["kubernetesImageReferences"]
     ):
         fail("Kubernetes image reference evidence is invalid")
+    if version_two:
+        application_images = runtime["applicationImages"]
+        if not isinstance(application_images, list):
+            fail("application image evidence is malformed")
+        services = set()
+        for item in application_images:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"service", "imageRef"}
+                or item["service"] not in CURRENT_SERVICES
+                or item["service"] in services
+                or not isinstance(item["imageRef"], str)
+                or REPOSITORY_DIGEST.fullmatch(item["imageRef"]) is None
+            ):
+                fail("application image evidence is invalid")
+            services.add(item["service"])
+        if not (CURRENT_SERVICES - {"telemetry"}).issubset(services):
+            fail("application image evidence is missing a rollback service")
     workload = runtime["workload"]
     if (
         not isinstance(workload, dict)
@@ -315,29 +385,22 @@ def validate_runtime(runtime):
         or queue["queueCount"] < 1
         or type(queue["backlog"]) is not int
         or queue["backlog"] < 0
+        or type(queue["consumersHealthy"]) is not bool
         or queue["consumersHealthy"] is not True
     ):
         fail("queue baseline is unhealthy or malformed")
     public_read = runtime["publicRead"]
-    if (
-        not isinstance(public_read, list)
-        or {item.get("name") for item in public_read}
-        != {"home", "api-event", "api-backoffice"}
-        or not all(set(item) == {"name", "status"} and item["status"] == 200 for item in public_read)
-    ):
+    public_valid = (
+        isinstance(public_read, list)
+        and {item.get("name") for item in public_read}
+        == {"home", "api-event", "api-backoffice"}
+        and all(
+            set(item) == {"name", "status"} and item["status"] == 200
+            for item in public_read
+        )
+    )
+    if not public_valid:
         fail("public read baseline is unhealthy or malformed")
-    identity = runtime["runtime"]
-    if (
-        not isinstance(identity, dict)
-        or set(identity)
-        != {"nodeName", "k3sVersion", "containerRuntimeVersion", "k3sActive"}
-        or not isinstance(identity["nodeName"], str)
-        or not DNS_LABEL.fullmatch(identity["nodeName"])
-        or not isinstance(identity["k3sVersion"], str)
-        or not isinstance(identity["containerRuntimeVersion"], str)
-        or identity["k3sActive"] is not True
-    ):
-        fail("runtime identity is invalid")
 
 
 def crosscheck_filesystem(runtime, capacity):
@@ -621,6 +684,8 @@ def sanitized_runtime(runtime, private_node=False):
         "publicRead": runtime["publicRead"],
         "runtime": runtime["runtime"],
     }
+    if "applicationImages" in runtime:
+        result["applicationImages"] = runtime["applicationImages"]
     if private_node:
         result["runtime"] = public_node_identity(result["runtime"])
     return result
@@ -1298,6 +1363,585 @@ def finalize_reclaim(args):
         fail("reclaim did not satisfy the fixed post-state contract")
 
 
+def validate_reclaim_result(value):
+    required = {
+        "schemaVersion",
+        "phase",
+        "sourceSha",
+        "diagnosisWorkflowRunId",
+        "category",
+        "selectedImageIds",
+        "removedImageIds",
+        "unexpectedAddedImageIds",
+        "mutationCommandSucceeded",
+        "categoryConverged",
+        "securityRelevantStateStable",
+        "thresholdPercent",
+        "postKubeletCapacity",
+        "actualRootUsedBytesBefore",
+        "actualRootUsedBytesAfter",
+        "actualMeasuredRootBytesFreed",
+        "imageSizeEstimatesWereNonAdditive",
+        "futureCandidateHeadroomProven",
+        "terminalStatus",
+        "contentChecksumSha256",
+    }
+    if set(value) != required:
+        fail("reclaim result has an unexpected schema")
+    validate_checksum(value, "reclaim result")
+    if (
+        value["schemaVersion"] != "k3s-node-disk-reclaim.v1"
+        or value["phase"] != "reclaim-disk"
+        or value["terminalStatus"] != "RECLAIMED"
+        or value["thresholdPercent"] != THRESHOLD
+        or value["mutationCommandSucceeded"] is not True
+        or value["categoryConverged"] is not True
+        or value["securityRelevantStateStable"] is not True
+        or value["imageSizeEstimatesWereNonAdditive"] is not True
+        or value["futureCandidateHeadroomProven"] is not False
+    ):
+        fail("reclaim result is not release eligible")
+    require_sha(value["sourceSha"], "reclaim source SHA")
+    require_positive(value["diagnosisWorkflowRunId"], "reclaim diagnosis run")
+    validate_capacity(value["postKubeletCapacity"])
+    for name in (
+        "actualRootUsedBytesBefore",
+        "actualRootUsedBytesAfter",
+        "actualMeasuredRootBytesFreed",
+    ):
+        if type(value[name]) is not int or value[name] < 0:
+            fail(f"reclaim {name} is invalid")
+    for name in ("selectedImageIds", "removedImageIds", "unexpectedAddedImageIds"):
+        if (
+            not isinstance(value[name], list)
+            or len(value[name]) != len(set(value[name]))
+            or not all(isinstance(item, str) and IMAGE_ID.fullmatch(item) for item in value[name])
+        ):
+            fail(f"reclaim {name} is invalid")
+
+
+def resident_image(runtime, image_ref):
+    matches = [
+        (image, digest)
+        for image in runtime["images"]
+        for digest in image["repoDigests"]
+        if digest == image_ref
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"immutable CRI residency is not unique for {image_ref}")
+    image, digest = matches[0]
+    return {
+        "residentImageId": image["id"],
+        "residentRepoDigest": digest,
+    }
+
+
+def checkpoint_residency(runtime, candidate_images, rollback_images=None):
+    candidate_residency = []
+    for item in candidate_images:
+        candidate_residency.append(
+            {
+                **item,
+                **resident_image(runtime, item["imageRef"]),
+            }
+        )
+    if rollback_images is None:
+        rollback_images = runtime["applicationImages"]
+    rollback_residency = []
+    for item in sorted(rollback_images, key=lambda row: row["service"]):
+        rollback_residency.append(
+            {
+                "service": item["service"],
+                "imageRef": item["imageRef"],
+                **resident_image(runtime, item["imageRef"]),
+            }
+        )
+    return candidate_residency, rollback_residency
+
+
+def checkpoint_stable_identity(runtime, capacity):
+    return {
+        "nodeNameSha256": hashlib.sha256(capacity["nodeName"].encode()).hexdigest(),
+        "rootMountSourceSha256": hashlib.sha256(
+            runtime["root"]["mount"]["source"].encode()
+        ).hexdigest(),
+        "rootFsType": runtime["root"]["mount"]["fstype"],
+        "rootMountCapacityBytes": runtime["root"]["mount"]["size"],
+        "mongoMountSourceSha256": hashlib.sha256(
+            runtime["mongo"]["mount"]["source"].encode()
+        ).hexdigest(),
+        "mongoFsType": runtime["mongo"]["mount"]["fstype"],
+        "mongoMountCapacityBytes": runtime["mongo"]["mount"]["size"],
+        "mongoSeparateFromRoot": runtime["mongo"]["separateFromRoot"],
+        "k3sVersion": runtime["runtime"]["k3sVersion"],
+        "containerRuntimeVersion": runtime["runtime"]["containerRuntimeVersion"],
+        "k3sActive": runtime["runtime"]["k3sActive"],
+    }
+
+
+def checkpoint_root(capacity):
+    return {
+        "capacityBytes": capacity["capacityBytes"],
+        "usedBytes": capacity["usedBytes"],
+    }
+
+
+def validate_release_checkpoint(value):
+    common = {
+        "schemaVersion",
+        "sourceSha",
+        "controlSha",
+        "infrastructureRunId",
+        "ghcrBuildRunId",
+        "producerRunId",
+        "producerRunAttempt",
+        "runtimeMode",
+        "disposition",
+        "terminalStatus",
+        "contentChecksumSha256",
+    }
+    if value.get("runtimeMode") == "oke":
+        if set(value) != common:
+            fail("OKE release checkpoint contains fabricated disk fields")
+        validate_checksum(value, "release checkpoint")
+        if (
+            value["schemaVersion"] != "k3s-release-disk-checkpoint.v1"
+            or value["producerRunAttempt"] != "1"
+            or value["disposition"] != "NOT_APPLICABLE"
+            or value["terminalStatus"] != "RELEASE_ELIGIBLE"
+        ):
+            fail("OKE release checkpoint identity is invalid")
+        require_sha(value["sourceSha"], "release checkpoint source SHA")
+        require_sha(value["controlSha"], "release checkpoint control SHA")
+        if value["sourceSha"] != value["controlSha"]:
+            fail("OKE release checkpoint was not produced from current control")
+        for name in ("infrastructureRunId", "ghcrBuildRunId", "producerRunId"):
+            require_positive(value[name], f"release checkpoint {name}")
+        if value["producerRunId"] != value["infrastructureRunId"]:
+            fail("OKE release checkpoint producer and infrastructure run differ")
+        return
+
+    required = common | {
+        "root",
+        "thresholdPercent",
+        "stableIdentity",
+        "candidateResidency",
+        "rollbackResidency",
+        "publicStateStatus",
+        "diagnosisRunId",
+        "diagnosisChecksumSha256",
+        "reclaimRunId",
+        "reclaimChecksumSha256",
+        "reclaimCategory",
+    }
+    if set(value) != required:
+        fail("k3s release checkpoint has an unexpected schema")
+    validate_checksum(value, "release checkpoint")
+    if (
+        value["schemaVersion"] != "k3s-release-disk-checkpoint.v1"
+        or value["runtimeMode"] != "k3s"
+        or value["producerRunAttempt"] != "1"
+        or value["disposition"] not in {"READY_NO_RECLAIM", "READY_RECLAIMED"}
+        or value["terminalStatus"] != "RELEASE_ELIGIBLE"
+        or value["thresholdPercent"] != THRESHOLD
+        or value["publicStateStatus"] != "PASS"
+    ):
+        fail("k3s release checkpoint identity is invalid")
+    require_sha(value["sourceSha"], "release checkpoint source SHA")
+    require_sha(value["controlSha"], "release checkpoint control SHA")
+    if value["sourceSha"] != value["controlSha"]:
+        fail("k3s release checkpoint was not produced from current control")
+    for name in ("infrastructureRunId", "ghcrBuildRunId", "producerRunId"):
+        require_positive(value[name], f"release checkpoint {name}")
+    root = value["root"]
+    if (
+        not isinstance(root, dict)
+        or set(root) != {"capacityBytes", "usedBytes"}
+        or type(root["capacityBytes"]) is not int
+        or root["capacityBytes"] <= 0
+        or type(root["usedBytes"]) is not int
+        or root["usedBytes"] < 0
+        or root["usedBytes"] > root["capacityBytes"]
+        or root["usedBytes"] * 100 > root["capacityBytes"] * THRESHOLD
+    ):
+        fail("release checkpoint byte threshold evidence is invalid")
+    identity = value["stableIdentity"]
+    identity_keys = {
+        "nodeNameSha256",
+        "rootMountSourceSha256",
+        "rootFsType",
+        "rootMountCapacityBytes",
+        "mongoMountSourceSha256",
+        "mongoFsType",
+        "mongoMountCapacityBytes",
+        "mongoSeparateFromRoot",
+        "k3sVersion",
+        "containerRuntimeVersion",
+        "k3sActive",
+    }
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != identity_keys
+        or not re.fullmatch(r"[0-9a-f]{64}", str(identity["nodeNameSha256"]))
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(identity["rootMountSourceSha256"])
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(identity["mongoMountSourceSha256"])
+        )
+        or not isinstance(identity["rootFsType"], str)
+        or not identity["rootFsType"]
+        or not isinstance(identity["mongoFsType"], str)
+        or not identity["mongoFsType"]
+        or type(identity["rootMountCapacityBytes"]) is not int
+        or identity["rootMountCapacityBytes"] <= 0
+        or type(identity["mongoMountCapacityBytes"]) is not int
+        or identity["mongoMountCapacityBytes"] <= 0
+        or identity["mongoSeparateFromRoot"] is not True
+        or identity["rootMountSourceSha256"]
+        == identity["mongoMountSourceSha256"]
+        or not isinstance(identity["k3sVersion"], str)
+        or not re.fullmatch(r"k3s version v[0-9][^\r\n]*", identity["k3sVersion"])
+        or not isinstance(identity["containerRuntimeVersion"], str)
+        or not re.fullmatch(
+            r"containerd://[A-Za-z0-9.+_-]+",
+            identity["containerRuntimeVersion"],
+        )
+        or identity["k3sActive"] is not True
+        or identity["rootMountCapacityBytes"] != root["capacityBytes"]
+    ):
+        fail("release checkpoint stable identity is invalid")
+    candidates = value["candidateResidency"]
+    if not isinstance(candidates, list):
+        fail("release checkpoint candidate residency is malformed")
+    plain_candidates = []
+    for item in candidates:
+        if not isinstance(item, dict) or set(item) != {
+            "service",
+            "imageRef",
+            "manifestDigest",
+            "platformDigest",
+            "residentImageId",
+            "residentRepoDigest",
+        }:
+            fail("release checkpoint candidate residency has an unexpected schema")
+        plain_candidates.append(
+            {key: item[key] for key in (
+                "service", "imageRef", "manifestDigest", "platformDigest"
+            )}
+        )
+        if (
+            not IMAGE_ID.fullmatch(str(item["residentImageId"]))
+            or item["residentRepoDigest"] != item["imageRef"]
+        ):
+            fail("release checkpoint candidate CRI identity is invalid")
+    validate_candidate_images(plain_candidates)
+    if [item["service"] for item in candidates] != sorted(CURRENT_SERVICES):
+        fail("release checkpoint candidate residency order is invalid")
+    rollback = value["rollbackResidency"]
+    if not isinstance(rollback, list):
+        fail("release checkpoint rollback residency is malformed")
+    rollback_services = set()
+    for item in rollback:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {
+                "service",
+                "imageRef",
+                "residentImageId",
+                "residentRepoDigest",
+            }
+            or item["service"] not in CURRENT_SERVICES
+            or item["service"] in rollback_services
+            or REPOSITORY_DIGEST.fullmatch(str(item["imageRef"])) is None
+            or not IMAGE_ID.fullmatch(str(item["residentImageId"]))
+            or item["residentRepoDigest"] != item["imageRef"]
+        ):
+            fail("release checkpoint rollback residency is invalid")
+        rollback_services.add(item["service"])
+    if (
+        frozenset(rollback_services) != CURRENT_SERVICES
+        or [item["service"] for item in rollback] != sorted(rollback_services)
+    ):
+        fail("release checkpoint rollback residency is incomplete")
+    if (
+        not POSITIVE_INTEGER.fullmatch(str(value["diagnosisRunId"]))
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(value["diagnosisChecksumSha256"])
+        )
+    ):
+        fail("release checkpoint diagnosis lineage is invalid")
+    if value["disposition"] == "READY_NO_RECLAIM":
+        if (
+            value["diagnosisRunId"] != value["producerRunId"]
+            or value["reclaimRunId"] != "0"
+            or value["reclaimChecksumSha256"] != "none"
+            or value["reclaimCategory"] != "none"
+        ):
+            fail("no-reclaim checkpoint producer lineage is invalid")
+    else:
+        if (
+            value["reclaimRunId"] != value["producerRunId"]
+            or value["reclaimCategory"] != "apt-package-cache"
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(value["reclaimChecksumSha256"])
+            )
+        ):
+            fail("reclaimed checkpoint producer lineage is invalid")
+
+
+def write_release_checkpoint(args):
+    output = Path(args.output)
+    output.unlink(missing_ok=True)
+    diagnosis = load_json(args.diagnosis, "diagnosis manifest")
+    validate_diagnosis(diagnosis)
+    runtime = load_json(args.runtime, "release runtime snapshot")
+    capacity = load_json(args.capacity, "release kubelet capacity")
+    validate_runtime(runtime, "public")
+    validate_capacity(capacity)
+    crosscheck_filesystem(runtime, capacity)
+    if (
+        runtime.get("schemaVersion") != "k3s-node-disk-runtime.v2"
+        or diagnosis["sourceSha"] != args.source_sha
+        or args.control_sha != args.source_sha
+        or "controlSha" in diagnosis
+        or diagnosis["terminalStatus"] != "DIAGNOSED"
+        or capacity["withinLimit"] is not True
+    ):
+        print("k3s_release_disk_checkpoint=INELIGIBLE")
+        return
+    disposition = "READY_NO_RECLAIM"
+    reclaim_run_id = "0"
+    reclaim_sha256 = "none"
+    reclaim_category = "none"
+    producer_run_id = require_positive(args.producer_run_id, "checkpoint producer run")
+    if args.reclaim:
+        reclaim = load_json(args.reclaim, "reclaim result")
+        validate_reclaim_result(reclaim)
+        if (
+            reclaim["sourceSha"] != diagnosis["sourceSha"]
+            or reclaim["diagnosisWorkflowRunId"] != diagnosis["workflowRunId"]
+            or reclaim["category"] != "apt-package-cache"
+            or reclaim["selectedImageIds"] != []
+            or reclaim["removedImageIds"] != []
+            or reclaim["unexpectedAddedImageIds"] != []
+            or reclaim["postKubeletCapacity"] != capacity
+        ):
+            print("k3s_release_disk_checkpoint=INELIGIBLE")
+            return
+        disposition = "READY_RECLAIMED"
+        reclaim_run_id = producer_run_id
+        reclaim_sha256 = reclaim["contentChecksumSha256"]
+        reclaim_category = "apt-package-cache"
+    elif (
+        diagnosis["workflowRunId"] != producer_run_id
+        or diagnosis["kubeletCapacity"]["capacityBytes"] != capacity["capacityBytes"]
+        or diagnosis["kubeletCapacity"]["usedBytes"] != capacity["usedBytes"]
+    ):
+        print("k3s_release_disk_checkpoint=INELIGIBLE")
+        return
+    candidates = diagnosis["candidateImages"]
+    try:
+        candidate_residency, rollback_residency = checkpoint_residency(
+            runtime, candidates
+        )
+    except ValueError:
+        print("k3s_release_disk_checkpoint=INELIGIBLE")
+        return
+    checkpoint = add_checksum(
+        {
+            "schemaVersion": "k3s-release-disk-checkpoint.v1",
+            "sourceSha": require_sha(args.source_sha, "checkpoint source SHA"),
+            "controlSha": require_sha(args.control_sha, "checkpoint control SHA"),
+            "infrastructureRunId": diagnosis["infrastructureRunId"],
+            "ghcrBuildRunId": diagnosis["ghcrBuildRunId"],
+            "producerRunId": producer_run_id,
+            "producerRunAttempt": "1",
+            "runtimeMode": "k3s",
+            "disposition": disposition,
+            "terminalStatus": "RELEASE_ELIGIBLE",
+            "thresholdPercent": THRESHOLD,
+            "root": checkpoint_root(capacity),
+            "stableIdentity": checkpoint_stable_identity(runtime, capacity),
+            "candidateResidency": candidate_residency,
+            "rollbackResidency": rollback_residency,
+            "publicStateStatus": "PASS",
+            "diagnosisRunId": diagnosis["workflowRunId"],
+            "diagnosisChecksumSha256": diagnosis["contentChecksumSha256"],
+            "reclaimRunId": reclaim_run_id,
+            "reclaimChecksumSha256": reclaim_sha256,
+            "reclaimCategory": reclaim_category,
+        }
+    )
+    validate_release_checkpoint(checkpoint)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(canonical(checkpoint) + "\n", encoding="utf-8")
+    print(f"k3s_release_disk_checkpoint={disposition}")
+
+
+def write_not_applicable_checkpoint(args):
+    checkpoint = add_checksum(
+        {
+            "schemaVersion": "k3s-release-disk-checkpoint.v1",
+            "sourceSha": require_sha(args.source_sha, "checkpoint source SHA"),
+            "controlSha": require_sha(args.control_sha, "checkpoint control SHA"),
+            "infrastructureRunId": require_positive(
+                args.infrastructure_run_id, "checkpoint infrastructure run"
+            ),
+            "ghcrBuildRunId": require_positive(
+                args.ghcr_build_run_id, "checkpoint GHCR build run"
+            ),
+            "producerRunId": require_positive(
+                args.producer_run_id, "checkpoint producer run"
+            ),
+            "producerRunAttempt": "1",
+            "runtimeMode": "oke",
+            "disposition": "NOT_APPLICABLE",
+            "terminalStatus": "RELEASE_ELIGIBLE",
+        }
+    )
+    validate_release_checkpoint(checkpoint)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(canonical(checkpoint) + "\n", encoding="utf-8")
+
+
+def load_checkpoint_argument(args):
+    if getattr(args, "checkpoint_json", None):
+        try:
+            value = json.loads(args.checkpoint_json)
+        except json.JSONDecodeError as exc:
+            fail(f"release checkpoint is malformed: {exc}")
+        if not isinstance(value, dict):
+            fail("release checkpoint must be an object")
+        return value
+    return load_json(args.checkpoint, "release checkpoint")
+
+
+def validate_release_checkpoint_command(args):
+    checkpoint = load_checkpoint_argument(args)
+    validate_release_checkpoint(checkpoint)
+    if checkpoint["sourceSha"] != args.source_sha:
+        fail("release checkpoint source SHA differs from the bound value")
+    if checkpoint["producerRunId"] != str(args.producer_run_id):
+        fail("release checkpoint producer run differs from the bound value")
+    if checkpoint["runtimeMode"] != args.runtime_mode:
+        fail("release checkpoint runtime mode differs from the protected environment")
+    if (
+        args.infrastructure_run_id
+        and checkpoint["infrastructureRunId"] != str(args.infrastructure_run_id)
+    ):
+        fail("release checkpoint infrastructure run differs from the bound value")
+    if (
+        args.ghcr_build_run_id
+        and checkpoint["ghcrBuildRunId"] != str(args.ghcr_build_run_id)
+    ):
+        fail("release checkpoint GHCR build run differs from the bound value")
+    expected_candidates = args.expected_candidate_images_sha256
+    if expected_candidates:
+        if checkpoint["runtimeMode"] != "k3s":
+            fail("OKE release checkpoint cannot bind candidate image evidence")
+        sealed_candidates = [
+            {
+                key: item[key]
+                for key in (
+                    "service",
+                    "imageRef",
+                    "manifestDigest",
+                    "platformDigest",
+                )
+            }
+            for item in checkpoint["candidateResidency"]
+        ]
+        if checksum(sealed_candidates) != expected_candidates:
+            fail("release checkpoint candidate image set differs from the bound build")
+    if args.candidate_images:
+        candidates = parse_candidate_images(args.candidate_images)
+        sealed_candidates = [
+            {
+                key: item[key]
+                for key in (
+                    "service",
+                    "imageRef",
+                    "manifestDigest",
+                    "platformDigest",
+                )
+            }
+            for item in checkpoint.get("candidateResidency", [])
+        ]
+        if (
+            checkpoint["runtimeMode"] != "k3s"
+            or sealed_candidates != candidates
+        ):
+            fail("release checkpoint candidate image set differs")
+    print(
+        canonical(
+            {
+                "sha256": checkpoint["contentChecksumSha256"],
+                "disposition": checkpoint["disposition"],
+            }
+        )
+    )
+
+
+def revalidate_release_checkpoint(args):
+    checkpoint = load_json(args.checkpoint, "release checkpoint")
+    validate_release_checkpoint(checkpoint)
+    if checkpoint["runtimeMode"] != "k3s":
+        fail("only k3s release checkpoints have a node state to revalidate")
+    if checkpoint["sourceSha"] != args.source_sha:
+        fail("release checkpoint source SHA differs during revalidation")
+    if checkpoint["producerRunId"] != str(args.producer_run_id):
+        fail("release checkpoint producer run differs during revalidation")
+    runtime = load_json(args.runtime, "fresh release runtime snapshot")
+    capacity = load_json(args.capacity, "fresh release kubelet capacity")
+    validate_runtime(runtime, args.profile)
+    validate_capacity(capacity)
+    crosscheck_filesystem(runtime, capacity)
+    if capacity["withinLimit"] is not True:
+        fail("fresh release checkpoint byte threshold is exceeded")
+    candidates = parse_candidate_images(args.candidate_images)
+    sealed_candidates = [
+        {
+            key: item[key]
+            for key in (
+                "service",
+                "imageRef",
+                "manifestDigest",
+                "platformDigest",
+            )
+        }
+        for item in checkpoint["candidateResidency"]
+    ]
+    if sealed_candidates != candidates:
+        fail("fresh candidate image set differs from the release checkpoint")
+    if capacity["capacityBytes"] != checkpoint["root"]["capacityBytes"]:
+        fail("fresh release checkpoint filesystem capacity differs")
+    if checkpoint_stable_identity(runtime, capacity) != checkpoint["stableIdentity"]:
+        fail("fresh release checkpoint stable identity differs")
+    rollback_images = (
+        runtime["applicationImages"]
+        if args.profile == "public"
+        else checkpoint["rollbackResidency"]
+    )
+    try:
+        candidate_residency, rollback_residency = checkpoint_residency(
+            runtime,
+            candidates,
+            rollback_images,
+        )
+    except ValueError as exc:
+        fail(str(exc))
+    if candidate_residency != checkpoint["candidateResidency"]:
+        fail("fresh candidate CRI residency differs from the release checkpoint")
+    if rollback_residency != checkpoint["rollbackResidency"]:
+        fail("fresh rollback CRI residency differs from the release checkpoint")
+    print(
+        f"k3s_release_disk_checkpoint_revalidation={args.profile.upper()}_READY "
+        f"used_bytes={capacity['usedBytes']} capacity_bytes={capacity['capacityBytes']}"
+    )
+
+
 def validate_diagnosis_command(args):
     diagnosis = load_json(args.diagnosis, "diagnosis manifest")
     validate_diagnosis(diagnosis)
@@ -1419,6 +2063,51 @@ def main():
     incomplete.add_argument("--reason", required=True)
     incomplete.add_argument("--output", required=True)
     incomplete.set_defaults(handler=write_incomplete_reclaim)
+
+    checkpoint = subparsers.add_parser("write-release-checkpoint")
+    checkpoint.add_argument("--diagnosis", required=True)
+    checkpoint.add_argument("--reclaim")
+    checkpoint.add_argument("--runtime", required=True)
+    checkpoint.add_argument("--capacity", required=True)
+    checkpoint.add_argument("--source-sha", required=True)
+    checkpoint.add_argument("--control-sha", required=True)
+    checkpoint.add_argument("--producer-run-id", required=True)
+    checkpoint.add_argument("--output", required=True)
+    checkpoint.set_defaults(handler=write_release_checkpoint)
+
+    not_applicable = subparsers.add_parser("write-not-applicable-checkpoint")
+    not_applicable.add_argument("--source-sha", required=True)
+    not_applicable.add_argument("--control-sha", required=True)
+    not_applicable.add_argument("--infrastructure-run-id", required=True)
+    not_applicable.add_argument("--ghcr-build-run-id", required=True)
+    not_applicable.add_argument("--producer-run-id", required=True)
+    not_applicable.add_argument("--output", required=True)
+    not_applicable.set_defaults(handler=write_not_applicable_checkpoint)
+
+    validate_checkpoint = subparsers.add_parser("validate-release-checkpoint")
+    checkpoint_source = validate_checkpoint.add_mutually_exclusive_group(required=True)
+    checkpoint_source.add_argument("--checkpoint")
+    checkpoint_source.add_argument("--checkpoint-json")
+    validate_checkpoint.add_argument("--source-sha", required=True)
+    validate_checkpoint.add_argument("--producer-run-id", required=True)
+    validate_checkpoint.add_argument("--runtime-mode", required=True, choices=("k3s", "oke"))
+    validate_checkpoint.add_argument("--infrastructure-run-id")
+    validate_checkpoint.add_argument("--ghcr-build-run-id")
+    validate_checkpoint.add_argument("--candidate-images")
+    validate_checkpoint.add_argument("--expected-candidate-images-sha256")
+    validate_checkpoint.set_defaults(handler=validate_release_checkpoint_command)
+
+    revalidate_checkpoint = subparsers.add_parser("revalidate-release-checkpoint")
+    revalidate_checkpoint.add_argument("--checkpoint", required=True)
+    revalidate_checkpoint.add_argument("--runtime", required=True)
+    revalidate_checkpoint.add_argument("--capacity", required=True)
+    revalidate_checkpoint.add_argument("--candidate-images", required=True)
+    revalidate_checkpoint.add_argument("--source-sha", required=True)
+    revalidate_checkpoint.add_argument("--producer-run-id", required=True)
+    revalidate_checkpoint.add_argument(
+        "--profile", required=True, choices=("public", "held")
+    )
+    revalidate_checkpoint.set_defaults(handler=revalidate_release_checkpoint)
 
     args = parser.parse_args()
     args.handler(args)

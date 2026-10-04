@@ -186,6 +186,43 @@ measurement has run.
 The fixed root-filesystem limit remains 70 percent. Root and persistent-data
 mount identities, workload and queue health, public reads, and protected
 running, candidate, and rollback image references remain fail-closed.
+Eligible infrastructure runs now seal that result as one compact,
+canonical-checksummed `k3s-release-disk-checkpoint.v1` artifact named
+`oci-release-disk-checkpoint-<source-sha>-<producer-run-id>-1`. Admission uses
+the integer comparison `usedBytes * 100 <= capacityBytes * 70`; rounded display
+percentages never grant headroom. A k3s checkpoint is release-eligible only for
+the current source and first attempt with either `READY_NO_RECLAIM`, or
+`READY_RECLAIMED` after APT-only reclaim. It requires exact immutable CRI
+evidence for all ten candidate services and complete rollback residency.
+`OBSERVED`, over-limit, incomplete, unhealthy, rerun, identity-mismatched, or
+CRI-reclaimed results produce no eligible checkpoint, and APT reclaim never
+falls through to CRI reclaim.
+
+The k3s artifact has a strict runtime-specific shape: common source/control/run
+identity with `terminalStatus=RELEASE_ELIGIBLE`, plus top-level
+`thresholdPercent=70`, raw root bytes, complete stable
+node/root/Mongo mount identity, sealed k3s and container-runtime versions,
+candidate and rollback residency with immutable image IDs and repository
+digests, `publicStateStatus=PASS`, and flat
+`diagnosisChecksumSha256`/`reclaimChecksumSha256` lineage. No-reclaim lineage
+is literally `0`/`none`/`none`. Missing or extra fields and any
+identity, version, checksum, mount, or residency substitution fail closed.
+
+OKE finalization emits the same schema with runtime mode `oke` and disposition
+`NOT_APPLICABLE` while retaining
+`terminalStatus=RELEASE_ELIGIBLE`, but no fabricated filesystem, diagnosis,
+reclaim, candidate, or rollback fields. Consumers validate the artifact with
+repository-fixed arguments and the authoritative protected-environment runtime
+mode. A later public or held revalidation must reproduce the bound identity,
+exact bytes, mount, candidate, and rollback state before release mutation; the
+checkpoint is not a durable waiver for changed runtime state.
+
+Held revalidation deliberately excludes mutable application evidence. It uses
+only raw bytes, root/Mongo mount and node/runtime identity, and immutable
+candidate/rollback residency; it does not call HTTP, RabbitMQ/rabbitmqctl,
+queues, pods, Deployments, or workload-health checks. Public mode retains its
+strict public and application-state checks.
+
 The validated GHCR generation table is checksum-bound to its summary and
 provides immutable source attribution for every exact canonical digest,
 including digest-only local cache records when containerd lacks local source

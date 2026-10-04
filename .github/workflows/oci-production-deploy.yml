@@ -20,6 +20,14 @@ on:
         description: Successful first-attempt final oci-live-data-rollout run ID
         required: true
         type: string
+      checkpoint_source_sha:
+        description: Exact source SHA of the release disk checkpoint
+        required: true
+        type: string
+      disk_checkpoint_run_id:
+        description: Successful first-attempt release disk checkpoint producer run ID
+        required: true
+        type: string
       baseline_recovery_run_id:
         description: Exact trusted recovery run bound through the data chain, or 0
         required: true
@@ -59,9 +67,12 @@ jobs:
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       DATA_RUN_ID: ${{ inputs.data_run_id }}
+      CHECKPOINT_SOURCE_SHA: ${{ inputs.checkpoint_source_sha }}
+      DISK_CHECKPOINT_RUN_ID: ${{ inputs.disk_checkpoint_run_id }}
       BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
       BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
       CONFIRMATION: ${{ inputs.confirmation }}
+      DISPATCH_INPUTS: ${{ toJSON(inputs) }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
       OCI_REGION: ${{ vars.OCI_REGION }}
@@ -128,6 +139,8 @@ jobs:
           [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$DATA_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CHECKPOINT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DISK_CHECKPOINT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ||
              "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
@@ -139,6 +152,20 @@ jobs:
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          protected_operation=oci-production-deploy
+          if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
+            protected_operation=oci-production-deploy-recovered
+          fi
+          policy_json="$(
+            ./infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh \
+              get "$protected_operation"
+          )"
+          ./infra/oci/scripts/upstream_run_binding_stan.py validate-all \
+            --repository "$REPOSITORY" \
+            --policy-json "$policy_json" \
+            --subject-sha "$SOURCE_SHA" \
+            --dispatch-inputs "$DISPATCH_INPUTS" \
+            --runtime-mode "$OCI_RUNTIME_MODE"
 
           build_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id')"
           read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
@@ -148,7 +175,7 @@ jobs:
           [ "$workflow_id" = "$build_workflow_id" ]
           [ "$workflow_path" = ".github/workflows/oci-production-build.yml" ]
           [ "$event" = "workflow_run" ]
-          [ "$head_sha" = "$SOURCE_SHA" ]
+          [ "$head_sha" = "$CHECKPOINT_SOURCE_SHA" ]
           [ "$head_branch" = "master" ]
           [ "$repository" = "$REPOSITORY" ]
           [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
@@ -161,7 +188,7 @@ jobs:
           [ "$workflow_id" = "$infra_workflow_id" ]
           [ "$workflow_path" = ".github/workflows/oci-infrastructure.yml" ]
           [ "$event" = "workflow_dispatch" ]
-          [ "$head_sha" = "$SOURCE_SHA" ]
+          [ "$head_sha" = "$CHECKPOINT_SOURCE_SHA" ]
           [ "$head_branch" = "master" ]
           [ "$repository" = "$REPOSITORY" ]
           [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
@@ -233,15 +260,17 @@ jobs:
             artifacts/build \
             artifacts/data \
             artifacts/data-baselines \
+            artifacts/disk-checkpoint \
             artifacts/infrastructure \
             artifacts/oci-baseline \
-            artifacts/oci-deploy
+            artifacts/oci-deploy \
+            artifacts/oci-deploy-recovery
           chmod 700 "$HOME" "$HOME/.kube"
 
       - name: Download exact OCI image provenance
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
+          name: oci-image-provenance-${{ inputs.checkpoint_source_sha }}-${{ inputs.build_run_id }}-1
           path: artifacts/build
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -265,6 +294,15 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.data_run_id }}
 
+      - name: Download exact release disk checkpoint
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: oci-release-disk-checkpoint-${{ inputs.checkpoint_source_sha }}-${{ inputs.disk_checkpoint_run_id }}-1
+          path: artifacts/disk-checkpoint
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.disk_checkpoint_run_id }}
+
       - name: Download exact pre-mutation rollback baseline
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -279,14 +317,39 @@ jobs:
         run: |
           set -euo pipefail
           PROVENANCE_DIR=artifacts/build \
-          SOURCE_SHA="$SOURCE_SHA" \
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
           EXPECTED_BUILD_RUN_ATTEMPT=1 \
           OUTPUT_FILE=artifacts/oci-deploy/images.tsv \
           VERIFY_REMOTE=0 BOOT_IMAGES=0 \
             ./infra/oci/scripts/verify-images.sh
+          checkpoint_args=(
+            validate-release-checkpoint
+            --checkpoint artifacts/disk-checkpoint/checkpoint.json
+            --source-sha "$CHECKPOINT_SOURCE_SHA"
+            --producer-run-id "$DISK_CHECKPOINT_RUN_ID"
+            --runtime-mode "$OCI_RUNTIME_MODE"
+          )
+          checkpoint_args+=(
+            --infrastructure-run-id "$INFRASTRUCTURE_RUN_ID"
+            --ghcr-build-run-id "$BUILD_RUN_ID"
+          )
+          if [ "$OCI_RUNTIME_MODE" = "k3s" ]; then
+            checkpoint_args+=(
+              --candidate-images artifacts/oci-deploy/images.tsv
+            )
+          fi
+          ./infra/oci/scripts/k3s_disk_recovery_stan.py \
+            "${checkpoint_args[@]}"
+          disk_checkpoint_sha256="$(
+            jq -er '.contentChecksumSha256' \
+              artifacts/disk-checkpoint/checkpoint.json
+          )"
+          disk_checkpoint_disposition="$(
+            jq -er '.disposition' artifacts/disk-checkpoint/checkpoint.json
+          )"
           source artifacts/infrastructure/provenance.env
-          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$source_sha" = "$CHECKPOINT_SOURCE_SHA" ]
           [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
           [ "$infrastructure_run_attempt" = "1" ]
           [ "$compartment_ocid" = "$OCI_COMPARTMENT_OCID" ]
@@ -302,16 +365,6 @@ jobs:
           [ "$canonical_host" = "$OCI_CANONICAL_HOST" ]
           [ "$redirect_host" = "$OCI_REDIRECT_HOST" ]
           [ "$diagnostic_host" = "${ingress_ipv4}.nip.io" ]
-          EVIDENCE_DIR=artifacts/data \
-          EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
-          EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
-          EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
-          EXPECTED_PHASE=apply-slip-index \
-          EXPECTED_RUN_ID="$DATA_RUN_ID" \
-          EXPECTED_RUN_ATTEMPT=1 \
-          EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
-          EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
-            ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
           mapfile -t baseline_manifests < <(
             find artifacts/data-baselines \
               -type f \
@@ -330,6 +383,23 @@ jobs:
             sha256sum --quiet --check SHA256SUMS
           )
           cp -a "$baseline_dir/." artifacts/oci-baseline/
+          EVIDENCE_DIR=artifacts/data \
+          EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+          EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+          EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+          EXPECTED_DISK_CHECKPOINT_SHA256="$disk_checkpoint_sha256" \
+          EXPECTED_DISK_CHECKPOINT_DISPOSITION="$disk_checkpoint_disposition" \
+          EXPECTED_PHASE=apply-slip-index \
+          EXPECTED_RUN_ID="$DATA_RUN_ID" \
+          EXPECTED_RUN_ATTEMPT=1 \
+          EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+          EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
+          RESUME_BASELINE_DIR=artifacts/oci-baseline \
+          VERIFY_RESUME_APPLIED_RUN=true \
+          RESUME_REPOSITORY="$GITHUB_REPOSITORY" \
+            ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
           if [ "$runtime_mode" = "oke" ]; then
             echo "::add-mask::$cluster_ocid"
             echo "::add-mask::$endpoint_nsg_ocid"
@@ -343,6 +413,10 @@ jobs:
           printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
           printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
           printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
+          printf 'disk_checkpoint_sha256=%s\n' \
+            "$disk_checkpoint_sha256" >> "$GITHUB_OUTPUT"
+          printf 'disk_checkpoint_disposition=%s\n' \
+            "$disk_checkpoint_disposition" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned OCI CLI
         id: oci_cli
@@ -436,25 +510,11 @@ jobs:
         run: |
           set -euo pipefail
           ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
-          if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
-            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
-            OPERATION_ID="live-data-apply-slip-index" \
-            SOURCE_SHA="$SOURCE_SHA" \
-              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify; then
-            NAMESPACE="$OCI_K8S_NAMESPACE" \
-            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
-            OPERATION_ID="live-data-apply-slip-index" \
-            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
-            SOURCE_SHA="$SOURCE_SHA" \
-              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
-          else
-            NAMESPACE="$OCI_K8S_NAMESPACE" \
-            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
-            OPERATION_ID="live-data-apply-slip-index" \
-            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
-            SOURCE_SHA="$SOURCE_SHA" \
-              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
-          fi
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+          OPERATION_ID="live-data-apply-slip-index" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify
 
       - name: Validate executable pre-deploy rollback baseline
         run: |
@@ -480,6 +540,79 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Revalidate held release disk checkpoint before lock renewal
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          CANDIDATE_IMAGES_FILE: artifacts/oci-deploy/images.tsv
+          CHECKPOINT_FILE: artifacts/disk-checkpoint/checkpoint.json
+          WORK_DIR: ${{ runner.temp }}/pre-deploy-disk-checkpoint
+        run: |
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+          CONTROL_SHA="$SOURCE_SHA" \
+          GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+          REVALIDATION_PROFILE=held \
+            ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
+
+      - name: Write checksum-bound deployment recovery intent
+        id: recovery_intent
+        env:
+          DISK_CHECKPOINT_SHA256: ${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
+          DISK_CHECKPOINT_DISPOSITION: ${{ steps.provenance.outputs.disk_checkpoint_disposition }}
+        run: |
+          set -euo pipefail
+          umask 077
+          recovery_dir=artifacts/oci-deploy-recovery
+          rm -rf "$recovery_dir"
+          mkdir -p "$recovery_dir"
+          cp artifacts/oci-deploy/images.tsv "$recovery_dir/images.tsv"
+          {
+            printf 'schema_version=oci-deployment-recovery-authority-v1\n'
+            printf 'source_sha=%s\n' "$SOURCE_SHA"
+            printf 'source_ref=refs/heads/master\n'
+            printf 'deployment_workflow=oci-production-deploy\n'
+            printf 'deployment_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'deployment_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'runtime_mode=%s\n' "$OCI_RUNTIME_MODE"
+            printf 'build_run_id=%s\n' "$BUILD_RUN_ID"
+            printf 'candidate_images_sha256=%s\n' \
+              "$(sha256sum "$recovery_dir/images.tsv" | awk '{print $1}')"
+            printf 'data_run_id=%s\n' "$DATA_RUN_ID"
+            printf 'data_run_attempt=1\n'
+            printf 'data_evidence_sha256=%s\n' \
+              "$(sha256sum artifacts/data/SHA256SUMS | awk '{print $1}')"
+            printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
+            printf 'infrastructure_run_attempt=1\n'
+            printf 'infrastructure_provenance_sha256=%s\n' \
+              "$(sha256sum artifacts/infrastructure/provenance.env | awk '{print $1}')"
+            printf 'checkpoint_source_sha=%s\n' "$CHECKPOINT_SOURCE_SHA"
+            printf 'disk_checkpoint_run_id=%s\n' "$DISK_CHECKPOINT_RUN_ID"
+            printf 'disk_checkpoint_sha256=%s\n' "$DISK_CHECKPOINT_SHA256"
+            printf 'disk_checkpoint_disposition=%s\n' \
+              "$DISK_CHECKPOINT_DISPOSITION"
+            printf 'baseline_sha256=%s\n' \
+              "$(sha256sum artifacts/oci-baseline/SHA256SUMS | awk '{print $1}')"
+            printf 'baseline_capture_run_id=%s\n' "$DATA_RUN_ID"
+            printf 'baseline_recovery_run_id=%s\n' "$BASELINE_RECOVERY_RUN_ID"
+            printf 'baseline_recovery_source_sha=%s\n' \
+              "$BASELINE_RECOVERY_SOURCE_SHA"
+          } >"$recovery_dir/deployment-intent.env"
+          printf '%s  deployment-intent.env\n' \
+            "$(sha256sum "$recovery_dir/deployment-intent.env" | awk '{print $1}')" \
+            >"$recovery_dir/deployment-intent.sha256"
+
+      - name: Renew exact transferred database lock
+        id: renew_lock
+        run: |
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+          OPERATION_ID="live-data-apply-slip-index" \
+          LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
+
       - name: Deploy immutable images sequentially
         id: apply
         env:
@@ -499,6 +632,7 @@ jobs:
         run: |
           set -euo pipefail
           {
+            printf 'build_run_id=%s\n' "$BUILD_RUN_ID"
             printf 'data_run_id=%s\n' "$DATA_RUN_ID"
             printf 'data_run_attempt=1\n'
             printf 'data_evidence_sha256=%s\n' "$(sha256sum artifacts/data/SHA256SUMS | awk '{print $1}')"
@@ -508,6 +642,12 @@ jobs:
               sha256sum artifacts/infrastructure/provenance.env |
                 awk '{print $1}'
             )"
+            printf 'checkpoint_source_sha=%s\n' "$CHECKPOINT_SOURCE_SHA"
+            printf 'disk_checkpoint_run_id=%s\n' "$DISK_CHECKPOINT_RUN_ID"
+            printf 'disk_checkpoint_sha256=%s\n' \
+              "${{ steps.provenance.outputs.disk_checkpoint_sha256 }}"
+            printf 'disk_checkpoint_disposition=%s\n' \
+              "${{ steps.provenance.outputs.disk_checkpoint_disposition }}"
           } >> artifacts/oci-deploy/provenance.txt
           cp artifacts/data/schema.env artifacts/oci-deploy/live-schema.env
 
@@ -538,9 +678,29 @@ jobs:
           OUTPUT_DIR: artifacts/oci-deploy-validation
         run: ./infra/oci/agents/deploy-validation-loop-stan.sh
 
+      - name: Revalidate held release disk checkpoint after protected health
+        id: post_checkpoint
+        if: env.OCI_RUNTIME_MODE == 'k3s' && steps.health.outcome == 'success'
+        env:
+          SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          CANDIDATE_IMAGES_FILE: artifacts/oci-deploy/images.tsv
+          CHECKPOINT_FILE: artifacts/disk-checkpoint/checkpoint.json
+          WORK_DIR: ${{ runner.temp }}/post-deploy-disk-checkpoint
+        run: |
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+          CONTROL_SHA="$SOURCE_SHA" \
+          GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+          REVALIDATION_PROFILE=held \
+            ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
+
       - name: Release transferred lock after protected validation
         id: release_lock
-        if: steps.health.outcome == 'success'
+        if: >-
+          steps.health.outcome == 'success' &&
+          (env.OCI_RUNTIME_MODE != 'k3s' ||
+            steps.post_checkpoint.outcome == 'success')
         run: |
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
@@ -590,6 +750,58 @@ jobs:
             SOURCE_SHA="$SOURCE_SHA" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           fi
+
+      - name: Finalize deployment recovery authority
+        id: recovery_authority
+        if: always() && steps.recovery_intent.outcome == 'success'
+        env:
+          WORKFLOW_RESULT: ${{ job.status }}
+          LOCK_RELEASE_OUTCOME: ${{ steps.release_lock.outcome }}
+          FENCE_RELEASE_OUTCOME: ${{ steps.release_runtime.outcome }}
+          REHOLD_OUTCOME: ${{ steps.rehold.outcome }}
+        run: |
+          set -euo pipefail
+          umask 077
+          recovery_dir=artifacts/oci-deploy-recovery
+          intent_sha256="$(
+            awk '$2 == "deployment-intent.env" {print $1}' \
+              "$recovery_dir/deployment-intent.sha256"
+          )"
+          [[ "$intent_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$intent_sha256" = "$(
+            sha256sum "$recovery_dir/deployment-intent.env" | awk '{print $1}'
+          )" ]
+          {
+            printf 'schema_version=oci-deployment-failure-lineage-v1\n'
+            printf 'source_sha=%s\n' "$SOURCE_SHA"
+            printf 'deployment_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'deployment_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'intent_sha256=%s\n' "$intent_sha256"
+            printf 'workflow_result=%s\n' "$WORKFLOW_RESULT"
+            printf 'lock_release_outcome=%s\n' "$LOCK_RELEASE_OUTCOME"
+            printf 'fence_release_outcome=%s\n' "$FENCE_RELEASE_OUTCOME"
+            printf 'rehold_outcome=%s\n' "$REHOLD_OUTCOME"
+          } >"$recovery_dir/failure-lineage.env"
+          (
+            cd "$recovery_dir"
+            sha256sum \
+              deployment-intent.env \
+              deployment-intent.sha256 \
+              failure-lineage.env \
+              images.tsv \
+              > SHA256SUMS
+            sha256sum --quiet --check SHA256SUMS
+          )
+
+      - name: Upload deployment recovery authority
+        id: recovery_authority_upload
+        if: always() && steps.recovery_intent.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-deploy-recovery-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-deploy-recovery
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload sanitized live readiness evidence
         if: always()

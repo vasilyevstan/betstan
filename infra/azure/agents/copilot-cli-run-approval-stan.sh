@@ -409,7 +409,7 @@ revalidate_control() {
 # uses, so there is no third implementation to drift.
 revalidate_upstream_bindings() {
   local operation subject_sha dispatch_inputs policy_json bindings
-  local bound_mode authoritative_mode environment
+  local bound_mode authoritative_mode environment requires_mode
 
   operation="$(jq -r '.operation // ""' <<<"$record_summary")"
   [[ -n "$operation" ]] ||
@@ -418,7 +418,14 @@ revalidate_upstream_bindings() {
   bindings="$(jq -c '.upstreamRunBindings // []' <<<"$policy_json")"
 
   bound_mode="$(jq -r '.inputs.runtime_mode // ""' <<<"$record_summary")"
-  if [[ -n "$bound_mode" ]]; then
+  requires_mode="$(
+    jq -r '
+      any(.upstreamRunBindings[]?;
+        .artifactValidatorProfile == "oci-release-disk-checkpoint-v1")
+    ' <<<"$policy_json"
+  )"
+  authoritative_mode=""
+  if [[ -n "$bound_mode" || "$requires_mode" = "true" ]]; then
     environment="$(jq -r '.environment // ""' <<<"$record_summary")"
     [[ -n "$environment" ]] ||
       fail "authority record has no environment for runtime mode revalidation"
@@ -427,7 +434,9 @@ revalidate_upstream_bindings() {
         "repos/$repository/environments/$environment/variables/OCI_RUNTIME_MODE" \
         --jq '.value'
     )"
-    [[ "$bound_mode" = "$authoritative_mode" ]] ||
+    [[ "$authoritative_mode" = "k3s" || "$authoritative_mode" = "oke" ]] ||
+      fail "authoritative runtime mode is unsupported"
+    [[ -z "$bound_mode" || "$bound_mode" = "$authoritative_mode" ]] ||
       fail "authoritative runtime mode changed since dispatch; approval refused"
   fi
 
@@ -441,7 +450,8 @@ revalidate_upstream_bindings() {
     --repository "$repository" \
     --policy-json "$policy_json" \
     --subject-sha "$subject_sha" \
-    --dispatch-inputs "$dispatch_inputs" ||
+    --dispatch-inputs "$dispatch_inputs" \
+    --runtime-mode "$authoritative_mode" ||
     fail "upstream prerequisites are no longer valid; approval refused"
 }
 
