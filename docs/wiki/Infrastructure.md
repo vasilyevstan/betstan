@@ -199,20 +199,23 @@ CRI-reclaimed results produce no eligible checkpoint, and APT reclaim never
 falls through to CRI reclaim.
 
 The k3s artifact has a strict runtime-specific shape: common source/control/run
-identity and terminal fields plus raw root bytes, complete stable
+identity with `terminalStatus=RELEASE_ELIGIBLE`, plus top-level
+`thresholdPercent=70`, raw root bytes, complete stable
 node/root/Mongo mount identity, sealed k3s and container-runtime versions,
 candidate and rollback residency with immutable image IDs and repository
-digests, public-state status, and flat diagnosis/reclaim lineage. No-reclaim
-lineage is literally `0`/`none`/`none`. Missing or extra fields and any
+digests, `publicStateStatus=PASS`, and flat
+`diagnosisChecksumSha256`/`reclaimChecksumSha256` lineage. No-reclaim lineage
+is literally `0`/`none`/`none`. Missing or extra fields and any
 identity, version, checksum, mount, or residency substitution fail closed.
 
 OKE finalization emits the same schema with runtime mode `oke` and disposition
-`NOT_APPLICABLE`, but no fabricated filesystem, mount, candidate, or rollback
-fields. Consumers validate the artifact with repository-fixed arguments and
-the authoritative protected-environment runtime mode. A later public or held
-revalidation must reproduce the bound identity, exact bytes, mount, candidate,
-and rollback state before release mutation; the checkpoint is not a durable
-waiver for changed runtime state.
+`NOT_APPLICABLE` while retaining
+`terminalStatus=RELEASE_ELIGIBLE`, but no fabricated filesystem, diagnosis,
+reclaim, candidate, or rollback fields. Consumers validate the artifact with
+repository-fixed arguments and the authoritative protected-environment runtime
+mode. A later public or held revalidation must reproduce the bound identity,
+exact bytes, mount, candidate, and rollback state before release mutation; the
+checkpoint is not a durable waiver for changed runtime state.
 
 Held revalidation deliberately excludes mutable application evidence. It uses
 only raw bytes, root/Mongo mount and node/runtime identity, and immutable

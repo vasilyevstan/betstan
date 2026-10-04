@@ -87,7 +87,8 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   its strict runtime-specific key set, canonical checksum, raw-byte
   70-percent boundary, complete node/mount/runtime identity, runtime versions,
   and immutable candidate/rollback residency. OKE has only the common
-  `NOT_APPLICABLE` shape; never fabricate disk fields.
+  fields with `terminalStatus=RELEASE_ELIGIBLE` and
+  `disposition=NOT_APPLICABLE`; never fabricate disk fields.
 - Public and held revalidation are different contracts. Public mode remains
   strict about public/application state. Held mode collects only stable
   infrastructure facts and must not call HTTP, RabbitMQ/rabbitmqctl, queues,

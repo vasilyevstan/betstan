@@ -1483,7 +1483,6 @@ def checkpoint_root(capacity):
     return {
         "capacityBytes": capacity["capacityBytes"],
         "usedBytes": capacity["usedBytes"],
-        "thresholdPercent": THRESHOLD,
     }
 
 
@@ -1509,7 +1508,7 @@ def validate_release_checkpoint(value):
             value["schemaVersion"] != "k3s-release-disk-checkpoint.v1"
             or value["producerRunAttempt"] != "1"
             or value["disposition"] != "NOT_APPLICABLE"
-            or value["terminalStatus"] != "NOT_APPLICABLE"
+            or value["terminalStatus"] != "RELEASE_ELIGIBLE"
         ):
             fail("OKE release checkpoint identity is invalid")
         require_sha(value["sourceSha"], "release checkpoint source SHA")
@@ -1524,15 +1523,15 @@ def validate_release_checkpoint(value):
 
     required = common | {
         "root",
+        "thresholdPercent",
         "stableIdentity",
-        "candidateImagesSha256",
         "candidateResidency",
         "rollbackResidency",
         "publicStateStatus",
         "diagnosisRunId",
-        "diagnosisSha256",
+        "diagnosisChecksumSha256",
         "reclaimRunId",
-        "reclaimSha256",
+        "reclaimChecksumSha256",
         "reclaimCategory",
     }
     if set(value) != required:
@@ -1543,8 +1542,9 @@ def validate_release_checkpoint(value):
         or value["runtimeMode"] != "k3s"
         or value["producerRunAttempt"] != "1"
         or value["disposition"] not in {"READY_NO_RECLAIM", "READY_RECLAIMED"}
-        or value["terminalStatus"] != "READY"
-        or value["publicStateStatus"] != "HEALTHY"
+        or value["terminalStatus"] != "RELEASE_ELIGIBLE"
+        or value["thresholdPercent"] != THRESHOLD
+        or value["publicStateStatus"] != "PASS"
     ):
         fail("k3s release checkpoint identity is invalid")
     require_sha(value["sourceSha"], "release checkpoint source SHA")
@@ -1556,13 +1556,12 @@ def validate_release_checkpoint(value):
     root = value["root"]
     if (
         not isinstance(root, dict)
-        or set(root) != {"capacityBytes", "usedBytes", "thresholdPercent"}
+        or set(root) != {"capacityBytes", "usedBytes"}
         or type(root["capacityBytes"]) is not int
         or root["capacityBytes"] <= 0
         or type(root["usedBytes"]) is not int
         or root["usedBytes"] < 0
         or root["usedBytes"] > root["capacityBytes"]
-        or root["thresholdPercent"] != THRESHOLD
         or root["usedBytes"] * 100 > root["capacityBytes"] * THRESHOLD
     ):
         fail("release checkpoint byte threshold evidence is invalid")
@@ -1639,12 +1638,6 @@ def validate_release_checkpoint(value):
     validate_candidate_images(plain_candidates)
     if [item["service"] for item in candidates] != sorted(CURRENT_SERVICES):
         fail("release checkpoint candidate residency order is invalid")
-    if (
-        not re.fullmatch(r"[0-9a-f]{64}", str(value["candidateImagesSha256"]))
-        or value["candidateImagesSha256"]
-        != checksum(sorted(plain_candidates, key=lambda row: row["service"]))
-    ):
-        fail("release checkpoint candidate checksum is invalid")
     rollback = value["rollbackResidency"]
     if not isinstance(rollback, list):
         fail("release checkpoint rollback residency is malformed")
@@ -1673,14 +1666,16 @@ def validate_release_checkpoint(value):
         fail("release checkpoint rollback residency is incomplete")
     if (
         not POSITIVE_INTEGER.fullmatch(str(value["diagnosisRunId"]))
-        or not re.fullmatch(r"[0-9a-f]{64}", str(value["diagnosisSha256"]))
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(value["diagnosisChecksumSha256"])
+        )
     ):
         fail("release checkpoint diagnosis lineage is invalid")
     if value["disposition"] == "READY_NO_RECLAIM":
         if (
             value["diagnosisRunId"] != value["producerRunId"]
             or value["reclaimRunId"] != "0"
-            or value["reclaimSha256"] != "none"
+            or value["reclaimChecksumSha256"] != "none"
             or value["reclaimCategory"] != "none"
         ):
             fail("no-reclaim checkpoint producer lineage is invalid")
@@ -1688,7 +1683,9 @@ def validate_release_checkpoint(value):
         if (
             value["reclaimRunId"] != value["producerRunId"]
             or value["reclaimCategory"] != "apt-package-cache"
-            or not re.fullmatch(r"[0-9a-f]{64}", str(value["reclaimSha256"]))
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(value["reclaimChecksumSha256"])
+            )
         ):
             fail("reclaimed checkpoint producer lineage is invalid")
 
@@ -1762,17 +1759,17 @@ def write_release_checkpoint(args):
             "producerRunAttempt": "1",
             "runtimeMode": "k3s",
             "disposition": disposition,
-            "terminalStatus": "READY",
+            "terminalStatus": "RELEASE_ELIGIBLE",
+            "thresholdPercent": THRESHOLD,
             "root": checkpoint_root(capacity),
             "stableIdentity": checkpoint_stable_identity(runtime, capacity),
-            "candidateImagesSha256": checksum(candidates),
             "candidateResidency": candidate_residency,
             "rollbackResidency": rollback_residency,
-            "publicStateStatus": "HEALTHY",
+            "publicStateStatus": "PASS",
             "diagnosisRunId": diagnosis["workflowRunId"],
-            "diagnosisSha256": diagnosis["contentChecksumSha256"],
+            "diagnosisChecksumSha256": diagnosis["contentChecksumSha256"],
             "reclaimRunId": reclaim_run_id,
-            "reclaimSha256": reclaim_sha256,
+            "reclaimChecksumSha256": reclaim_sha256,
             "reclaimCategory": reclaim_category,
         }
     )
@@ -1800,7 +1797,7 @@ def write_not_applicable_checkpoint(args):
             "producerRunAttempt": "1",
             "runtimeMode": "oke",
             "disposition": "NOT_APPLICABLE",
-            "terminalStatus": "NOT_APPLICABLE",
+            "terminalStatus": "RELEASE_ELIGIBLE",
         }
     )
     validate_release_checkpoint(checkpoint)
@@ -1844,13 +1841,37 @@ def validate_release_checkpoint_command(args):
     if expected_candidates:
         if checkpoint["runtimeMode"] != "k3s":
             fail("OKE release checkpoint cannot bind candidate image evidence")
-        if checkpoint["candidateImagesSha256"] != expected_candidates:
+        sealed_candidates = [
+            {
+                key: item[key]
+                for key in (
+                    "service",
+                    "imageRef",
+                    "manifestDigest",
+                    "platformDigest",
+                )
+            }
+            for item in checkpoint["candidateResidency"]
+        ]
+        if checksum(sealed_candidates) != expected_candidates:
             fail("release checkpoint candidate image set differs from the bound build")
     if args.candidate_images:
         candidates = parse_candidate_images(args.candidate_images)
+        sealed_candidates = [
+            {
+                key: item[key]
+                for key in (
+                    "service",
+                    "imageRef",
+                    "manifestDigest",
+                    "platformDigest",
+                )
+            }
+            for item in checkpoint.get("candidateResidency", [])
+        ]
         if (
             checkpoint["runtimeMode"] != "k3s"
-            or checkpoint["candidateImagesSha256"] != checksum(candidates)
+            or sealed_candidates != candidates
         ):
             fail("release checkpoint candidate image set differs")
     print(
@@ -1880,7 +1901,19 @@ def revalidate_release_checkpoint(args):
     if capacity["withinLimit"] is not True:
         fail("fresh release checkpoint byte threshold is exceeded")
     candidates = parse_candidate_images(args.candidate_images)
-    if checkpoint["candidateImagesSha256"] != checksum(candidates):
+    sealed_candidates = [
+        {
+            key: item[key]
+            for key in (
+                "service",
+                "imageRef",
+                "manifestDigest",
+                "platformDigest",
+            )
+        }
+        for item in checkpoint["candidateResidency"]
+    ]
+    if sealed_candidates != candidates:
         fail("fresh candidate image set differs from the release checkpoint")
     if capacity["capacityBytes"] != checkpoint["root"]["capacityBytes"]:
         fail("fresh release checkpoint filesystem capacity differs")

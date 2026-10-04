@@ -1845,7 +1845,7 @@ elif endpoint == "actions/artifacts/9145/zip":
         "ghcrBuildRunId": "42", "producerRunId": "45",
         "producerRunAttempt": "1", "runtimeMode": "oke",
         "disposition": "NOT_APPLICABLE",
-        "terminalStatus": "NOT_APPLICABLE",
+        "terminalStatus": "RELEASE_ELIGIBLE",
     }
     canonical = json.dumps(checkpoint, sort_keys=True, separators=(",", ":"))
     checkpoint["contentChecksumSha256"] = hashlib.sha256(canonical.encode()).hexdigest()
@@ -3840,7 +3840,7 @@ checkpoint = {
     "producerRunAttempt": "1",
     "runtimeMode": "oke",
     "disposition": "NOT_APPLICABLE",
-    "terminalStatus": "NOT_APPLICABLE",
+    "terminalStatus": "RELEASE_ELIGIBLE",
 }
 checkpoint["contentChecksumSha256"] = hashlib.sha256(
     json.dumps(checkpoint, sort_keys=True, separators=(",", ":")).encode()

@@ -741,27 +741,27 @@ jq -e '
   .schemaVersion == "k3s-release-disk-checkpoint.v1" and
   .sourceSha == .controlSha and
   .disposition == "READY_NO_RECLAIM" and
-  .terminalStatus == "READY" and
-  .root.thresholdPercent == 70 and
+  .terminalStatus == "RELEASE_ELIGIBLE" and
+  .thresholdPercent == 70 and
   .root.usedBytes == 35000000000 and
   (.candidateResidency | length) == 10 and
   (.rollbackResidency | length) == 10 and
-  .publicStateStatus == "HEALTHY" and
+  .publicStateStatus == "PASS" and
   .diagnosisRunId == "700" and
+  (.diagnosisChecksumSha256 | test("^[0-9a-f]{64}$")) and
   .reclaimRunId == "0" and
-  .reclaimSha256 == "none" and
+  .reclaimChecksumSha256 == "none" and
   .reclaimCategory == "none" and
   (.contentChecksumSha256 | test("^[0-9a-f]{64}$"))
 ' "$checkpoint" >/dev/null ||
   fail "canonical no-reclaim checkpoint is incomplete"
 jq -e '
   ((keys | sort) == ([
-    "candidateImagesSha256",
     "candidateResidency",
     "contentChecksumSha256",
     "controlSha",
     "diagnosisRunId",
-    "diagnosisSha256",
+    "diagnosisChecksumSha256",
     "disposition",
     "ghcrBuildRunId",
     "infrastructureRunId",
@@ -770,18 +770,18 @@ jq -e '
     "publicStateStatus",
     "reclaimCategory",
     "reclaimRunId",
-    "reclaimSha256",
+    "reclaimChecksumSha256",
     "rollbackResidency",
     "root",
     "runtimeMode",
     "schemaVersion",
     "sourceSha",
     "stableIdentity",
+    "thresholdPercent",
     "terminalStatus"
   ] | sort)) and
   ((.root | keys | sort) == ([
     "capacityBytes",
-    "thresholdPercent",
     "usedBytes"
   ] | sort)) and
   ((.stableIdentity | keys | sort) == ([
@@ -1048,7 +1048,7 @@ jq -e '
   .disposition == "READY_RECLAIMED" and
   .reclaimCategory == "apt-package-cache" and
   .reclaimRunId == "701" and
-  (.reclaimSha256 | test("^[0-9a-f]{64}$"))
+  (.reclaimChecksumSha256 | test("^[0-9a-f]{64}$"))
 ' "$apt_checkpoint" >/dev/null ||
   fail "APT-only reclaim did not produce the fixed eligible disposition"
 
@@ -1100,7 +1100,7 @@ oke_checkpoint="$work_dir/oke-checkpoint.json"
 jq -e '
   .runtimeMode == "oke" and
   .disposition == "NOT_APPLICABLE" and
-  .terminalStatus == "NOT_APPLICABLE" and
+  .terminalStatus == "RELEASE_ELIGIBLE" and
   ((keys | sort) == ([
     "contentChecksumSha256",
     "controlSha",
@@ -1116,6 +1116,60 @@ jq -e '
   ] | sort))
 ' "$oke_checkpoint" >/dev/null ||
   fail "OKE checkpoint fabricated disk fields"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - \
+  "$HELPER" "$checkpoint" "$oke_checkpoint" <<'PY'
+import copy
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+helper_path, k3s_path, oke_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("k3s_disk_recovery", helper_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+k3s = json.loads(Path(k3s_path).read_text(encoding="utf-8"))
+oke = json.loads(Path(oke_path).read_text(encoding="utf-8"))
+module.validate_release_checkpoint(k3s)
+module.validate_release_checkpoint(oke)
+
+
+def reseal(value):
+    value.pop("contentChecksumSha256", None)
+    value["contentChecksumSha256"] = module.checksum(value)
+    return value
+
+
+alternates = []
+ready = copy.deepcopy(k3s)
+ready["terminalStatus"] = "READY"
+alternates.append(ready)
+healthy = copy.deepcopy(k3s)
+healthy["publicStateStatus"] = "HEALTHY"
+alternates.append(healthy)
+nested = copy.deepcopy(k3s)
+nested["root"]["thresholdPercent"] = nested.pop("thresholdPercent")
+alternates.append(nested)
+old_checksums = copy.deepcopy(k3s)
+old_checksums["diagnosisSha256"] = old_checksums.pop(
+    "diagnosisChecksumSha256"
+)
+old_checksums["reclaimSha256"] = old_checksums.pop(
+    "reclaimChecksumSha256"
+)
+alternates.append(old_checksums)
+old_oke = copy.deepcopy(oke)
+old_oke["terminalStatus"] = "NOT_APPLICABLE"
+alternates.append(old_oke)
+
+for alternate in alternates:
+    try:
+        module.validate_release_checkpoint(reseal(alternate))
+    except SystemExit:
+        continue
+    raise AssertionError("alternate release checkpoint schema passed")
+PY
 
 grep -Fxq '    apt-get clean' "$REMOTE" ||
   fail "remote reclaim does not use native apt-get clean"

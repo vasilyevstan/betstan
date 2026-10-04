@@ -1532,7 +1532,7 @@ value = {
     "producerRunAttempt": "1",
     "runtimeMode": "oke",
     "disposition": "NOT_APPLICABLE",
-    "terminalStatus": "NOT_APPLICABLE",
+    "terminalStatus": "RELEASE_ELIGIBLE",
 }
 value["contentChecksumSha256"] = hashlib.sha256(
     json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -1708,7 +1708,7 @@ checkpoint = {
     "producerRunAttempt": "1",
     "runtimeMode": "oke",
     "disposition": "NOT_APPLICABLE",
-    "terminalStatus": "NOT_APPLICABLE",
+    "terminalStatus": "RELEASE_ELIGIBLE",
 }
 checkpoint["contentChecksumSha256"] = hashlib.sha256(
     json.dumps(checkpoint, sort_keys=True, separators=(",", ":")).encode()
@@ -3062,10 +3062,6 @@ for service in services:
         "residentRepoDigest": image_ref,
     })
     lines.append("\t".join((service, repository, image_ref, manifest, platform)))
-plain = [
-    {key: row[key] for key in ("service", "imageRef", "manifestDigest", "platformDigest")}
-    for row in candidates
-]
 rollback = []
 for service in services:
     manifest = "sha256:" + hashlib.sha256((service + "-rollback").encode()).hexdigest()
@@ -3083,9 +3079,11 @@ value = {
     "infrastructureRunId": "699",
     "ghcrBuildRunId": "701", "producerRunId": "700",
     "producerRunAttempt": "1", "runtimeMode": "k3s",
-    "disposition": "READY_NO_RECLAIM", "terminalStatus": "READY",
+    "disposition": "READY_NO_RECLAIM",
+    "terminalStatus": "RELEASE_ELIGIBLE",
+    "thresholdPercent": 70,
     "root": {
-        "capacityBytes": 1000, "usedBytes": 700, "thresholdPercent": 70,
+        "capacityBytes": 1000, "usedBytes": 700,
     },
     "stableIdentity": {
         "nodeNameSha256": hashlib.sha256(b"node").hexdigest(),
@@ -3098,17 +3096,13 @@ value = {
         "containerRuntimeVersion": "containerd://2.1.4-k3s1",
         "k3sActive": True,
     },
-    "candidateImagesSha256": hashlib.sha256(
-        json.dumps(sorted(plain, key=lambda row: row["service"]),
-                   sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest(),
     "candidateResidency": candidates,
     "rollbackResidency": rollback,
-    "publicStateStatus": "HEALTHY",
+    "publicStateStatus": "PASS",
     "diagnosisRunId": "700",
-    "diagnosisSha256": hashlib.sha256(b"diagnosis").hexdigest(),
+    "diagnosisChecksumSha256": hashlib.sha256(b"diagnosis").hexdigest(),
     "reclaimRunId": "0",
-    "reclaimSha256": "none",
+    "reclaimChecksumSha256": "none",
     "reclaimCategory": "none",
 }
 value["contentChecksumSha256"] = hashlib.sha256(

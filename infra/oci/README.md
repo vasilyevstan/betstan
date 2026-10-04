@@ -314,12 +314,14 @@ concurrent retirement fixture isolation without masking failed suites.
    bytes must be at or below 70 percent, and immutable CRI evidence must prove
    all ten candidate images plus complete rollback residency. CRI reclaim,
    incomplete or unhealthy state, reruns, and identity drift are ineligible.
-   OKE finalize emits only the `NOT_APPLICABLE` checkpoint shape, without
-   fabricated disk fields. The strict k3s shape seals common identity and
-   terminal fields plus raw root bytes, complete node/root/Mongo mount
+   OKE finalize emits only common fields with
+   `terminalStatus=RELEASE_ELIGIBLE` and `disposition=NOT_APPLICABLE`, without
+   fabricated disk fields. The strict k3s shape adds top-level
+   `thresholdPercent=70`, raw root bytes, complete node/root/Mongo mount
    identity, k3s and runtime versions, immutable candidate/rollback image IDs
-   and repository digests, public-state status, and flat diagnosis/reclaim
-   lineage; missing or extra keys and any substitution fail closed.
+   and repository digests, `publicStateStatus=PASS`, and flat
+   `diagnosisChecksumSha256`/`reclaimChecksumSha256` lineage; missing or extra
+   keys and any substitution fail closed.
 6. Before every OCI application deploy, produce a successful final
    `apply-slip-index` data handoff for the same exact current master SHA,
    first-attempt OCI build, finalized infrastructure run, and bound release

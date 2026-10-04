@@ -280,8 +280,9 @@ Current OCI data and deployment authority also requires the exact
 canonical-checksummed `k3s-release-disk-checkpoint.v1` artifact. The k3s shape
 seals raw root bytes, complete stable node/mount/runtime identity, exact
 candidate and rollback CRI residency, public-state status, and flat
-diagnosis/reclaim lineage; the OKE shape contains only the common
-`NOT_APPLICABLE` fields. Missing or extra keys, runtime-version drift, identity
+diagnosis/reclaim lineage; the OKE shape contains only common fields with
+`terminalStatus=RELEASE_ELIGIBLE` and `disposition=NOT_APPLICABLE`. Missing or
+extra keys, runtime-version drift, identity
 drift, incomplete residency, a rerun, or a byte count above the integer
 70-percent boundary fails closed.
 
