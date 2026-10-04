@@ -305,15 +305,39 @@ concurrent retirement fixture isolation without masking failed suites.
    firewall that rejects direct non-SSH input. Because session `ACTIVE` can
    precede endpoint readiness, the operator retries only the tunnel against
    that same session with bounded backoff and exact PID cleanup.
-   `scripts/finalize-k3s.sh` then mounts the Mongo volume, installs
-   ingress-nginx and cert-manager, and reconciles the fixed 10/10 Mbps OCI
-   load balancer. A release-eligible first-attempt k3s finalize, diagnosis, or
-   APT-only reclaim seals one canonical `k3s-release-disk-checkpoint.v1`
-   artifact named
+   Finalize first invalidates any stale release checkpoint, validates the
+   registry candidates, opens access, and always runs
+   `scripts/finalize-k3s.sh` to mount the Mongo volume, install ingress-nginx
+   and cert-manager, and reconcile the fixed 10/10 Mbps OCI load balancer.
+   Registry validation proves availability, not node residency. When it
+   succeeds, finalize preloads the ten service-sorted immutable public GHCR
+   references through the node's native anonymous `k3s crictl` endpoint,
+   sequentially and without credentials. Every attempted pull has a fresh raw
+   root `df` byte measurement immediately before and after it; a failed pull
+   still receives the post-attempt measurement when available. Invalid
+   evidence, unavailable bytes, a value above the exact 70-percent boundary,
+   or a failed pull stops before the next image and withholds release
+   eligibility. Preload never deletes images, prunes data, runs APT cleanup,
+   retries, or falls back to another image tool.
+
+   Only after preload completes does the existing aggregate diagnosis inspect
+   complete candidate and rollback CRI residency and write a checkpoint.
+   Preload success alone grants no residency authority. Candidate verification
+   or candidacy-preload failure can therefore leave infrastructure finalize
+   successful while release eligibility remains withheld; fatal provenance,
+   access, host-identity, transport, finalizer, cleanup, and artifact failures
+   still fail infrastructure. The protected disk-recovery path remains
+   available independently.
+
+   A release-eligible first-attempt k3s finalize diagnosis or APT-only reclaim
+   seals one canonical `k3s-release-disk-checkpoint.v1` artifact named
    `oci-release-disk-checkpoint-<source-sha>-<producer-run-id>-1`. Exact integer
-   bytes must be at or below 70 percent, and immutable CRI evidence must prove
-   all ten candidate images plus complete rollback residency. CRI reclaim,
-   incomplete or unhealthy state, reruns, and identity drift are ineligible.
+   bytes from both the kubelet node-filesystem evidence and an independent raw
+   root `df` measurement must each satisfy
+   `usedBytes * 100 <= capacityBytes * 70`; equality passes. Immutable CRI
+   evidence must prove all ten candidate images plus complete rollback
+   residency. CRI reclaim, incomplete or unhealthy state, reruns, and identity
+   drift are ineligible.
    OKE finalize emits only common fields with
    `terminalStatus=RELEASE_ELIGIBLE` and `disposition=NOT_APPLICABLE`, without
    fabricated disk fields. The strict k3s shape adds top-level

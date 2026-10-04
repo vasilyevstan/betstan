@@ -221,6 +221,9 @@ Before deployment, the release chain verifies:
   and upstream runs;
 - current `master` identity;
 - image digest availability;
+- for k3s, candidate verification, infrastructure finalization,
+  authority-bound native CRI preload, and aggregate diagnosis/checkpoint
+  creation in that order;
 - migration and schema compatibility;
 - dry-run results;
 - for non-dry-run k3s data maintenance, a root filesystem at or below the
@@ -247,17 +250,38 @@ and sanitized. These are transport retries, not protected-workflow reruns or
 reuse of consumed authority, and do not establish that an unclassified failure
 would recover.
 
-**Release disk checkpoint authority.** Every current live-data operation and
-normal or recovered deployment binds a full `checkpoint_source_sha`, positive
-`disk_checkpoint_run_id`, canonical checkpoint checksum, and disposition from
-the exact infrastructure producer. Fresh phases require the checkpoint source
-to equal the approved SHA. A resume may use an ancestor only after the
-pre-authority and workflow checks prove that every descendant change is under
-`.github/`, `infra/`, or Markdown, candidate images are exactly equivalent,
-and the original applied source, predecessor, failed run, build,
-infrastructure, checkpoint, and data lineage all resolve recursively. A later
-phase or deployment rejects any checkpoint source, run, checksum, or
-disposition substitution.
+**Release disk checkpoint authority.** Registry verification of all ten
+immutable candidates is required, but does not establish k3s node CRI
+residency. The existing finalization phase therefore finalizes infrastructure
+before preloading those public immutable references through the authority-bound
+native k3s CRI path, and runs aggregate diagnosis only after preload completes.
+Neither registry verification nor successful preload is release authority:
+checkpoint creation still requires the aggregate public-state contract, while
+later revalidation applies its selected public or held profile. Candidate and
+rollback CRI residency, lineage, identity, checksums, and kubelet checks remain
+mandatory at their applicable boundaries.
+
+Checkpoint creation and each public or held revalidation independently require
+fresh kubelet node-filesystem and raw-root byte measurements to satisfy
+`usedBytes * 100 <= capacityBytes * 70`. Equality passes; one byte over the
+limit withholds eligibility. The separate governed diagnosis path remains
+available over the limit. Candidate-verification or candidacy-preload failure
+stops further preload work and removes candidate and checkpoint evidence,
+while otherwise-valid finalized infrastructure provenance remains available
+for governed diagnosis or reclaim. Authority, access,
+infrastructure-finalization, and cleanup failures remain fatal.
+[[Infrastructure]] describes the bounded preload behavior.
+
+Every current live-data operation and normal or recovered deployment binds a
+full `checkpoint_source_sha`, positive `disk_checkpoint_run_id`, canonical
+checkpoint checksum, and disposition from the exact infrastructure producer.
+Fresh phases require the checkpoint source to equal the approved SHA. A resume
+may use an ancestor only after the pre-authority and workflow checks prove that
+every descendant change is under `.github/`, `infra/`, or Markdown, candidate
+images are exactly equivalent, and the original applied source, predecessor,
+failed run, build, infrastructure, checkpoint, and data lineage all resolve
+recursively. A later phase or deployment rejects any checkpoint source, run,
+checksum, or disposition substitution.
 
 Those identities do not all advance together. Build, infrastructure, and disk
 checkpoint runs remain bound to the original `checkpoint_source_sha` and are
@@ -267,6 +291,17 @@ failed activation runs bind an explicit hash-covered `resume_source_sha`.
 That source may be the approved SHA or the proven GitHub/infra/Markdown-only
 ancestor; a newly produced byte-equivalent build or infrastructure run is not
 interchangeable with the original.
+
+This finalization change adds no workflow, release phase, cleanup category,
+schema, threshold, credential path, or alternate image client. It is a stricter
+admission rule within the existing chain. Because the checked-in finalization
+and checkpoint source changed, rollout requires the normal focused
+branch-to-`dev` and `dev`-to-`master` promotion followed by a completely fresh
+exact-current-`master`-SHA build and downstream release-evidence chain; the
+ancestor-resume allowance above does not authorize reuse for this change.
+Rollback is a separately reviewed forward correction or revert through the
+same promotion path and must produce its own fresh exact-current-SHA chain; it
+cannot revive removed candidate or checkpoint evidence.
 
 When `baseline_recovery_run_id` is nonzero, its hash-covered
 `baseline_recovery_source_sha` is also mandatory before authority. The shared

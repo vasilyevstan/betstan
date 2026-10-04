@@ -34,15 +34,17 @@ fail() {
   exit 1
 }
 
-[[ "$ACTION" == "diagnose" || "$ACTION" == "reclaim" ||
+[[ "$ACTION" == "preload" || "$ACTION" == "diagnose" || "$ACTION" == "reclaim" ||
    "$ACTION" == "revalidate" ]] ||
-  fail "usage: $0 {diagnose|reclaim|revalidate}"
+  fail "usage: $0 {preload|diagnose|reclaim|revalidate}"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_SHA is invalid"
 [[ "$CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "CONTROL_SHA is invalid"
 historical=false
 if [[ "$CONTROL_SHA" != "$SOURCE_SHA" ]]; then
   if [[ "$ACTION" == "diagnose" ]]; then
     historical=true
+  elif [[ "$ACTION" == "preload" ]]; then
+    fail "historical observations cannot preload"
   elif [[ "$ACTION" != "revalidate" ]]; then
     fail "historical observations cannot reclaim"
   fi
@@ -61,7 +63,7 @@ fi
   fail "candidate image evidence is unavailable"
 [[ -n "$INFRA_PROVENANCE_FILE" && -f "$INFRA_PROVENANCE_FILE" ]] ||
   fail "bound infrastructure provenance is unavailable"
-if [[ "$ACTION" != "revalidate" ]]; then
+if [[ "$ACTION" == "diagnose" || "$ACTION" == "reclaim" ]]; then
   [[ -n "$OUTPUT_FILE" && "$OUTPUT_FILE" != "/" && "$OUTPUT_FILE" != "." ]] ||
     fail "OUTPUT_FILE is required"
   [[ ! -L "$OUTPUT_FILE" ]] || fail "OUTPUT_FILE must not be a symbolic link"
@@ -77,10 +79,10 @@ for command_name in jq python3 sha256sum base64; do
 done
 
 mkdir -p "$WORK_DIR"
-if [[ "$ACTION" != "revalidate" ]]; then
+if [[ "$ACTION" == "diagnose" || "$ACTION" == "reclaim" ]]; then
   mkdir -p "$(dirname "$OUTPUT_FILE")"
 fi
-if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+if [[ "$ACTION" != "preload" && -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
   mkdir -p "$(dirname "$CHECKPOINT_OUTPUT_FILE")"
 fi
 chmod 700 "$WORK_DIR"
@@ -90,8 +92,9 @@ reclaim_plan="$WORK_DIR/reclaim-plan.json"
 runtime_after="$WORK_DIR/runtime-after.json"
 capacity_after="$WORK_DIR/capacity-after.json"
 
-unset canonical_host k3s_node_name instance_ocid instance_fingerprint
-unset source_sha infrastructure_run_id ghcr_build_run_id infrastructure_finalized
+unset canonical_host k3s_node_name instance_ocid instance_fingerprint instance_private_ip
+unset source_sha infrastructure_run_id infrastructure_run_attempt
+unset ghcr_build_run_id infrastructure_finalized runtime_mode
 unset mongo_volume_ocid mongo_volume_attachment_ocid mongo_volume_gb
 unset compartment_ocid region availability_domain namespace
 # shellcheck disable=SC1090
@@ -105,6 +108,28 @@ source "$INFRA_PROVENANCE_FILE"
   fail "configured k3s node name differs from bound infrastructure"
 baseline_instance="${instance_ocid:-}"
 baseline_instance_fingerprint="${instance_fingerprint:-}"
+baseline_instance_private_ip="${instance_private_ip:-}"
+if [[ "$ACTION" == "preload" ]]; then
+  [[ "$CONTROL_SHA" == "$SOURCE_SHA" && "$historical" == "false" &&
+     "$GITHUB_RUN_ID" == "$INFRASTRUCTURE_RUN_ID" ]] ||
+    fail "candidate preload requires current source and control"
+  [[ "$RECLAIM_CATEGORY" == "none" && "$RECLAIM_IMAGE_IDS" == "[]" &&
+     -z "$DIAGNOSIS_RUN_ID" && -z "$DIAGNOSIS_FILE" &&
+     -z "$CHECKPOINT_FILE" && -z "$DISK_CHECKPOINT_RUN_ID" &&
+     -z "$REVALIDATION_PROFILE" ]] ||
+    fail "candidate preload rejects diagnosis, reclaim, and revalidation inputs"
+  [[ "${source_sha:-}" == "$SOURCE_SHA" &&
+     "${infrastructure_run_id:-}" == "$INFRASTRUCTURE_RUN_ID" &&
+     "${infrastructure_run_attempt:-}" == "1" &&
+     "${ghcr_build_run_id:-}" == "$GHCR_BUILD_RUN_ID" &&
+     "${infrastructure_finalized:-}" == "true" &&
+     "${runtime_mode:-}" == "k3s" ]] ||
+    fail "candidate preload infrastructure authority is incomplete or mismatched"
+  [[ "$baseline_instance" =~ ^ocid1\.[a-z0-9.-]+$ &&
+     -n "$baseline_instance_private_ip" &&
+     "$baseline_instance_fingerprint" == "$(oci_fingerprint "$baseline_instance")" ]] ||
+    fail "candidate preload instance authority is invalid"
+fi
 if [[ "$historical" == "true" ]]; then
   [[ "${source_sha:-}" == "$SOURCE_SHA" &&
      "${infrastructure_run_id:-}" == "$INFRASTRUCTURE_RUN_ID" &&
@@ -149,6 +174,11 @@ if [[ "$historical" == "true" ]]; then
   [[ "$instance_ocid" == "$baseline_instance" ]] ||
     fail "access session differs from the historical instance"
 fi
+if [[ "$ACTION" == "preload" ]]; then
+  [[ "$instance_ocid" == "$baseline_instance" &&
+     "$instance_private_ip" == "$baseline_instance_private_ip" ]] ||
+    fail "candidate preload access session differs from the finalized instance"
+fi
 
 run_remote() {
   local remote_action="$1"
@@ -189,6 +219,59 @@ run_remote() {
     "${os_user}@127.0.0.1" \
     "sudo K3S_DISK_SELECTED_IMAGE_IDS_B64=$encoded K3S_DISK_CANONICAL_HOST_B64=$encoded_host K3S_DISK_NODE_NAME_B64=$encoded_node$device_assignment bash -s -- $remote_action"
 }
+
+if [[ "$ACTION" == "preload" ]]; then
+  [[ -x "$EVIDENCE_HELPER" ]] ||
+    fail "candidate image evidence helper is unavailable"
+  candidate_refs=""
+  candidate_status=0
+  candidate_refs="$(
+    "$EVIDENCE_HELPER" candidate-image-refs \
+      --candidate-images "$CANDIDATE_IMAGES_FILE"
+  )" || candidate_status=$?
+  case "$candidate_status" in
+    0) ;;
+    1)
+      echo "k3s_disk_recovery=preload status=INELIGIBLE reason=invalid candidate image evidence" >&2
+      exit 20
+      ;;
+    *)
+      fail "candidate image evidence parser failed with code $candidate_status"
+      ;;
+  esac
+  normalized_candidate_refs=""
+  normalized_candidate_refs="$(
+    jq -ce '
+      if type == "array" and length == 10 and
+         all(.[];
+           type == "string" and
+           test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$")
+         )
+      then . else error("invalid candidate references") end
+    ' <<<"$candidate_refs"
+  )" || fail "candidate image evidence parser emitted an invalid payload"
+  [[ "$candidate_refs" == "$normalized_candidate_refs" &&
+     "$candidate_refs" != *$'\n'* ]] ||
+    fail "candidate image evidence parser emitted a noncanonical payload"
+
+  preload_status=0
+  run_remote preload-candidate-images "$candidate_refs" ||
+    preload_status=$?
+  case "$preload_status" in
+    0)
+      echo "k3s_disk_recovery=preload status=COMPLETE images=10"
+      ;;
+    20)
+      echo "k3s_disk_recovery=preload status=INELIGIBLE reason=candidate preload failed" >&2
+      exit 20
+      ;;
+    *)
+      echo "k3s_disk_recovery=preload status=FAIL reason=remote preload failed code=$preload_status" >&2
+      exit "$preload_status"
+      ;;
+  esac
+  exit 0
+fi
 
 capture_capacity() {
   local output="$1"

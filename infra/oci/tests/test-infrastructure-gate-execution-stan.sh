@@ -410,6 +410,191 @@ for workflow_case in success before-access before-observation after-observation 
   fi
 done
 
+mkdir -p "$WORKDIR/finalize-workflow/infra/oci/scripts"
+ruby -ryaml -e '
+  workflow = YAML.load_file(ARGV[0])
+  step = workflow.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }.find do |item|
+    item["name"] == "Open ephemeral OCI Bastion access and finalize k3s"
+  end
+  File.write(ARGV[1], step.fetch("run"))
+' "$WORKFLOW" "$WORKDIR/finalize-workflow/finalize.sh"
+cat >"$WORKDIR/finalize-workflow/infra/oci/scripts/verify-images.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'verify\n' >>"$FINALIZE_CALLS"
+if [[ "${ASSERT_CHECKPOINT_INVALIDATED:-false}" == true &&
+      -e "$CHECKPOINT_OUTPUT_FILE" ]]; then
+  exit 31
+fi
+mkdir -p "$(dirname "$OUTPUT_FILE")"
+printf 'verified-candidates\n' >"$OUTPUT_FILE"
+[[ "${FAIL_VERIFY:-false}" != true ]] || exit 32
+STUB
+cat >"$WORKDIR/finalize-workflow/infra/oci/scripts/configure-k3s-access.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "open" || "$1" == "cleanup" ]]
+printf 'access %s\n' "$1" >>"$FINALIZE_CALLS"
+[[ "$1" != "cleanup" || "${FAIL_FINALIZE_CLEANUP:-false}" != true ]] || exit 45
+STUB
+cat >"$WORKDIR/finalize-workflow/infra/oci/scripts/finalize-k3s.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'finalize\n' >>"$FINALIZE_CALLS"
+[[ "${FAIL_FINALIZER:-false}" != true ]] || exit 36
+if [[ "${FINALIZER_OMIT_PROVENANCE:-false}" == true ]]; then
+  rm -f "$INFRA_PROVENANCE_FILE"
+else
+  printf 'infrastructure_finalized=true\n' >"$INFRA_PROVENANCE_FILE"
+fi
+STUB
+cat >"$WORKDIR/finalize-workflow/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -z "${OCI_K3S_SSH_PRIVATE_KEY:-}" ]]
+printf 'operation %s\n' "$1" >>"$FINALIZE_CALLS"
+case "$1" in
+  preload)
+    [[ -s "$INFRA_PROVENANCE_FILE" ]] || exit 43
+    grep -Fxq 'infrastructure_finalized=true' "$INFRA_PROVENANCE_FILE" || exit 43
+    exit "${PRELOAD_STATUS:-0}"
+    ;;
+  diagnose)
+    [[ "${FAIL_DIAGNOSE:-false}" != true ]] || exit 44
+    if [[ "${DIAGNOSE_INELIGIBLE:-false}" == true ]]; then
+      rm -f "$CHECKPOINT_OUTPUT_FILE"
+      printf 'k3s_release_disk_checkpoint=INELIGIBLE\n'
+    else
+      mkdir -p "$(dirname "$CHECKPOINT_OUTPUT_FILE")"
+      printf 'release-eligible\n' >"$CHECKPOINT_OUTPUT_FILE"
+    fi
+    ;;
+  *)
+    exit 46
+    ;;
+esac
+STUB
+chmod +x "$WORKDIR/finalize-workflow/infra/oci/scripts/"*.sh
+
+for finalize_case in \
+  success verification status-20 fatal-preload finalizer provenance \
+  diagnose-ineligible diagnose-failure cleanup stale-checkpoint \
+  invalidation-failure; do
+  finalize_root="$WORKDIR/finalize-workflow"
+  candidate_file="$finalize_root/artifacts/oci-infrastructure/verified-candidate-images.tsv"
+  checkpoint_file="$finalize_root/artifacts/oci-release-disk-checkpoint/checkpoint.json"
+  provenance_file="$finalize_root/artifacts/oci-infrastructure/provenance.env"
+  rm -rf "$finalize_root/artifacts"
+  mkdir -p "$(dirname "$candidate_file")" "$(dirname "$checkpoint_file")"
+  printf 'pre-finalize\n' >"$provenance_file"
+  : >"$WORKDIR/finalize-calls.txt"
+  finalize_args=(
+    FAIL_VERIFY=false
+    PRELOAD_STATUS=0
+    FAIL_FINALIZER=false
+    FINALIZER_OMIT_PROVENANCE=false
+    FAIL_DIAGNOSE=false
+    DIAGNOSE_INELIGIBLE=false
+    FAIL_FINALIZE_CLEANUP=false
+    ASSERT_CHECKPOINT_INVALIDATED=false
+  )
+  expected_status=0
+  expected_calls=$'verify\naccess open\nfinalize\noperation preload\noperation diagnose\naccess cleanup'
+  expect_candidate=present
+  expect_checkpoint=present
+  case "$finalize_case" in
+    verification)
+      finalize_args+=(FAIL_VERIFY=true)
+      expected_calls=$'verify\naccess open\nfinalize\naccess cleanup'
+      expect_candidate=absent
+      expect_checkpoint=absent
+      ;;
+    status-20)
+      finalize_args+=(PRELOAD_STATUS=20)
+      expected_calls=$'verify\naccess open\nfinalize\noperation preload\naccess cleanup'
+      expect_candidate=absent
+      expect_checkpoint=absent
+      ;;
+    fatal-preload)
+      finalize_args+=(PRELOAD_STATUS=37)
+      expected_status=37
+      expected_calls=$'verify\naccess open\nfinalize\noperation preload\naccess cleanup'
+      expect_candidate=absent
+      expect_checkpoint=absent
+      ;;
+    finalizer)
+      finalize_args+=(FAIL_FINALIZER=true)
+      expected_status=36
+      expected_calls=$'verify\naccess open\nfinalize\naccess cleanup'
+      expect_checkpoint=absent
+      ;;
+    provenance)
+      finalize_args+=(FINALIZER_OMIT_PROVENANCE=true)
+      expected_status=43
+      expected_calls=$'verify\naccess open\nfinalize\noperation preload\naccess cleanup'
+      expect_candidate=absent
+      expect_checkpoint=absent
+      ;;
+    diagnose-ineligible)
+      finalize_args+=(DIAGNOSE_INELIGIBLE=true)
+      expect_checkpoint=absent
+      ;;
+    diagnose-failure)
+      finalize_args+=(FAIL_DIAGNOSE=true)
+      expect_checkpoint=absent
+      ;;
+    cleanup)
+      finalize_args+=(FAIL_FINALIZE_CLEANUP=true)
+      expected_status=45
+      ;;
+    stale-checkpoint)
+      printf 'stale\n' >"$checkpoint_file"
+      finalize_args+=(ASSERT_CHECKPOINT_INVALIDATED=true)
+      ;;
+    invalidation-failure)
+      rm -f "$checkpoint_file"
+      mkdir -p "$checkpoint_file"
+      printf 'undeletable\n' >"$checkpoint_file/blocker"
+      expected_status=1
+      expected_calls='access cleanup'
+      expect_candidate=absent
+      expect_checkpoint=directory
+      ;;
+  esac
+
+  finalize_status=0
+  (
+    cd "$finalize_root"
+    env PATH="$WORKDIR/bin:$PATH" \
+      FINALIZE_CALLS="$WORKDIR/finalize-calls.txt" \
+      SOURCE_SHA="$SHA" GHCR_BUILD_RUN_ID=300 \
+      CANDIDATE_IMAGES_FILE="$candidate_file" \
+      CHECKPOINT_OUTPUT_FILE="$checkpoint_file" \
+      INFRA_PROVENANCE_FILE="$provenance_file" \
+      RECOVERY_WORK_DIR="$WORKDIR/finalize-recovery" \
+      OCI_K3S_SSH_PRIVATE_KEY=fixture-only \
+      "${finalize_args[@]}" bash finalize.sh
+  ) >"$WORKDIR/finalize-output.txt" 2>&1 || finalize_status=$?
+
+  status_ok=false
+  [[ "$finalize_status" == "$expected_status" ]] && status_ok=true
+  files_ok=true
+  [[ "$expect_candidate" != present || -f "$candidate_file" ]] || files_ok=false
+  [[ "$expect_candidate" != absent || ! -e "$candidate_file" ]] || files_ok=false
+  [[ "$expect_checkpoint" != present || -f "$checkpoint_file" ]] || files_ok=false
+  [[ "$expect_checkpoint" != absent || ! -e "$checkpoint_file" ]] || files_ok=false
+  [[ "$expect_checkpoint" != directory || -d "$checkpoint_file" ]] || files_ok=false
+  if [[ "$status_ok" == true && "$files_ok" == true &&
+        "$(cat "$WORKDIR/finalize-calls.txt")" == "$expected_calls" ]]; then
+    PASS=$((PASS + 1))
+    echo "PASS actual k3s finalize $finalize_case preserves candidate residency ordering"
+  else
+    FAIL=$((FAIL + 1))
+    echo "FAIL actual k3s finalize $finalize_case status=$finalize_status calls=$(tr '\n' ',' <"$WORKDIR/finalize-calls.txt")"
+  fi
+  [[ ! -d "$checkpoint_file" ]] || rm -rf "$checkpoint_file"
+done
+
 # A validator rejection must fail the gate, never be swallowed.
 run_case "propagates a validator rejection" reject \
   BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=finalize \
@@ -442,7 +627,9 @@ finalize = text[
 ]
 ordered = (
     "./infra/oci/scripts/verify-images.sh",
+    "./infra/oci/scripts/configure-k3s-access.sh open",
     "./infra/oci/scripts/finalize-k3s.sh",
+    "./infra/oci/scripts/k3s-node-disk-recovery-stan.sh preload",
     "./infra/oci/scripts/k3s-node-disk-recovery-stan.sh diagnose",
 )
 positions = [finalize.index(value) for value in ordered]
