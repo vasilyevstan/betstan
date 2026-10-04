@@ -2279,7 +2279,9 @@ from pathlib import Path
 workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
 step = workflow[
     workflow.index("- name: Capture and validate pre-mutation rollback baseline"):
-    workflow.index("- name: Reject an already over-limit k3s root filesystem")
+    workflow.index(
+        "- name: Revalidate exact release disk checkpoint before lock mutation"
+    )
 ]
 body = step.split("        run: |\n", 1)[1]
 lines = []

@@ -84,7 +84,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate exact SHA and release provenance
+      - name: Validate exact SHA and deployment run
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -106,6 +106,7 @@ jobs:
             local run_id="$1"
             local workflow_file="$2"
             local expected_event="$3"
+            local expected_head_sha="$4"
             local workflow_id actual_id path event head_sha head_branch repository
             local status conclusion attempt
             workflow_id="$(
@@ -119,7 +120,7 @@ jobs:
             [ "$actual_id" = "$workflow_id" ]
             [ "$path" = ".github/workflows/$workflow_file" ]
             [ "$event" = "$expected_event" ]
-            [ "$head_sha" = "$SOURCE_SHA" ]
+            [ "$head_sha" = "$expected_head_sha" ]
             [ "$head_branch" = "master" ]
             [ "$repository" = "$REPOSITORY" ]
             [ "$status" = "completed" ]
@@ -127,27 +128,11 @@ jobs:
             [ "$attempt" = "1" ]
           }
 
-          verify_run "$BUILD_RUN_ID" oci-production-build.yml workflow_run
-          verify_run "$INFRASTRUCTURE_RUN_ID" oci-infrastructure.yml workflow_dispatch
-          verify_run "$DEPLOYMENT_RUN_ID" oci-production-deploy.yml workflow_dispatch
-
-      - name: Download exact OCI image provenance
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
-          path: artifacts/build
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.build_run_id }}
-
-      - name: Download exact OCI infrastructure provenance
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
-          path: artifacts/infrastructure
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.infrastructure_run_id }}
+          verify_run \
+            "$DEPLOYMENT_RUN_ID" \
+            oci-production-deploy.yml \
+            workflow_dispatch \
+            "$SOURCE_SHA"
 
       - name: Download exact dark deployment provenance
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -167,12 +152,116 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.deployment_run_id }}
 
+      - name: Resolve original checkpoint build and infrastructure lineage
+        id: deployment_lineage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          deployment_value() {
+            local key="$1"
+            awk -F= -v key="$key" '
+              $1 == key {
+                if (found++) exit 1
+                value = substr($0, length(key) + 2)
+              }
+              END {
+                if (found != 1) exit 1
+                print value
+              }
+            ' artifacts/deploy/provenance.txt
+          }
+
+          deploy_source_sha="$(deployment_value source_sha)"
+          deploy_run_id="$(deployment_value deployment_run_id)"
+          deploy_run_attempt="$(deployment_value deployment_run_attempt)"
+          deploy_build_run_id="$(deployment_value build_run_id)"
+          deploy_infrastructure_run_id="$(
+            deployment_value infrastructure_run_id
+          )"
+          checkpoint_source_sha="$(deployment_value checkpoint_source_sha)"
+          [ "$deploy_source_sha" = "$SOURCE_SHA" ]
+          [ "$deploy_run_id" = "$DEPLOYMENT_RUN_ID" ]
+          [ "$deploy_run_attempt" = "1" ]
+          [ "$deploy_build_run_id" = "$BUILD_RUN_ID" ]
+          [ "$deploy_infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [[ "$checkpoint_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$checkpoint_source_sha" "$SOURCE_SHA"
+          while IFS= read -r -d '' changed_path; do
+            case "$changed_path" in
+              .github/*|infra/*|*.md) ;;
+              *)
+                echo \
+                  "Application path changed after the original disk checkpoint: $changed_path" \
+                  >&2
+                exit 1
+                ;;
+            esac
+          done < <(
+            git diff --name-only -z "$checkpoint_source_sha..$SOURCE_SHA"
+          )
+
+          verify_run() {
+            local run_id="$1"
+            local workflow_file="$2"
+            local expected_event="$3"
+            local workflow_id actual_id path event head_sha head_branch repository
+            local status conclusion attempt
+            workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/$workflow_file" \
+                --jq '.id'
+            )"
+            read -r actual_id path event head_sha head_branch repository \
+              status conclusion attempt <<<"$(
+              gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1" \
+                --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+            )"
+            [ "$actual_id" = "$workflow_id" ]
+            [ "$path" = ".github/workflows/$workflow_file" ]
+            [ "$event" = "$expected_event" ]
+            [ "$head_sha" = "$checkpoint_source_sha" ]
+            [ "$head_branch" = "master" ]
+            [ "$repository" = "$REPOSITORY" ]
+            [ "$status" = "completed" ]
+            [ "$conclusion" = "success" ]
+            [ "$attempt" = "1" ]
+          }
+
+          verify_run "$BUILD_RUN_ID" oci-production-build.yml workflow_run
+          verify_run \
+            "$INFRASTRUCTURE_RUN_ID" \
+            oci-infrastructure.yml \
+            workflow_dispatch
+          printf 'checkpoint_source_sha=%s\n' "$checkpoint_source_sha" \
+            >> "$GITHUB_OUTPUT"
+          printf 'CHECKPOINT_SOURCE_SHA=%s\n' "$checkpoint_source_sha" \
+            >> "$GITHUB_ENV"
+
+      - name: Download exact OCI image provenance
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: oci-image-provenance-${{ steps.deployment_lineage.outputs.checkpoint_source_sha }}-${{ inputs.build_run_id }}-1
+          path: artifacts/build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Download exact OCI infrastructure provenance
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
       - name: Verify downloaded provenance
         id: provenance
         run: |
           set -euo pipefail
           PROVENANCE_DIR=artifacts/build \
-          SOURCE_SHA="$SOURCE_SHA" \
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
           EXPECTED_BUILD_RUN_ATTEMPT=1 \
           OUTPUT_FILE=artifacts/live-control/images.tsv \
@@ -180,10 +269,11 @@ jobs:
             ./infra/oci/scripts/verify-images.sh
 
           source artifacts/infrastructure/provenance.env
-          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$source_sha" = "$CHECKPOINT_SOURCE_SHA" ]
           [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
           [ "$infrastructure_run_attempt" = "1" ]
           [ "$infrastructure_finalized" = "true" ]
+          [ "$ghcr_build_run_id" = "$BUILD_RUN_ID" ]
           [ "$application_registry_provider" = "ghcr" ]
           [ "$application_registry_host" = "ghcr.io" ]
           [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
@@ -207,12 +297,60 @@ jobs:
           [ "$source_sha" = "$SOURCE_SHA" ]
           [ "$deployment_run_id" = "$DEPLOYMENT_RUN_ID" ]
           [ "$deployment_run_attempt" = "1" ]
+          [ "$build_run_id" = "$BUILD_RUN_ID" ]
           [ "$runtime_mode" = "$selected_runtime_mode" ]
           [ "$runtime_fingerprint" = "$selected_runtime_fingerprint" ]
           [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
           [ "$infrastructure_run_attempt" = "1" ]
           [ "$infrastructure_provenance_sha256" = "$selected_infrastructure_sha256" ]
           [ "$public_host" = "$canonical_host" ]
+          deploy_checkpoint_source_sha="$checkpoint_source_sha"
+          [ "$deploy_checkpoint_source_sha" = "$CHECKPOINT_SOURCE_SHA" ]
+          deploy_disk_checkpoint_run_id="$disk_checkpoint_run_id"
+          deploy_disk_checkpoint_sha256="$disk_checkpoint_sha256"
+          deploy_disk_checkpoint_disposition="$disk_checkpoint_disposition"
+          schema_value() {
+            local key="$1"
+            awk -F= -v key="$key" '
+              $1 == key {
+                if (found++) exit 1
+                value = substr($0, length(key) + 2)
+              }
+              END {
+                if (found != 1) exit 1
+                print value
+              }
+            ' artifacts/deploy/live-schema.env
+          }
+          [ "$(schema_value schema_version)" = "live-betting-v6" ]
+          [ "$(schema_value source_sha)" = "$SOURCE_SHA" ]
+          [ "$(schema_value build_run_id)" = "$BUILD_RUN_ID" ]
+          [ "$(schema_value infrastructure_run_id)" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$(schema_value checkpoint_source_sha)" = \
+            "$deploy_checkpoint_source_sha" ]
+          [ "$(schema_value disk_checkpoint_run_id)" = \
+            "$deploy_disk_checkpoint_run_id" ]
+          [ "$(schema_value disk_checkpoint_sha256)" = \
+            "$deploy_disk_checkpoint_sha256" ]
+          [ "$(schema_value disk_checkpoint_disposition)" = \
+            "$deploy_disk_checkpoint_disposition" ]
+          [[ "$deploy_checkpoint_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$deploy_disk_checkpoint_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$deploy_disk_checkpoint_sha256" =~ ^[0-9a-f]{64}$ ]]
+          case "$deploy_disk_checkpoint_disposition" in
+            READY_NO_RECLAIM|READY_RECLAIMED|NOT_APPLICABLE) ;;
+            *) exit 1 ;;
+          esac
+          {
+            printf 'CHECKPOINT_SOURCE_SHA=%s\n' \
+              "$deploy_checkpoint_source_sha"
+            printf 'DISK_CHECKPOINT_RUN_ID=%s\n' \
+              "$deploy_disk_checkpoint_run_id"
+            printf 'DISK_CHECKPOINT_SHA256=%s\n' \
+              "$deploy_disk_checkpoint_sha256"
+            printf 'DISK_CHECKPOINT_DISPOSITION=%s\n' \
+              "$deploy_disk_checkpoint_disposition"
+          } >> "$GITHUB_ENV"
 
           mapfile -t dark_summaries < <(
             find artifacts/dark-readiness -type f -name summary.env
@@ -365,6 +503,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          DEPLOYMENT_PROVENANCE_FILE: artifacts/deploy/provenance.txt
+          LIVE_SCHEMA_EVIDENCE_FILE: artifacts/deploy/live-schema.env
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
       - name: Arm owner-bound activation abort
@@ -888,6 +1028,9 @@ jobs:
           activation_lease_until_epoch=unknown
           final_control_file=none
           final_control_sha256=none
+          live_acceptance_user_id="${LIVE_ACCEPTANCE_USER_ID:-none}"
+          [[ "$live_acceptance_user_id" == "none" ||
+             "$live_acceptance_user_id" =~ ^[0-9a-f]{24}$ ]]
 
           if [ "$COMMIT_OUTCOME" = "success" ]; then
             final_control_file=artifacts/live-control/commit/control.env
@@ -953,6 +1096,11 @@ jobs:
             "build_run_id=$BUILD_RUN_ID" \
             "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID" \
             "deployment_run_id=$DEPLOYMENT_RUN_ID" \
+            "checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA" \
+            "disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID" \
+            "disk_checkpoint_sha256=$DISK_CHECKPOINT_SHA256" \
+            "disk_checkpoint_disposition=$DISK_CHECKPOINT_DISPOSITION" \
+            "live_acceptance_user_id=$live_acceptance_user_id" \
             "activation_run_id=$GITHUB_RUN_ID" \
             "activation_run_attempt=$GITHUB_RUN_ATTEMPT" \
             "activate_control_sha256=$activate_control_sha256" \

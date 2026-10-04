@@ -83,6 +83,19 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   NodePorts directly to the internet.
 - Deploy only exact digest provenance, sequentially: Mongo, RabbitMQ,
   backends, client, ingress.
+- Treat `k3s-release-disk-checkpoint.v1` as exact release evidence. Validate
+  its strict runtime-specific key set, canonical checksum, raw-byte
+  70-percent boundary, complete node/mount/runtime identity, runtime versions,
+  and immutable candidate/rollback residency. OKE has only the common
+  `NOT_APPLICABLE` shape; never fabricate disk fields.
+- Public and held revalidation are different contracts. Public mode remains
+  strict about public/application state. Held mode collects only stable
+  infrastructure facts and must not call HTTP, RabbitMQ/rabbitmqctl, queues,
+  pods, Deployments, or mutable workload health.
+- On a validated descendant resume, preserve the original checkpoint-source
+  build and infrastructure run IDs; current workflow, predecessor, and failed
+  run evidence remains bound to the current control SHA. Never substitute a
+  new byte-equivalent build or infrastructure run.
 - Preserve the retained Mongo volume and refuse legacy Mongo manifests.
 - Never receive or use Azure credentials. Cross-cloud data work is exclusive
   to the protected migration and stop-only recovery workflows and their

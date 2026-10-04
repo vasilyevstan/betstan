@@ -665,6 +665,405 @@ if "$HELPER" finalize-reclaim --diagnosis "$diagnosis" \
   fail "reclaim above the unchanged 70 percent limit was accepted"
 fi
 
+checkpoint_runtime="$work_dir/checkpoint-runtime.json"
+checkpoint_capacity="$work_dir/checkpoint-capacity.json"
+python3 - "$runtime" "$candidate_images" "$checkpoint_runtime" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+runtime_path, candidates_path, output_path = map(Path, sys.argv[1:])
+runtime = json.loads(runtime_path.read_text())
+candidates = []
+for raw in candidates_path.read_text().splitlines():
+    service, _, image_ref, _, platform = raw.split("\t")
+    candidates.append((service, image_ref, platform))
+runtime["schemaVersion"] = "k3s-node-disk-runtime.v2"
+runtime["snapshotProfile"] = "public"
+runtime["applicationImages"] = [
+    {"service": service, "imageRef": image_ref}
+    for service, image_ref, _ in candidates
+]
+runtime["images"] = [
+    {
+        "id": platform,
+        "repoTags": [],
+        "repoDigests": [image_ref],
+        "sizeBytes": 1000,
+        "pinned": False,
+    }
+    for _, image_ref, platform in candidates
+]
+runtime["containerImageReferences"] = []
+runtime["kubernetesImageReferences"] = [
+    image_ref for _, image_ref, _ in candidates
+]
+runtime["root"]["mount"]["used"] = 35_000_000_000
+runtime["root"]["mount"]["avail"] = 15_000_000_000
+runtime["root"]["df"].update({
+    "usedBytes": 35_000_000_000,
+    "availableBytes": 15_000_000_000,
+    "usedPercent": 70,
+})
+output_path.write_text(json.dumps(runtime, sort_keys=True))
+PY
+cat >"$checkpoint_capacity" <<'JSON'
+{"schemaVersion":"k3s-node-filesystem-capacity.v1","nodeName":"fixture-k3s","capacityBytes":50000000000,"usedBytes":35000000000,"availableBytes":15000000000,"usedPercent":70.0,"thresholdPercent":70,"withinLimit":true}
+JSON
+checkpoint_diagnosis="$work_dir/checkpoint-diagnosis.json"
+"$HELPER" diagnose \
+  --runtime "$checkpoint_runtime" \
+  --capacity "$checkpoint_capacity" \
+  --candidate-images "$candidate_images" \
+  --source-sha "$SOURCE_SHA" \
+  --infrastructure-run-id 400 \
+  --ghcr-build-run-id 300 \
+  --workflow-run-id 700 \
+  --output "$checkpoint_diagnosis"
+checkpoint="$work_dir/checkpoint.json"
+"$HELPER" write-release-checkpoint \
+  --diagnosis "$checkpoint_diagnosis" \
+  --runtime "$checkpoint_runtime" \
+  --capacity "$checkpoint_capacity" \
+  --source-sha "$SOURCE_SHA" \
+  --control-sha "$SOURCE_SHA" \
+  --producer-run-id 700 \
+  --output "$checkpoint" >/dev/null
+"$HELPER" validate-release-checkpoint \
+  --checkpoint "$checkpoint" \
+  --source-sha "$SOURCE_SHA" \
+  --producer-run-id 700 \
+  --runtime-mode k3s \
+  --infrastructure-run-id 400 \
+  --ghcr-build-run-id 300 \
+  --candidate-images "$candidate_images" >/dev/null
+jq -e '
+  .schemaVersion == "k3s-release-disk-checkpoint.v1" and
+  .sourceSha == .controlSha and
+  .disposition == "READY_NO_RECLAIM" and
+  .terminalStatus == "READY" and
+  .root.thresholdPercent == 70 and
+  .root.usedBytes == 35000000000 and
+  (.candidateResidency | length) == 10 and
+  (.rollbackResidency | length) == 10 and
+  .publicStateStatus == "HEALTHY" and
+  .diagnosisRunId == "700" and
+  .reclaimRunId == "0" and
+  .reclaimSha256 == "none" and
+  .reclaimCategory == "none" and
+  (.contentChecksumSha256 | test("^[0-9a-f]{64}$"))
+' "$checkpoint" >/dev/null ||
+  fail "canonical no-reclaim checkpoint is incomplete"
+jq -e '
+  ((keys | sort) == ([
+    "candidateImagesSha256",
+    "candidateResidency",
+    "contentChecksumSha256",
+    "controlSha",
+    "diagnosisRunId",
+    "diagnosisSha256",
+    "disposition",
+    "ghcrBuildRunId",
+    "infrastructureRunId",
+    "producerRunAttempt",
+    "producerRunId",
+    "publicStateStatus",
+    "reclaimCategory",
+    "reclaimRunId",
+    "reclaimSha256",
+    "rollbackResidency",
+    "root",
+    "runtimeMode",
+    "schemaVersion",
+    "sourceSha",
+    "stableIdentity",
+    "terminalStatus"
+  ] | sort)) and
+  ((.root | keys | sort) == ([
+    "capacityBytes",
+    "thresholdPercent",
+    "usedBytes"
+  ] | sort)) and
+  ((.stableIdentity | keys | sort) == ([
+    "containerRuntimeVersion",
+    "k3sActive",
+    "k3sVersion",
+    "mongoFsType",
+    "mongoMountCapacityBytes",
+    "mongoMountSourceSha256",
+    "mongoSeparateFromRoot",
+    "nodeNameSha256",
+    "rootFsType",
+    "rootMountCapacityBytes",
+    "rootMountSourceSha256"
+  ] | sort)) and
+  all(.candidateResidency[];
+    ((keys | sort) == ([
+      "imageRef",
+      "manifestDigest",
+      "platformDigest",
+      "residentImageId",
+      "residentRepoDigest",
+      "service"
+    ] | sort))) and
+  all(.rollbackResidency[];
+    ((keys | sort) == ([
+      "imageRef",
+      "residentImageId",
+      "residentRepoDigest",
+      "service"
+    ] | sort)))
+' "$checkpoint" >/dev/null ||
+  fail "k3s release checkpoint key sets drifted"
+
+"$HELPER" revalidate-release-checkpoint \
+  --checkpoint "$checkpoint" \
+  --runtime "$checkpoint_runtime" \
+  --capacity "$checkpoint_capacity" \
+  --candidate-images "$candidate_images" \
+  --source-sha "$SOURCE_SHA" \
+  --producer-run-id 700 \
+  --profile public >/dev/null
+
+held_runtime="$work_dir/checkpoint-held-runtime.json"
+jq '{
+  schemaVersion:"k3s-node-disk-held-runtime.v1",
+  snapshotProfile:"held",
+  applicationRepository,
+  root,
+  mongo,
+  images,
+  runtime
+}' "$checkpoint_runtime" >"$held_runtime"
+"$HELPER" revalidate-release-checkpoint \
+  --checkpoint "$checkpoint" \
+  --runtime "$held_runtime" \
+  --capacity "$checkpoint_capacity" \
+  --candidate-images "$candidate_images" \
+  --source-sha "$SOURCE_SHA" \
+  --producer-run-id 700 \
+  --profile held >/dev/null
+
+for mutation in \
+  '.unexpected = true' \
+  'del(.stableIdentity.k3sVersion)' \
+  '.root.unexpected = 1' \
+  '.candidateResidency[0].unexpected = true' \
+  '.rollbackResidency[0].unexpected = true'; do
+  invalid_checkpoint="$work_dir/checkpoint-schema-$(
+    printf '%s' "$mutation" | sha256sum | cut -c1-12
+  ).json"
+  jq "$mutation" "$checkpoint" >"$invalid_checkpoint"
+  if "$HELPER" validate-release-checkpoint \
+      --checkpoint "$invalid_checkpoint" \
+      --source-sha "$SOURCE_SHA" \
+      --producer-run-id 700 \
+      --runtime-mode k3s >/dev/null 2>&1; then
+    fail "release checkpoint accepted missing or extra schema fields: $mutation"
+  fi
+done
+
+for mutation in \
+  '.runtime.k3sVersion = "k3s version v1.35.0+k3s1"' \
+  '.runtime.containerRuntimeVersion = "containerd://2.2.0-k3s1"' \
+  '.root.mount.source = "/dev/substituted-root"' \
+  '.images[0].id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+  '.images[0].repoDigests[0] = "ghcr.io/vasilyevstan/betstan-images@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'; do
+  drifted_runtime="$work_dir/checkpoint-held-drift-$(
+    printf '%s' "$mutation" | sha256sum | cut -c1-12
+  ).json"
+  jq "$mutation" "$held_runtime" >"$drifted_runtime"
+  if "$HELPER" revalidate-release-checkpoint \
+      --checkpoint "$checkpoint" \
+      --runtime "$drifted_runtime" \
+      --capacity "$checkpoint_capacity" \
+      --candidate-images "$candidate_images" \
+      --source-sha "$SOURCE_SHA" \
+      --producer-run-id 700 \
+      --profile held >/dev/null 2>&1; then
+    fail "held checkpoint accepted stable identity or CRI residency substitution: $mutation"
+  fi
+done
+
+held_extra_mount="$work_dir/checkpoint-held-extra-mount.json"
+jq '.root.mount.unexpected = "drift"' "$held_runtime" >"$held_extra_mount"
+if "$HELPER" revalidate-release-checkpoint \
+    --checkpoint "$checkpoint" \
+    --runtime "$held_extra_mount" \
+    --capacity "$checkpoint_capacity" \
+    --candidate-images "$candidate_images" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --profile held >/dev/null 2>&1; then
+  fail "held runtime accepted an extra mount schema field"
+fi
+
+over_boundary_capacity="$work_dir/checkpoint-over-boundary-capacity.json"
+cat >"$over_boundary_capacity" <<'JSON'
+{"schemaVersion":"k3s-node-filesystem-capacity.v1","nodeName":"fixture-k3s","capacityBytes":50000000000,"usedBytes":35000000001,"availableBytes":14999999999,"usedPercent":70.0,"thresholdPercent":70,"withinLimit":false}
+JSON
+over_boundary_runtime="$work_dir/checkpoint-over-boundary-runtime.json"
+jq '
+  .root.mount.used = 35000000001 |
+  .root.mount.avail = 14999999999 |
+  .root.df.usedBytes = 35000000001 |
+  .root.df.availableBytes = 14999999999 |
+  .root.df.usedPercent = 70
+' "$checkpoint_runtime" >"$over_boundary_runtime"
+if "$HELPER" revalidate-release-checkpoint \
+    --checkpoint "$checkpoint" \
+    --runtime "$over_boundary_runtime" \
+    --capacity "$over_boundary_capacity" \
+    --candidate-images "$candidate_images" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --profile public >/dev/null 2>&1; then
+  fail "one byte above 70 percent passed release revalidation"
+fi
+
+missing_candidate_runtime="$work_dir/checkpoint-missing-candidate.json"
+jq 'del(.images[0])' "$checkpoint_runtime" >"$missing_candidate_runtime"
+missing_candidate_checkpoint="$work_dir/checkpoint-missing-candidate-output.json"
+"$HELPER" write-release-checkpoint \
+  --diagnosis "$checkpoint_diagnosis" \
+  --runtime "$missing_candidate_runtime" \
+  --capacity "$checkpoint_capacity" \
+  --source-sha "$SOURCE_SHA" \
+  --control-sha "$SOURCE_SHA" \
+  --producer-run-id 700 \
+  --output "$missing_candidate_checkpoint" >/dev/null
+[[ ! -e "$missing_candidate_checkpoint" ]] ||
+  fail "checkpoint was emitted with incomplete candidate residency"
+
+unhealthy_runtime="$work_dir/checkpoint-unhealthy-runtime.json"
+jq '.workload.unhealthyPodCount = 1' \
+  "$checkpoint_runtime" >"$unhealthy_runtime"
+unhealthy_checkpoint="$work_dir/checkpoint-unhealthy-output.json"
+if "$HELPER" write-release-checkpoint \
+    --diagnosis "$checkpoint_diagnosis" \
+    --runtime "$unhealthy_runtime" \
+    --capacity "$checkpoint_capacity" \
+    --source-sha "$SOURCE_SHA" \
+    --control-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --output "$unhealthy_checkpoint" >/dev/null 2>&1; then
+  fail "unhealthy public state was accepted for a release checkpoint"
+fi
+[[ ! -e "$unhealthy_checkpoint" ]] ||
+  fail "unhealthy public state emitted a release checkpoint"
+
+post_apt_v2="$work_dir/post-apt-v2.json"
+python3 - "$post_apt" "$candidate_images" "$post_apt_v2" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+runtime_path, candidates_path, output_path = map(Path, sys.argv[1:])
+runtime = json.loads(runtime_path.read_text())
+candidates = [raw.split("\t") for raw in candidates_path.read_text().splitlines()]
+runtime["schemaVersion"] = "k3s-node-disk-runtime.v2"
+runtime["snapshotProfile"] = "public"
+runtime["applicationImages"] = [
+    {"service": row[0], "imageRef": row[2]}
+    for row in candidates
+]
+runtime["images"] = [
+    {
+        "id": row[4],
+        "repoTags": [],
+        "repoDigests": [row[2]],
+        "sizeBytes": 1000,
+        "pinned": False,
+    }
+    for row in candidates
+]
+runtime["containerImageReferences"] = []
+runtime["kubernetesImageReferences"] = [row[2] for row in candidates]
+output_path.write_text(json.dumps(runtime, sort_keys=True))
+PY
+apt_checkpoint="$work_dir/apt-checkpoint.json"
+"$HELPER" write-release-checkpoint \
+  --diagnosis "$diagnosis" \
+  --reclaim "$work_dir/apt-result.json" \
+  --runtime "$post_apt_v2" \
+  --capacity "$post_capacity" \
+  --source-sha "$SOURCE_SHA" \
+  --control-sha "$SOURCE_SHA" \
+  --producer-run-id 701 \
+  --output "$apt_checkpoint" >/dev/null
+jq -e '
+  .disposition == "READY_RECLAIMED" and
+  .reclaimCategory == "apt-package-cache" and
+  .reclaimRunId == "701" and
+  (.reclaimSha256 | test("^[0-9a-f]{64}$"))
+' "$apt_checkpoint" >/dev/null ||
+  fail "APT-only reclaim did not produce the fixed eligible disposition"
+
+cri_checkpoint="$work_dir/cri-checkpoint.json"
+"$HELPER" write-release-checkpoint \
+  --diagnosis "$diagnosis" \
+  --reclaim "$work_dir/cri-result.json" \
+  --runtime "$post_apt_v2" \
+  --capacity "$post_capacity" \
+  --source-sha "$SOURCE_SHA" \
+  --control-sha "$SOURCE_SHA" \
+  --producer-run-id 702 \
+  --output "$cri_checkpoint" >/dev/null
+[[ ! -e "$cri_checkpoint" ]] ||
+  fail "CRI reclaim produced a release-eligible checkpoint"
+
+tampered_checkpoint="$work_dir/checkpoint-tampered.json"
+jq '.root.usedBytes -= 1' "$checkpoint" >"$tampered_checkpoint"
+if "$HELPER" validate-release-checkpoint \
+    --checkpoint "$tampered_checkpoint" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --runtime-mode k3s >/dev/null 2>&1; then
+  fail "checkpoint checksum substitution was accepted"
+fi
+if "$HELPER" validate-release-checkpoint \
+    --checkpoint "$checkpoint" \
+    --source-sha 2222222222222222222222222222222222222222 \
+    --producer-run-id 700 \
+    --runtime-mode k3s >/dev/null 2>&1; then
+  fail "checkpoint source identity mismatch was accepted"
+fi
+
+oke_checkpoint="$work_dir/oke-checkpoint.json"
+"$HELPER" write-not-applicable-checkpoint \
+  --source-sha "$SOURCE_SHA" \
+  --control-sha "$SOURCE_SHA" \
+  --infrastructure-run-id 800 \
+  --ghcr-build-run-id 300 \
+  --producer-run-id 800 \
+  --output "$oke_checkpoint"
+"$HELPER" validate-release-checkpoint \
+  --checkpoint "$oke_checkpoint" \
+  --source-sha "$SOURCE_SHA" \
+  --producer-run-id 800 \
+  --runtime-mode oke \
+  --infrastructure-run-id 800 \
+  --ghcr-build-run-id 300 >/dev/null
+jq -e '
+  .runtimeMode == "oke" and
+  .disposition == "NOT_APPLICABLE" and
+  .terminalStatus == "NOT_APPLICABLE" and
+  ((keys | sort) == ([
+    "contentChecksumSha256",
+    "controlSha",
+    "disposition",
+    "ghcrBuildRunId",
+    "infrastructureRunId",
+    "producerRunAttempt",
+    "producerRunId",
+    "runtimeMode",
+    "schemaVersion",
+    "sourceSha",
+    "terminalStatus"
+  ] | sort))
+' "$oke_checkpoint" >/dev/null ||
+  fail "OKE checkpoint fabricated disk fields"
+
 grep -Fxq '    apt-get clean' "$REMOTE" ||
   fail "remote reclaim does not use native apt-get clean"
 grep -Fq '      cri rmi "$image_id"' "$REMOTE" ||
@@ -955,6 +1354,9 @@ SH
 cat >"$snapshot_bin/snapshot-fixture" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${STUB_SNAPSHOT_COMMAND_LOG:-}" ]]; then
+  printf '%s:%s\n' "${0##*/}" "$*" >>"$STUB_SNAPSHOT_COMMAND_LOG"
+fi
 case "${0##*/}:$*" in
   "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /")
     jq '{filesystems:[.root.mount]}' "$STUB_CURRENT_RUNTIME"
@@ -1053,6 +1455,52 @@ snapshot_env=(
   RECLAIM_CATEGORY=none
   RECLAIM_IMAGE_IDS='[]'
 )
+
+: >"$work_dir/held-command.log"
+rm -f "$work_dir/held-curl.log"
+PATH="$snapshot_bin:$stub_bin:$PATH" \
+  STUB_CURRENT_RUNTIME="$runtime" \
+  STUB_CAPACITY_SUMMARY="$work_dir/summary-before.json" \
+  STUB_WORKLOADS="$work_dir/snapshot-workloads.json" \
+  STUB_QUEUES="$work_dir/snapshot-queues.tsv" \
+  STUB_QUEUE_FAILURE=1 \
+  STUB_CURL_LOG="$work_dir/held-curl.log" \
+  STUB_REAL_JQ="$(command -v jq)" \
+  STUB_JQ_ARGV_LOG="$work_dir/held-jq-argv.log" \
+  STUB_SNAPSHOT_COMMAND_LOG="$work_dir/held-command.log" \
+  K3S_DISK_NODE_NAME_B64="$encoded_node" \
+  "$REMOTE" snapshot-held >"$work_dir/held-snapshot.json"
+jq -e '
+  .schemaVersion == "k3s-node-disk-held-runtime.v1" and
+  .snapshotProfile == "held" and
+  ((keys | sort) == ([
+    "applicationRepository",
+    "images",
+    "mongo",
+    "root",
+    "runtime",
+    "schemaVersion",
+    "snapshotProfile"
+  ] | sort)) and
+  ((.root | keys | sort) == (["df","mount"] | sort)) and
+  ((.mongo | keys | sort) == (["mount","separateFromRoot"] | sort)) and
+  ((.runtime | keys | sort) == ([
+    "containerRuntimeVersion",
+    "k3sActive",
+    "k3sVersion",
+    "nodeName"
+  ] | sort))
+' "$work_dir/held-snapshot.json" >/dev/null ||
+  fail "held snapshot did not use its exact stable-only schema"
+if [[ -s "$work_dir/held-curl.log" ]] ||
+   grep -Eq 'rabbitmqctl|get pods|get deployments|statefulsets|daemonsets|replicasets|jobs|cronjobs' \
+     "$work_dir/held-command.log"; then
+  fail "held snapshot invoked public, RabbitMQ, pod, or workload checks"
+fi
+if grep -Fq 'canonical host is unavailable' "$work_dir/held-command.log"; then
+  fail "held snapshot still depended on a public canonical host"
+fi
+
 snapshot_case() {
   local name="$1" expected="$2" evidence="$3"
   shift 3
@@ -1215,7 +1663,13 @@ while IFS=$'\t' read -r queue_name _; do
   snapshot_diagnostic source-declared-queues "queue_zero_consumers name=$queue_name "
 done <"$work_dir/snapshot-known-queues.tsv"
 
-jq '.items += [{kind:"Deployment",metadata:{namespace:"betstan-oci",name:"gaming-telemetry-depl"}}]' \
+jq --arg image "ghcr.io/vasilyevstan/betstan-images@$TELEMETRY_ID" '
+  .items += [{
+    kind:"Deployment",
+    metadata:{namespace:"betstan-oci",name:"gaming-telemetry-depl"},
+    spec:{template:{spec:{containers:[{image:$image}]}}}
+  }]
+' \
   "$work_dir/snapshot-workloads-base.json" >"$work_dir/snapshot-workloads.json"
 printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case deployed-telemetry-queue-missing fail "queue baseline is unhealthy or malformed"

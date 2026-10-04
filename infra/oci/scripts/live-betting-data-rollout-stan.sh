@@ -9,6 +9,10 @@ PHASE="${PHASE:-${1:-}}"
 SOURCE_SHA="${SOURCE_SHA:-}"
 BUILD_RUN_ID="${BUILD_RUN_ID:-}"
 INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
+CHECKPOINT_SOURCE_SHA="${CHECKPOINT_SOURCE_SHA:-}"
+DISK_CHECKPOINT_RUN_ID="${DISK_CHECKPOINT_RUN_ID:-}"
+DISK_CHECKPOINT_SHA256="${DISK_CHECKPOINT_SHA256:-}"
+DISK_CHECKPOINT_DISPOSITION="${DISK_CHECKPOINT_DISPOSITION:-}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OCI_ROOT_DIR/artifacts/oci-live-data-rollout}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
@@ -74,6 +78,16 @@ esac
   fail "BUILD_RUN_ID must be a positive integer"
 [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
   fail "INFRASTRUCTURE_RUN_ID must be a positive integer"
+[[ "$CHECKPOINT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  fail "CHECKPOINT_SOURCE_SHA must be a complete lowercase commit SHA"
+[[ "$DISK_CHECKPOINT_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+  fail "DISK_CHECKPOINT_RUN_ID must be a positive integer"
+[[ "$DISK_CHECKPOINT_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "DISK_CHECKPOINT_SHA256 must be a SHA-256 digest"
+case "$DISK_CHECKPOINT_DISPOSITION" in
+  READY_NO_RECLAIM|READY_RECLAIMED|NOT_APPLICABLE) ;;
+  *) fail "DISK_CHECKPOINT_DISPOSITION is invalid" ;;
+esac
 [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
   fail "GITHUB_RUN_ID must be a positive integer"
 [[ "$RUN_ATTEMPT" == "1" ]] ||
@@ -1792,10 +1806,14 @@ esac
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$OUTPUT_DIR/provenance.env" <<EOF
-schema_version=live-betting-v5
+schema_version=live-betting-v6
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
+disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+disk_checkpoint_sha256=$DISK_CHECKPOINT_SHA256
+disk_checkpoint_disposition=$DISK_CHECKPOINT_DISPOSITION
 baseline_sha256=$BASELINE_SHA256
 baseline_recovery_run_id=$BASELINE_RECOVERY_RUN_ID
 baseline_recovery_source_sha=$BASELINE_RECOVERY_SOURCE_SHA
@@ -1819,6 +1837,10 @@ jq -s \
   --arg source_sha "$SOURCE_SHA" \
   --arg build_run_id "$BUILD_RUN_ID" \
   --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" \
+  --arg checkpoint_source_sha "$CHECKPOINT_SOURCE_SHA" \
+  --arg disk_checkpoint_run_id "$DISK_CHECKPOINT_RUN_ID" \
+  --arg disk_checkpoint_sha256 "$DISK_CHECKPOINT_SHA256" \
+  --arg disk_checkpoint_disposition "$DISK_CHECKPOINT_DISPOSITION" \
   --arg baseline_sha256 "$BASELINE_SHA256" \
   --arg baseline_recovery_run_id "$BASELINE_RECOVERY_RUN_ID" \
   --arg baseline_recovery_source_sha "$BASELINE_RECOVERY_SOURCE_SHA" \
@@ -1837,10 +1859,14 @@ jq -s \
   --argjson operation_lock_enforced "$OPERATION_LOCK_ENFORCED" \
   --argjson operation_lock_handoff "$OPERATION_LOCK_HANDOFF" '
     {
-      schema_version: "live-betting-v5",
+      schema_version: "live-betting-v6",
       source_sha: $source_sha,
       build_run_id: $build_run_id,
       infrastructure_run_id: $infrastructure_run_id,
+      checkpoint_source_sha: $checkpoint_source_sha,
+      disk_checkpoint_run_id: $disk_checkpoint_run_id,
+      disk_checkpoint_sha256: $disk_checkpoint_sha256,
+      disk_checkpoint_disposition: $disk_checkpoint_disposition,
       baseline_sha256: $baseline_sha256,
       baseline_recovery_run_id: $baseline_recovery_run_id,
       baseline_recovery_source_sha: $baseline_recovery_source_sha,
@@ -1865,10 +1891,14 @@ jq -s \
 
 if [[ "$PHASE" == "apply-slip-index" ]]; then
   cat >"$OUTPUT_DIR/schema.env" <<EOF
-schema_version=live-betting-v5
+schema_version=live-betting-v6
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
+disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+disk_checkpoint_sha256=$DISK_CHECKPOINT_SHA256
+disk_checkpoint_disposition=$DISK_CHECKPOINT_DISPOSITION
 baseline_sha256=$BASELINE_SHA256
 baseline_recovery_run_id=$BASELINE_RECOVERY_RUN_ID
 baseline_recovery_source_sha=$BASELINE_RECOVERY_SOURCE_SHA
@@ -1892,6 +1922,10 @@ EVIDENCE_DIR="$OUTPUT_DIR" \
 EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
 EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
 EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_CHECKPOINT_SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
+EXPECTED_DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+EXPECTED_DISK_CHECKPOINT_SHA256="$DISK_CHECKPOINT_SHA256" \
+EXPECTED_DISK_CHECKPOINT_DISPOSITION="$DISK_CHECKPOINT_DISPOSITION" \
 EXPECTED_PHASE="$PHASE" \
 EXPECTED_RUN_ID="$RUN_ID" \
 EXPECTED_RUN_ATTEMPT="$RUN_ATTEMPT" \

@@ -432,5 +432,40 @@ for missing in BOUND_RUNTIME_MODE OCI_RUNTIME_MODE PHASE SOURCE_SHA \
   run_case "rejects missing $missing" reject "${filtered[@]}"
 done
 
+if python3 - "$WORKFLOW" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+finalize = text[
+    text.index("- name: Open ephemeral OCI Bastion access and finalize k3s"):
+    text.index("- name: Close ephemeral OCI Bastion access")
+]
+ordered = (
+    "./infra/oci/scripts/verify-images.sh",
+    "./infra/oci/scripts/finalize-k3s.sh",
+    "./infra/oci/scripts/k3s-node-disk-recovery-stan.sh diagnose",
+)
+positions = [finalize.index(value) for value in ordered]
+if positions != sorted(positions):
+    raise SystemExit("k3s finalize checkpoint operations are out of order")
+for value in (
+    'CHECKPOINT_OUTPUT_FILE: artifacts/oci-release-disk-checkpoint/checkpoint.json',
+    'rm -f "$CHECKPOINT_OUTPUT_FILE"',
+    'k3s_release_disk_checkpoint=INELIGIBLE',
+    "write-not-applicable-checkpoint",
+    "hashFiles('artifacts/oci-release-disk-checkpoint/checkpoint.json') != ''",
+    "oci-release-disk-checkpoint-${{ inputs.approved_sha }}-${{ github.run_id }}-1",
+):
+    if value not in text:
+        raise SystemExit(f"infrastructure checkpoint contract is missing: {value}")
+PY
+then
+  PASS=$((PASS + 1))
+  echo "PASS finalize emits only release-eligible canonical disk checkpoints"
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL finalize disk checkpoint contract"
+fi
+
 echo "gate execution: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

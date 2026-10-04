@@ -1496,3 +1496,28 @@ Durable rules:
 - A homepage `200` does not prove recovery while an affected API returns `503`.
   Restore the affected services before continuing feature work, report observed
   evidence and the next check, and do not invent an ETA.
+
+## Disk-headroom release checkpoints — 2026-10-03
+
+- A release checkpoint is a sealed observation, not a waiver. Use strict
+  common/k3s/OKE key sets, canonical checksums, raw integer bytes, complete
+  stable identity, runtime versions, and immutable CRI residency. One byte
+  above `capacityBytes * 70 / 100` blocks release even when display rounding
+  says `70.00`.
+- Separate public and held evidence. Public collection remains strict about
+  public/application state. Held collection is stable-only and must not query
+  HTTP, RabbitMQ, queues, pods, Deployments, or mutable workload health, so a
+  deliberately quiesced retained hold can still be revalidated safely.
+- Metadata is not recovery lineage. Fixed profiles must download safe complete
+  ZIPs, verify checksum manifests and baseline capture identity, then parse the
+  complete predecessor-v6, deployment, and activation tuples before authority.
+- An ancestor resume has two source identities. The current workflow,
+  predecessor, and failed-run evidence use the current control SHA; the
+  original build, infrastructure, and disk checkpoint remain bound to
+  `checkpoint_source_sha`. Preserve those original IDs in every successor;
+  never accept a newly produced byte-equivalent build or infrastructure run.
+- Put mutable observations at the authority boundary. Baseline and predecessor
+  work precede the final public revalidation, which is the last read-only
+  action before lock acquisition. Deployment verifies the transferred hold,
+  renews without an acquire fallback, revalidates after health, and releases
+  lock before fence.

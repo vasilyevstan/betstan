@@ -28,6 +28,9 @@ case "$ACTION" in
   snapshot)
     required_commands=(findmnt df du k3s sha256sum curl systemctl)
     ;;
+  snapshot-held)
+    required_commands=(findmnt df k3s systemctl)
+    ;;
   probe-public-read)
     required_commands=(curl)
     ;;
@@ -74,12 +77,15 @@ if [[ "$ACTION" == "snapshot" || "$ACTION" == "probe-public-read" ||
   CANONICAL_HOST="$(
     decode_required "${K3S_DISK_CANONICAL_HOST_B64:-}" "canonical host"
   )"
-  EXPECTED_NODE_NAME="$(
-    decode_required "${K3S_DISK_NODE_NAME_B64:-}" "k3s node name"
-  )"
   [[ "$CANONICAL_HOST" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ &&
      "$CANONICAL_HOST" == *.* ]] ||
     fail "canonical host is invalid"
+fi
+if [[ "$ACTION" == "snapshot" || "$ACTION" == "snapshot-held" ||
+      "$ACTION" == "baseline-proof" ]]; then
+  EXPECTED_NODE_NAME="$(
+    decode_required "${K3S_DISK_NODE_NAME_B64:-}" "k3s node name"
+  )"
   [[ "$EXPECTED_NODE_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
     fail "k3s node name is invalid"
 fi
@@ -436,6 +442,89 @@ baseline_proof() {
       '
 }
 
+held_snapshot() {
+  local root_mount mongo_mount root_df images k3s_version
+  local container_runtime node_name
+
+  root_mount="$(mount_json /)" || fail "root mount is invalid"
+  mongo_mount="$(mount_json "$MONGO_PATH")" || fail "Mongo mount is invalid"
+  [[ "$(jq -r '.source' <<<"$root_mount")" != \
+     "$(jq -r '.source' <<<"$mongo_mount")" ]] ||
+    fail "Mongo data is not on a separate mounted filesystem"
+
+  root_df="$(
+    df --block-size=1 --output=size,used,avail,pcent,target / |
+      awk 'NR == 2 {
+        gsub(/%/, "", $4)
+        printf "{\"capacityBytes\":%s,\"usedBytes\":%s,\"availableBytes\":%s,\"usedPercent\":%s}\n",
+          $1, $2, $3, $4
+      }'
+  )"
+  jq -e '
+    .capacityBytes > 0 and .usedBytes >= 0 and .availableBytes >= 0 and
+    .usedBytes <= .capacityBytes and
+    .usedPercent >= 0 and .usedPercent <= 100
+  ' <<<"$root_df" >/dev/null || fail "root df output is invalid"
+
+  images="$(cri images -o json)" || fail "unable to read CRI images"
+  jq -e '.images | type == "array"' <<<"$images" >/dev/null ||
+    fail "CRI image inventory is malformed"
+
+  k3s_version="$(k3s --version | awk 'NR == 1 { print }')"
+  [[ "$k3s_version" =~ ^k3s\ version\ v[0-9] ]] ||
+    fail "k3s runtime version is malformed"
+  read -r node_name container_runtime <<<"$(
+    k3s kubectl get nodes -o json |
+      jq -er '
+        .items |
+        if length == 1 then
+          [.[0].metadata.name, .[0].status.nodeInfo.containerRuntimeVersion] |
+          @tsv
+        else
+          error("unexpected node count")
+        end
+      '
+  )" || fail "node and container runtime identity are unavailable"
+  [[ "$node_name" == "$EXPECTED_NODE_NAME" ]] ||
+    fail "unexpected k3s node identity"
+  systemctl is-active --quiet k3s || fail "k3s service is not active"
+
+  builtin printf '%s\n' \
+    "$root_mount" "$mongo_mount" "$root_df" "$images" |
+  jq -cs \
+    --arg schema "k3s-node-disk-held-runtime.v1" \
+    --arg repository "$APPLICATION_REPOSITORY" \
+    --arg k3s_version "$k3s_version" \
+    --arg container_runtime "$container_runtime" \
+    --arg node_name "$node_name" '
+      if length != 4 then error("held snapshot requires exactly four JSON values")
+      else . end |
+      . as [$root_mount, $mongo_mount, $root_df, $images] |
+      {
+        schemaVersion:$schema,
+        snapshotProfile:"held",
+        applicationRepository:$repository,
+        root:{mount:$root_mount,df:$root_df},
+        mongo:{mount:$mongo_mount,separateFromRoot:true},
+        images:[
+          $images.images[] | {
+            id:(.id // ""),
+            repoTags:(.repoTags // []),
+            repoDigests:(.repoDigests // []),
+            sizeBytes:((.size // 0) | tonumber),
+            pinned:(.pinned // false)
+          }
+        ],
+        runtime:{
+          nodeName:$node_name,
+          k3sVersion:$k3s_version,
+          containerRuntimeVersion:$container_runtime,
+          k3sActive:true
+        }
+      }
+    '
+}
+
 snapshot() {
   local root_mount mongo_mount root_df images containers pods workloads queue
   local rabbit_pod queue_output queue_count queue_backlog consumers_healthy
@@ -627,7 +716,7 @@ snapshot() {
     "$images" "$containers" "$pods" "$workloads" \
     "$queue_count" "$queue_backlog" "$consumers_healthy" "$public_read" |
   jq -cs \
-    --arg schema "k3s-node-disk-runtime.v1" \
+    --arg schema "k3s-node-disk-runtime.v2" \
     --arg repository "$APPLICATION_REPOSITORY" \
     --arg k3s_version "$k3s_version" \
     --arg container_runtime "$container_runtime" \
@@ -640,6 +729,7 @@ snapshot() {
       ] |
       {
         schemaVersion:$schema,
+        snapshotProfile:"public",
         applicationRepository:$repository,
         root:{mount:$root_mount,df:$root_df},
         mongo:{mount:$mongo_mount,separateFromRoot:true},
@@ -680,6 +770,22 @@ snapshot() {
               .spec.jobTemplate.spec.template.spec.containers[]?.image
             )
           ] | map(select(type == "string" and length > 0)) | unique | sort
+        ),
+        applicationImages:(
+          [
+            $workloads.items[]? |
+            select(
+              .kind == "Deployment" and
+              .metadata.namespace == "betstan-oci" and
+              (.metadata.name | test("^gaming-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip|telemetry)-depl$"))
+            ) |
+            if (.spec.template.spec.containers | length) != 1
+            then error("application deployment must have one container")
+            else {
+              service:(.metadata.name | capture("^gaming-(?<service>.+)-depl$").service),
+              imageRef:.spec.template.spec.containers[0].image
+            } end
+          ] | sort_by(.service)
         ),
         workload:{
           podCount:($pods.items | length),
@@ -730,6 +836,9 @@ case "$ACTION" in
     ;;
   snapshot)
     snapshot
+    ;;
+  snapshot-held)
+    held_snapshot
     ;;
   probe-public-read)
     public_read_checks

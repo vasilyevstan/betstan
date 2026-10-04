@@ -19,6 +19,10 @@ GHCR_GENERATIONS_FILE="${GHCR_GENERATIONS_FILE:-}"
 DIAGNOSIS_FILE="${DIAGNOSIS_FILE:-}"
 INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
+CHECKPOINT_OUTPUT_FILE="${CHECKPOINT_OUTPUT_FILE:-}"
+CHECKPOINT_FILE="${CHECKPOINT_FILE:-}"
+DISK_CHECKPOINT_RUN_ID="${DISK_CHECKPOINT_RUN_ID:-}"
+REVALIDATION_PROFILE="${REVALIDATION_PROFILE:-}"
 WORK_DIR="${WORK_DIR:-${RUNNER_TEMP:-$PWD}/k3s-disk-recovery-work}"
 REMOTE_RUNNER="${K3S_DISK_REMOTE_RUNNER:-}"
 EVIDENCE_HELPER="$SCRIPT_DIR/k3s_disk_recovery_stan.py"
@@ -30,14 +34,18 @@ fail() {
   exit 1
 }
 
-[[ "$ACTION" == "diagnose" || "$ACTION" == "reclaim" ]] ||
-  fail "usage: $0 {diagnose|reclaim}"
+[[ "$ACTION" == "diagnose" || "$ACTION" == "reclaim" ||
+   "$ACTION" == "revalidate" ]] ||
+  fail "usage: $0 {diagnose|reclaim|revalidate}"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_SHA is invalid"
 [[ "$CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "CONTROL_SHA is invalid"
 historical=false
 if [[ "$CONTROL_SHA" != "$SOURCE_SHA" ]]; then
-  [[ "$ACTION" == "diagnose" ]] || fail "historical observations cannot reclaim"
-  historical=true
+  if [[ "$ACTION" == "diagnose" ]]; then
+    historical=true
+  elif [[ "$ACTION" != "revalidate" ]]; then
+    fail "historical observations cannot reclaim"
+  fi
 fi
 [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
   fail "INFRASTRUCTURE_RUN_ID is invalid"
@@ -53,15 +61,28 @@ fi
   fail "candidate image evidence is unavailable"
 [[ -n "$INFRA_PROVENANCE_FILE" && -f "$INFRA_PROVENANCE_FILE" ]] ||
   fail "bound infrastructure provenance is unavailable"
-[[ -n "$OUTPUT_FILE" && "$OUTPUT_FILE" != "/" && "$OUTPUT_FILE" != "." ]] ||
-  fail "OUTPUT_FILE is required"
-[[ ! -L "$OUTPUT_FILE" ]] || fail "OUTPUT_FILE must not be a symbolic link"
+if [[ "$ACTION" != "revalidate" ]]; then
+  [[ -n "$OUTPUT_FILE" && "$OUTPUT_FILE" != "/" && "$OUTPUT_FILE" != "." ]] ||
+    fail "OUTPUT_FILE is required"
+  [[ ! -L "$OUTPUT_FILE" ]] || fail "OUTPUT_FILE must not be a symbolic link"
+fi
+if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+  [[ "$CHECKPOINT_OUTPUT_FILE" != "/" && "$CHECKPOINT_OUTPUT_FILE" != "." &&
+     ! -L "$CHECKPOINT_OUTPUT_FILE" ]] ||
+    fail "CHECKPOINT_OUTPUT_FILE is invalid"
+fi
 for command_name in jq python3 sha256sum base64; do
   command -v "$command_name" >/dev/null 2>&1 ||
     fail "required command is unavailable: $command_name"
 done
 
-mkdir -p "$WORK_DIR" "$(dirname "$OUTPUT_FILE")"
+mkdir -p "$WORK_DIR"
+if [[ "$ACTION" != "revalidate" ]]; then
+  mkdir -p "$(dirname "$OUTPUT_FILE")"
+fi
+if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+  mkdir -p "$(dirname "$CHECKPOINT_OUTPUT_FILE")"
+fi
 chmod 700 "$WORK_DIR"
 runtime_before="$WORK_DIR/runtime-before.json"
 capacity_before="$WORK_DIR/capacity-before.json"
@@ -244,10 +265,42 @@ capture_baseline() {
 if [[ "$historical" == "true" ]]; then
   capture_baseline before
 fi
-run_remote snapshot "[]" >"$runtime_before" ||
+snapshot_action=snapshot
+if [[ "$ACTION" == "revalidate" && "$REVALIDATION_PROFILE" == "held" ]]; then
+  snapshot_action=snapshot-held
+fi
+run_remote "$snapshot_action" "[]" >"$runtime_before" ||
   fail "read-only runtime snapshot failed"
 capture_capacity "$capacity_before" ||
   fail "kubelet filesystem cross-check failed"
+
+if [[ "$ACTION" == "revalidate" ]]; then
+  [[ "$REVALIDATION_PROFILE" == "public" ||
+     "$REVALIDATION_PROFILE" == "held" ]] ||
+    fail "REVALIDATION_PROFILE must be public or held"
+  [[ "$DISK_CHECKPOINT_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+    fail "DISK_CHECKPOINT_RUN_ID is invalid"
+  [[ -n "$CHECKPOINT_FILE" && -f "$CHECKPOINT_FILE" &&
+     ! -L "$CHECKPOINT_FILE" ]] ||
+    fail "bound release checkpoint is unavailable"
+  "$EVIDENCE_HELPER" validate-release-checkpoint \
+    --checkpoint "$CHECKPOINT_FILE" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id "$DISK_CHECKPOINT_RUN_ID" \
+    --runtime-mode k3s \
+    --infrastructure-run-id "$INFRASTRUCTURE_RUN_ID" \
+    --ghcr-build-run-id "$GHCR_BUILD_RUN_ID" \
+    --candidate-images "$CANDIDATE_IMAGES_FILE"
+  "$EVIDENCE_HELPER" revalidate-release-checkpoint \
+    --checkpoint "$CHECKPOINT_FILE" \
+    --runtime "$runtime_before" \
+    --capacity "$capacity_before" \
+    --candidate-images "$CANDIDATE_IMAGES_FILE" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id "$DISK_CHECKPOINT_RUN_ID" \
+    --profile "$REVALIDATION_PROFILE"
+  exit 0
+fi
 
 if [[ "$ACTION" == "diagnose" ]]; then
   [[ "$RECLAIM_CATEGORY" == "none" && "$RECLAIM_IMAGE_IDS" == "[]" ]] ||
@@ -278,6 +331,16 @@ if [[ "$ACTION" == "diagnose" ]]; then
       --baseline-after "$WORK_DIR/baseline-after.json")
   fi
   "$EVIDENCE_HELPER" "${diagnose_args[@]}"
+  if [[ "$historical" == "false" && -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+    "$EVIDENCE_HELPER" write-release-checkpoint \
+      --diagnosis "$OUTPUT_FILE" \
+      --runtime "$runtime_before" \
+      --capacity "$capacity_before" \
+      --source-sha "$SOURCE_SHA" \
+      --control-sha "$CONTROL_SHA" \
+      --producer-run-id "$GITHUB_RUN_ID" \
+      --output "$CHECKPOINT_OUTPUT_FILE"
+  fi
   storage_status="$(jq -er '.mongoStorage.status' "$OUTPUT_FILE")"
   echo "mongo_collection_storage=$storage_status"
   echo "k3s_disk_recovery=diagnose status=PASS manifest=$OUTPUT_FILE"
@@ -357,4 +420,15 @@ finalize_status=$?
 set -e
 [[ "$finalize_status" -eq 0 ]] ||
   fail "reclaim remained incomplete; no alternate category was attempted"
+if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+  "$EVIDENCE_HELPER" write-release-checkpoint \
+    --diagnosis "$DIAGNOSIS_FILE" \
+    --reclaim "$OUTPUT_FILE" \
+    --runtime "$runtime_after" \
+    --capacity "$capacity_after" \
+    --source-sha "$SOURCE_SHA" \
+    --control-sha "$CONTROL_SHA" \
+    --producer-run-id "$GITHUB_RUN_ID" \
+    --output "$CHECKPOINT_OUTPUT_FILE"
+fi
 echo "k3s_disk_recovery=reclaim status=PASS manifest=$OUTPUT_FILE"

@@ -531,6 +531,17 @@ its owner. It is never healthy by default.
   must be reported immediately. A lock whose owner PID is gone may be cleared
   only through the helper's exact stale-lock check; never delete a live or
   unverified lock.
+- For OCI live-data resume, deployment recovery, or activation cleanup, do not
+  classify a run from metadata and jobs alone. Require the repository-fixed
+  profile to download and validate its exact baseline, deployment,
+  predecessor-v6, checkpoint, and activation artifacts before intent, approval,
+  or mutation. Treat malformed/incomplete ZIPs, checksum or capture-run drift,
+  and any lineage substitution as prerequisite decay.
+- Track both source identities on an allowed descendant resume: current
+  workflow/predecessor/failed-run evidence stays at the current control SHA,
+  while build, infrastructure, and checkpoint identities stay at the original
+  checkpoint source. Route a new byte-equivalent build or infrastructure run
+  as `BLOCKED`, not as replacement evidence.
 - A jobless queued dispatch with zero jobs and zero pending approvals is not
   usable approval authority. Keep it unapproved. For global production
   exclusivity, immediately run the checked-in supersession classifier before

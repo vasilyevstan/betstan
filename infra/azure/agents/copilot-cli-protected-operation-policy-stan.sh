@@ -127,6 +127,8 @@ OCI_DEPLOY_INPUTS = [
     "build_run_id",
     "infrastructure_run_id",
     "data_run_id",
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
     "baseline_recovery_run_id",
     "baseline_recovery_source_sha",
     "confirmation",
@@ -305,6 +307,115 @@ K3S_DISK_DIAGNOSIS_BINDING = {
     },
 }
 
+OCI_BUILD_RUN_BINDING = {
+    **GHCR_BUILD_BINDING,
+    "input": "build_run_id",
+    "expectedHeadShaInput": "checkpoint_source_sha",
+    "artifactContent": {
+        **GHCR_BUILD_BINDING["artifactContent"],
+        "equals": {
+            **GHCR_BUILD_BINDING["artifactContent"]["equals"],
+            "build_run_id": "{run_id}",
+        },
+    },
+}
+
+OCI_CURRENT_INFRASTRUCTURE_BINDING = {
+    "input": "infrastructure_run_id",
+    "afterInput": "build_run_id",
+    "expectedHeadShaInput": "checkpoint_source_sha",
+    "workflow": "oci-infrastructure.yml",
+    "titleTemplates": {"workflow_dispatch": None},
+    "artifactTemplate": "oci-infrastructure-provenance-{run_id}-1",
+    "artifactContent": {
+        "fileName": "provenance.env",
+        "format": "env",
+        "equals": {
+            "source_sha": "{subject_sha}",
+            "infrastructure_run_id": "{run_id}",
+            "infrastructure_run_attempt": "1",
+            "infrastructure_finalized": "true",
+            "ghcr_build_run_id": "{input:build_run_id}",
+        },
+    },
+}
+
+OCI_DISK_CHECKPOINT_BINDING = {
+    "input": "disk_checkpoint_run_id",
+    "expectedHeadShaInput": "checkpoint_source_sha",
+    "workflow": "oci-infrastructure.yml",
+    "titleTemplates": {"workflow_dispatch": None},
+    "artifactTemplate":
+        "oci-release-disk-checkpoint-{subject_sha}-{run_id}-1",
+    "artifactValidatorProfile": "oci-release-disk-checkpoint-v1",
+}
+
+
+def live_data_binding(input_name, phase, *, expected_head_input=None):
+    result = {
+        "input": input_name,
+        "workflow": "oci-live-data-rollout.yml",
+        "titleTemplates": {
+            "workflow_dispatch":
+                f"oci-live-data {phase} {{subject_sha}}",
+        },
+        "artifactTemplate": "oci-live-data-rollout-{run_id}-1",
+        "artifactContent": {
+            "fileName": "provenance.env",
+            "format": "env",
+            "equals": {
+                "schema_version": "live-betting-v6",
+                "phase": phase,
+                "source_sha": "{subject_sha}",
+                "workflow_run_id": "{run_id}",
+                "workflow_run_attempt": "1",
+                "checkpoint_source_sha": "{input:checkpoint_source_sha}",
+                "disk_checkpoint_run_id": "{input:disk_checkpoint_run_id}",
+            },
+        },
+    }
+    if expected_head_input is not None:
+        result["expectedHeadShaInput"] = expected_head_input
+    return result
+
+
+def failed_deploy_binding(profile):
+    return {
+        "input": "failed_deploy_run_id",
+        "expectedConclusion": "failure",
+        "runProfile": profile,
+        "workflow": "oci-production-deploy.yml",
+        "titleTemplates": {
+            "workflow_dispatch": "oci-production-deploy {subject_sha}",
+        },
+        "artifactTemplate": "oci-production-baseline-{run_id}-1",
+    }
+
+
+FAILED_ACTIVATION_BINDING = {
+    "input": "failed_activation_run_id",
+    "expectedConclusion": "failure",
+    "runProfile": "oci-failed-activation-cleanup-v1",
+    "workflow": "oci-live-betting-activate.yml",
+    "titleTemplates": {
+        "workflow_dispatch": "oci-live-activate {subject_sha}",
+    },
+    "artifactTemplate": "oci-live-activation-{run_id}-1",
+    "artifactContent": {
+        "fileName": "provenance.env",
+        "format": "env",
+        "equals": {
+            "source_sha": "{subject_sha}",
+            "activation_run_id": "{run_id}",
+            "activation_run_attempt": "1",
+            "workflow_result": "failure",
+            "activation_state": "dark",
+            "live_kickoffs_enabled": "false",
+            "live_acceptance_user_id": "{input:failed_activation_user_id}",
+        },
+    },
+}
+
 GHCR_INPUTS = [
     "approved_sha",
     "phase",
@@ -328,6 +439,8 @@ LIVE_DATA_INPUTS = [
     "approved_sha",
     "build_run_id",
     "infrastructure_run_id",
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
     "phase",
     "prerequisite_run_id",
     "baseline_recovery_run_id",
@@ -458,10 +571,24 @@ POLICIES = {
             "baseline_recovery_source_sha": "none",
             "confirmation": "DEPLOY OCI EXACT SHA",
         },
-        positive=["build_run_id", "infrastructure_run_id", "data_run_id"],
-        full_shas=["approved_sha"],
+        positive=[
+            "build_run_id",
+            "infrastructure_run_id",
+            "data_run_id",
+            "disk_checkpoint_run_id",
+        ],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding("data_run_id", "apply-slip-index"),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+        ],
     ),
     "oci-production-deploy-recovered": dispatch(
         "oci-production-deploy-recovered",
@@ -474,13 +601,27 @@ POLICIES = {
             "build_run_id",
             "infrastructure_run_id",
             "data_run_id",
+            "disk_checkpoint_run_id",
             "baseline_recovery_run_id",
         ],
-        full_shas=["approved_sha", "baseline_recovery_source_sha"],
+        full_shas=[
+            "approved_sha",
+            "checkpoint_source_sha",
+            "baseline_recovery_source_sha",
+        ],
         subject_input="approved_sha",
         subject_relation="current",
         target_input="baseline_recovery_source_sha",
         target_relation="ancestor-or-current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding("data_run_id", "apply-slip-index"),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+        ],
     ),
     "oci-production-rollback": dispatch(
         "oci-production-rollback",
@@ -1019,11 +1160,19 @@ POLICIES = {
             "failed_activation_user_id": "0",
             "confirmation": "DRY RUN LIVE DATA EXACT SHA",
         },
-        positive=["build_run_id", "infrastructure_run_id"],
+        positive=[
+            "build_run_id", "infrastructure_run_id", "disk_checkpoint_run_id"
+        ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha"],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
+        templates={"checkpoint_source_sha": "{subject_sha}"},
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+        ],
     ),
     "oci-live-data-apply-backfills": dispatch(
         "oci-live-data-apply-backfills",
@@ -1038,11 +1187,26 @@ POLICIES = {
             "failed_activation_user_id": "0",
             "confirmation": "APPLY LIVE BACKFILLS EXACT SHA",
         },
-        positive=["build_run_id", "infrastructure_run_id", "prerequisite_run_id"],
+        positive=[
+            "build_run_id",
+            "infrastructure_run_id",
+            "prerequisite_run_id",
+            "disk_checkpoint_run_id",
+        ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha"],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
+        templates={"checkpoint_source_sha": "{subject_sha}"},
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding("prerequisite_run_id", "dry-run"),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+        ],
     ),
     "oci-live-data-apply-slip-index": dispatch(
         "oci-live-data-apply-slip-index",
@@ -1057,11 +1221,26 @@ POLICIES = {
             "failed_activation_user_id": "0",
             "confirmation": "APPLY LIVE SLIP INDEX EXACT SHA",
         },
-        positive=["build_run_id", "infrastructure_run_id", "prerequisite_run_id"],
+        positive=[
+            "build_run_id",
+            "infrastructure_run_id",
+            "prerequisite_run_id",
+            "disk_checkpoint_run_id",
+        ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha"],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
+        templates={"checkpoint_source_sha": "{subject_sha}"},
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding("prerequisite_run_id", "apply-backfills"),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+        ],
     ),
     "oci-live-data-resume-deploy": dispatch(
         "oci-live-data-resume-deploy",
@@ -1080,11 +1259,30 @@ POLICIES = {
             "infrastructure_run_id",
             "prerequisite_run_id",
             "failed_deploy_run_id",
+            "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha"],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding(
+                    "prerequisite_run_id",
+                    "apply-slip-index",
+                ),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+            {
+                **failed_deploy_binding(
+                    "oci-failed-deploy-retained-hold-v1"
+                ),
+                "afterInput": "prerequisite_run_id",
+            },
+        ],
     ),
     "oci-live-data-resume-deploy-released": dispatch(
         "oci-live-data-resume-deploy-released",
@@ -1104,11 +1302,30 @@ POLICIES = {
             "infrastructure_run_id",
             "prerequisite_run_id",
             "failed_deploy_run_id",
+            "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha"],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding(
+                    "prerequisite_run_id",
+                    "apply-slip-index",
+                ),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+            {
+                **failed_deploy_binding(
+                    "oci-failed-deploy-released-runtime-v1"
+                ),
+                "afterInput": "prerequisite_run_id",
+            },
+        ],
     ),
     "oci-live-data-resume-activation": dispatch(
         "oci-live-data-resume-activation",
@@ -1127,12 +1344,35 @@ POLICIES = {
             "prerequisite_run_id",
             "failed_deploy_run_id",
             "failed_activation_run_id",
+            "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha"],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
         object_id_or_literals={"failed_activation_user_id": []},
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding(
+                    "prerequisite_run_id",
+                    "apply-slip-index",
+                ),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+            {
+                **failed_deploy_binding(
+                    "oci-failed-deploy-retained-hold-v1"
+                ),
+                "afterInput": "prerequisite_run_id",
+            },
+            {
+                **FAILED_ACTIVATION_BINDING,
+                "afterInput": "failed_deploy_run_id",
+            },
+        ],
     ),
     "oci-live-data-resume-activation-released": dispatch(
         "oci-live-data-resume-activation-released",
@@ -1152,12 +1392,35 @@ POLICIES = {
             "prerequisite_run_id",
             "failed_deploy_run_id",
             "failed_activation_run_id",
+            "disk_checkpoint_run_id",
         ],
         zero_or_positive=["baseline_recovery_run_id"],
-        full_shas=["approved_sha"],
+        full_shas=["approved_sha", "checkpoint_source_sha"],
         object_id_or_literals={"failed_activation_user_id": []},
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding(
+                    "prerequisite_run_id",
+                    "apply-slip-index",
+                ),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+            {
+                **failed_deploy_binding(
+                    "oci-failed-deploy-released-runtime-v1"
+                ),
+                "afterInput": "prerequisite_run_id",
+            },
+            {
+                **FAILED_ACTIVATION_BINDING,
+                "afterInput": "failed_deploy_run_id",
+            },
+        ],
     ),
     "oci-migrate": dispatch(
         "oci-migrate",

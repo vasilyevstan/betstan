@@ -1304,6 +1304,8 @@ def validate_live_data_rollout_workflow!(file, document, content)
       approved_sha
       build_run_id
       infrastructure_run_id
+      checkpoint_source_sha
+      disk_checkpoint_run_id
       phase
       prerequisite_run_id
       baseline_recovery_run_id
@@ -1332,6 +1334,9 @@ def validate_live_data_rollout_workflow!(file, document, content)
       "failed-activation cleanup confirmation",
     "oci-production-build.yml" => "exact build provenance",
     "oci-infrastructure.yml" => "exact infrastructure provenance",
+    "oci-release-disk-checkpoint-${{ inputs.checkpoint_source_sha }}-${{ inputs.disk_checkpoint_run_id }}-1" =>
+      "exact release disk checkpoint binding",
+    "k3s_disk_recovery_stan.py" => "repository-fixed release disk checkpoint validation",
     "oci-live-data-rollout.yml" => "phase-chain provenance",
     "oci-ghcr-cache-recovery.yml" => "explicit recovery baseline authority",
     "ghcr-cache-recovery-" => "exact recovery artifact binding",
@@ -1642,10 +1647,32 @@ end
 
 def validate_oci_production_deploy_binding!(name, document, content)
   validate_manual_oci_workflow!(name, document, content)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[
+      approved_sha
+      build_run_id
+      infrastructure_run_id
+      data_run_id
+      checkpoint_source_sha
+      disk_checkpoint_run_id
+      baseline_recovery_run_id
+      baseline_recovery_source_sha
+      confirmation
+    ]
+  )
   {
     "infrastructure_run_id=%s" => "infrastructure run binding",
     "infrastructure_run_attempt=1" => "first-attempt infrastructure binding",
     "infrastructure_provenance_sha256=%s" => "infrastructure artifact digest binding",
+    "checkpoint_source_sha=%s" => "checkpoint source binding",
+    "disk_checkpoint_run_id=%s" => "checkpoint producer binding",
+    "disk_checkpoint_sha256=%s" => "checkpoint checksum binding",
+    "disk_checkpoint_disposition=%s" => "checkpoint disposition binding",
+    "oci-release-disk-checkpoint-${{ inputs.checkpoint_source_sha }}-${{ inputs.disk_checkpoint_run_id }}-1" =>
+      "exact release disk checkpoint artifact binding",
+    "k3s_disk_recovery_stan.py" => "repository-fixed release disk checkpoint validation",
     ".github/workflows/oci-production-rollback.yml" => "partial-recovery workflow binding",
     "oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1" => "partial-recovery artifact binding",
     "validate-rollback-baseline-stan.sh" => "executable pre-deploy rollback validation",
@@ -1665,15 +1692,17 @@ def validate_oci_production_deploy_binding!(name, document, content)
   acquire_indexes = lines.each_index.select do |index|
     lines[index].include?("shared-mongo-operation-lock-stan.sh acquire")
   end
-  unless acquire_indexes.length == 2
-    fail_inventory("#{name} must have exactly two guarded deploy-lock acquisition paths")
+  unless acquire_indexes.length == 1
+    fail_inventory("#{name} must have exactly one post-failure deploy-lock reacquisition path")
   end
   acquire_indexes.each do |index|
-    invocation = lines[[index - 6, 0].max..index].join
+    invocation = lines[[index - 14, 0].max..index].join
     unless invocation.include?(
       'LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS"'
-    )
-      fail_inventory("#{name} deploy-lock acquisition is missing the bounded deploy lease")
+    ) && invocation.include?("if ! NAMESPACE=")
+      fail_inventory(
+        "#{name} deploy-lock reacquisition must be bounded and guarded by failed exact-lock verification"
+      )
     end
   end
   renew_count = lines.count do |line|
@@ -1681,6 +1710,28 @@ def validate_oci_production_deploy_binding!(name, document, content)
   end
   unless renew_count == 2
     fail_inventory("#{name} must renew each verified deploy-lock path exactly once")
+  end
+
+  ordered_steps = [
+    "Verify transferred database lock and maintenance fence",
+    "Validate executable pre-deploy rollback baseline",
+    "Revalidate held release disk checkpoint before lock renewal",
+    "Renew exact transferred database lock",
+    "Deploy immutable images sequentially",
+    "Run protected OCI cluster validation loop",
+    "Revalidate held release disk checkpoint after protected health",
+    "Release transferred lock after protected validation",
+    "Release live data maintenance fence"
+  ]
+  positions = ordered_steps.map { |step| content.index("- name: #{step}") }
+  unless positions.all? && positions.each_cons(2).all? { |left, right| left < right }
+    fail_inventory(
+      "#{name} must preserve verify, baseline, checkpoint, renew, deploy, health, checkpoint, lock, fence ordering"
+    )
+  end
+  initial_deploy = positions.fetch(4)
+  if content[0...initial_deploy].include?("shared-mongo-operation-lock-stan.sh acquire")
+    fail_inventory("#{name} must not acquire a replacement lock before deployment")
   end
 end
 
