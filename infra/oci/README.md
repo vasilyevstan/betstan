@@ -341,7 +341,9 @@ concurrent retirement fixture isolation without masking failed suites.
    OKE finalize emits only common fields with
    `terminalStatus=RELEASE_ELIGIBLE` and `disposition=NOT_APPLICABLE`, without
    fabricated disk fields. The strict k3s shape adds top-level
-   `thresholdPercent=70`, raw root bytes, complete node/root/Mongo mount
+   `thresholdPercent=70`; `checkpoint.root` seals kubelet node-filesystem
+   bytes, while fresh raw `runtime.root.df` is an independent admission veto
+   not added to the schema. It also adds complete node/root/Mongo mount
    identity, k3s and runtime versions, immutable candidate/rollback image IDs
    and repository digests, `publicStateStatus=PASS`, and flat
    `diagnosisChecksumSha256`/`reclaimChecksumSha256` lineage; missing or extra

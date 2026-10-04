@@ -154,7 +154,7 @@ preload_candidate_images() {
     length == 10 and
     all(.[];
       type == "string" and
-      test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$")
+      test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}\\z")
     )
   ' <<<"$SELECTED_IMAGE_IDS" >/dev/null 2>&1 || payload_status=$?
   case "$payload_status" in

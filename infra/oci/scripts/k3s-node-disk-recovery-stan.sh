@@ -245,7 +245,7 @@ if [[ "$ACTION" == "preload" ]]; then
       if type == "array" and length == 10 and
          all(.[];
            type == "string" and
-           test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$")
+           test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}\\z")
          )
       then . else error("invalid candidate references") end
     ' <<<"$candidate_refs"

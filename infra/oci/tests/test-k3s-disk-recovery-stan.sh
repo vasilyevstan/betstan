@@ -122,6 +122,11 @@ jq -e '
   all(.[]; test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$"))
 ' "$candidate_cases/actual.json" >/dev/null ||
   fail "candidate image reference payload shape is invalid"
+trailing_lf_candidate_refs="$(
+  jq -c '.[-1] += "\n"' "$candidate_cases/actual.json"
+)"
+jq -e '.[-1] | endswith("\n")' <<<"$trailing_lf_candidate_refs" >/dev/null ||
+  fail "trailing-LF candidate reference fixture is invalid"
 
 for candidate_case in \
   malformed missing extra duplicate-service repository tag manifest-digest \
@@ -1525,6 +1530,28 @@ env "${common_env[@]}" \
 [[ "$preload_wrapper_status" == "20" && ! -s "$work_dir/remote.log" ]] ||
   fail "invalid local candidate evidence reached the preload transport"
 
+local_guard_bin="$work_dir/local-guard-bin"
+mkdir -p "$local_guard_bin"
+cat >"$local_guard_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == */k3s_disk_recovery_stan.py ]]
+[[ "$2" == "candidate-image-refs" ]]
+printf '%s\n' "${STUB_CANDIDATE_REFS:?}"
+SH
+chmod +x "$local_guard_bin/python3"
+: >"$work_dir/remote.log"
+preload_wrapper_status=0
+env "${common_env[@]}" \
+  PATH="$local_guard_bin:$stub_bin:$PATH" \
+  STUB_CANDIDATE_REFS="$trailing_lf_candidate_refs" \
+  GITHUB_RUN_ID=400 \
+  CONTROL_SHA="$SOURCE_SHA" \
+  "$ORCHESTRATOR" preload >"$work_dir/preload-wrapper-trailing-lf.log" 2>&1 ||
+  preload_wrapper_status=$?
+[[ "$preload_wrapper_status" != "0" && ! -s "$work_dir/remote.log" ]] ||
+  fail "local candidate guard normalized a final-element trailing-LF reference"
+
 for authority_case in \
   "RECLAIM_CATEGORY=apt-package-cache" \
   "CONTROL_SHA=2222222222222222222222222222222222222222" \
@@ -1712,7 +1739,19 @@ while IFS= read -r line; do
     break
   fi
 done <"$STUB_DF_MEASUREMENTS"
-[[ -n "$measurement" && "$measurement" != "FAIL" ]] || exit 42
+[[ -n "$measurement" ]] || exit 42
+case "$measurement" in
+  FAIL)
+    exit 42
+    ;;
+  EMPTY)
+    exit 0
+    ;;
+  EXTRA)
+    printf 'Size Used Mounted\n10 7 /\n10 7 /\n'
+    exit 0
+    ;;
+esac
 read -r capacity used extra <<<"$measurement"
 [[ -z "$extra" ]] || exit 42
 printf 'Size Used Mounted\n%s %s /\n' "$capacity" "$used"
@@ -1793,6 +1832,26 @@ preload_status="$(run_preload "$work_dir/preload-nondivisible.log" "$shared_prel
   fail "non-divisible floor boundary or shared references were rejected"
 
 reset_preload_case
+write_safe_measurements 9223372036854775807 6456360425798343064
+preload_status="$(
+  run_preload "$work_dir/preload-signed-max-boundary.log" "$shared_preload_refs"
+)"
+[[ "$preload_status" == "0" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "10" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "20" ]] ||
+  fail "maximum signed-safe capacity overflowed at its exact 70 percent floor"
+
+reset_preload_case
+printf '9223372036854775807 6456360425798343065\n' >"$preload_measurements"
+preload_status="$(
+  run_preload "$work_dir/preload-signed-max-over.log" "$preload_refs"
+)"
+[[ "$preload_status" == "20" &&
+   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "0" &&
+   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "1" ]] ||
+  fail "maximum signed-safe one-byte threshold breach reached CRI"
+
+reset_preload_case
 printf '11 8\n' >"$preload_measurements"
 preload_status="$(run_preload "$work_dir/preload-pre-over.log" "$preload_refs")"
 [[ "$preload_status" == "20" &&
@@ -1819,22 +1878,41 @@ preload_status="$(
    "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "2" ]] ||
   fail "failed pull did not retain failure after its post-attempt measurement"
 
-for malformed_measurement in "bogus 7" "11 -1" "9223372036854775808 7"; do
+df_rejection_cases=(
+  "failed|FAIL"
+  "empty|EMPTY"
+  "extra-line|EXTRA"
+  "zero-capacity|0 0"
+  "used-over-capacity|10 11"
+  "nonnumeric-capacity|bogus 7"
+  "negative-used|11 -1"
+  "overflow-capacity|9223372036854775808 7"
+)
+for df_case in "${df_rejection_cases[@]}"; do
+  IFS='|' read -r df_case_name malformed_measurement <<<"$df_case"
   reset_preload_case
   printf '%s\n' "$malformed_measurement" >"$preload_measurements"
-  preload_status="$(run_preload "$work_dir/preload-malformed-df.log" "$preload_refs")"
+  preload_status="$(
+    run_preload "$work_dir/preload-pre-df-$df_case_name.log" "$preload_refs"
+  )"
   [[ "$preload_status" == "20" &&
-     "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "0" ]] ||
-    fail "malformed raw root bytes did not fail closed: $malformed_measurement"
+     "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "0" &&
+     "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "1" ]] ||
+    fail "invalid pre-pull df result did not fail before CRI: $df_case_name"
 done
 
-reset_preload_case
-printf '11 7\n11 nope\n' >"$preload_measurements"
-preload_status="$(run_preload "$work_dir/preload-post-malformed.log" "$preload_refs")"
-[[ "$preload_status" == "20" &&
-   "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "1" &&
-   "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "2" ]] ||
-  fail "malformed post-pull bytes did not stop before the next image"
+for df_case in "${df_rejection_cases[@]}"; do
+  IFS='|' read -r df_case_name malformed_measurement <<<"$df_case"
+  reset_preload_case
+  printf '11 7\n%s\n' "$malformed_measurement" >"$preload_measurements"
+  preload_status="$(
+    run_preload "$work_dir/preload-post-df-$df_case_name.log" "$preload_refs"
+  )"
+  [[ "$preload_status" == "20" &&
+     "$(awk -F '\t' '$1 == "pull" {count++} END {print count+0}' "$preload_command_log")" == "1" &&
+     "$(awk -F '\t' '$1 == "df" {count++} END {print count+0}' "$preload_command_log")" == "2" ]] ||
+    fail "invalid post-pull df result did not stop later pulls: $df_case_name"
+done
 
 invalid_preload_payload() {
   local name="$1" payload="$2" status
@@ -1859,6 +1937,7 @@ invalid_preload_payload digest "$(
   jq -c '.[0] = "ghcr.io/vasilyevstan/betstan-images@sha256:SHORT"' \
     "$candidate_cases/actual.json"
 )"
+invalid_preload_payload trailing-lf "$trailing_lf_candidate_refs"
 
 reset_preload_case
 write_safe_measurements 10 0
