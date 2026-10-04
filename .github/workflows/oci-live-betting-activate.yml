@@ -1127,6 +1127,50 @@ jobs:
             "close_bastion_outcome=$CLOSE_BASTION_OUTCOME" \
             > artifacts/live-control/provenance.env
 
+      - name: Prepare activation recovery authority
+        id: recovery_authority
+        if: always()
+        run: |
+          set -euo pipefail
+          umask 077
+          recovery_dir=artifacts/live-activation-recovery
+          rm -rf "$recovery_dir"
+          mkdir -p "$recovery_dir"
+          for relative in \
+            provenance.env \
+            activate/control.env \
+            acceptance/evidence.json \
+            accepted.env \
+            commit/control.env \
+            failure-disable/control.env \
+            final-failure-disable/control.env; do
+            source_file="artifacts/live-control/$relative"
+            if [ -f "$source_file" ]; then
+              mkdir -p "$recovery_dir/$(dirname "$relative")"
+              cp "$source_file" "$recovery_dir/$relative"
+            fi
+          done
+          (
+            cd "$recovery_dir"
+            find . -type f ! -name SHA256SUMS -print |
+              LC_ALL=C sort |
+              while IFS= read -r relative; do
+                relative="${relative#./}"
+                sha256sum "$relative"
+              done > SHA256SUMS
+            sha256sum --quiet --check SHA256SUMS
+          )
+
+      - name: Upload activation recovery authority
+        id: recovery_authority_upload
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-live-activation-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/live-activation-recovery
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload protected activation evidence
         id: evidence_upload
         if: always()

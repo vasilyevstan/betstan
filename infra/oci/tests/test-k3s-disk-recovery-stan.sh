@@ -844,6 +844,59 @@ jq '{
   --producer-run-id 700 \
   --profile held >/dev/null
 
+rollback_generation_drift="$work_dir/checkpoint-rollback-generation-drift.json"
+python3 - "$checkpoint_runtime" "$rollback_generation_drift" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source, destination = map(Path, sys.argv[1:])
+runtime = json.loads(source.read_text())
+new_digest = (
+    "ghcr.io/vasilyevstan/betstan-images@sha256:"
+    + "9" * 64
+)
+runtime["applicationImages"][0]["imageRef"] = new_digest
+runtime["kubernetesImageReferences"][0] = new_digest
+runtime["images"].append({
+    "id": "sha256:" + "8" * 64,
+    "repoTags": [],
+    "repoDigests": [new_digest],
+    "sizeBytes": 1000,
+    "pinned": False,
+})
+destination.write_text(json.dumps(runtime, sort_keys=True))
+PY
+if "$HELPER" revalidate-release-checkpoint \
+    --checkpoint "$checkpoint" \
+    --runtime "$rollback_generation_drift" \
+    --capacity "$checkpoint_capacity" \
+    --candidate-images "$candidate_images" \
+    --source-sha "$SOURCE_SHA" \
+    --producer-run-id 700 \
+    --profile public >/dev/null 2>&1; then
+  fail "public revalidation ignored current rollback generation drift"
+fi
+
+rollback_generation_held="$work_dir/checkpoint-rollback-generation-held.json"
+jq '{
+  schemaVersion:"k3s-node-disk-held-runtime.v1",
+  snapshotProfile:"held",
+  applicationRepository,
+  root,
+  mongo,
+  images,
+  runtime
+}' "$rollback_generation_drift" >"$rollback_generation_held"
+"$HELPER" revalidate-release-checkpoint \
+  --checkpoint "$checkpoint" \
+  --runtime "$rollback_generation_held" \
+  --capacity "$checkpoint_capacity" \
+  --candidate-images "$candidate_images" \
+  --source-sha "$SOURCE_SHA" \
+  --producer-run-id 700 \
+  --profile held >/dev/null
+
 for mutation in \
   '.unexpected = true' \
   'del(.stableIdentity.k3sVersion)' \

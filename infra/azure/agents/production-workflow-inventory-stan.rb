@@ -1349,7 +1349,7 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1" =>
       "failed-deploy rollback baseline binding",
     "oci-live-betting-activate.yml" => "failed-activation workflow binding",
-    "oci-live-activation-${FAILED_ACTIVATION_RUN_ID}-1" =>
+    "oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1" =>
       "failed-activation artifact binding",
     "cleanup-live-acceptance-slips-stan.sh" =>
       "exact synthetic Slip cleanup",

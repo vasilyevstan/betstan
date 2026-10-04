@@ -3975,8 +3975,55 @@ def deployment(run_id):
         "live-schema.env": env(schema),
     }
 
+def deployment_recovery(run_id):
+    intent = env({
+        "schema_version": "oci-deployment-recovery-authority-v1",
+        "source_sha": source,
+        "source_ref": "refs/heads/master",
+        "deployment_workflow": "oci-production-deploy",
+        "deployment_run_id": str(run_id),
+        "deployment_run_attempt": "1",
+        "runtime_mode": "oke",
+        "build_run_id": "41",
+        "candidate_images_sha256": hashlib.sha256(images_raw).hexdigest(),
+        "data_run_id": "48",
+        "data_run_attempt": "1",
+        "data_evidence_sha256": predecessor_sha,
+        "infrastructure_run_id": "47",
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            hashlib.sha256(infrastructure_raw).hexdigest(),
+        "checkpoint_source_sha": source,
+        "disk_checkpoint_run_id": "47",
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": "NOT_APPLICABLE",
+        "baseline_sha256": baseline_sha,
+        "baseline_capture_run_id": "48",
+        "baseline_recovery_run_id": "0",
+        "baseline_recovery_source_sha": "none",
+    })
+    intent_sha = hashlib.sha256(intent).hexdigest()
+    return checksummed({
+        "deployment-intent.env": intent,
+        "deployment-intent.sha256":
+            f"{intent_sha}  deployment-intent.env\n".encode(),
+        "failure-lineage.env": env({
+            "schema_version": "oci-deployment-failure-lineage-v1",
+            "source_sha": source,
+            "deployment_run_id": str(run_id),
+            "deployment_run_attempt": "1",
+            "intent_sha256": intent_sha,
+            "workflow_result": "failure",
+            "lock_release_outcome": "skipped",
+            "fence_release_outcome": "skipped",
+            "rehold_outcome": "success",
+        }),
+        "images.tsv": images_raw,
+    })
+
 archive(9151, deployment(51))
 archive(9154, deployment(54))
+archive(9251, deployment_recovery(51))
 
 control = b"after_flag=false\nafter_lease_until_epoch=0\n"
 control_sha = hashlib.sha256(control).hexdigest()
@@ -4015,9 +4062,18 @@ activation = {
     "revoke_runner_outcome": "success",
     "close_bastion_outcome": "success",
 }
-archive(9053, {
+activation_recovery = checksummed({
     "provenance.env": env(activation),
     "failure-disable/control.env": control,
+})
+archive(9053, activation_recovery)
+archive(9253, {
+    "provenance.env": env(activation),
+    "failure-disable/control.env": control,
+    "images.tsv": images_raw,
+    "restarts-before.json": b"[]\n",
+    "readiness-before/summary.env": b"status=PASS\n",
+    "readiness-activated/summary.env": b"status=PASS\n",
 })
 PY
 
@@ -4164,6 +4220,7 @@ def mutated_archive(artifact_id):
             key, value = activation_mutations[mutation]
             values[key] = value
             files["provenance.env"] = env_dump(values)
+            reseal(files)
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         for name, content in files.items():
@@ -4281,9 +4338,17 @@ elif endpoint.startswith("actions/runs/") and "/artifacts?" in endpoint:
         48: [[artifact(9048, "oci-live-data-rollout-48-1")]],
         51: [
             [artifact(9051, "oci-production-baseline-51-1")],
-            [artifact(9151, "oci-deploy-provenance-51-1")],
+            [
+                artifact(9151, "oci-deploy-provenance-51-1"),
+                artifact(
+                    9251, "oci-deploy-recovery-authority-51-1"
+                ),
+            ],
         ],
-        53: [[artifact(9053, "oci-live-activation-53-1")]],
+        53: [[
+            artifact(9053, "oci-live-activation-recovery-53-1"),
+            artifact(9253, "oci-live-activation-53-1"),
+        ]],
         54: [[artifact(9154, "oci-deploy-provenance-54-1")]],
     }
     pages = [
@@ -4316,6 +4381,19 @@ elif endpoint.startswith("actions/runs/") and "/jobs?" in endpoint:
                             "Re-enter maintenance after an incomplete deployment",
                         "conclusion": "success",
                     },
+                    {
+                        "name":
+                            "Write checksum-bound deployment recovery intent",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "Finalize deployment recovery authority",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "Upload deployment recovery authority",
+                        "conclusion": "success",
+                    },
                 ],
             },
             {"name": "public-validate", "conclusion": "skipped", "steps": []},
@@ -4334,6 +4412,8 @@ elif endpoint.startswith("actions/runs/") and "/jobs?" in endpoint:
                 {"name": "Write final activation provenance",
                  "conclusion": "success"},
                 {"name": "Upload protected activation evidence",
+                 "conclusion": "success"},
+                {"name": "Upload activation recovery authority",
                  "conclusion": "success"},
             ],
         }]

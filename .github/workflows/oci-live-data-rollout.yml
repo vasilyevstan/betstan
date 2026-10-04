@@ -477,7 +477,7 @@ jobs:
                 git cat-file -e "${activation_source_sha}^{commit}"
                 git merge-base --is-ancestor \
                   "$activation_source_sha" "$prerequisite_source_sha"
-                activation_artifact_name="oci-live-activation-${FAILED_ACTIVATION_RUN_ID}-1"
+                activation_artifact_name="oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1"
                 activation_artifact_count="$(
                   gh api \
                     "repos/$REPOSITORY/actions/runs/$FAILED_ACTIVATION_RUN_ID/artifacts?per_page=100" \

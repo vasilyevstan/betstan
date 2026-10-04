@@ -111,6 +111,33 @@ with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as bundle:
 PY
 }
 
+artifact_zip_duplicate_fixture() {
+  local artifact_id="$1"
+  local source_directory="$2"
+  local duplicate_relative="$3"
+  local destination
+  destination="$FIXTURE_DIR/$(printf '%s' \
+    "repos/$REPO/actions/artifacts/$artifact_id/zip" | tr '/?=&' '____')"
+  python3 - \
+    "$destination" "$source_directory" "$duplicate_relative" <<'PY'
+import pathlib
+import sys
+import warnings
+import zipfile
+
+destination = pathlib.Path(sys.argv[1])
+source = pathlib.Path(sys.argv[2])
+duplicate = sys.argv[3]
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", UserWarning)
+    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for path in sorted(source.rglob("*")):
+            if path.is_file():
+                bundle.write(path, path.relative_to(source).as_posix())
+        bundle.writestr(duplicate, (source / duplicate).read_bytes())
+PY
+}
+
 # attempt event title path repo branch sha status conclusion workflow_id
 write_capacity_fixtures() {
   local attempt="${1:-1}" event="${2:-workflow_dispatch}" title="${3:-}"
@@ -1351,7 +1378,7 @@ profile_binding() {
   if [ "$profile" = "oci-failed-activation-cleanup-v1" ]; then
     workflow=oci-live-betting-activate.yml
     input=failed_activation_run_id
-    artifact=oci-live-activation-{run_id}-1
+    artifact=oci-live-activation-recovery-{run_id}-1
     title='oci-live-activate {subject_sha}'
   else
     workflow=oci-production-deploy.yml
@@ -1632,11 +1659,69 @@ def deployment(directory, run_id):
     write(directory, "rabbitmq-baseline.txt", rabbit_raw)
     write(directory, "live-schema.env", env(schema))
 
+def deployment_recovery(directory, run_id):
+    intent = {
+        "schema_version": "oci-deployment-recovery-authority-v1",
+        "source_sha": source,
+        "source_ref": "refs/heads/master",
+        "deployment_workflow": "oci-production-deploy",
+        "deployment_run_id": str(run_id),
+        "deployment_run_attempt": "1",
+        "runtime_mode": "oke",
+        "build_run_id": "41",
+        "candidate_images_sha256": hashlib.sha256(images_raw).hexdigest(),
+        "data_run_id": "43",
+        "data_run_attempt": "1",
+        "data_evidence_sha256": predecessor_manifest_sha,
+        "infrastructure_run_id": "44",
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256": infrastructure_sha,
+        "checkpoint_source_sha": checkpoint_source,
+        "disk_checkpoint_run_id": "44",
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": "NOT_APPLICABLE",
+        "baseline_sha256": baseline_sha,
+        "baseline_capture_run_id": "43",
+        "baseline_recovery_run_id": "0",
+        "baseline_recovery_source_sha": "none",
+    }
+    intent_raw = env(intent).encode()
+    intent_sha = hashlib.sha256(intent_raw).hexdigest()
+    write(directory, "deployment-intent.env", intent_raw)
+    write(
+        directory,
+        "deployment-intent.sha256",
+        f"{intent_sha}  deployment-intent.env\n",
+    )
+    write(directory, "images.tsv", images_raw)
+    write(directory, "failure-lineage.env", env({
+        "schema_version": "oci-deployment-failure-lineage-v1",
+        "source_sha": source,
+        "deployment_run_id": str(run_id),
+        "deployment_run_attempt": "1",
+        "intent_sha256": intent_sha,
+        "workflow_result": "failure",
+        "lock_release_outcome": "skipped",
+        "fence_release_outcome": "skipped",
+        "rehold_outcome": "success",
+    }))
+    manifest(directory)
+
 deployment("failed-deployment", failed_run)
+deployment_recovery("deployment-recovery", failed_run)
 if include_activation:
     deployment("successful-deployment", "45")
     control = b"after_flag=false\nafter_lease_until_epoch=0\n"
-    write("activation", "failure-disable/control.env", control)
+    write("activation-full", "images.tsv", images_raw)
+    write("activation-full", "restarts-before.json", b"[]\n")
+    write("activation-full", "readiness-before/summary.env", b"status=PASS\n")
+    write(
+        "activation-full",
+        "readiness-activated/summary.env",
+        b"status=PASS\n",
+    )
+    write("activation-full", "failure-disable/control.env", control)
+    write("activation-recovery", "failure-disable/control.env", control)
     control_sha = hashlib.sha256(control).hexdigest()
     activation = {
         "source_sha": source,
@@ -1674,7 +1759,9 @@ if include_activation:
         "revoke_runner_outcome": "success",
         "close_bastion_outcome": "success",
     }
-    write("activation", "provenance.env", env(activation))
+    write("activation-full", "provenance.env", env(activation))
+    write("activation-recovery", "provenance.env", env(activation))
+    manifest("activation-recovery")
 PY
 
   fixture "repos/$REPO/actions/runs/41/artifacts?per_page=100" <<EOF2
@@ -1694,7 +1781,17 @@ EOF2
   artifact_zip_directory_fixture 9814 "$root/predecessor"
 
   if [[ "$include_activation" == "true" ]]; then
-    artifact_zip_directory_fixture "$((9700 + failed_run))" "$root/activation"
+    fixture "repos/$REPO/actions/runs/$failed_run/artifacts?per_page=100" <<EOF2
+{"total_count":2,"artifacts":[
+ {"name":"oci-live-activation-recovery-$failed_run-1","id":$((9700 + failed_run)),"expired":false,"size_in_bytes":8192},
+ {"name":"oci-live-activation-$failed_run-1","id":$((22000 + failed_run)),"expired":false,"size_in_bytes":8192}]}
+EOF2
+    artifact_zip_directory_fixture \
+      "$((9700 + failed_run))" \
+      "$root/activation-recovery"
+    artifact_zip_directory_fixture \
+      "$((22000 + failed_run))" \
+      "$root/activation-full"
     fixture "repos/$REPO/actions/workflows/oci-production-deploy.yml" <<'EOF2'
 {"id":7645}
 EOF2
@@ -1716,13 +1813,63 @@ EOF2
     artifact_zip_directory_fixture 9816 "$root/successful-deployment"
   else
     fixture "repos/$REPO/actions/runs/$failed_run/artifacts?per_page=100" <<EOF2
-{"total_count":2,"artifacts":[
+{"total_count":3,"artifacts":[
  {"name":"oci-production-baseline-$failed_run-1","id":$((9700 + failed_run)),"expired":false,"size_in_bytes":8192},
- {"name":"oci-deploy-provenance-$failed_run-1","id":$((20000 + failed_run)),"expired":false,"size_in_bytes":8192}]}
+ {"name":"oci-deploy-provenance-$failed_run-1","id":$((20000 + failed_run)),"expired":false,"size_in_bytes":8192},
+ {"name":"oci-deploy-recovery-authority-$failed_run-1","id":$((21000 + failed_run)),"expired":false,"size_in_bytes":8192}]}
 EOF2
     artifact_zip_directory_fixture "$((9700 + failed_run))" "$root/baseline"
     artifact_zip_directory_fixture "$((20000 + failed_run))" "$root/failed-deployment"
+    artifact_zip_directory_fixture \
+      "$((21000 + failed_run))" \
+      "$root/deployment-recovery"
   fi
+}
+
+write_deployment_recovery_outcomes() {
+  local run_id="$1" lock="$2" fence="$3" reenter="$4"
+  local recovery_dir="$WORK/profile-artifacts-$run_id/deployment-recovery"
+  python3 - "$recovery_dir" "$lock" "$fence" "$reenter" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+updates = {
+    "lock_release_outcome": sys.argv[2],
+    "fence_release_outcome": sys.argv[3],
+    "rehold_outcome": sys.argv[4],
+}
+path = root / "failure-lineage.env"
+rows = []
+seen = set()
+for line in path.read_text(encoding="utf-8").splitlines():
+    key, value = line.split("=", 1)
+    if key in updates:
+        value = updates[key]
+        seen.add(key)
+    rows.append(f"{key}={value}\n")
+if seen != set(updates):
+    raise SystemExit("deployment recovery fixture is missing an outcome")
+path.write_text("".join(rows), encoding="utf-8")
+manifest = root / "SHA256SUMS"
+members = sorted(
+    candidate
+    for candidate in root.rglob("*")
+    if candidate.is_file() and candidate != manifest
+)
+manifest.write_text(
+    "".join(
+        f"{hashlib.sha256(member.read_bytes()).hexdigest()}  "
+        f"{member.relative_to(root).as_posix()}\n"
+        for member in members
+    ),
+    encoding="utf-8",
+)
+PY
+  artifact_zip_directory_fixture \
+    "$((21000 + run_id))" \
+    "$recovery_dir"
 }
 
 write_deploy_profile_jobs() {
@@ -1735,9 +1882,12 @@ write_deploy_profile_jobs() {
       total_count:2,
       jobs:[
         {name:"deploy",conclusion:$deploy,steps:[
+          {name:"Write checksum-bound deployment recovery intent",conclusion:"success"},
           {name:"Release transferred lock after protected validation",conclusion:$lock},
           {name:"Release live data maintenance fence",conclusion:$fence},
-          {name:"Re-enter maintenance after an incomplete deployment",conclusion:$reenter}
+          {name:"Re-enter maintenance after an incomplete deployment",conclusion:$reenter},
+          {name:"Finalize deployment recovery authority",conclusion:"success"},
+          {name:"Upload deployment recovery authority",conclusion:"success"}
         ]},
         {name:"public-validate",conclusion:$public,steps:[]}
       ]
@@ -1748,6 +1898,8 @@ write_deploy_profile_jobs() {
   fi
   fixture "repos/$REPO/actions/runs/$run_id/attempts/1/jobs?per_page=100" \
     <<<"$payload"
+  write_deployment_recovery_outcomes \
+    "$run_id" "$lock" "$fence" "$reenter"
 }
 
 retained_binding="$(profile_binding oci-failed-deploy-retained-hold-v1)"
@@ -1824,6 +1976,7 @@ activation_binding="$(profile_binding oci-failed-activation-cleanup-v1)"
 write_activation_jobs() {
   local run_id="$1" job="$2" resolve="$3" cleanup="$4"
   local dark="$5" provenance="$6" upload="$7"
+  local recovery_upload="${8:-success}"
   fixture "repos/$REPO/actions/runs/$run_id/attempts/1/jobs?per_page=100" <<EOF2
 {"total_count":1,"jobs":[{
  "name":"activate-and-validate","conclusion":"$job","steps":[
@@ -1831,18 +1984,30 @@ write_activation_jobs() {
   {"name":"Revoke and clean reusable validation account","conclusion":"$cleanup"},
   {"name":"Enforce dark mode unless activation committed","conclusion":"$dark"},
   {"name":"Write final activation provenance","conclusion":"$provenance"},
-  {"name":"Upload protected activation evidence","conclusion":"$upload"}
+  {"name":"Upload protected activation evidence","conclusion":"$upload"},
+  {"name":"Upload activation recovery authority","conclusion":"$recovery_upload"}
  ]}]}
 EOF2
 }
 
-for mutation in none job resolve cleanup dark provenance upload; do
+for mutation in none job resolve cleanup dark provenance upload recovery-upload; do
   reset_fixtures
   write_profile_run 613 oci-live-betting-activate.yml \
-    "oci-live-activate $SUBJECT_SHA" 7613 oci-live-activation-613-1
+    "oci-live-activate $SUBJECT_SHA" 7613 \
+    oci-live-activation-recovery-613-1
   write_profile_artifacts 613 true
+  if [ "$mutation" = none ]; then
+    for relative in \
+      images.tsv \
+      restarts-before.json \
+      readiness-before/summary.env \
+      readiness-activated/summary.env; do
+      [ -f "$WORK/profile-artifacts-613/activation-full/$relative" ] ||
+        fail "activation full-upload fixture omits $relative"
+    done
+  fi
   job=failure resolve=success cleanup=failure dark=success
-  provenance=success upload=success
+  provenance=success upload=success recovery_upload=success
   case "$mutation" in
     job) job=success ;;
     resolve) resolve=failure ;;
@@ -1850,9 +2015,10 @@ for mutation in none job resolve cleanup dark provenance upload; do
     dark) dark=failure ;;
     provenance) provenance=failure ;;
     upload) upload=failure ;;
+    recovery-upload) recovery_upload=failure ;;
   esac
   write_activation_jobs 613 "$job" "$resolve" "$cleanup" \
-    "$dark" "$provenance" "$upload"
+    "$dark" "$provenance" "$upload" "$recovery_upload"
   if run_custom_binding "$activation_binding" 613 \
       "$(profile_dispatch_inputs)" oke >/dev/null; then
     [ "$mutation" = none ] ||
@@ -1894,6 +2060,31 @@ if reseal:
 PY
 }
 
+reseal_profile_directory() {
+  local directory="$1"
+  python3 - "$directory" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+manifest = root / "SHA256SUMS"
+members = sorted(
+    candidate
+    for candidate in root.rglob("*")
+    if candidate.is_file() and candidate != manifest
+)
+manifest.write_text(
+    "".join(
+        f"{hashlib.sha256(member.read_bytes()).hexdigest()}  "
+        f"{member.relative_to(root).as_posix()}\n"
+        for member in members
+    ),
+    encoding="utf-8",
+)
+PY
+}
+
 profile_artifact_zip_path() {
   local artifact_id="$1"
   printf '%s/%s\n' \
@@ -1917,13 +2108,15 @@ artifact_profile_run=620
 for mutation in \
   metadata-only \
   malformed-zip \
-  missing-zip-member \
+  missing-recovery-artifact \
+  partial-recovery-artifact \
+  substituted-recovery-intent \
   bad-checksum \
   bad-capture-run; do
   prepare_retained_profile_artifacts "$artifact_profile_run"
   profile_root="$WORK/profile-artifacts-$artifact_profile_run"
   baseline_artifact_id=$((9700 + artifact_profile_run))
-  deployment_artifact_id=$((20000 + artifact_profile_run))
+  recovery_artifact_id=$((21000 + artifact_profile_run))
   case "$mutation" in
     metadata-only)
       rm "$(profile_artifact_zip_path "$baseline_artifact_id")"
@@ -1932,11 +2125,58 @@ for mutation in \
       printf 'not a zip archive\n' \
         >"$(profile_artifact_zip_path "$baseline_artifact_id")"
       ;;
-    missing-zip-member)
-      rm "$profile_root/failed-deployment/live-schema.env"
+    missing-recovery-artifact)
+      rm "$(profile_artifact_zip_path "$recovery_artifact_id")"
+      ;;
+    partial-recovery-artifact)
+      rm "$profile_root/deployment-recovery/failure-lineage.env"
       artifact_zip_directory_fixture \
-        "$deployment_artifact_id" \
-        "$profile_root/failed-deployment"
+        "$recovery_artifact_id" \
+        "$profile_root/deployment-recovery"
+      ;;
+    substituted-recovery-intent)
+      python3 - "$profile_root/deployment-recovery" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+intent = root / "deployment-intent.env"
+intent.write_text("".join(
+    ("source_sha=" + "b" * 40 if line.startswith("source_sha=") else line)
+    + "\n"
+    for line in intent.read_text(encoding="utf-8").splitlines()
+), encoding="utf-8")
+intent_sha = hashlib.sha256(intent.read_bytes()).hexdigest()
+(root / "deployment-intent.sha256").write_text(
+    f"{intent_sha}  deployment-intent.env\n",
+    encoding="utf-8",
+)
+failure = root / "failure-lineage.env"
+rows = []
+for line in failure.read_text(encoding="utf-8").splitlines():
+    if line.startswith("intent_sha256="):
+        line = f"intent_sha256={intent_sha}"
+    rows.append(line + "\n")
+failure.write_text("".join(rows), encoding="utf-8")
+manifest = root / "SHA256SUMS"
+members = sorted(
+    candidate
+    for candidate in root.rglob("*")
+    if candidate.is_file() and candidate != manifest
+)
+manifest.write_text(
+    "".join(
+        f"{hashlib.sha256(member.read_bytes()).hexdigest()}  "
+        f"{member.relative_to(root).as_posix()}\n"
+        for member in members
+    ),
+    encoding="utf-8",
+)
+PY
+      artifact_zip_directory_fixture \
+        "$recovery_artifact_id" \
+        "$profile_root/deployment-recovery"
       ;;
     bad-checksum)
       printf 'tampered\n' >>"$profile_root/baseline/evidence.txt"
@@ -2048,46 +2288,45 @@ for mutation in \
     oci-live-betting-activate.yml \
     "oci-live-activate $SUBJECT_SHA" \
     7613 \
-    "oci-live-activation-$activation_artifact_run-1"
+    "oci-live-activation-recovery-$activation_artifact_run-1"
   write_profile_artifacts "$activation_artifact_run" true
   write_activation_jobs \
     "$activation_artifact_run" \
     failure success failure success success success
   profile_root="$WORK/profile-artifacts-$activation_artifact_run"
-  activation_dir="$profile_root/activation"
+  activation_dir="$profile_root/activation-recovery"
   case "$mutation" in
     source_sha)
       rewrite_profile_env "$activation_dir" provenance.env \
-        source_sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb false
+        source_sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
       ;;
     build_run_id)
-      rewrite_profile_env "$activation_dir" provenance.env build_run_id 99 false
+      rewrite_profile_env "$activation_dir" provenance.env build_run_id 99
       ;;
     infrastructure_run_id)
       rewrite_profile_env \
-        "$activation_dir" provenance.env infrastructure_run_id 99 false
+        "$activation_dir" provenance.env infrastructure_run_id 99
       ;;
     deployment_run_id)
       rewrite_profile_env \
-        "$activation_dir" provenance.env deployment_run_id 46 false
+        "$activation_dir" provenance.env deployment_run_id 46
       ;;
     checkpoint_source_sha)
       rewrite_profile_env "$activation_dir" provenance.env \
-        checkpoint_source_sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb false
+        checkpoint_source_sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
       ;;
     disk_checkpoint_run_id)
       rewrite_profile_env \
-        "$activation_dir" provenance.env disk_checkpoint_run_id 99 false
+        "$activation_dir" provenance.env disk_checkpoint_run_id 99
       ;;
     disk_checkpoint_sha256)
       rewrite_profile_env "$activation_dir" provenance.env \
         disk_checkpoint_sha256 \
-        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-        false
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
       ;;
     disk_checkpoint_disposition)
       rewrite_profile_env "$activation_dir" provenance.env \
-        disk_checkpoint_disposition READY_NO_RECLAIM false
+        disk_checkpoint_disposition READY_NO_RECLAIM
       ;;
   esac
   artifact_zip_directory_fixture \
@@ -2100,27 +2339,51 @@ for mutation in \
   ok "reject activation lineage substitution $mutation"
 done
 
-reset_fixtures
-write_profile_run "$activation_artifact_run" \
-  oci-live-betting-activate.yml \
-  "oci-live-activate $SUBJECT_SHA" \
-  7613 \
-  "oci-live-activation-$activation_artifact_run-1"
-write_profile_artifacts "$activation_artifact_run" true
-write_activation_jobs \
-  "$activation_artifact_run" \
-  failure success failure success success success
-profile_root="$WORK/profile-artifacts-$activation_artifact_run"
-activation_dir="$profile_root/activation"
-printf 'unbound\n' >"$activation_dir/unexpected.txt"
-artifact_zip_directory_fixture \
-  "$((9700 + activation_artifact_run))" \
-  "$activation_dir"
-if run_custom_binding "$activation_binding" "$activation_artifact_run" \
-    "$(profile_dispatch_inputs)" oke >/dev/null; then
-  fail "activation profile accepted an unbound ZIP member"
-fi
-ok "reject activation artifact with an unbound ZIP member"
+for mutation in missing modified duplicate additional; do
+  reset_fixtures
+  write_profile_run "$activation_artifact_run" \
+    oci-live-betting-activate.yml \
+    "oci-live-activate $SUBJECT_SHA" \
+    7613 \
+    "oci-live-activation-recovery-$activation_artifact_run-1"
+  write_profile_artifacts "$activation_artifact_run" true
+  write_activation_jobs \
+    "$activation_artifact_run" \
+    failure success failure success success success
+  profile_root="$WORK/profile-artifacts-$activation_artifact_run"
+  activation_dir="$profile_root/activation-recovery"
+  case "$mutation" in
+    missing)
+      rm "$activation_dir/failure-disable/control.env"
+      reseal_profile_directory "$activation_dir"
+      ;;
+    modified)
+      printf 'modified=true\n' \
+        >>"$activation_dir/failure-disable/control.env"
+      reseal_profile_directory "$activation_dir"
+      ;;
+    duplicate)
+      artifact_zip_duplicate_fixture \
+        "$((9700 + activation_artifact_run))" \
+        "$activation_dir" \
+        provenance.env
+      ;;
+    additional)
+      printf 'unexpected\n' >"$activation_dir/unexpected.txt"
+      reseal_profile_directory "$activation_dir"
+      ;;
+  esac
+  if [ "$mutation" != duplicate ]; then
+    artifact_zip_directory_fixture \
+      "$((9700 + activation_artifact_run))" \
+      "$activation_dir"
+  fi
+  if run_custom_binding "$activation_binding" "$activation_artifact_run" \
+      "$(profile_dispatch_inputs)" oke >/dev/null; then
+    fail "activation profile accepted $mutation recovery-authority evidence"
+  fi
+  ok "reject activation recovery artifact with $mutation member evidence"
+done
 
 ANCESTOR_PROFILE_SHA="bd1008081411d64d96dd0221126090577ea72c6b"
 ancestor_profile_run=622

@@ -286,7 +286,11 @@ Each fixed profile downloads and parses its exact artifacts; run metadata and
 job conclusions alone are insufficient. ZIP paths and members must be safe and
 complete, checksum manifests and baseline capture identity must match, and the
 complete predecessor-v6, deployment, build, infrastructure, checkpoint, and
-activation tuples must resolve without substitution.
+activation tuples must resolve without substitution. Retained-hold deployment
+recovery uses the checksum-sealed intent written before lock renewal plus the
+post-rehold failure lineage. Failed-activation cleanup uses a separate exact
+recovery-authority artifact rather than treating the workflow's larger
+diagnostic evidence directory as that authority.
 
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this
 operation-specific check at the actual selected fresh or imported baseline.
@@ -373,6 +377,10 @@ Held collection is stable-only: raw bytes, root/Mongo mount and node/runtime
 identity, and immutable candidate/rollback residency. It performs no HTTP,
 RabbitMQ/rabbitmqctl, queue, pod, Deployment, or mutable workload-health
 query, so deliberate application quiescence does not invalidate the snapshot.
+Public revalidation additionally derives rollback residency from the fresh
+Deployment image generation; a different valid resident generation is drift.
+Held revalidation instead uses the sealed rollback list because Deployment
+inspection is forbidden.
 
 Deployment validates policy, build, infrastructure, final-v6, checkpoint, and
 recovery bindings before read-only runtime access. It then verifies the exact

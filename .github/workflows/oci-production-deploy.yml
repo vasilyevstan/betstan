@@ -263,7 +263,8 @@ jobs:
             artifacts/disk-checkpoint \
             artifacts/infrastructure \
             artifacts/oci-baseline \
-            artifacts/oci-deploy
+            artifacts/oci-deploy \
+            artifacts/oci-deploy-recovery
           chmod 700 "$HOME" "$HOME/.kube"
 
       - name: Download exact OCI image provenance
@@ -555,6 +556,53 @@ jobs:
           REVALIDATION_PROFILE=held \
             ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
 
+      - name: Write checksum-bound deployment recovery intent
+        id: recovery_intent
+        env:
+          DISK_CHECKPOINT_SHA256: ${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
+          DISK_CHECKPOINT_DISPOSITION: ${{ steps.provenance.outputs.disk_checkpoint_disposition }}
+        run: |
+          set -euo pipefail
+          umask 077
+          recovery_dir=artifacts/oci-deploy-recovery
+          rm -rf "$recovery_dir"
+          mkdir -p "$recovery_dir"
+          cp artifacts/oci-deploy/images.tsv "$recovery_dir/images.tsv"
+          {
+            printf 'schema_version=oci-deployment-recovery-authority-v1\n'
+            printf 'source_sha=%s\n' "$SOURCE_SHA"
+            printf 'source_ref=refs/heads/master\n'
+            printf 'deployment_workflow=oci-production-deploy\n'
+            printf 'deployment_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'deployment_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'runtime_mode=%s\n' "$OCI_RUNTIME_MODE"
+            printf 'build_run_id=%s\n' "$BUILD_RUN_ID"
+            printf 'candidate_images_sha256=%s\n' \
+              "$(sha256sum "$recovery_dir/images.tsv" | awk '{print $1}')"
+            printf 'data_run_id=%s\n' "$DATA_RUN_ID"
+            printf 'data_run_attempt=1\n'
+            printf 'data_evidence_sha256=%s\n' \
+              "$(sha256sum artifacts/data/SHA256SUMS | awk '{print $1}')"
+            printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
+            printf 'infrastructure_run_attempt=1\n'
+            printf 'infrastructure_provenance_sha256=%s\n' \
+              "$(sha256sum artifacts/infrastructure/provenance.env | awk '{print $1}')"
+            printf 'checkpoint_source_sha=%s\n' "$CHECKPOINT_SOURCE_SHA"
+            printf 'disk_checkpoint_run_id=%s\n' "$DISK_CHECKPOINT_RUN_ID"
+            printf 'disk_checkpoint_sha256=%s\n' "$DISK_CHECKPOINT_SHA256"
+            printf 'disk_checkpoint_disposition=%s\n' \
+              "$DISK_CHECKPOINT_DISPOSITION"
+            printf 'baseline_sha256=%s\n' \
+              "$(sha256sum artifacts/oci-baseline/SHA256SUMS | awk '{print $1}')"
+            printf 'baseline_capture_run_id=%s\n' "$DATA_RUN_ID"
+            printf 'baseline_recovery_run_id=%s\n' "$BASELINE_RECOVERY_RUN_ID"
+            printf 'baseline_recovery_source_sha=%s\n' \
+              "$BASELINE_RECOVERY_SOURCE_SHA"
+          } >"$recovery_dir/deployment-intent.env"
+          printf '%s  deployment-intent.env\n' \
+            "$(sha256sum "$recovery_dir/deployment-intent.env" | awk '{print $1}')" \
+            >"$recovery_dir/deployment-intent.sha256"
+
       - name: Renew exact transferred database lock
         id: renew_lock
         run: |
@@ -702,6 +750,58 @@ jobs:
             SOURCE_SHA="$SOURCE_SHA" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           fi
+
+      - name: Finalize deployment recovery authority
+        id: recovery_authority
+        if: always() && steps.recovery_intent.outcome == 'success'
+        env:
+          WORKFLOW_RESULT: ${{ job.status }}
+          LOCK_RELEASE_OUTCOME: ${{ steps.release_lock.outcome }}
+          FENCE_RELEASE_OUTCOME: ${{ steps.release_runtime.outcome }}
+          REHOLD_OUTCOME: ${{ steps.rehold.outcome }}
+        run: |
+          set -euo pipefail
+          umask 077
+          recovery_dir=artifacts/oci-deploy-recovery
+          intent_sha256="$(
+            awk '$2 == "deployment-intent.env" {print $1}' \
+              "$recovery_dir/deployment-intent.sha256"
+          )"
+          [[ "$intent_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$intent_sha256" = "$(
+            sha256sum "$recovery_dir/deployment-intent.env" | awk '{print $1}'
+          )" ]
+          {
+            printf 'schema_version=oci-deployment-failure-lineage-v1\n'
+            printf 'source_sha=%s\n' "$SOURCE_SHA"
+            printf 'deployment_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'deployment_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'intent_sha256=%s\n' "$intent_sha256"
+            printf 'workflow_result=%s\n' "$WORKFLOW_RESULT"
+            printf 'lock_release_outcome=%s\n' "$LOCK_RELEASE_OUTCOME"
+            printf 'fence_release_outcome=%s\n' "$FENCE_RELEASE_OUTCOME"
+            printf 'rehold_outcome=%s\n' "$REHOLD_OUTCOME"
+          } >"$recovery_dir/failure-lineage.env"
+          (
+            cd "$recovery_dir"
+            sha256sum \
+              deployment-intent.env \
+              deployment-intent.sha256 \
+              failure-lineage.env \
+              images.tsv \
+              > SHA256SUMS
+            sha256sum --quiet --check SHA256SUMS
+          )
+
+      - name: Upload deployment recovery authority
+        id: recovery_authority_upload
+        if: always() && steps.recovery_intent.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-deploy-recovery-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-deploy-recovery
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload sanitized live readiness evidence
         if: always()

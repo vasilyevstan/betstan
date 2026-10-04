@@ -7,6 +7,7 @@ VERIFIER="$ROOT_DIR/infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
 MAINTENANCE="$ROOT_DIR/infra/oci/scripts/live-data-maintenance-stan.sh"
 WORKFLOW="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 DEPLOY_WORKFLOW="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
+ACTIVATION_WORKFLOW="$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml"
 WORK_PARENT="$ROOT_DIR/infra/oci/tests/.live-data-rollout-workdirs"
 SOURCE_SHA=1111111111111111111111111111111111111111
 BUILD_RUN_ID=2001
@@ -2518,7 +2519,7 @@ for literal in \
   'failed_activation_user_id:' \
   'oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1' \
   'oci-live-betting-activate.yml' \
-  'oci-live-activation-${FAILED_ACTIVATION_RUN_ID}-1' \
+  'oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1' \
   'Verify exact failed-deploy resume state' \
   'git merge-base --is-ancestor "$prior_source_sha" "$SOURCE_SHA"' \
   '.github/*|infra/*|*.md' \
@@ -2696,12 +2697,13 @@ fi
 [[ "$(cat "$ordering_fixture/order.log")" == $'baseline\nrevalidate' ]] ||
   fail "final public revalidation was not the last action before lock mutation"
 
-python3 - "$WORKFLOW" "$DEPLOY_WORKFLOW" <<'PY'
+python3 - "$WORKFLOW" "$DEPLOY_WORKFLOW" "$ACTIVATION_WORKFLOW" <<'PY'
 import sys
 from pathlib import Path
 
 data = Path(sys.argv[1]).read_text(encoding="utf-8")
 deploy = Path(sys.argv[2]).read_text(encoding="utf-8")
+activation = Path(sys.argv[3]).read_text(encoding="utf-8")
 
 
 def require_order(text: str, markers: list[str], label: str) -> None:
@@ -2743,6 +2745,7 @@ require_order(
         "Verify transferred database lock and maintenance fence",
         "Validate executable pre-deploy rollback baseline",
         "Revalidate held release disk checkpoint before lock renewal",
+        "Write checksum-bound deployment recovery intent",
         "Renew exact transferred database lock",
         "Deploy immutable images sequentially",
         "Bind schema evidence to deployment provenance",
@@ -2751,9 +2754,29 @@ require_order(
         "Release transferred lock after protected validation",
         "Release live data maintenance fence",
         "Re-enter maintenance after an incomplete deployment",
+        "Finalize deployment recovery authority",
+        "Upload deployment recovery authority",
     ],
     "deploy workflow",
 )
+require_order(
+    activation,
+    [
+        "Write final activation provenance",
+        "Prepare activation recovery authority",
+        "Upload activation recovery authority",
+        "Upload protected activation evidence",
+    ],
+    "activation workflow",
+)
+for literal in (
+    "oci-deploy-recovery-authority-${{ github.run_id }}-${{ github.run_attempt }}",
+    "if: always() && steps.recovery_intent.outcome == 'success'",
+    "oci-live-activation-recovery-${{ github.run_id }}-${{ github.run_attempt }}",
+    "path: artifacts/live-activation-recovery",
+):
+    if literal not in deploy and literal not in activation:
+        raise SystemExit(f"recovery artifact producer is missing: {literal}")
 for literal in (
     "SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}",
     "SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}",
@@ -2765,6 +2788,7 @@ for literal in (
     "if: inputs.failed_activation_run_id != '0'",
     "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID",
     "failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID",
+    'activation_artifact_name="oci-live-activation-recovery-${FAILED_ACTIVATION_RUN_ID}-1"',
 ):
     if literal not in data:
         raise SystemExit(f"data workflow is missing lock handoff contract: {literal}")

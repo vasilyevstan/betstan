@@ -174,6 +174,42 @@ DEPLOYMENT_PROVENANCE_KEYS = {
     "disk_checkpoint_sha256",
     "disk_checkpoint_disposition",
 }
+DEPLOYMENT_RECOVERY_INTENT_KEYS = {
+    "schema_version",
+    "source_sha",
+    "source_ref",
+    "deployment_workflow",
+    "deployment_run_id",
+    "deployment_run_attempt",
+    "runtime_mode",
+    "build_run_id",
+    "candidate_images_sha256",
+    "data_run_id",
+    "data_run_attempt",
+    "data_evidence_sha256",
+    "infrastructure_run_id",
+    "infrastructure_run_attempt",
+    "infrastructure_provenance_sha256",
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
+    "disk_checkpoint_sha256",
+    "disk_checkpoint_disposition",
+    "baseline_sha256",
+    "baseline_capture_run_id",
+    "baseline_recovery_run_id",
+    "baseline_recovery_source_sha",
+}
+DEPLOYMENT_FAILURE_LINEAGE_KEYS = {
+    "schema_version",
+    "source_sha",
+    "deployment_run_id",
+    "deployment_run_attempt",
+    "intent_sha256",
+    "workflow_result",
+    "lock_release_outcome",
+    "fence_release_outcome",
+    "rehold_outcome",
+}
 ACTIVATION_PROVENANCE_KEYS = {
     "source_sha",
     "build_run_id",
@@ -1187,6 +1223,139 @@ def parse_deployment_artifact(
     return provenance
 
 
+def parse_deployment_recovery_artifact(
+    repository,
+    deployment_run,
+    subject_sha,
+    dispatch_inputs,
+    checkpoint,
+    predecessor,
+    predecessor_manifest_sha256,
+    baseline_manifest_sha256,
+    runtime_mode,
+    lock_outcome,
+    fence_outcome,
+    rehold_outcome,
+    label,
+):
+    artifact = exact_artifact(
+        repository,
+        deployment_run,
+        f"oci-deploy-recovery-authority-{deployment_run}-1",
+        label,
+    )
+    files = artifact_files(repository, artifact, label)
+    validate_checksum_manifest(files, label)
+    expected_files = {
+        "deployment-intent.env",
+        "deployment-intent.sha256",
+        "failure-lineage.env",
+        "images.tsv",
+        "SHA256SUMS",
+    }
+    if exact_basename_set(files) != expected_files or len(files) != len(expected_files):
+        fail(f"{label} artifact has an unexpected file set")
+    _, intent_raw = unique_artifact_file(
+        files, "deployment-intent.env", label
+    )
+    intent = parse_env(
+        intent_raw,
+        f"{label} intent",
+        DEPLOYMENT_RECOVERY_INTENT_KEYS,
+    )
+    _, seal_raw = unique_artifact_file(
+        files, "deployment-intent.sha256", label
+    )
+    intent_sha256 = hashlib.sha256(intent_raw).hexdigest()
+    if seal_raw != f"{intent_sha256}  deployment-intent.env\n".encode():
+        fail(f"{label} pre-mutation intent seal differs")
+    _, failure_raw = unique_artifact_file(files, "failure-lineage.env", label)
+    failure = parse_env(
+        failure_raw,
+        f"{label} failure lineage",
+        DEPLOYMENT_FAILURE_LINEAGE_KEYS,
+    )
+    _, images_raw = unique_artifact_file(files, "images.tsv", label)
+
+    checkpoint_source = require_dispatch_sha(
+        dispatch_inputs, "checkpoint_source_sha"
+    )
+    build_run = require_dispatch_run(dispatch_inputs, "build_run_id")
+    infrastructure_run = require_dispatch_run(
+        dispatch_inputs, "infrastructure_run_id"
+    )
+    predecessor_run = predecessor["workflow_run_id"]
+    expected_intent = {
+        "schema_version": "oci-deployment-recovery-authority-v1",
+        "source_sha": subject_sha,
+        "source_ref": "refs/heads/master",
+        "deployment_workflow": "oci-production-deploy",
+        "deployment_run_id": deployment_run,
+        "deployment_run_attempt": "1",
+        "runtime_mode": runtime_mode,
+        "build_run_id": build_run,
+        "candidate_images_sha256": hashlib.sha256(images_raw).hexdigest(),
+        "data_run_id": predecessor_run,
+        "data_run_attempt": "1",
+        "data_evidence_sha256": predecessor_manifest_sha256,
+        "infrastructure_run_id": infrastructure_run,
+        "infrastructure_run_attempt": "1",
+        "checkpoint_source_sha": checkpoint_source,
+        "disk_checkpoint_run_id": checkpoint["producerRunId"],
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": checkpoint["disposition"],
+        "baseline_sha256": baseline_manifest_sha256,
+        "baseline_capture_run_id": predecessor_run,
+        "baseline_recovery_run_id": predecessor["baseline_recovery_run_id"],
+        "baseline_recovery_source_sha":
+            predecessor["baseline_recovery_source_sha"],
+    }
+    for key, expected_value in expected_intent.items():
+        if intent.get(key) != expected_value:
+            fail(f"{label} intent field {key} differs from the exact lineage")
+
+    build_artifact = exact_artifact(
+        repository,
+        build_run,
+        f"oci-image-provenance-{checkpoint_source}-{build_run}-1",
+        f"{label} build",
+    )
+    build_images_raw = artifact_member(
+        repository,
+        build_artifact,
+        "images.tsv",
+        f"{label} build",
+    )
+    if candidate_images_checksum(images_raw) != candidate_images_checksum(
+        build_images_raw
+    ):
+        fail(f"{label} candidate images differ from the original build")
+    _, infrastructure_sha256 = parse_infrastructure_provenance(
+        repository,
+        checkpoint_source,
+        infrastructure_run,
+        build_run,
+        f"{label} infrastructure",
+    )
+    if intent["infrastructure_provenance_sha256"] != infrastructure_sha256:
+        fail(f"{label} infrastructure checksum differs")
+
+    expected_failure = {
+        "schema_version": "oci-deployment-failure-lineage-v1",
+        "source_sha": subject_sha,
+        "deployment_run_id": deployment_run,
+        "deployment_run_attempt": "1",
+        "intent_sha256": intent_sha256,
+        "workflow_result": "failure",
+        "lock_release_outcome": lock_outcome,
+        "fence_release_outcome": fence_outcome,
+        "rehold_outcome": rehold_outcome,
+    }
+    for key, expected_value in expected_failure.items():
+        if failure.get(key) != expected_value:
+            fail(f"{label} failure field {key} differs from the exact run")
+
+
 def validate_descendant_scope(checkpoint_sha, subject_sha):
     if checkpoint_sha == subject_sha:
         return
@@ -1268,6 +1437,10 @@ def validate_failed_deploy_artifacts(
     artifact,
     dispatch_inputs,
     runtime_mode,
+    profile,
+    lock_outcome,
+    fence_outcome,
+    rehold_outcome,
     label,
 ):
     checkpoint = parse_checkpoint_artifact(
@@ -1309,17 +1482,34 @@ def validate_failed_deploy_artifacts(
         or baseline_manifest_sha256 != predecessor["baseline_sha256"]
     ):
         fail(f"{label} rollback baseline does not match its predecessor capture")
-    parse_deployment_artifact(
-        repository,
-        run_id,
-        subject_sha,
-        dispatch_inputs,
-        checkpoint,
-        predecessor,
-        predecessor_manifest_sha256,
-        runtime_mode,
-        f"{label} deployment",
-    )
+    if profile == "oci-failed-deploy-retained-hold-v1":
+        parse_deployment_recovery_artifact(
+            repository,
+            run_id,
+            subject_sha,
+            dispatch_inputs,
+            checkpoint,
+            predecessor,
+            predecessor_manifest_sha256,
+            baseline_manifest_sha256,
+            runtime_mode,
+            lock_outcome,
+            fence_outcome,
+            rehold_outcome,
+            f"{label} recovery authority",
+        )
+    else:
+        parse_deployment_artifact(
+            repository,
+            run_id,
+            subject_sha,
+            dispatch_inputs,
+            checkpoint,
+            predecessor,
+            predecessor_manifest_sha256,
+            runtime_mode,
+            f"{label} deployment",
+        )
     return checkpoint, predecessor
 
 
@@ -1365,6 +1555,7 @@ def validate_failed_activation_artifacts(
         f"{label} predecessor",
     )
     files = artifact_files(repository, artifact, label)
+    validate_checksum_manifest(files, label)
     _, raw = unique_artifact_file(files, "provenance.env", label)
     activation = parse_env(raw, f"{label} provenance", ACTIVATION_PROVENANCE_KEYS)
     expected = {
@@ -1450,7 +1641,7 @@ def validate_failed_activation_artifacts(
             activation["final_control_sha256"],
             label,
         )
-    expected_relatives = {"provenance.env"}
+    expected_relatives = {"provenance.env", "SHA256SUMS"}
     for key, relative in checksum_files.items():
         if activation[key] != "none":
             expected_relatives.add(relative)
@@ -1499,10 +1690,28 @@ def validate_run_profile(
             deploy, "Re-enter maintenance after an incomplete deployment", label
         )
         if profile == "oci-failed-deploy-retained-hold-v1":
+            recovery_intent = step_conclusion(
+                deploy,
+                "Write checksum-bound deployment recovery intent",
+                label,
+            )
+            recovery_finalize = step_conclusion(
+                deploy,
+                "Finalize deployment recovery authority",
+                label,
+            )
+            recovery_upload = step_conclusion(
+                deploy,
+                "Upload deployment recovery authority",
+                label,
+            )
             if (
                 deploy.get("conclusion") != "failure"
                 or public.get("conclusion") != "skipped"
                 or reenter != "success"
+                or recovery_intent != "success"
+                or recovery_finalize != "success"
+                or recovery_upload != "success"
                 or (lock, fence) not in {
                     ("skipped", "skipped"),
                     ("failure", "skipped"),
@@ -1525,6 +1734,10 @@ def validate_run_profile(
             artifact,
             dispatch_inputs,
             runtime_mode,
+            profile,
+            lock,
+            fence,
+            reenter,
             label,
         )
         return
@@ -1545,6 +1758,9 @@ def validate_run_profile(
         ) != "success"
         or step_conclusion(
             activation, "Upload protected activation evidence", label
+        ) != "success"
+        or step_conclusion(
+            activation, "Upload activation recovery authority", label
         ) != "success"
     ):
         fail("failed activation does not match the cleanup recovery profile")

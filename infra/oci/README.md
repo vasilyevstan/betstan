@@ -337,7 +337,11 @@ concurrent retirement fixture isolation without masking failed suites.
    SHA; byte-equivalent replacement runs are rejected.
    Fixed failure profiles download safe complete baseline, deployment,
    predecessor-v6, and activation artifacts and verify checksum/capture and
-   complete lineage; metadata and jobs alone are not authority.
+   complete lineage; metadata and jobs alone are not authority. Retained-hold
+   recovery binds the pre-lock-renewal deployment intent to its post-rehold
+   failure lineage, while activation cleanup consumes a separate exact
+   checksum-manifested recovery-authority artifact instead of the larger
+   always-uploaded diagnostics tree.
    The workflow runs only compiled CLIs from the approved immutable image
    digests. Fresh and released-runtime paths finish static, predecessor,
    baseline, and read-only access work, then make public checkpoint
@@ -347,7 +351,10 @@ concurrent retirement fixture isolation without masking failed suites.
    action. Held collection uses only raw bytes, root/Mongo mount and
    node/runtime identity, and immutable candidate/rollback residency; it calls
    no HTTP, RabbitMQ/rabbitmqctl, queues, pods, Deployments, or mutable
-   workload-health checks. The workflow captures and validates a rollback baseline whose nine
+   workload-health checks. Public revalidation derives rollback residency from
+   the fresh Deployment image generation, while held revalidation uses the
+   sealed rollback list because it cannot inspect Deployments. The workflow
+   captures and validates a rollback baseline whose nine
    live references and provenance are the same immutable public GHCR
    generation. An OCIR or mixed live generation requires the exact successful
    cache-recovery authority and cannot be labeled as a normal GHCR baseline.

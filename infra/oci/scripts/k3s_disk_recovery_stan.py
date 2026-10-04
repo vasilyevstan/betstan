@@ -1886,11 +1886,16 @@ def revalidate_release_checkpoint(args):
         fail("fresh release checkpoint filesystem capacity differs")
     if checkpoint_stable_identity(runtime, capacity) != checkpoint["stableIdentity"]:
         fail("fresh release checkpoint stable identity differs")
+    rollback_images = (
+        runtime["applicationImages"]
+        if args.profile == "public"
+        else checkpoint["rollbackResidency"]
+    )
     try:
         candidate_residency, rollback_residency = checkpoint_residency(
             runtime,
             candidates,
-            checkpoint["rollbackResidency"],
+            rollback_images,
         )
     except ValueError as exc:
         fail(str(exc))

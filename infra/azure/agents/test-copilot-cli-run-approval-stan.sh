@@ -437,10 +437,11 @@ binding_artifacts_json() {
     50) artifact="oci-live-data-rollout-50-1"; artifact_id=9050 ;;
     51)
       jq -cn '{
-        total_count:2,
+        total_count:3,
         artifacts:[
           {id:9051,name:"oci-production-baseline-51-1",expired:false,size_in_bytes:4096},
-          {id:9151,name:"oci-deploy-provenance-51-1",expired:false,size_in_bytes:4096}
+          {id:9151,name:"oci-deploy-provenance-51-1",expired:false,size_in_bytes:4096},
+          {id:9251,name:"oci-deploy-recovery-authority-51-1",expired:false,size_in_bytes:4096}
         ]
       }'
       return
@@ -455,7 +456,7 @@ binding_artifacts_json() {
       }'
       return
       ;;
-    53) artifact="oci-live-activation-53-1"; artifact_id=9053 ;;
+    53) artifact="oci-live-activation-recovery-53-1"; artifact_id=9053 ;;
     54) artifact="oci-deploy-provenance-54-1"; artifact_id=9154 ;;
     *) return 1 ;;
   esac
@@ -475,7 +476,7 @@ binding_artifact_zip() {
   local file_name content
   local subject_sha="${STUB_BINDING_SHA:-$SHA}"
   case "$artifact_id" in
-    9041|9048|9049|9050|9051|9052|9053|9151|9152|9154)
+    9041|9048|9049|9050|9051|9052|9053|9151|9152|9154|9251)
       python3 - \
         "$artifact_id" \
         "$subject_sha" \
@@ -721,6 +722,52 @@ def deployment(run_id):
         "live-schema.env": env(schema),
     }
 
+def deployment_recovery(run_id):
+    intent = env({
+        "schema_version": "oci-deployment-recovery-authority-v1",
+        "source_sha": source,
+        "source_ref": "refs/heads/master",
+        "deployment_workflow": "oci-production-deploy",
+        "deployment_run_id": str(run_id),
+        "deployment_run_attempt": "1",
+        "runtime_mode": "oke",
+        "build_run_id": "41",
+        "candidate_images_sha256": hashlib.sha256(images_raw).hexdigest(),
+        "data_run_id": "48",
+        "data_run_attempt": "1",
+        "data_evidence_sha256": predecessor_sha,
+        "infrastructure_run_id": "47",
+        "infrastructure_run_attempt": "1",
+        "infrastructure_provenance_sha256":
+            hashlib.sha256(infrastructure_raw).hexdigest(),
+        "checkpoint_source_sha": source,
+        "disk_checkpoint_run_id": "47",
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": "NOT_APPLICABLE",
+        "baseline_sha256": baseline_sha,
+        "baseline_capture_run_id": "48",
+        "baseline_recovery_run_id": recovery_run,
+        "baseline_recovery_source_sha": recovery_source,
+    })
+    intent_sha = hashlib.sha256(intent).hexdigest()
+    return checksummed({
+        "deployment-intent.env": intent,
+        "deployment-intent.sha256":
+            f"{intent_sha}  deployment-intent.env\n".encode(),
+        "failure-lineage.env": env({
+            "schema_version": "oci-deployment-failure-lineage-v1",
+            "source_sha": source,
+            "deployment_run_id": str(run_id),
+            "deployment_run_attempt": "1",
+            "intent_sha256": intent_sha,
+            "workflow_result": "failure",
+            "lock_release_outcome": "skipped",
+            "fence_release_outcome": "skipped",
+            "rehold_outcome": "success",
+        }),
+        "images.tsv": images_raw,
+    })
+
 if mutation == "metadata-only" and artifact_id == 9051:
     raise SystemExit("artifact bytes intentionally unavailable")
 if mutation == "malformed-zip" and artifact_id == 9051:
@@ -782,6 +829,8 @@ elif artifact_id in {9051, 9052}:
     archive(files)
 elif artifact_id in {9151, 9152, 9154}:
     archive(deployment({9151: 51, 9152: 52, 9154: 54}[artifact_id]))
+elif artifact_id == 9251:
+    archive(deployment_recovery(51))
 else:
     control = b"after_flag=false\nafter_lease_until_epoch=0\n"
     control_sha = hashlib.sha256(control).hexdigest()
@@ -840,10 +889,10 @@ else:
     if mutation in activation_mutations:
         key, value = activation_mutations[mutation]
         activation[key] = value
-    archive({
+    archive(checksummed({
         "provenance.env": env(activation),
         "failure-disable/control.env": control,
-    })
+    }))
 PY
       return
       ;;
@@ -1029,9 +1078,12 @@ binding_jobs_json() {
             name:"deploy",
             conclusion:"failure",
             steps:[
+              {name:"Write checksum-bound deployment recovery intent",conclusion:"success"},
               {name:"Release transferred lock after protected validation",conclusion:"skipped"},
               {name:"Release live data maintenance fence",conclusion:"skipped"},
-              {name:"Re-enter maintenance after an incomplete deployment",conclusion:"success"}
+              {name:"Re-enter maintenance after an incomplete deployment",conclusion:"success"},
+              {name:"Finalize deployment recovery authority",conclusion:"success"},
+              {name:"Upload deployment recovery authority",conclusion:"success"}
             ]
           },
           {name:"public-validate",conclusion:"skipped",steps:[]}
@@ -1066,7 +1118,8 @@ binding_jobs_json() {
             {name:"Revoke and clean reusable validation account",conclusion:"failure"},
             {name:"Enforce dark mode unless activation committed",conclusion:"success"},
             {name:"Write final activation provenance",conclusion:"success"},
-            {name:"Upload protected activation evidence",conclusion:"success"}
+            {name:"Upload protected activation evidence",conclusion:"success"},
+            {name:"Upload activation recovery authority",conclusion:"success"}
           ]
         }]
       }'
@@ -1317,7 +1370,8 @@ gh() {
     "repos/$REPOSITORY/actions/artifacts/9053/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9151/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9152/zip"|\
-    "repos/$REPOSITORY/actions/artifacts/9154/zip")
+    "repos/$REPOSITORY/actions/artifacts/9154/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9251/zip")
       local binding_artifact_id
       binding_artifact_id="${endpoint%/zip}"
       binding_artifact_zip "${binding_artifact_id##*/}"

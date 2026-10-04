@@ -400,7 +400,7 @@ FAILED_ACTIVATION_BINDING = {
     "titleTemplates": {
         "workflow_dispatch": "oci-live-activate {subject_sha}",
     },
-    "artifactTemplate": "oci-live-activation-{run_id}-1",
+    "artifactTemplate": "oci-live-activation-recovery-{run_id}-1",
     "artifactContent": {
         "fileName": "provenance.env",
         "format": "env",
