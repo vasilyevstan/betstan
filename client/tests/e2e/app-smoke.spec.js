@@ -15,6 +15,39 @@ const prepareShell = async (page, overrides = {}) => {
   return state;
 };
 
+test('browser favicon serves and decodes the standalone BetStan mark', async ({ page }) => {
+  await prepareShell(page);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+  const iconLinks = page.locator('head link[rel~="icon"]');
+  await expect(iconLinks).toHaveCount(1);
+  const iconLink = iconLinks.first();
+  await expect(iconLink).toHaveAttribute('type', 'image/svg+xml');
+
+  const iconHref = await iconLink.evaluate((link) => link.href);
+  expect(new URL(iconHref).pathname).toBe('/brand/betstan-mark.svg');
+
+  const iconResponse = await page.request.get(iconHref);
+  expect(iconResponse.status()).toBe(200);
+  expect(iconResponse.headers()['content-type']).toMatch(
+    /^image\/svg\+xml(?:;\s*charset=[^;]+)?$/i
+  );
+  const iconBody = await iconResponse.text();
+  expect(iconBody).toContain('viewBox="0 0 48 48"');
+  expect(iconBody).not.toMatch(/<!doctype html|<html[\s>]/i);
+
+  const dimensions = await page.evaluate(async (source) => {
+    const image = new Image();
+    image.src = source;
+    await image.decode();
+    return {
+      height: image.naturalHeight,
+      width: image.naturalWidth,
+    };
+  }, iconHref);
+  expect(dimensions).toEqual({ height: 48, width: 48 });
+});
+
 test('home page responds and renders shell', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
