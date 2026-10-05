@@ -195,12 +195,35 @@ client, fallback, image deletion, pruning, or APT cleanup.
 Every attempted pull has a fresh raw-root byte measurement immediately before
 and after it. Each measurement must satisfy the unchanged exact integer limit
 `usedBytes * 100 <= capacityBytes * 70`; equality passes, while one byte over
-the limit stops further pulls. Invalid candidate evidence, an unavailable or
-over-limit measurement, or a failed pull is a candidacy failure: preloading
-stops and candidate and checkpoint evidence are removed, while otherwise-valid
-infrastructure provenance remains available to the governed diagnosis and
-reclaim path. Authority, access, host-identity, infrastructure-finalization,
-transport, and cleanup failures remain fatal.
+the limit stops further pulls. During standalone finalization, invalid
+candidate evidence, an unavailable or over-limit measurement, or a failed pull
+is a candidacy failure: preloading stops and candidate and checkpoint evidence
+are removed, while otherwise-valid infrastructure provenance remains available
+to the governed diagnosis and reclaim path. Authority, access, host-identity,
+infrastructure-finalization, transport, and cleanup failures remain fatal.
+
+When native APT cleanup succeeds within a governed first-attempt reclaim, the
+reclaim immediately runs exactly one diagnosis-bound candidate preload before
+post-state capture and finalization. The ten exact diagnosis `imageRef` values
+are service-sorted and sent through the same native, sequential, anonymous
+`k3s crictl pull` path. Its fresh raw-root measurements and exact 70-percent
+pre/post admission remain unchanged. It adds no retry, image deletion, pruning,
+credentials, alternate client, governed operation, authority, schema, or
+threshold.
+
+APT finalization permits only newly added native CRI image IDs uniquely proven
+by exact diagnosis candidate `imageRef` residency. Any removal or foreign
+addition fails, and an added ID receives no exception when candidate residency
+is ambiguous. Manifest and platform digests remain provenance attributes; they
+are not native CRI image IDs.
+
+Preload status `20` remains a candidacy failure. Post-state and reclaim
+evidence are still preserved: when the APT cleanup and its postconditions are
+valid, reclaim can remain `RECLAIMED` and successful, but the release
+checkpoint is withheld with `reason=candidate_preload`. A non-`20` preload
+failure remains fatal after evidence capture and finalization where possible.
+Standalone finalization preload and CRI reclaim are unchanged, and CRI reclaim
+cannot create a release checkpoint.
 
 Preload completion is not release authority. Root and persistent-data mount
 identities, workload and queue health, public reads, and protected running,
