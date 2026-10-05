@@ -1297,7 +1297,8 @@ def finalize_reclaim(args):
     post_ids = {item["id"] for item in post["images"]}
     before_ids = {item["id"] for item in before["images"]}
     removed = sorted(before_ids - post_ids)
-    added = sorted(post_ids - before_ids)
+    raw_added = sorted(post_ids - before_ids)
+    unexpected_added = raw_added
     stable = (
         before["root"]["mountSourceSha256"]
         == hashlib.sha256(post["root"]["mount"]["source"].encode()).hexdigest()
@@ -1318,8 +1319,16 @@ def finalize_reclaim(args):
         and all(item["status"] == 200 for item in post["publicRead"])
     )
     if args.category == "cri-owned-unused-images":
-        category_converged = removed == ids and not added
+        category_converged = removed == ids and not unexpected_added
     elif args.category == "apt-package-cache":
+        proven_candidate_ids = set()
+        for candidate in diagnosis["candidateImages"]:
+            try:
+                residency = resident_image(post, candidate["imageRef"])
+            except ValueError:
+                continue
+            proven_candidate_ids.add(residency["residentImageId"])
+        unexpected_added = sorted(set(raw_added) - proven_candidate_ids)
         before_apt = next(
             item["bytes"] for item in before["consumers"]
             if item["category"] == "apt-package-cache"
@@ -1328,7 +1337,9 @@ def finalize_reclaim(args):
             item["bytes"] for item in post["consumers"]
             if item["category"] == "apt-package-cache"
         )
-        category_converged = not removed and not added and post_apt <= before_apt
+        category_converged = (
+            not removed and not unexpected_added and post_apt <= before_apt
+        )
     else:
         fail("reclaim category is unsupported")
     within_limit = capacity["withinLimit"] is True
@@ -1342,7 +1353,7 @@ def finalize_reclaim(args):
             "category": args.category,
             "selectedImageIds": ids,
             "removedImageIds": removed,
-            "unexpectedAddedImageIds": added,
+            "unexpectedAddedImageIds": unexpected_added,
             "mutationCommandSucceeded": mutation_succeeded,
             "categoryConverged": category_converged,
             "securityRelevantStateStable": stable,
@@ -2001,6 +2012,15 @@ def candidate_image_refs(args):
     print(canonical([candidate["imageRef"] for candidate in candidates]))
 
 
+def diagnosis_candidate_image_refs(args):
+    diagnosis = load_json(args.diagnosis, "diagnosis manifest")
+    validate_diagnosis(diagnosis)
+    candidates = sorted(
+        diagnosis["candidateImages"], key=lambda candidate: candidate["service"]
+    )
+    print(canonical([candidate["imageRef"] for candidate in candidates]))
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2008,6 +2028,10 @@ def main():
     refs = subparsers.add_parser("candidate-image-refs")
     refs.add_argument("--candidate-images", required=True)
     refs.set_defaults(handler=candidate_image_refs)
+
+    diagnosis_refs = subparsers.add_parser("diagnosis-candidate-image-refs")
+    diagnosis_refs.add_argument("--diagnosis", required=True)
+    diagnosis_refs.set_defaults(handler=diagnosis_candidate_image_refs)
 
     diagnose = subparsers.add_parser("diagnose")
     diagnose.add_argument("--runtime", required=True)

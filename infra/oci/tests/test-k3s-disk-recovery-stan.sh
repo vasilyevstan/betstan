@@ -110,6 +110,17 @@ for row in shared:
 (destination / "shared.tsv").write_text(
     "\n".join("\t".join(row) for row in shared) + "\n"
 )
+
+different = [row[:] for row in rows]
+for index, row in enumerate(different, start=1):
+    manifest = "sha256:" + f"{9000 + index:064x}"
+    platform = "sha256:" + f"{10000 + index:064x}"
+    row[2] = f"{row[1]}@{manifest}"
+    row[3] = manifest
+    row[4] = platform
+(destination / "different-valid.tsv").write_text(
+    "\n".join("\t".join(row) for row in different) + "\n"
+)
 PY
 
 "$HELPER" candidate-image-refs \
@@ -739,6 +750,138 @@ jq '
   --image-ids '[]' \
   --mutation-succeeded true \
   --output "$work_dir/apt-result.json"
+
+apt_candidate_cases="$work_dir/apt-candidate-finalize-cases"
+mkdir -p "$apt_candidate_cases"
+python3 - "$post_apt" "$diagnosis" "$apt_candidate_cases" "$CURRENT_ID" <<'PY'
+import copy
+import json
+import sys
+from pathlib import Path
+
+runtime_path, diagnosis_path, output_path, removed_id = sys.argv[1:]
+runtime = json.loads(Path(runtime_path).read_text())
+diagnosis = json.loads(Path(diagnosis_path).read_text())
+output = Path(output_path)
+
+
+def image(image_id, digests):
+    return {
+        "id": image_id,
+        "repoTags": [],
+        "repoDigests": digests,
+        "sizeBytes": 1000,
+        "pinned": False,
+    }
+
+
+def native_id(value):
+    return "sha256:" + f"{value:064d}"
+
+
+candidate = diagnosis["candidateImages"][0]
+candidate_native = native_id(901)
+ambiguous_native = native_id(902)
+foreign_native = native_id(903)
+platform_native = candidate["platformDigest"]
+assert platform_native not in {item["id"] for item in runtime["images"]}
+
+partial = copy.deepcopy(runtime)
+partial["images"].append(image(candidate_native, [candidate["imageRef"]]))
+(output / "candidate-partial.json").write_text(json.dumps(partial, sort_keys=True))
+
+platform = copy.deepcopy(runtime)
+platform["images"].append(
+    image(platform_native, [f"docker.io/library/test@{platform_native}"])
+)
+(output / "platform-is-not-native-proof.json").write_text(
+    json.dumps(platform, sort_keys=True)
+)
+
+foreign = copy.deepcopy(runtime)
+foreign["images"].append(
+    image(foreign_native, [f"docker.io/library/test@{foreign_native}"])
+)
+(output / "foreign.json").write_text(json.dumps(foreign, sort_keys=True))
+
+ambiguous = copy.deepcopy(runtime)
+ambiguous["images"].extend(
+    [
+        image(candidate_native, [candidate["imageRef"]]),
+        image(ambiguous_native, [candidate["imageRef"]]),
+    ]
+)
+(output / "ambiguous.json").write_text(json.dumps(ambiguous, sort_keys=True))
+
+removed = copy.deepcopy(partial)
+removed["images"] = [
+    item for item in removed["images"] if item["id"] != removed_id
+]
+(output / "removed.json").write_text(json.dumps(removed, sort_keys=True))
+
+(output / "ids.json").write_text(
+    json.dumps(
+        {
+            "candidateNative": candidate_native,
+            "ambiguousNative": ambiguous_native,
+            "foreignNative": foreign_native,
+            "platformNative": platform_native,
+            "removed": removed_id,
+        },
+        sort_keys=True,
+    )
+)
+PY
+
+"$HELPER" finalize-reclaim \
+  --diagnosis "$diagnosis" \
+  --post-runtime "$apt_candidate_cases/candidate-partial.json" \
+  --post-capacity "$post_capacity" \
+  --category apt-package-cache \
+  --image-ids '[]' \
+  --mutation-succeeded true \
+  --output "$apt_candidate_cases/candidate-partial-result.json"
+jq -e '
+  .terminalStatus == "RECLAIMED" and
+  .removedImageIds == [] and
+  .unexpectedAddedImageIds == []
+' "$apt_candidate_cases/candidate-partial-result.json" >/dev/null ||
+  fail "diagnosis candidate native ID was not exempted from APT additions"
+
+for apt_case in platform-is-not-native-proof foreign ambiguous removed; do
+  if "$HELPER" finalize-reclaim \
+      --diagnosis "$diagnosis" \
+      --post-runtime "$apt_candidate_cases/$apt_case.json" \
+      --post-capacity "$post_capacity" \
+      --category apt-package-cache \
+      --image-ids '[]' \
+      --mutation-succeeded true \
+      --output "$apt_candidate_cases/$apt_case-result.json" \
+      >/dev/null 2>&1; then
+    fail "APT reclaim accepted an unsafe image inventory transition: $apt_case"
+  fi
+  jq -e '.terminalStatus == "INCOMPLETE"' \
+    "$apt_candidate_cases/$apt_case-result.json" >/dev/null ||
+    fail "unsafe APT image transition lacked durable evidence: $apt_case"
+done
+jq -e --slurpfile ids "$apt_candidate_cases/ids.json" '
+  .unexpectedAddedImageIds == [$ids[0].platformNative]
+' "$apt_candidate_cases/platform-is-not-native-proof-result.json" >/dev/null ||
+  fail "candidate platform digest was incorrectly treated as a native CRI ID"
+jq -e --slurpfile ids "$apt_candidate_cases/ids.json" '
+  .unexpectedAddedImageIds == [$ids[0].foreignNative]
+' "$apt_candidate_cases/foreign-result.json" >/dev/null ||
+  fail "foreign APT image addition was not retained as unexpected"
+jq -e --slurpfile ids "$apt_candidate_cases/ids.json" '
+  .unexpectedAddedImageIds ==
+    ([$ids[0].candidateNative, $ids[0].ambiguousNative] | sort)
+' "$apt_candidate_cases/ambiguous-result.json" >/dev/null ||
+  fail "ambiguous candidate residency incorrectly granted an exemption"
+jq -e --slurpfile ids "$apt_candidate_cases/ids.json" '
+  .removedImageIds == [$ids[0].removed] and
+  .unexpectedAddedImageIds == []
+' "$apt_candidate_cases/removed-result.json" >/dev/null ||
+  fail "APT reclaim did not retain removal failure after candidate exemption"
 
 over_capacity="$work_dir/over-capacity.json"
 cat >"$over_capacity" <<'JSON'
@@ -1395,6 +1538,12 @@ case "$action" in
       type == "array" and length == 10 and
       all(.[]; type == "string")
     ' <<<"$selected" >/dev/null
+    if [[ -n "${STUB_PRELOAD_POST_RUNTIME:-}" ]]; then
+      cp "$STUB_PRELOAD_POST_RUNTIME" "${STUB_CURRENT_RUNTIME:?}"
+    fi
+    if [[ -n "${STUB_PRELOAD_POST_SUMMARY:-}" ]]; then
+      cp "$STUB_PRELOAD_POST_SUMMARY" "${STUB_CURRENT_SUMMARY:?}"
+    fi
     exit "${STUB_PRELOAD_STATUS:-0}"
     ;;
   baseline-proof)
@@ -1417,8 +1566,11 @@ case "$action" in
     cp "${STUB_POST_SUMMARY:?}" "${STUB_CURRENT_SUMMARY:?}"
     ;;
   reclaim-apt-package-cache)
-    cp "${STUB_POST_RUNTIME:?}" "${STUB_CURRENT_RUNTIME:?}"
-    cp "${STUB_POST_SUMMARY:?}" "${STUB_CURRENT_SUMMARY:?}"
+    [[ "${STUB_APT_STATUS:-0}" == "0" ]] || exit "$STUB_APT_STATUS"
+    cp "${STUB_APT_POST_RUNTIME:-${STUB_POST_RUNTIME:?}}" \
+      "${STUB_CURRENT_RUNTIME:?}"
+    cp "${STUB_APT_POST_SUMMARY:-${STUB_POST_SUMMARY:?}}" \
+      "${STUB_CURRENT_SUMMARY:?}"
     ;;
   *)
     exit 1
@@ -1619,6 +1771,216 @@ env "${common_env[@]}" \
   RECLAIM_IMAGE_IDS='[]' \
   OUTPUT_FILE="$work_dir/orchestrated-diagnosis.json" \
   "$ORCHESTRATOR" diagnose >/dev/null
+
+apt_orchestrator_cases="$work_dir/apt-orchestrator-cases"
+mkdir -p "$apt_orchestrator_cases"
+python3 - "$post_apt" "$work_dir/orchestrated-diagnosis.json" \
+  "$apt_orchestrator_cases" <<'PY'
+import copy
+import json
+import sys
+from pathlib import Path
+
+runtime_path, diagnosis_path, output_path = map(Path, sys.argv[1:])
+runtime = json.loads(runtime_path.read_text())
+diagnosis = json.loads(diagnosis_path.read_text())
+output_path.mkdir(exist_ok=True)
+candidates = sorted(diagnosis["candidateImages"], key=lambda row: row["service"])
+
+
+def candidate_image(index, candidate):
+    return {
+        "id": "sha256:" + f"{950 + index:064d}",
+        "repoTags": [],
+        "repoDigests": [candidate["imageRef"]],
+        "sizeBytes": 1000,
+        "pinned": False,
+    }
+
+
+def write(name, candidate_count, *, used=34_500_000_000):
+    value = copy.deepcopy(runtime)
+    value["schemaVersion"] = "k3s-node-disk-runtime.v2"
+    value["snapshotProfile"] = "public"
+    value["applicationImages"] = [
+        {"service": row["service"], "imageRef": row["imageRef"]}
+        for row in candidates
+    ]
+    value["images"].extend(
+        candidate_image(index, candidate)
+        for index, candidate in enumerate(candidates[:candidate_count], start=1)
+    )
+    value["root"]["mount"]["used"] = used
+    value["root"]["mount"]["avail"] = value["root"]["mount"]["size"] - used
+    value["root"]["df"]["usedBytes"] = used
+    value["root"]["df"]["availableBytes"] = (
+        value["root"]["df"]["capacityBytes"] - used
+    )
+    value["root"]["df"]["usedPercent"] = used * 100 / value["root"]["df"]["capacityBytes"]
+    (output_path / f"{name}.json").write_text(json.dumps(value, sort_keys=True))
+
+
+write("complete", len(candidates))
+write("partial", 1)
+write("over-limit", 1, used=35_500_000_000)
+PY
+cat >"$work_dir/summary-over.json" <<'JSON'
+{"node":{"fs":{"capacityBytes":50000000000,"usedBytes":35500000000,"availableBytes":14500000000}}}
+JSON
+
+cp "$runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+: >"$work_dir/remote.log"
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=501 \
+  DIAGNOSIS_RUN_ID=500 \
+  DIAGNOSIS_FILE="$work_dir/orchestrated-diagnosis.json" \
+  CANDIDATE_IMAGES_FILE="$candidate_cases/different-valid.tsv" \
+  RECLAIM_CATEGORY=apt-package-cache \
+  RECLAIM_IMAGE_IDS='[]' \
+  STUB_APT_POST_RUNTIME="$post_apt" \
+  STUB_PRELOAD_POST_RUNTIME="$apt_orchestrator_cases/complete.json" \
+  OUTPUT_FILE="$work_dir/orchestrated-apt-reclaim.json" \
+  CHECKPOINT_OUTPUT_FILE="$work_dir/orchestrated-apt-checkpoint.json" \
+  "$ORCHESTRATOR" reclaim >"$work_dir/orchestrated-apt-success.log"
+printf '%s\n' snapshot reclaim-apt-package-cache preload-candidate-images snapshot \
+  >"$work_dir/expected-apt-actions"
+awk -F '\t' '{print $1}' "$work_dir/remote.log" >"$work_dir/actual-apt-actions"
+cmp "$work_dir/expected-apt-actions" "$work_dir/actual-apt-actions" ||
+  fail "APT reclaim did not preserve exact snapshot-clean-preload-snapshot order"
+[[ "$(awk -F '\t' '$1 == "reclaim-apt-package-cache" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" &&
+   "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" ]] ||
+  fail "APT reclaim did not issue exactly one cleanup and one candidate preload"
+jq -c '[.candidateImages | sort_by(.service)[] | .imageRef]' \
+  "$work_dir/orchestrated-diagnosis.json" >"$work_dir/diagnosis-candidate-refs.json"
+awk -F '\t' '$1 == "preload-candidate-images" {print $2}' \
+  "$work_dir/remote.log" >"$work_dir/orchestrated-apt-preload-refs.json"
+cmp "$work_dir/diagnosis-candidate-refs.json" \
+  "$work_dir/orchestrated-apt-preload-refs.json" ||
+  fail "APT preload used current candidate TSV instead of the bound diagnosis"
+jq -e '
+  .terminalStatus == "RECLAIMED" and
+  .unexpectedAddedImageIds == [] and
+  .removedImageIds == []
+' "$work_dir/orchestrated-apt-reclaim.json" >/dev/null ||
+  fail "successful diagnosis-bound APT preload lacked reclaim evidence"
+jq -e '
+  .terminalStatus == "RELEASE_ELIGIBLE" and
+  .disposition == "READY_RECLAIMED" and
+  (.candidateResidency | length) == 10
+' "$work_dir/orchestrated-apt-checkpoint.json" >/dev/null ||
+  fail "successful diagnosis-bound APT preload lacked an eligible checkpoint"
+
+cp "$runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+: >"$work_dir/remote.log"
+printf 'stale\n' >"$work_dir/orchestrated-apt-20-checkpoint.json"
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=502 \
+  DIAGNOSIS_RUN_ID=500 \
+  DIAGNOSIS_FILE="$work_dir/orchestrated-diagnosis.json" \
+  RECLAIM_CATEGORY=apt-package-cache \
+  RECLAIM_IMAGE_IDS='[]' \
+  STUB_APT_POST_RUNTIME="$post_apt" \
+  STUB_PRELOAD_POST_RUNTIME="$apt_orchestrator_cases/partial.json" \
+  STUB_PRELOAD_STATUS=20 \
+  OUTPUT_FILE="$work_dir/orchestrated-apt-20-reclaim.json" \
+  CHECKPOINT_OUTPUT_FILE="$work_dir/orchestrated-apt-20-checkpoint.json" \
+  "$ORCHESTRATOR" reclaim >"$work_dir/orchestrated-apt-20.log" 2>&1
+jq -e '
+  .terminalStatus == "RECLAIMED" and
+  .unexpectedAddedImageIds == []
+' "$work_dir/orchestrated-apt-20-reclaim.json" >/dev/null ||
+  fail "status-20 candidate preload did not finalize valid APT postconditions"
+[[ ! -e "$work_dir/orchestrated-apt-20-checkpoint.json" &&
+   "$(grep -Fxc 'k3s_release_disk_checkpoint=INELIGIBLE reason=candidate_preload' "$work_dir/orchestrated-apt-20.log")" == "1" &&
+   "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" &&
+   "$(awk -F '\t' '$1 == "snapshot" {count++} END {print count+0}' "$work_dir/remote.log")" == "2" ]] ||
+  fail "status-20 candidate preload retried, skipped post evidence, or retained a checkpoint"
+
+cp "$runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+: >"$work_dir/remote.log"
+printf 'stale\n' >"$work_dir/orchestrated-apt-over-checkpoint.json"
+apt_over_status=0
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=503 \
+  DIAGNOSIS_RUN_ID=500 \
+  DIAGNOSIS_FILE="$work_dir/orchestrated-diagnosis.json" \
+  RECLAIM_CATEGORY=apt-package-cache \
+  RECLAIM_IMAGE_IDS='[]' \
+  STUB_APT_POST_RUNTIME="$post_apt" \
+  STUB_PRELOAD_POST_RUNTIME="$apt_orchestrator_cases/over-limit.json" \
+  STUB_PRELOAD_POST_SUMMARY="$work_dir/summary-over.json" \
+  STUB_PRELOAD_STATUS=20 \
+  OUTPUT_FILE="$work_dir/orchestrated-apt-over-reclaim.json" \
+  CHECKPOINT_OUTPUT_FILE="$work_dir/orchestrated-apt-over-checkpoint.json" \
+  "$ORCHESTRATOR" reclaim >"$work_dir/orchestrated-apt-over.log" 2>&1 ||
+  apt_over_status=$?
+[[ "$apt_over_status" != "0" &&
+   ! -e "$work_dir/orchestrated-apt-over-checkpoint.json" &&
+   "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" ]] ||
+  fail "status-20 over-limit APT reclaim passed or retried preload"
+jq -e '
+  .terminalStatus == "INCOMPLETE" and
+  .postKubeletCapacity.withinLimit == false
+' "$work_dir/orchestrated-apt-over-reclaim.json" >/dev/null ||
+  fail "status-20 over-limit APT reclaim lacked durable failure evidence"
+
+cp "$runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+: >"$work_dir/remote.log"
+apt_fatal_status=0
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=504 \
+  DIAGNOSIS_RUN_ID=500 \
+  DIAGNOSIS_FILE="$work_dir/orchestrated-diagnosis.json" \
+  RECLAIM_CATEGORY=apt-package-cache \
+  RECLAIM_IMAGE_IDS='[]' \
+  STUB_APT_POST_RUNTIME="$post_apt" \
+  STUB_PRELOAD_POST_RUNTIME="$apt_orchestrator_cases/partial.json" \
+  STUB_PRELOAD_STATUS=42 \
+  OUTPUT_FILE="$work_dir/orchestrated-apt-fatal-reclaim.json" \
+  CHECKPOINT_OUTPUT_FILE="$work_dir/orchestrated-apt-fatal-checkpoint.json" \
+  "$ORCHESTRATOR" reclaim >"$work_dir/orchestrated-apt-fatal.log" 2>&1 ||
+  apt_fatal_status=$?
+[[ "$apt_fatal_status" == "42" &&
+   ! -e "$work_dir/orchestrated-apt-fatal-checkpoint.json" &&
+   "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" &&
+   "$(awk -F '\t' '$1 == "snapshot" {count++} END {print count+0}' "$work_dir/remote.log")" == "2" ]] ||
+  fail "fatal APT candidate preload was retried, collapsed, or skipped post evidence"
+jq -e '.terminalStatus == "RECLAIMED"' \
+  "$work_dir/orchestrated-apt-fatal-reclaim.json" >/dev/null ||
+  fail "fatal APT candidate preload lacked finalized reclaim evidence"
+if grep -Fq 'k3s_release_disk_checkpoint=INELIGIBLE reason=candidate_preload' \
+    "$work_dir/orchestrated-apt-fatal.log"; then
+  fail "fatal APT candidate preload was converted to candidacy status 20"
+fi
+
+cp "$runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+: >"$work_dir/remote.log"
+apt_failure_status=0
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=505 \
+  DIAGNOSIS_RUN_ID=500 \
+  DIAGNOSIS_FILE="$work_dir/orchestrated-diagnosis.json" \
+  RECLAIM_CATEGORY=apt-package-cache \
+  RECLAIM_IMAGE_IDS='[]' \
+  STUB_APT_STATUS=41 \
+  OUTPUT_FILE="$work_dir/orchestrated-apt-failure-reclaim.json" \
+  "$ORCHESTRATOR" reclaim >"$work_dir/orchestrated-apt-failure.log" 2>&1 ||
+  apt_failure_status=$?
+[[ "$apt_failure_status" != "0" &&
+   "$(awk -F '\t' '$1 == "reclaim-apt-package-cache" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" &&
+   "$(awk -F '\t' '$1 == "preload-candidate-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "0" &&
+   "$(awk -F '\t' '$1 == "snapshot" {count++} END {print count+0}' "$work_dir/remote.log")" == "2" ]] ||
+  fail "failed APT cleanup reached candidate preload or skipped post evidence"
+jq -e '
+  .terminalStatus == "INCOMPLETE" and
+  .mutationCommandSucceeded == false
+' "$work_dir/orchestrated-apt-failure-reclaim.json" >/dev/null ||
+  fail "failed APT cleanup lacked durable incomplete evidence"
 
 cp "$runtime" "$work_dir/current-runtime.json"
 cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
