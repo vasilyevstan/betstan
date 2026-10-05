@@ -265,12 +265,36 @@ Checkpoint creation and each public or held revalidation independently require
 fresh kubelet node-filesystem and raw-root byte measurements to satisfy
 `usedBytes * 100 <= capacityBytes * 70`. Equality passes; one byte over the
 limit withholds eligibility. The separate governed diagnosis path remains
-available over the limit. Candidate-verification or candidacy-preload failure
-stops further preload work and removes candidate and checkpoint evidence,
-while otherwise-valid finalized infrastructure provenance remains available
-for governed diagnosis or reclaim. Authority, access,
-infrastructure-finalization, and cleanup failures remain fatal.
+available over the limit. During standalone finalization, candidate-verification
+or candidacy-preload failure stops further preload work and removes candidate
+and checkpoint evidence, while otherwise-valid finalized infrastructure
+provenance remains available for governed diagnosis or reclaim. Authority,
+access, infrastructure-finalization, and cleanup failures remain fatal.
 [[Infrastructure]] describes the bounded preload behavior.
+
+When native APT cleanup succeeds within a governed first-attempt reclaim, the
+existing action immediately performs exactly one service-sorted preload of the
+bound diagnosis candidate `imageRef` values before post-state capture and
+finalization. It reuses the unchanged native, sequential, anonymous
+`k3s crictl pull` behavior and exact raw-root 70-percent pre/post admission,
+without retry, deletion, pruning, credentials, an alternate client, or a new
+governed operation, authority, schema, or threshold.
+
+APT finalization allows a newly added native CRI image ID only when exact
+diagnosis candidate `imageRef` residency proves it uniquely. Any removal or
+foreign addition fails, and an added ID receives no exception when residency
+is ambiguous. Manifest and platform digests are not CRI image IDs. Status `20`
+remains candidacy failure, so post-state and reclaim evidence are preserved and
+a valid APT cleanup may still finish `RECLAIMED` and successful, but no
+checkpoint is emitted and the reason is `candidate_preload`. A non-`20`
+preload failure remains fatal after evidence capture where possible.
+Standalone finalization preload and CRI reclaim remain unchanged, and CRI
+reclaim cannot create the release checkpoint.
+
+These outcomes do not grant checkpoint authority. Eligibility still
+independently requires complete residency for all ten candidates and the
+rollback generation, plus every existing byte, identity, lineage, public-state,
+workload, queue, and health gate.
 
 Every current live-data operation and normal or recovered deployment binds a
 full `checkpoint_source_sha`, positive `disk_checkpoint_run_id`, canonical

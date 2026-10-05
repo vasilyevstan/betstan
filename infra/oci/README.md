@@ -329,6 +329,18 @@ concurrent retirement fixture isolation without masking failed suites.
    still fail infrastructure. The protected disk-recovery path remains
    available independently.
 
+   APT-only disk recovery keeps that standalone finalize authority unchanged.
+   After its bound diagnosis passes fresh validation and native APT cleanup
+   succeeds once, it service-sorts the ten exact candidate references from the
+   diagnosis itself and invokes the same native candidate preload once. It
+   does not re-authorize those references from the current candidate TSV.
+   Preload status is recorded before the mandatory post snapshot, capacity
+   check, and durable reclaim finalization. Status `20` is not retried: valid
+   APT postconditions may remain `RECLAIMED`, but the release checkpoint is
+   withheld with reason `candidate_preload`; a non-`20` preload failure remains
+   fatal after post evidence capture where possible. The CRI reclaim path is
+   unchanged and does not preload candidates.
+
    A release-eligible first-attempt k3s finalize diagnosis or APT-only reclaim
    seals one canonical `k3s-release-disk-checkpoint.v1` artifact named
    `oci-release-disk-checkpoint-<source-sha>-<producer-run-id>-1`. Exact integer

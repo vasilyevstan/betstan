@@ -220,6 +220,25 @@ run_remote() {
     "sudo K3S_DISK_SELECTED_IMAGE_IDS_B64=$encoded K3S_DISK_CANONICAL_HOST_B64=$encoded_host K3S_DISK_NODE_NAME_B64=$encoded_node$device_assignment bash -s -- $remote_action"
 }
 
+preload_candidate_images() {
+  local candidate_refs="$1"
+  local normalized_candidate_refs=""
+  normalized_candidate_refs="$(
+    jq -ce '
+      if type == "array" and length == 10 and
+         all(.[];
+           type == "string" and
+           test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}\\z")
+         )
+      then . else error("invalid candidate references") end
+    ' <<<"$candidate_refs"
+  )" || fail "candidate image evidence parser emitted an invalid payload"
+  [[ "$candidate_refs" == "$normalized_candidate_refs" &&
+     "$candidate_refs" != *$'\n'* ]] ||
+    fail "candidate image evidence parser emitted a noncanonical payload"
+  run_remote preload-candidate-images "$candidate_refs"
+}
+
 if [[ "$ACTION" == "preload" ]]; then
   [[ -x "$EVIDENCE_HELPER" ]] ||
     fail "candidate image evidence helper is unavailable"
@@ -239,23 +258,9 @@ if [[ "$ACTION" == "preload" ]]; then
       fail "candidate image evidence parser failed with code $candidate_status"
       ;;
   esac
-  normalized_candidate_refs=""
-  normalized_candidate_refs="$(
-    jq -ce '
-      if type == "array" and length == 10 and
-         all(.[];
-           type == "string" and
-           test("^ghcr[.]io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}\\z")
-         )
-      then . else error("invalid candidate references") end
-    ' <<<"$candidate_refs"
-  )" || fail "candidate image evidence parser emitted an invalid payload"
-  [[ "$candidate_refs" == "$normalized_candidate_refs" &&
-     "$candidate_refs" != *$'\n'* ]] ||
-    fail "candidate image evidence parser emitted a noncanonical payload"
 
   preload_status=0
-  run_remote preload-candidate-images "$candidate_refs" ||
+  preload_candidate_images "$candidate_refs" ||
     preload_status=$?
   case "$preload_status" in
     0)
@@ -461,9 +466,20 @@ fi
 "$EVIDENCE_HELPER" plan-reclaim "${plan_args[@]}"
 
 mutation_succeeded=true
+candidate_preload_status=0
+apt_candidate_refs=""
+if [[ "$RECLAIM_CATEGORY" == "apt-package-cache" ]]; then
+  apt_candidate_refs="$(
+    "$EVIDENCE_HELPER" diagnosis-candidate-image-refs \
+      --diagnosis "$DIAGNOSIS_FILE"
+  )" || fail "bound diagnosis candidate references are unavailable"
+fi
 case "$RECLAIM_CATEGORY" in
   apt-package-cache)
-    if ! run_remote reclaim-apt-package-cache "[]"; then
+    if run_remote reclaim-apt-package-cache "[]"; then
+      preload_candidate_images "$apt_candidate_refs" ||
+        candidate_preload_status=$?
+    else
       mutation_succeeded=false
     fi
     ;;
@@ -487,6 +503,19 @@ if [[ "$post_capture_succeeded" != "true" ]]; then
     --image-ids "$RECLAIM_IMAGE_IDS" \
     --reason post-state-capture-failed \
     --output "$OUTPUT_FILE"
+  if [[ "$RECLAIM_CATEGORY" == "apt-package-cache" &&
+     "$candidate_preload_status" -ne 0 ]]; then
+    if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+      rm -f -- "$CHECKPOINT_OUTPUT_FILE" ||
+        fail "could not withhold the release checkpoint"
+    fi
+    if [[ "$candidate_preload_status" -eq 20 ]]; then
+      echo "k3s_release_disk_checkpoint=INELIGIBLE reason=candidate_preload"
+      fail "post-state capture failed after bounded mutation"
+    fi
+    echo "k3s_disk_recovery=reclaim status=FAIL reason=remote preload failed code=$candidate_preload_status" >&2
+    exit "$candidate_preload_status"
+  fi
   fail "post-state capture failed after bounded mutation"
 fi
 
@@ -501,6 +530,22 @@ set +e
   --output "$OUTPUT_FILE"
 finalize_status=$?
 set -e
+if [[ "$RECLAIM_CATEGORY" == "apt-package-cache" &&
+   "$candidate_preload_status" -ne 0 ]]; then
+  if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+    rm -f -- "$CHECKPOINT_OUTPUT_FILE" ||
+      fail "could not withhold the release checkpoint"
+  fi
+  if [[ "$candidate_preload_status" -eq 20 ]]; then
+    echo "k3s_release_disk_checkpoint=INELIGIBLE reason=candidate_preload"
+    [[ "$finalize_status" -eq 0 ]] ||
+      fail "reclaim remained incomplete; no alternate category was attempted"
+    echo "k3s_disk_recovery=reclaim status=PASS manifest=$OUTPUT_FILE"
+    exit 0
+  fi
+  echo "k3s_disk_recovery=reclaim status=FAIL reason=remote preload failed code=$candidate_preload_status" >&2
+  exit "$candidate_preload_status"
+fi
 [[ "$finalize_status" -eq 0 ]] ||
   fail "reclaim remained incomplete; no alternate category was attempted"
 if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
