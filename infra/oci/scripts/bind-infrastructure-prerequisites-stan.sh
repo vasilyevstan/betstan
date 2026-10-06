@@ -130,6 +130,11 @@ case "$PHASE" in
         [ -z "$(jq -r '.ghcr_package_validation_run_id // ""' <<<"$DISPATCH_INPUTS")" ]
         operation="oci-k3s-disk-reclaim-apt"
         ;;
+      system-journal)
+        [ -z "$(jq -r '.ghcr_package_validation_run_id // ""' <<<"$DISPATCH_INPUTS")" ]
+        jq -e '.reclaim_image_ids == "[]"' <<<"$DISPATCH_INPUTS" >/dev/null
+        operation="oci-k3s-disk-reclaim-journal"
+        ;;
       cri-owned-unused-images)
         jq -e '
           (.ghcr_package_validation_run_id // "") |

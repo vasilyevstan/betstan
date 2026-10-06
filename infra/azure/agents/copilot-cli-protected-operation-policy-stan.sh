@@ -1538,6 +1538,15 @@ POLICIES = {
     ),
 }
 
+POLICIES["oci-k3s-disk-reclaim-journal"] = {
+    **POLICIES["oci-k3s-disk-reclaim-apt"],
+    "operation": "oci-k3s-disk-reclaim-journal",
+    "fixedInputs": {
+        **POLICIES["oci-k3s-disk-reclaim-apt"]["fixedInputs"],
+        "reclaim_category": "system-journal",
+    },
+}
+
 DISABLED_BEFORE_APPROVAL_WORKFLOWS = {
     "oci-capacity-acquire.yml",
     "oci-infrastructure.yml",
