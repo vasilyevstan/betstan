@@ -353,7 +353,7 @@ const getContrastEvidence = (page) => page.evaluate(() => {
 });
 
 const expectTooltipContents = async (tooltip, bucket, count) => {
-  const label = bucket.length === 10 ? '00:00-24:00 UTC' : `${bucket.slice(11, 16)} UTC`;
+  const label = bucket.length === 10 ? `${bucket} UTC` : `${bucket.slice(11, 16)} UTC`;
   await expect(tooltip).toBeVisible();
   await expect(tooltip.locator('time')).toHaveCount(1);
   await expect(tooltip.locator('data')).toHaveCount(1);
@@ -364,8 +364,10 @@ const expectTooltipContents = async (tooltip, bucket, count) => {
   await expect(tooltip.locator('data')).toHaveText(String(count));
   await expect(tooltip.locator('data')).toHaveAttribute('value', String(count));
   await expect(tooltip).toHaveText(`${label}${count}`);
-  await expect(tooltip).not.toHaveAccessibleName(/\d{4}-\d{2}-\d{2}/);
-  await expect(tooltip).not.toHaveAccessibleDescription(/\d{4}-\d{2}-\d{2}/);
+  if (bucket.length !== 10) {
+    await expect(tooltip).not.toHaveAccessibleName(/\d{4}-\d{2}-\d{2}/);
+    await expect(tooltip).not.toHaveAccessibleDescription(/\d{4}-\d{2}-\d{2}/);
+  }
   await expect(tooltip).not.toHaveAttribute('title');
   await expect(tooltip.locator('[title], [aria-label], [aria-labelledby], [aria-describedby]')).toHaveCount(0);
 };
@@ -1039,7 +1041,7 @@ for (const uiVariant of UI_VARIANTS) {
           const barBox = await bar.boundingBox();
           const { evidence } = measured;
           // Re-measure the same Back → tallest-bar state without requiring
-          // natural above: the two-row daily window can use the bounded fallback.
+          // natural above: the two-row daily tooltip can use the bounded fallback.
           expect(evidence.top).toBeGreaterThanOrEqual(evidence.minTop + 8 - 0.75);
           expect(evidence.bottom).toBeLessThanOrEqual(evidence.maxBottom - 8 + 0.75);
           expect(measured.scrollDelta).toBeLessThanOrEqual(0.75);
@@ -1060,7 +1062,7 @@ for (const uiVariant of UI_VARIANTS) {
           await page.mouse.click(point.x, point.y);
           await expect(card.locator('rect')).toHaveCount(24);
           expect(state.requestCount(key)).toBe(requestsBeforeClick + 1);
-          console.log(`Daily window placement ${uiVariant}/${theme}/768: bar ${barBox.y.toFixed(2)}–${(barBox.y + barBox.height).toFixed(2)}; tooltip ${evidence.top.toFixed(2)}–${evidence.bottom.toFixed(2)}; protected-control collisions ${evidence.controlOverlaps}; 12-step transit/Escape/reentry and actual bar click passed.`);
+          console.log(`Daily bucket placement ${uiVariant}/${theme}/768: bar ${barBox.y.toFixed(2)}–${(barBox.y + barBox.height).toFixed(2)}; tooltip ${evidence.top.toFixed(2)}–${evidence.bottom.toFixed(2)}; protected-control collisions ${evidence.controlOverlaps}; 12-step transit/Escape/reentry and actual bar click passed.`);
         }
         console.log(`Telemetry ${uiVariant}/${theme}/${viewport.width} daily/hourly: ${JSON.stringify(
           [measured, hourly].map(({ evidence, contrast, layoutDelta, scrollDelta }) => ({
@@ -1202,7 +1204,7 @@ test('static route aliases share layout, navigation, and page-view identity', as
   expect(state.requestCount('POST /api/telemetry/page-view')).toBe(1);
 });
 
-test('exact tooltip time and amount in both modes preserve hover transit, Escape and native SVG actions', async ({ page }) => {
+test('exact tooltip date/time bucket identity and amount in both modes preserve hover transit, Escape and native SVG actions', async ({ page }) => {
   await installFakeEventSource(page);
   const state = createShellMockState();
   state.telemetrySummary.metrics[0].values[0] = 0;
@@ -1263,7 +1265,7 @@ test('exact tooltip time and amount in both modes preserve hover transit, Escape
   await page.setViewportSize({ width: 1500, height: 1000 });
   await expect(first.getByRole('tooltip')).toHaveCount(0);
   expect(state.requestCount('POST /api/telemetry/page-view')).toBe(0);
-  console.log('Tooltip evidence: all 8 cards; whole-day UTC window plus amount for 14 daily buckets by pointer and native focus; hourly UTC start plus amount for 24 buckets; exact datetime/count attributes and later generatedAt; no tooltip calendar-date text/name/description/title; external date context retained; two occupied rows in BOTH modes; zero/MAX_SAFE_INTEGER/edges; transit/Escape/reentry/scroll/resize/native SVG focus retained.');
+  console.log('Tooltip evidence: all 8 cards; UTC date plus amount for 14 daily buckets by pointer and native focus; hourly UTC start plus amount for 24 buckets; exact datetime/count attributes and later generatedAt; no hourly tooltip calendar-date text/name/description; no tooltip title in either mode; external date context retained; two occupied rows in BOTH modes; zero/MAX_SAFE_INTEGER/edges; transit/Escape/reentry/scroll/resize/native SVG focus retained.');
 });
 
 test('mobile focus fallback, loading/error Back, partial Refresh and later-open focus retention', async ({ page }) => {
@@ -1385,7 +1387,7 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
   console.log(`Mobile focus fallback measured; text contrast ${Math.min(...contrast.tooltipText).toFixed(2)}, focus ${contrast.focus.ratio.toFixed(2)}; network/batch completion retained sibling focus.`);
 });
 
-test('mixed-count pair geometry and both-mode time/amount tooltips stay contained at target widths', async ({ page }, testInfo) => {
+test('mixed-count pair geometry and both-mode date/time bucket and amount tooltips stay contained at target widths', async ({ page }, testInfo) => {
   await installFakeEventSource(page);
   const state = createShellMockState();
   const counts = [0, 7, Number.MAX_SAFE_INTEGER];
