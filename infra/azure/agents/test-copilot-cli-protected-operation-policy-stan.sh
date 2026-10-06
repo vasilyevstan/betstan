@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "38" ]] || {
-  echo "expected 38 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "39" ]] || {
+  echo "expected 39 protected operations, got $operation_count" >&2
   exit 1
 }
 

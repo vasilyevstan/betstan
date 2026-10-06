@@ -1822,6 +1822,10 @@ case "$action" in
           "$(awk '$1 == "snapshot" {count++} END {print count+0}' "$STUB_REMOTE_LOG")" == "2" ]]; then
       exit "$STUB_POST_CAPTURE_STATUS"
     fi
+    if [[ -n "${STUB_SNAPSHOT_RUNNER:-}" &&
+          "$(awk '$1 == "snapshot" {count++} END {print count+0}' "$STUB_REMOTE_LOG")" == "$STUB_SNAPSHOT_AT" ]]; then
+      exec "$STUB_SNAPSHOT_RUNNER"
+    fi
     cat "${STUB_CURRENT_RUNTIME:?}"
     ;;
   reclaim-cri-owned-unused-images)
@@ -1838,6 +1842,9 @@ case "$action" in
   reclaim-system-journal)
     [[ "$selected" == "[]" ]]
     [[ "${STUB_JOURNAL_STATUS:-0}" == "0" ]] || exit "$STUB_JOURNAL_STATUS"
+    if [[ -n "${STUB_JOURNAL_REMOTE:-}" ]]; then
+      "$STUB_JOURNAL_REMOTE" reclaim-system-journal "$selected"
+    fi
     cp "${STUB_JOURNAL_POST_RUNTIME:?}" "${STUB_CURRENT_RUNTIME:?}"
     cp "${STUB_POST_SUMMARY:?}" "${STUB_CURRENT_SUMMARY:?}"
     ;;
@@ -2251,18 +2258,39 @@ jq -e '
 ' "$work_dir/orchestrated-apt-failure-reclaim.json" >/dev/null ||
   fail "failed APT cleanup lacked durable incomplete evidence"
 
-for journal_case in success candidacy candidacy-over fatal mutation-failure \
+journal_bin="$work_dir/journal-bin"
+mkdir -p "$journal_bin"
+for command_name in bash base64 jq; do
+  ln -s "$(command -v "$command_name")" "$journal_bin/$command_name"
+done
+cat >"$journal_bin/journalctl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$STUB_JOURNAL_LOG"
+printf '/synthetic-private-journal/stdout-marker\n'
+printf '/synthetic-private-journal/stderr-marker\n' >&2
+case "$*" in
+  --rotate) exit "${STUB_ROTATE_STATUS:-0}" ;;
+  "--directory=/var/log/journal --vacuum-size=536870912") exit "${STUB_VACUUM_STATUS:-0}" ;;
+  *) exit 99 ;;
+esac
+SH
+chmod +x "$journal_bin/journalctl"
+
+for journal_case in success candidacy candidacy-over fatal mutation-failure rotate-failure vacuum-failure \
   post-capture-failure fatal-post-capture candidacy-post-capture; do
   cp "$journal_cases/before.json" "$work_dir/current-runtime.json"
   cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
   : >"$work_dir/remote.log"
   : >"$work_dir/journal-capacity.log"
+  : >"$work_dir/journal-command.log"
   journal_checkpoint="$work_dir/journal-$journal_case-checkpoint.json"
   journal_result="$work_dir/journal-$journal_case-reclaim.json"
   journal_log="$work_dir/journal-$journal_case.log"
   printf 'stale\n' >"$journal_checkpoint"
   journal_args=(
     STUB_JOURNAL_STATUS=0 STUB_PRELOAD_STATUS=0 STUB_POST_CAPTURE_STATUS=0
+    STUB_ROTATE_STATUS=0 STUB_VACUUM_STATUS=0
     STUB_PRELOAD_POST_RUNTIME="$journal_cases/complete.json"
   )
   case "$journal_case" in
@@ -2279,12 +2307,20 @@ for journal_case in success candidacy candidacy-over fatal mutation-failure \
     mutation-failure)
       journal_args+=(STUB_JOURNAL_STATUS=41)
       ;;
+    rotate-failure)
+      journal_args+=(STUB_ROTATE_STATUS=41)
+      ;;
+    vacuum-failure)
+      journal_args+=(STUB_VACUUM_STATUS=42)
+      ;;
   esac
   case "$journal_case" in
     *post-capture*) journal_args+=(STUB_POST_CAPTURE_STATUS=43) ;;
   esac
   journal_status=0
   env "${common_env[@]}" \
+    PATH="$journal_bin:$stub_bin:$PATH" \
+    STUB_JOURNAL_REMOTE="$REMOTE" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
     GITHUB_RUN_ID=501 DIAGNOSIS_RUN_ID=500 \
     DIAGNOSIS_FILE="$journal_cases/diagnosis.json" \
     CANDIDATE_IMAGES_FILE="$candidate_cases/different-valid.tsv" \
@@ -2295,15 +2331,28 @@ for journal_case in success candidacy candidacy-over fatal mutation-failure \
     CHECKPOINT_OUTPUT_FILE="$journal_checkpoint" \
     "$ORCHESTRATOR" reclaim >"$journal_log" 2>&1 || journal_status=$?
   expected_actions=$'snapshot\nreclaim-system-journal\npreload-candidate-images\nsnapshot'
-  [[ "$journal_case" != mutation-failure ]] ||
-    expected_actions=$'snapshot\nreclaim-system-journal\nsnapshot'
+  expected_commands=$'--rotate\n--directory=/var/log/journal --vacuum-size=536870912'
+  case "$journal_case" in
+    mutation-failure | rotate-failure | vacuum-failure)
+      expected_actions=$'snapshot\nreclaim-system-journal\nsnapshot'
+      case "$journal_case" in
+        mutation-failure) expected_commands="" ;;
+        rotate-failure) expected_commands=--rotate ;;
+      esac
+      ;;
+  esac
   [[ "$(awk -F '\t' '{print $1}' "$work_dir/remote.log")" == "$expected_actions" &&
+     "$(cat "$work_dir/journal-command.log")" == "$expected_commands" &&
      "$(wc -l <"$work_dir/journal-capacity.log" | tr -d ' ')" == "2" ]] ||
     fail "journal $journal_case changed single-mutation/preload order or skipped post capture"
+  if grep -Fq '/synthetic-private-journal/' "$journal_log"; then
+    fail "journal $journal_case exposed raw journalctl output through the orchestrator"
+  fi
   jq -e '.category == "system-journal" and .selectedImageIds == []' \
     "$journal_result" >/dev/null ||
     fail "journal $journal_case lost bounded reclaim evidence"
-  if [[ "$journal_case" != mutation-failure ]]; then
+  if [[ "$journal_case" != mutation-failure && "$journal_case" != rotate-failure &&
+        "$journal_case" != vacuum-failure ]]; then
     awk -F '\t' '$1 == "preload-candidate-images" {print $2}' "$work_dir/remote.log" \
       >"$work_dir/journal-preload-refs.json"
     cmp "$work_dir/diagnosis-candidate-refs.json" "$work_dir/journal-preload-refs.json" ||
@@ -2336,6 +2385,10 @@ for journal_case in success candidacy candidacy-over fatal mutation-failure \
     *post-capture*)
       jq -e '.terminalStatus == "INCOMPLETE" and .reason == "post-state-capture-failed"' \
         "$journal_result" >/dev/null || fail "journal failed capture lacked incomplete evidence"
+      ;;
+    mutation-failure | rotate-failure | vacuum-failure)
+      jq -e '.terminalStatus == "INCOMPLETE" and .mutationCommandSucceeded == false' \
+        "$journal_result" >/dev/null || fail "journal command failure lost mutation status"
       ;;
     *)
       jq -e '.terminalStatus == "INCOMPLETE"' "$journal_result" >/dev/null ||
@@ -2441,42 +2494,36 @@ grep -Fq \
   "$work_dir/k3s-crictl.log" ||
   fail "remote CRI reclaim did not use bundled k3s crictl with exact endpoint and ID"
 
-journal_bin="$work_dir/journal-bin"
-mkdir -p "$journal_bin"
-for command_name in bash base64 jq; do
-  ln -s "$(command -v "$command_name")" "$journal_bin/$command_name"
-done
-cat >"$journal_bin/journalctl" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"$STUB_JOURNAL_LOG"
-case "$*" in
-  --rotate) exit "${STUB_ROTATE_STATUS:-0}" ;;
-  "--directory=/var/log/journal --vacuum-size=536870912") exit "${STUB_VACUUM_STATUS:-0}" ;;
-  *) exit 99 ;;
-esac
-SH
-chmod +x "$journal_bin/journalctl"
 for journal_command_case in success rotate-failure vacuum-failure; do
   : >"$work_dir/journal-command.log"
   journal_command_args=(STUB_ROTATE_STATUS=0 STUB_VACUUM_STATUS=0)
   expected_status=0
+  expected_diagnostic=""
   expected_commands=$'--rotate\n--directory=/var/log/journal --vacuum-size=536870912'
   case "$journal_command_case" in
     rotate-failure)
       journal_command_args+=(STUB_ROTATE_STATUS=41)
       expected_status=41
       expected_commands=--rotate
+      expected_diagnostic="k3s_disk_remote=reclaim-system-journal status=FAIL reason=system journal rotation failed"
       ;;
-    vacuum-failure) journal_command_args+=(STUB_VACUUM_STATUS=42); expected_status=42 ;;
+    vacuum-failure)
+      journal_command_args+=(STUB_VACUUM_STATUS=42)
+      expected_status=42
+      expected_diagnostic="k3s_disk_remote=reclaim-system-journal status=FAIL reason=system journal vacuum failed"
+      ;;
   esac
   journal_command_status=0
   env PATH="$journal_bin" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
     "${journal_command_args[@]}" "$REMOTE" reclaim-system-journal '[]' \
-    >/dev/null 2>&1 || journal_command_status=$?
+    >"$work_dir/journal-command.stdout" 2>"$work_dir/journal-command.stderr" ||
+    journal_command_status=$?
   [[ "$journal_command_status" == "$expected_status" &&
      "$(cat "$work_dir/journal-command.log")" == "$expected_commands" ]] ||
     fail "journal commands were changed, reordered, retried, or fell through: $journal_command_case"
+  [[ ! -s "$work_dir/journal-command.stdout" &&
+     "$(cat "$work_dir/journal-command.stderr")" == "$expected_diagnostic" ]] ||
+    fail "journal $journal_command_case exposed output other than fixed sanitized diagnostics"
 done
 for invalid_ids in "$selected" '[ ]' '{}'; do
   : >"$work_dir/journal-command.log"
@@ -2494,38 +2541,61 @@ fi
 [[ ! -s "$work_dir/journal-command.log" ]] || fail "caller arguments reached journalctl"
 PATH="$journal_bin" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
   K3S_DISK_SELECTED_IMAGE_IDS_B64=W10= \
-  "$REMOTE" reclaim-system-journal
+  "$REMOTE" reclaim-system-journal >"$work_dir/journal-encoded.log" 2>&1
 [[ "$(cat "$work_dir/journal-command.log")" == \
    $'--rotate\n--directory=/var/log/journal --vacuum-size=536870912' ]] ||
   fail "journal encoded transport changed its literal commands"
+[[ ! -s "$work_dir/journal-encoded.log" ]] ||
+  fail "journal encoded transport exposed raw command output"
 
-sed -n '/^fixed_path_bytes()/,/^}/p' "$REMOTE" >"$work_dir/journal-path-helper.sh"
+{
+  sed -n '/^fail()/,/^}/p' "$REMOTE"
+  sed -n '/^fixed_path_bytes()/,/^}/p' "$REMOTE"
+} >"$work_dir/journal-path-helper.sh"
 mkdir "$work_dir/journal-directory"
 ln -s "$work_dir/journal-directory" "$work_dir/journal-link"
 touch "$work_dir/journal-file"
-for path_case in directory non-root aliased-parent symlink file missing; do
+for path_case in directory non-root aliased-parent symlink file missing \
+  du-failure readlink-failure mount-failure; do
   journal_path="$work_dir/journal-directory"
   canonical_path="$journal_path"
-  mount_target=/
+  stub_mount_target=/
   expected_directory=true
   expected_root=true
+  expected_failure=""
   case "$path_case" in
-    non-root) mount_target=/separate; expected_root=false ;;
+    non-root) stub_mount_target=/separate; expected_root=false ;;
     aliased-parent) canonical_path="$work_dir/elsewhere"; expected_directory=false; expected_root=false ;;
     symlink) journal_path="$work_dir/journal-link"; expected_directory=false; expected_root=false ;;
     file) journal_path="$work_dir/journal-file"; expected_directory=false; expected_root=false ;;
     missing) journal_path="$work_dir/journal-missing"; expected_directory=false; expected_root=false ;;
+    du-failure) expected_failure="aggregate size measurement failed for system-journal" ;;
+    readlink-failure) expected_failure="path resolution failed for system-journal" ;;
+    mount-failure) expected_failure="mount measurement failed for system-journal" ;;
   esac
+  path_status=0
   (
     source "$work_dir/journal-path-helper.sh"
-    readlink() { printf '%s\n' "$canonical_path"; }
-    findmnt() { printf '%s\n' "$mount_target"; }
-    du() { printf '1234567890\n'; }
-    fixed_path_bytes system-journal "$journal_path"
-  ) | jq -e --argjson directory "$expected_directory" --argjson root "$expected_root" '
+    ACTION=snapshot
+    readlink() { printf '%s\n' "$canonical_path"; [[ "$path_case" != readlink-failure ]]; }
+    findmnt() { printf '%s\n' "$stub_mount_target"; [[ "$path_case" != mount-failure ]]; }
+    du() { printf '1234567890\n'; [[ "$path_case" != du-failure ]]; }
+    row="$(fixed_path_bytes system-journal "$journal_path")" || exit "$?"
+    printf '%s\n' "$row"
+  ) >"$work_dir/journal-path.stdout" 2>"$work_dir/journal-path.stderr" || path_status=$?
+  if [[ -n "$expected_failure" ]]; then
+    [[ "$path_status" != "0" && ! -s "$work_dir/journal-path.stdout" ]] ||
+      fail "failed journal $path_case emitted accepted consumer evidence"
+    grep -Fq "reason=$expected_failure" "$work_dir/journal-path.stderr" ||
+      fail "journal $path_case failed for the wrong reason"
+    continue
+  fi
+  [[ "$path_status" == "0" ]] || fail "journal path measurement failed: $path_case"
+  jq -e --argjson directory "$expected_directory" --argjson root "$expected_root" '
     .category == "system-journal" and
     .isDirectory == $directory and .onRootFilesystem == $root
-  ' >/dev/null || fail "journal directory/root evidence was incorrect: $path_case"
+  ' "$work_dir/journal-path.stdout" >/dev/null ||
+    fail "journal directory/root evidence was incorrect: $path_case"
 done
 
 preload_bin="$work_dir/preload-bin"
@@ -2891,6 +2961,10 @@ case "${0##*/}:$*" in
     printf 'Size Used Avail Use%% Mounted\n50000000000 37000000000 13000000000 74%% /\n'
     ;;
   "du:--bytes --summarize --one-file-system "*)
+    if [[ "$4" == "${STUB_DU_FAILURE_PATH:-}" ]]; then
+      printf '1234567890\t%s\n' "$4"
+      exit 47
+    fi
     printf '0\n'
     ;;
   "k3s:crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock --image-endpoint unix:///run/k3s/containerd/containerd.sock images -o json")
@@ -3125,6 +3199,79 @@ printf '\n%s\n%s\n\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$
 snapshot_case header-and-absent-telemetry pass \
   '.queue == {queueCount:4,backlog:3,consumersHealthy:true} and
    .runtime.k3sVersion == "k3s version v1.34.5+k3s1 (fixture)"'
+
+cat >"$work_dir/measurement-snapshot-runner" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$STUB_LIB"
+source "$STUB_SNAPSHOT_REMOTE" snapshot
+SH
+chmod +x "$work_dir/measurement-snapshot-runner"
+for capture_phase in pre post; do
+  cp "$journal_cases/before.json" "$work_dir/current-runtime.json"
+  cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+  : >"$work_dir/remote.log"
+  : >"$work_dir/journal-capacity.log"
+  : >"$work_dir/journal-command.log"
+  : >"$work_dir/measurement-command.log"
+  measurement_work="$work_dir/journal-$capture_phase-measurement-work"
+  measurement_result="$work_dir/journal-$capture_phase-measurement-reclaim.json"
+  measurement_checkpoint="$work_dir/journal-$capture_phase-measurement-checkpoint.json"
+  measurement_log="$work_dir/journal-$capture_phase-measurement.log"
+  printf 'stale\n' >"$measurement_checkpoint"
+  snapshot_at=1
+  [[ "$capture_phase" != post ]] || snapshot_at=2
+  measurement_status=0
+  env "${snapshot_env[@]}" \
+    PATH="$snapshot_bin:$journal_bin:$stub_bin:$PATH" \
+    K3S_DISK_REMOTE_RUNNER="$work_dir/remote-runner" \
+    STUB_SNAPSHOT_RUNNER="$work_dir/measurement-snapshot-runner" \
+    STUB_SNAPSHOT_AT="$snapshot_at" STUB_SNAPSHOT_REMOTE="$REMOTE" \
+    STUB_LIB="$ROOT_DIR/infra/oci/scripts/lib.sh" STUB_DU_FAILURE_PATH=/var/log \
+    STUB_SNAPSHOT_COMMAND_LOG="$work_dir/measurement-command.log" \
+    STUB_CURRENT_RUNTIME="$work_dir/current-runtime.json" \
+    STUB_CAPACITY_SUMMARY="$work_dir/current-summary.json" \
+    STUB_JOURNAL_REMOTE="$REMOTE" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
+    STUB_JOURNAL_POST_RUNTIME="$journal_cases/cleaned.json" \
+    STUB_PRELOAD_POST_RUNTIME="$journal_cases/complete.json" \
+    STUB_CAPACITY_LOG="$work_dir/journal-capacity.log" \
+    GITHUB_RUN_ID=501 DIAGNOSIS_RUN_ID=500 \
+    DIAGNOSIS_FILE="$journal_cases/diagnosis.json" \
+    RECLAIM_CATEGORY=system-journal RECLAIM_IMAGE_IDS='[]' \
+    WORK_DIR="$measurement_work" OUTPUT_FILE="$measurement_result" \
+    CHECKPOINT_OUTPUT_FILE="$measurement_checkpoint" \
+    "$ORCHESTRATOR" reclaim >"$measurement_log" 2>&1 || measurement_status=$?
+  [[ "$measurement_status" != "0" && ! -e "$measurement_checkpoint" ]] ||
+    fail "journal $capture_phase measurement failure retained successful release authority"
+  grep -Fxq 'du:--bytes --summarize --one-file-system /var/log' \
+    "$work_dir/measurement-command.log" ||
+    fail "journal $capture_phase measurement did not reach the real consumer collection"
+  grep -Fq 'reason=aggregate size measurement failed for system-logs' "$measurement_log" ||
+    fail "journal $capture_phase measurement failed for the wrong reason"
+  if grep -Eq 'k3s_disk_recovery=reclaim status=PASS|/synthetic-private-journal/' "$measurement_log"; then
+    fail "journal $capture_phase measurement exposed native output or finalized successfully"
+  fi
+  if [[ "$capture_phase" == pre ]]; then
+    [[ "$(awk -F '\t' '{print $1}' "$work_dir/remote.log")" == snapshot &&
+       ! -s "$work_dir/journal-command.log" && ! -s "$work_dir/journal-capacity.log" &&
+       ! -s "$measurement_work/runtime-before.json" && ! -e "$measurement_result" ]] ||
+      fail "partial pre-state measurement reached mutation or emitted accepted evidence"
+  else
+    [[ "$(awk -F '\t' '{print $1}' "$work_dir/remote.log")" == \
+       $'snapshot\nreclaim-system-journal\npreload-candidate-images\nsnapshot' &&
+       "$(cat "$work_dir/journal-command.log")" == \
+       $'--rotate\n--directory=/var/log/journal --vacuum-size=536870912' &&
+       "$(wc -l <"$work_dir/journal-capacity.log" | tr -d ' ')" == "2" &&
+       ! -s "$measurement_work/runtime-after.json" ]] ||
+      fail "partial post-state measurement changed command order or skipped post evidence"
+    jq -e '
+      .category == "system-journal" and .terminalStatus == "INCOMPLETE" and
+      .reason == "post-state-capture-failed"
+    ' "$measurement_result" >/dev/null ||
+      fail "partial post-state measurement did not prevent successful finalization"
+  fi
+done
+
 awk -F '\t' '$1 != "telemetry"' "$candidate_images" >"$work_dir/candidate-missing.tsv"
 awk -F '\t' 'BEGIN {OFS="\t"} $1 == "telemetry" {$1="auth"} {print}' \
   "$candidate_images" >"$work_dir/candidate-duplicate.tsv"

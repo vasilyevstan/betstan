@@ -272,17 +272,23 @@ mount_json() {
 fixed_path_bytes() {
   local category="$1"
   local path="$2"
-  local bytes=0 is_directory=false on_root_filesystem=false
+  local bytes=0 is_directory=false on_root_filesystem=false resolved_path mount_target
   if [[ -e "$path" ]]; then
-    bytes="$(du --bytes --summarize --one-file-system "$path" | awk '{print $1}')"
+    bytes="$(du --bytes --summarize --one-file-system "$path" 2>/dev/null | awk '{print $1}')" ||
+      fail "aggregate size measurement failed for $category"
   fi
   [[ "$bytes" =~ ^[0-9]+$ ]] || fail "invalid aggregate size for $category"
   if [[ "$category" == "system-journal" ]]; then
-    if [[ -d "$path" && ! -L "$path" &&
-          "$(readlink -f -- "$path")" == "$path" ]]; then
-      is_directory=true
-      if [[ "$(findmnt --noheadings --output TARGET --target "$path")" == "/" ]]; then
-        on_root_filesystem=true
+    if [[ -d "$path" && ! -L "$path" ]]; then
+      resolved_path="$(readlink -f -- "$path" 2>/dev/null)" ||
+        fail "path resolution failed for system-journal"
+      if [[ "$resolved_path" == "$path" ]]; then
+        is_directory=true
+        mount_target="$(findmnt --noheadings --output TARGET --target "$path" 2>/dev/null)" ||
+          fail "mount measurement failed for system-journal"
+        if [[ "$mount_target" == "/" ]]; then
+          on_root_filesystem=true
+        fi
       fi
     fi
     jq -cn --arg category "$category" --arg path "$path" --argjson bytes "$bytes" \
@@ -848,7 +854,7 @@ snapshot() {
       mongo-data:/var/lib/betstan/mongo; do
       fixed_path_bytes "${spec%%:*}" "${spec#*:}"
     done | jq -cs 'sort_by(.category)'
-  )"
+  )" || fail "fixed-path consumer measurement failed"
 
   # Native inventories can exceed Linux's per-argument limit; keep JSON on stdin.
   builtin printf '%s\n' \
@@ -992,8 +998,16 @@ case "$ACTION" in
     apt-get clean
     ;;
   reclaim-system-journal)
-    journalctl --rotate
-    journalctl --directory=/var/log/journal --vacuum-size=536870912
+    journalctl --rotate >/dev/null 2>&1 || {
+      journal_status=$?
+      echo "k3s_disk_remote=reclaim-system-journal status=FAIL reason=system journal rotation failed" >&2
+      exit "$journal_status"
+    }
+    journalctl --directory=/var/log/journal --vacuum-size=536870912 >/dev/null 2>&1 || {
+      journal_status=$?
+      echo "k3s_disk_remote=reclaim-system-journal status=FAIL reason=system journal vacuum failed" >&2
+      exit "$journal_status"
+    }
     ;;
   reclaim-cri-owned-unused-images)
     jq -e '
