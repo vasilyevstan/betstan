@@ -22,9 +22,10 @@ SUBJECT_SHA="ac1008081411d64d96dd0221126090577ea72c6b"
 CAPACITY_RUN=34122018082
 WORKFLOW_ID=325567150
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/betstan-upstream-binding-XXXXXX")"
-chmod 700 "$WORK"
+WORK="$ROOT_DIR/infra/oci/tests/.upstream-binding-work.$$"
+mkdir -m 700 "$WORK"
 trap 'rm -rf "$WORK"' EXIT
+mkdir "$WORK/repository"
 
 passed=0
 fail() {
@@ -861,7 +862,7 @@ validate_disk_infrastructure() {
 }
 
 for operation in oci-k3s-disk-diagnose oci-k3s-disk-reclaim-apt \
-  oci-k3s-disk-reclaim-cri; do
+  oci-k3s-disk-reclaim-cri oci-k3s-disk-reclaim-journal; do
   reset_fixtures
   write_disk_infrastructure_fixture 101 202
   validate_disk_infrastructure "$operation" >/dev/null ||
@@ -1013,6 +1014,30 @@ assert equals["ghcrBuildRunId"] == "{input:ghcr_build_run_id}"
 assert equals["terminalStatus"] == "DIAGNOSED"
 ' || fail "apt disk reclaim policy is wrong"
 
+"$POLICY" all | python3 -c '
+import json, sys
+policies = {p["operation"]: p for p in json.load(sys.stdin)}
+apt = policies["oci-k3s-disk-reclaim-apt"]
+journal = policies["oci-k3s-disk-reclaim-journal"]
+assert journal["subjectRelation"] == "current"
+assert journal["environment"] == "oci-infrastructure"
+assert journal["fixedInputs"]["phase"] == "reclaim-disk"
+assert journal["fixedInputs"]["reclaim_category"] == "system-journal"
+assert journal["fixedInputs"]["reclaim_image_ids"] == "[]"
+assert journal["fixedInputs"]["ghcr_package_validation_run_id"] == ""
+assert journal["inputNames"] == apt["inputNames"]
+assert journal["upstreamRunBindings"] == apt["upstreamRunBindings"]
+assert journal["upstreamRunBindings"][-1]["artifactContent"]["equals"]["schemaVersion"] == \
+    "k3s-node-disk-diagnosis.v2"
+assert set(journal["inputNames"]).isdisjoint(
+    {"journal_path", "vacuum_size", "retry", "fallback", "environment"}
+)
+journal["operation"] = apt["operation"]
+journal["fixedInputs"]["reclaim_category"] = "apt-package-cache"
+assert journal == apt
+' || fail "journal disk reclaim did not preserve exact non-CRI authority"
+ok "journal reclaim has distinct fixed operation and unchanged non-CRI bindings"
+
 "$POLICY" get oci-k3s-disk-reclaim-cri | python3 -c '
 import json, sys
 p = json.load(sys.stdin)
@@ -1082,7 +1107,7 @@ PY
   "$AUTHORITY_HELPER" validate-request \
     --request "$WORK/request.json" --policy-json "$(cat "$policy_file")" \
     --repository "$REPO" --current-master "$(printf 'a%.0s' {1..40})" \
-    --repo-root "$ROOT_DIR" --output "$WORK/normalized-$1.json" >/dev/null
+    --repo-root "$WORK/repository" --output "$WORK/normalized-$1.json" >/dev/null
   python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inputHash"])' \
     "$WORK/normalized-$1.json"
 }
@@ -1377,6 +1402,7 @@ if sorted(manifest) != [
     "oci-k3s-disk-diagnose",
     "oci-k3s-disk-reclaim-apt",
     "oci-k3s-disk-reclaim-cri",
+    "oci-k3s-disk-reclaim-journal",
 ]:
     raise SystemExit("manifest does not cover the exact bound infrastructure operations")
 for operation, bindings in manifest.items():
@@ -1404,7 +1430,8 @@ print("manifest equivalence ok")
 EQUIV
 ok "workflow binding manifest is byte-equivalent to the dispatcher policy"
 
-for operation in oci-k3s-disk-reclaim-apt oci-k3s-disk-reclaim-cri; do
+for operation in oci-k3s-disk-reclaim-apt oci-k3s-disk-reclaim-cri \
+  oci-k3s-disk-reclaim-journal; do
   reset_fixtures
   diagnosis_binding="$(
     jq -c --arg operation "$operation" \
