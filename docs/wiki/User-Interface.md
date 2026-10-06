@@ -289,21 +289,25 @@ users created, and user logins.
 
 In overview mode, each card contains a dependency-free graph and all fourteen
 exact date/value pairs. All eight cards use an immediate, theme-matched,
-two-line tooltip: **time first, exact count second**, in both daily and hourly
-views. Daily tooltips show `00:00-24:00 UTC`: the whole UTC-day aggregation
-window, including today's in-progress day, not a claim that the day is
-complete. Hourly tooltips show `HH:mm UTC`, the active hour bucket's UTC start.
-Both refer to the accepted bucket, not individual event times, the current
-clock, snapshot-generation time, or local time. Counts are never rounded or
-abbreviated. Calendar dates are absent from each tooltip's text, accessible
-name, description, and title. Machine-readable metadata retains the actual
-daily date or hourly UTC instant; `24:00` is only a window label, never a
-constructed date-time. Date context remains outside tooltips in the
-selected-day heading, daily date/value list and button names, and snapshot
-timestamps. Hovering a bar or focusing a native daily date/value button shows
-the same time-and-count content. Daily buttons remain usable by keyboard and
-touch; **Escape** dismisses the tooltip, and exact values remain readable
-without hover.
+two-line tooltip: **UTC date or time first, exact count second**. Daily
+tooltips show `YYYY-MM-DD UTC`, identifying the accepted UTC calendar day,
+including today's in-progress day, not a claim that the day is complete.
+Hourly tooltips show `HH:mm UTC`, the accepted hour bucket's UTC start.
+Both labels identify UTC aggregation buckets, not individual event times,
+the current clock, snapshot-generation time, or local time. Counts are never
+rounded or abbreviated. Calendar dates are absent from hourly tooltips' text,
+accessible names, descriptions, and titles. Machine-readable metadata retains
+the actual daily date or hourly UTC instant and exact count. The selected-day
+heading supplies hourly date context outside the tooltip; daily date/value
+lists, button names, and snapshot timestamps also retain their dates.
+Hovering a bar or focusing a native daily date/value button shows the same
+bucket-and-count content. Daily buttons remain usable by keyboard and touch;
+**Escape** dismisses the tooltip, and exact values remain readable without
+hover.
+
+This label-only client correction is compatible with existing API responses
+and stored observations. It follows the existing client rollout and rollback
+path described above.
 
 Clicking a daily bar or activating its date/value button changes only that
 card to the selected day's **24 hourly UTC counts**, from **00:00** through
