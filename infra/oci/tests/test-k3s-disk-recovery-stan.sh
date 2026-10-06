@@ -2957,6 +2957,9 @@ case "${0##*/}:$*" in
   "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /var/lib/betstan/mongo")
     jq '{filesystems:[.mongo.mount]}' "$STUB_CURRENT_RUNTIME"
     ;;
+  "findmnt:--noheadings --output TARGET --target /var/log/journal")
+    printf '/\n'
+    ;;
   "df:--block-size=1 --output=size,used,avail,pcent,target /")
     printf 'Size Used Avail Use%% Mounted\n50000000000 37000000000 13000000000 74%% /\n'
     ;;
@@ -3022,6 +3025,11 @@ chmod +x "$snapshot_bin/jq" "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
 for snapshot_command in findmnt df du k3s systemctl; do
   ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
 done
+snapshot_journal_mount="$(
+  "$snapshot_bin/findmnt" --noheadings --output TARGET --target /var/log/journal
+)" || fail "snapshot journal mount fixture rejected the fixed probe"
+[[ "$snapshot_journal_mount" == "/" ]] ||
+  fail "snapshot journal mount fixture did not identify the root filesystem"
 
 expected_preload_b64="$(printf '%s' "$preload_refs" | base64 | tr -d '\n')"
 : >"$work_dir/preload-transport.log"
