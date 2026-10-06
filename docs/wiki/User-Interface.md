@@ -48,7 +48,9 @@ The header keeps visibly labelled **Events**, **Backoffice**, **Telemetry**,
 authentication, **Layout**, and **Theme** choices discoverable. Signed-in
 users also receive **My bets**. Backoffice and Telemetry remain visibly
 labelled and usable for anonymous visitors as well as signed-in users. Header
-navigation and presentation choices preserve the current query parameters.
+navigation and presentation choices preserve the current query parameters. The
+browser tab uses a dedicated 48 x 48 square SVG emblem derived from the
+existing header wordmark, while install and touch icons remain unchanged.
 
 My Bets opens with **All statuses**, **All types**, **All dates**, and
 **Newest first**. The compact toolbar keeps **Search bets**, the matching count,
