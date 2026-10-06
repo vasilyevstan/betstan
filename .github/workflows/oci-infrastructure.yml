@@ -108,6 +108,7 @@ on:
         options:
           - none
           - apt-package-cache
+          - system-journal
           - cri-owned-unused-images
       reclaim_image_ids:
         description: Compact JSON array of exact diagnosis-owned unused CRI image IDs
@@ -1260,7 +1261,7 @@ jobs:
               [ "$CONFIRMATION" = "RECLAIM EVIDENCED K3S ROOT DISK" ]
               [[ "$DIAGNOSIS_RUN_ID" =~ ^[1-9][0-9]*$ ]]
               case "$RECLAIM_CATEGORY" in
-                apt-package-cache)
+                apt-package-cache | system-journal)
                   [ -z "$GHCR_PACKAGE_VALIDATION_RUN_ID" ]
                   [ "$RECLAIM_IMAGE_IDS" = "[]" ]
                   ;;

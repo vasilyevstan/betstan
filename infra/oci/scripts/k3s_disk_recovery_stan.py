@@ -16,6 +16,8 @@ REPOSITORY_DIGEST = re.compile(
     rf"{re.escape(REPOSITORY)}@(sha256:[0-9a-f]{{64}})"
 )
 THRESHOLD = 70
+JOURNAL_PATH = "/var/log/journal"
+JOURNAL_TARGET_BYTES = 536870912
 DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 CURRENT_SERVICES = frozenset(
     ("auth", "bet", "backoffice", "client", "event", "gamemaster",
@@ -185,7 +187,10 @@ def validate_capacity(capacity):
 def validate_runtime(runtime, expected_profile=None):
     schema = runtime.get("schemaVersion")
     held_version = schema == "k3s-node-disk-held-runtime.v1"
-    version_two = schema == "k3s-node-disk-runtime.v2"
+    version_three = schema == "k3s-node-disk-runtime.v3"
+    application_version = schema in {
+        "k3s-node-disk-runtime.v2", "k3s-node-disk-runtime.v3"
+    }
     if held_version:
         required = {
             "schemaVersion",
@@ -212,7 +217,7 @@ def validate_runtime(runtime, expected_profile=None):
             "publicRead",
             "runtime",
         }
-        if version_two:
+        if application_version:
             required.update(("snapshotProfile", "applicationImages"))
         profile = runtime.get("snapshotProfile", "public")
     if set(runtime) != required:
@@ -220,6 +225,7 @@ def validate_runtime(runtime, expected_profile=None):
     if schema not in {
         "k3s-node-disk-runtime.v1",
         "k3s-node-disk-runtime.v2",
+        "k3s-node-disk-runtime.v3",
         "k3s-node-disk-held-runtime.v1",
     }:
         fail("runtime snapshot schema version is unsupported")
@@ -324,15 +330,25 @@ def validate_runtime(runtime, expected_profile=None):
         "mongo-data": "/var/lib/betstan/mongo",
         "system-logs": "/var/log",
     }
+    if version_three:
+        expected_consumers["system-journal"] = JOURNAL_PATH
     consumers = runtime["consumers"]
     if (
         not isinstance(consumers, list)
+        or len(consumers) != len(expected_consumers)
+        or not all(isinstance(item, dict) for item in consumers)
         or {item.get("category") for item in consumers} != set(expected_consumers)
     ):
         fail("fixed-path aggregate consumer evidence is incomplete")
     for item in consumers:
+        keys = {"category", "path", "bytes"}
+        if item["category"] == "system-journal":
+            keys.update(("isDirectory", "onRootFilesystem"))
+            if any(type(item.get(key)) is not bool
+                   for key in ("isDirectory", "onRootFilesystem")):
+                fail("system journal directory evidence is invalid")
         if (
-            set(item) != {"category", "path", "bytes"}
+            set(item) != keys
             or item["path"] != expected_consumers[item["category"]]
             or type(item["bytes"]) is not int
             or item["bytes"] < 0
@@ -351,7 +367,7 @@ def validate_runtime(runtime, expected_profile=None):
         for item in runtime["kubernetesImageReferences"]
     ):
         fail("Kubernetes image reference evidence is invalid")
-    if version_two:
+    if application_version:
         application_images = runtime["applicationImages"]
         if not isinstance(application_images, list):
             fail("application image evidence is malformed")
@@ -1228,6 +1244,29 @@ def validate_fresh_against_diagnosis(diagnosis, runtime, capacity):
     return classification
 
 
+def journal_bytes(runtime):
+    consumers = runtime.get("consumers")
+    if not isinstance(consumers, list):
+        fail("system journal evidence is missing")
+    journals = [
+        item for item in consumers
+        if isinstance(item, dict) and item.get("category") == "system-journal"
+    ]
+    if len(journals) != 1:
+        fail("system journal evidence is missing or ambiguous")
+    journal = journals[0]
+    if (
+        set(journal) != {"category", "path", "bytes", "isDirectory", "onRootFilesystem"}
+        or journal["path"] != JOURNAL_PATH
+        or journal["isDirectory"] is not True
+        or journal["onRootFilesystem"] is not True
+        or type(journal["bytes"]) is not int
+        or journal["bytes"] < 0
+    ):
+        fail("system journal is not a real directory on the root filesystem")
+    return journal["bytes"]
+
+
 def plan_reclaim(args):
     diagnosis = load_json(args.diagnosis, "diagnosis manifest")
     validate_diagnosis(diagnosis)
@@ -1244,6 +1283,22 @@ def plan_reclaim(args):
         )
         if apt["bytes"] <= 0:
             fail("apt package-cache has no evidenced reclaim candidate")
+    elif args.category == "system-journal":
+        if ids:
+            fail("system journal reclaim cannot select image IDs")
+        bound_bytes = journal_bytes(diagnosis["runtime"])
+        fresh_bytes = journal_bytes(runtime)
+        if min(bound_bytes, fresh_bytes) <= JOURNAL_TARGET_BYTES:
+            fail("system journal does not exceed the fixed vacuum target")
+        # Gross bytes are only an impossibility bound, not predicted recoverability.
+        excess = max(
+            0,
+            runtime["root"]["df"]["usedBytes"]
+            - runtime["root"]["df"]["capacityBytes"] * THRESHOLD // 100,
+            capacity["usedBytes"] - capacity["capacityBytes"] * THRESHOLD // 100,
+        )
+        if fresh_bytes < excess:
+            fail("system journal bytes cannot cover the fresh filesystem excess")
     elif args.category == "cri-owned-unused-images":
         if not ids:
             fail("CRI reclaim requires at least one exact image ID")
@@ -1320,7 +1375,9 @@ def finalize_reclaim(args):
     )
     if args.category == "cri-owned-unused-images":
         category_converged = removed == ids and not unexpected_added
-    elif args.category == "apt-package-cache":
+    elif args.category in {"apt-package-cache", "system-journal"}:
+        if ids:
+            fail("non-CRI reclaim cannot select image IDs")
         proven_candidate_ids = set()
         for candidate in diagnosis["candidateImages"]:
             try:
@@ -1329,20 +1386,48 @@ def finalize_reclaim(args):
                 continue
             proven_candidate_ids.add(residency["residentImageId"])
         unexpected_added = sorted(set(raw_added) - proven_candidate_ids)
-        before_apt = next(
-            item["bytes"] for item in before["consumers"]
-            if item["category"] == "apt-package-cache"
-        )
-        post_apt = next(
-            item["bytes"] for item in post["consumers"]
-            if item["category"] == "apt-package-cache"
-        )
-        category_converged = (
-            not removed and not unexpected_added and post_apt <= before_apt
-        )
+        if args.category == "system-journal":
+            if not getattr(args, "pre_runtime", None):
+                fail("system journal finalization requires the fresh pre-mutation snapshot")
+            fresh = load_json(args.pre_runtime, "pre-reclaim runtime snapshot")
+            validate_runtime(fresh)
+            fresh_state, _ = security_state(fresh, classify(fresh, diagnosis["candidateImages"]))
+            if fresh_state != diagnosis["securityStateSha256"]:
+                fail("pre-reclaim journal runtime identity differs from diagnosis")
+            before_bytes = journal_bytes(before)
+            fresh_bytes = journal_bytes(fresh)
+            post_bytes = journal_bytes(post)
+            cleanup_converged = (
+                min(before_bytes, fresh_bytes) > JOURNAL_TARGET_BYTES
+                and post_bytes < min(before_bytes, fresh_bytes)
+            )
+            stable = stable and (
+                before["root"]["fsType"] == post["root"]["mount"]["fstype"]
+                and before["root"]["capacityBytes"] == post["root"]["df"]["capacityBytes"]
+                and before["root"]["capacityBytes"] == post["root"]["mount"]["size"]
+                and before["mongo"]["fsType"] == post["mongo"]["mount"]["fstype"]
+                and before["mongo"]["capacityBytes"] == post["mongo"]["mount"]["size"]
+                and before["workload"] == post["workload"]
+                and before["queue"] == post["queue"]
+                and before["publicRead"] == post["publicRead"]
+                and before.get("applicationImages") == post.get("applicationImages")
+            )
+        else:
+            before_bytes = next(
+                item["bytes"] for item in before["consumers"]
+                if item["category"] == args.category
+            )
+            post_bytes = next(
+                item["bytes"] for item in post["consumers"]
+                if item["category"] == args.category
+            )
+            cleanup_converged = post_bytes <= before_bytes
+        category_converged = not removed and not unexpected_added and cleanup_converged
     else:
         fail("reclaim category is unsupported")
     within_limit = capacity["withinLimit"] is True
+    if args.category == "system-journal":
+        within_limit = within_limit and raw_root_within_limit(post)
     success = mutation_succeeded and category_converged and stable and within_limit
     result = add_checksum(
         {
@@ -1698,7 +1783,7 @@ def validate_release_checkpoint(value):
     else:
         if (
             value["reclaimRunId"] != value["producerRunId"]
-            or value["reclaimCategory"] != "apt-package-cache"
+            or value["reclaimCategory"] not in {"apt-package-cache", "system-journal"}
             or not re.fullmatch(
                 r"[0-9a-f]{64}", str(value["reclaimChecksumSha256"])
             )
@@ -1717,7 +1802,9 @@ def write_release_checkpoint(args):
     validate_capacity(capacity)
     crosscheck_filesystem(runtime, capacity)
     if (
-        runtime.get("schemaVersion") != "k3s-node-disk-runtime.v2"
+        runtime.get("schemaVersion") not in {
+            "k3s-node-disk-runtime.v2", "k3s-node-disk-runtime.v3"
+        }
         or diagnosis["sourceSha"] != args.source_sha
         or args.control_sha != args.source_sha
         or "controlSha" in diagnosis
@@ -1738,7 +1825,7 @@ def write_release_checkpoint(args):
         if (
             reclaim["sourceSha"] != diagnosis["sourceSha"]
             or reclaim["diagnosisWorkflowRunId"] != diagnosis["workflowRunId"]
-            or reclaim["category"] != "apt-package-cache"
+            or reclaim["category"] not in {"apt-package-cache", "system-journal"}
             or reclaim["selectedImageIds"] != []
             or reclaim["removedImageIds"] != []
             or reclaim["unexpectedAddedImageIds"] != []
@@ -1746,10 +1833,16 @@ def write_release_checkpoint(args):
         ):
             print("k3s_release_disk_checkpoint=INELIGIBLE")
             return
+        if reclaim["category"] == "system-journal" and not (
+            journal_bytes(diagnosis["runtime"]) > JOURNAL_TARGET_BYTES
+            and journal_bytes(runtime) < journal_bytes(diagnosis["runtime"])
+        ):
+            print("k3s_release_disk_checkpoint=INELIGIBLE")
+            return
         disposition = "READY_RECLAIMED"
         reclaim_run_id = producer_run_id
         reclaim_sha256 = reclaim["contentChecksumSha256"]
-        reclaim_category = "apt-package-cache"
+        reclaim_category = reclaim["category"]
     elif (
         diagnosis["workflowRunId"] != producer_run_id
         or diagnosis["kubeletCapacity"]["capacityBytes"] != capacity["capacityBytes"]
@@ -1987,9 +2080,9 @@ def write_incomplete_reclaim(args):
     diagnosis = load_json(args.diagnosis, "diagnosis manifest")
     validate_diagnosis(diagnosis)
     ids = sorted(selected_ids(args.image_ids))
-    if args.category == "apt-package-cache" and ids:
-        fail("apt package-cache reclaim cannot select image IDs")
-    if args.category not in {"apt-package-cache", "cri-owned-unused-images"}:
+    if args.category in {"apt-package-cache", "system-journal"} and ids:
+        fail("non-CRI reclaim cannot select image IDs")
+    if args.category not in {"apt-package-cache", "system-journal", "cri-owned-unused-images"}:
         fail("reclaim category is unsupported")
     result = add_checksum(
         {
@@ -2087,6 +2180,7 @@ def main():
 
     finalize = subparsers.add_parser("finalize-reclaim")
     finalize.add_argument("--diagnosis", required=True)
+    finalize.add_argument("--pre-runtime")
     finalize.add_argument("--post-runtime", required=True)
     finalize.add_argument("--post-capacity", required=True)
     finalize.add_argument("--category", required=True)

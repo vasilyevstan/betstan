@@ -85,6 +85,11 @@ fi
 if [[ "$ACTION" != "preload" && -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
   mkdir -p "$(dirname "$CHECKPOINT_OUTPUT_FILE")"
 fi
+if [[ "$ACTION" == "reclaim" && "$RECLAIM_CATEGORY" == "system-journal" &&
+      -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+  rm -f -- "$CHECKPOINT_OUTPUT_FILE" ||
+    fail "could not withhold the release checkpoint"
+fi
 chmod 700 "$WORK_DIR"
 runtime_before="$WORK_DIR/runtime-before.json"
 capacity_before="$WORK_DIR/capacity-before.json"
@@ -467,17 +472,18 @@ fi
 
 mutation_succeeded=true
 candidate_preload_status=0
-apt_candidate_refs=""
-if [[ "$RECLAIM_CATEGORY" == "apt-package-cache" ]]; then
-  apt_candidate_refs="$(
+cleanup_candidate_refs=""
+if [[ "$RECLAIM_CATEGORY" == "apt-package-cache" ||
+      "$RECLAIM_CATEGORY" == "system-journal" ]]; then
+  cleanup_candidate_refs="$(
     "$EVIDENCE_HELPER" diagnosis-candidate-image-refs \
       --diagnosis "$DIAGNOSIS_FILE"
   )" || fail "bound diagnosis candidate references are unavailable"
 fi
 case "$RECLAIM_CATEGORY" in
-  apt-package-cache)
-    if run_remote reclaim-apt-package-cache "[]"; then
-      preload_candidate_images "$apt_candidate_refs" ||
+  apt-package-cache | system-journal)
+    if run_remote "reclaim-$RECLAIM_CATEGORY" "[]"; then
+      preload_candidate_images "$cleanup_candidate_refs" ||
         candidate_preload_status=$?
     else
       mutation_succeeded=false
@@ -503,8 +509,7 @@ if [[ "$post_capture_succeeded" != "true" ]]; then
     --image-ids "$RECLAIM_IMAGE_IDS" \
     --reason post-state-capture-failed \
     --output "$OUTPUT_FILE"
-  if [[ "$RECLAIM_CATEGORY" == "apt-package-cache" &&
-     "$candidate_preload_status" -ne 0 ]]; then
+  if [[ "$candidate_preload_status" -ne 0 ]]; then
     if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
       rm -f -- "$CHECKPOINT_OUTPUT_FILE" ||
         fail "could not withhold the release checkpoint"
@@ -522,6 +527,7 @@ fi
 set +e
 "$EVIDENCE_HELPER" finalize-reclaim \
   --diagnosis "$DIAGNOSIS_FILE" \
+  --pre-runtime "$runtime_before" \
   --post-runtime "$runtime_after" \
   --post-capacity "$capacity_after" \
   --category "$RECLAIM_CATEGORY" \
@@ -530,8 +536,7 @@ set +e
   --output "$OUTPUT_FILE"
 finalize_status=$?
 set -e
-if [[ "$RECLAIM_CATEGORY" == "apt-package-cache" &&
-   "$candidate_preload_status" -ne 0 ]]; then
+if [[ "$candidate_preload_status" -ne 0 ]]; then
   if [[ -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
     rm -f -- "$CHECKPOINT_OUTPUT_FILE" ||
       fail "could not withhold the release checkpoint"

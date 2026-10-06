@@ -7,7 +7,8 @@ ORCHESTRATOR="$ROOT_DIR/infra/oci/scripts/k3s-node-disk-recovery-stan.sh"
 REMOTE="$ROOT_DIR/infra/oci/scripts/k3s-node-disk-remote-stan.sh"
 WORK_PARENT="$ROOT_DIR/infra/oci/tests/.k3s-disk-recovery-workdirs"
 mkdir -p "$WORK_PARENT"
-work_dir="$(mktemp -d "$WORK_PARENT/test.XXXXXX")"
+work_dir="$WORK_PARENT/test.$$"
+mkdir -m 700 "$work_dir"
 cleanup() {
   while read -r pid; do
     [[ -n "$pid" ]] || continue
@@ -895,6 +896,261 @@ if "$HELPER" finalize-reclaim --diagnosis "$diagnosis" \
   fail "reclaim above the unchanged 70 percent limit was accepted"
 fi
 
+journal_cases="$work_dir/journal-cases"
+mkdir -p "$journal_cases"
+python3 - "$HELPER" "$runtime" "$capacity" "$candidate_images" \
+  "$journal_cases" "$SOURCE_SHA" <<'PY'
+import argparse
+import copy
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+helper, runtime_path, capacity_path, candidates_path, output_path, source = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("disk", helper)
+disk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(disk)
+output = Path(output_path)
+legacy = json.loads(Path(runtime_path).read_text())
+capacity = json.loads(Path(capacity_path).read_text())
+candidates = disk.parse_candidate_images(candidates_path)
+
+
+def write(name, value):
+    path = output / f"{name}.json"
+    path.write_text(disk.canonical(value) + "\n")
+    return str(path)
+
+
+def rejected(callback, label, reason=None):
+    try:
+        callback()
+    except SystemExit as exc:
+        if reason is not None:
+            assert reason in str(exc), (label, str(exc))
+    else:
+        raise AssertionError(f"accepted {label}")
+
+
+disk.validate_runtime(legacy)
+v2 = copy.deepcopy(legacy)
+v2.update(schemaVersion="k3s-node-disk-runtime.v2", snapshotProfile="public")
+v2["applicationImages"] = [
+    {"service": row["service"], "imageRef": row["imageRef"]} for row in candidates
+]
+disk.validate_runtime(v2)
+before = copy.deepcopy(v2)
+before["schemaVersion"] = "k3s-node-disk-runtime.v3"
+before["consumers"].append({
+    "category": "system-journal", "path": "/var/log/journal", "bytes": 3_000_000_000,
+    "isDirectory": True, "onRootFilesystem": True,
+})
+disk.validate_runtime(before)
+for version in (legacy, v2):
+    extra = copy.deepcopy(version)
+    extra["consumers"].append(copy.deepcopy(before["consumers"][-1]))
+    rejected(lambda: disk.validate_runtime(extra), "seventh consumer in legacy schema")
+for change in (
+    lambda value: value["consumers"].pop(),
+    lambda value: value["consumers"].append(copy.deepcopy(value["consumers"][-1])),
+    lambda value: value["consumers"].__setitem__(0, copy.deepcopy(value["consumers"][-1])),
+    lambda value: value["consumers"][-1].update(path="/run/log/journal"),
+    lambda value: value["consumers"][-1].update(isDirectory=1),
+    lambda value: value["consumers"][-1].update(extra=True),
+    lambda value: value.pop("applicationImages"),
+):
+    invalid = copy.deepcopy(before)
+    change(invalid)
+    rejected(lambda: disk.validate_runtime(invalid), "non-strict v3 runtime")
+assert disk.JOURNAL_TARGET_BYTES == 536870912
+assert disk.JOURNAL_PATH == "/var/log/journal"
+before_path = write("before", before)
+diagnosis_path = str(output / "diagnosis.json")
+disk.build_diagnosis(argparse.Namespace(
+    runtime=before_path, capacity=capacity_path, candidate_images=candidates_path,
+    source_sha=source, infrastructure_run_id="400", ghcr_build_run_id="300",
+    workflow_run_id="500", mongo_storage=str(output / "unavailable.json"),
+    mongo_storage_failure="TRANSPORT_FAILED", output=diagnosis_path,
+))
+diagnosis = json.loads(Path(diagnosis_path).read_text())
+assert diagnosis["schemaVersion"] == "k3s-node-disk-diagnosis.v2"
+plan_args = dict(
+    diagnosis=diagnosis_path, runtime=before_path, capacity=capacity_path,
+    category="system-journal", image_ids="[]", protected_generations=None,
+    generation_map=None, output=str(output / "plan.json"),
+)
+
+
+def plan(**overrides):
+    disk.plan_reclaim(argparse.Namespace(**{**plan_args, **overrides}))
+
+
+plan()
+assert set(json.loads(Path(plan_args["output"]).read_text())) == {
+    "schemaVersion", "sourceSha", "diagnosisWorkflowRunId", "category",
+    "selectedImageIds", "securityStateSha256", "preRootUsedBytes",
+    "preRootUsedPercent", "terminalStatus", "contentChecksumSha256",
+}
+assert json.loads(Path(plan_args["output"]).read_text())["schemaVersion"] == \
+    "k3s-node-disk-reclaim-plan.v1"
+rejected(lambda: plan(image_ids=json.dumps([before["images"][0]["id"]])), "selected IDs")
+for label, change in (
+    ("missing", lambda rows: rows.pop()),
+    ("wrong-path", lambda rows: rows[-1].update(path="/var/log")),
+    ("not-directory", lambda rows: rows[-1].update(isDirectory=False)),
+    ("non-root", lambda rows: rows[-1].update(onRootFilesystem=False)),
+    ("at-target", lambda rows: rows[-1].update(bytes=536870912)),
+    ("below-target", lambda rows: rows[-1].update(bytes=536870911)),
+):
+    old = copy.deepcopy(diagnosis)
+    change(old["runtime"]["consumers"])
+    old.pop("contentChecksumSha256")
+    old_path = write(f"bound-{label}", disk.add_checksum(old))
+    rejected(lambda: plan(diagnosis=old_path), f"bound journal {label}")
+    fresh = copy.deepcopy(before)
+    change(fresh["consumers"])
+    fresh_path = write(f"fresh-{label}", fresh)
+    rejected(lambda: plan(runtime=fresh_path), f"fresh journal {label}")
+rejected(lambda: plan(runtime=write("fresh-v2", v2)), "legacy fresh snapshot")
+for larger in ("root", "kubelet"):
+    fresh = copy.deepcopy(before)
+    fresh_capacity = copy.deepcopy(capacity)
+    if larger == "root":
+        fresh["root"]["df"]["usedBytes"] += 500_000_000
+    else:
+        fresh_capacity.update(usedBytes=37_500_000_000, availableBytes=12_500_000_000,
+                              usedPercent=75.0)
+    fresh["consumers"][-1]["bytes"] = 2_500_000_000
+    fresh_capacity_path = write(f"capacity-{larger}", fresh_capacity)
+    plan(runtime=write(f"gross-equality-{larger}", fresh), capacity=fresh_capacity_path)
+    fresh["consumers"][-1]["bytes"] -= 1
+    rejected(
+        lambda: plan(runtime=write(f"insufficient-{larger}", fresh),
+                     capacity=fresh_capacity_path),
+        f"insufficient journal for larger {larger} excess", "cannot cover",
+    )
+
+after = copy.deepcopy(before)
+after["root"]["df"].update(usedBytes=34_500_000_000, availableBytes=15_500_000_000,
+                          usedPercent=69)
+after["root"]["mount"].update(used=34_500_000_000, avail=15_500_000_000)
+after["consumers"][-1]["bytes"] = 500_000_000
+post_capacity = copy.deepcopy(capacity)
+post_capacity.update(usedBytes=34_500_000_000, availableBytes=15_500_000_000,
+                     usedPercent=69.0, withinLimit=True)
+post_capacity_path = write("post-capacity", post_capacity)
+write("cleaned", after)
+for index, candidate in enumerate(candidates):
+    after["images"].append({
+        "id": f"sha256:{9000 + index:064x}", "repoTags": [],
+        "repoDigests": [candidate["imageRef"]], "sizeBytes": 1000, "pinned": False,
+    })
+after_path = write("complete", after)
+partial = copy.deepcopy(after)
+partial["images"] = partial["images"][:len(before["images"]) + 1]
+write("partial", partial)
+over = copy.deepcopy(partial)
+over["root"]["df"].update(usedBytes=35_500_000_000, availableBytes=14_500_000_000,
+                         usedPercent=71)
+write("over-limit", over)
+final_args = dict(
+    diagnosis=diagnosis_path, pre_runtime=before_path, post_runtime=after_path,
+    post_capacity=post_capacity_path,
+    category="system-journal", image_ids="[]", mutation_succeeded="true",
+    output=str(output / "reclaim.json"),
+)
+
+
+def finalize(**overrides):
+    disk.finalize_reclaim(argparse.Namespace(**{**final_args, **overrides}))
+
+
+finalize()
+result = json.loads(Path(final_args["output"]).read_text())
+assert result["schemaVersion"] == "k3s-node-disk-reclaim.v1"
+assert result["terminalStatus"] == "RECLAIMED"
+assert result["removedImageIds"] == result["unexpectedAddedImageIds"] == []
+for label, change in (
+    ("no-decrease", lambda value: value["consumers"][-1].update(bytes=3_000_000_000)),
+    ("increase", lambda value: value["consumers"][-1].update(bytes=3_000_000_001)),
+    ("removal", lambda value: value["images"].pop(0)),
+    ("foreign", lambda value: value["images"].append({
+        "id": "sha256:" + "f" * 64, "repoTags": [], "sizeBytes": 1, "pinned": False,
+        "repoDigests": ["docker.io/library/foreign@sha256:" + "f" * 64],
+    })),
+    ("ambiguous", lambda value: value["images"].append({
+        **value["images"][-1], "id": "sha256:" + "e" * 64,
+    })),
+    ("mount", lambda value: value["root"]["mount"].update(source="/dev/other")),
+    ("mount-size", lambda value: value["root"]["mount"].update(size=50_000_000_001)),
+    ("runtime", lambda value: value["runtime"].update(k3sVersion="k3s version v1.35.0")),
+    ("pod-count", lambda value: value["workload"].update(podCount=13)),
+    ("restarts", lambda value: value["workload"].update(restartCount=5)),
+    ("queue-count", lambda value: value["queue"].update(queueCount=12)),
+    ("queue-backlog", lambda value: value["queue"].update(backlog=8)),
+):
+    invalid = copy.deepcopy(after)
+    change(invalid)
+    rejected(lambda: finalize(post_runtime=write(label, invalid)), label)
+    assert json.loads(Path(final_args["output"]).read_text())["terminalStatus"] == "INCOMPLETE"
+invalid = copy.deepcopy(after)
+invalid["publicRead"][0]["status"] = 503
+rejected(lambda: finalize(post_runtime=write("public-read", invalid)), "public read drift")
+rejected(lambda: finalize(mutation_succeeded="false"), "mutation failure")
+rejected(lambda: finalize(image_ids=json.dumps([before["images"][0]["id"]])), "final IDs")
+rejected(lambda: finalize(pre_runtime=None), "missing fresh journal baseline")
+fresh = copy.deepcopy(before)
+fresh["consumers"][-1]["bytes"] = 2_000_000_000
+growing = copy.deepcopy(after)
+growing["consumers"][-1]["bytes"] = 2_000_000_001
+rejected(lambda: finalize(pre_runtime=write("fresh-smaller", fresh),
+                          post_runtime=write("post-growing", growing)),
+         "journal growth hidden by an older larger diagnosis")
+for root_extra, kubelet_extra in ((0, 0), (1, 0), (0, 1)):
+    equality = copy.deepcopy(after)
+    equality["root"]["df"].update(usedBytes=35_000_000_000 + root_extra,
+                                 availableBytes=15_000_000_000 - root_extra,
+                                 usedPercent=70)
+    equality_capacity = copy.deepcopy(post_capacity)
+    equality_capacity.update(usedBytes=35_000_000_000 + kubelet_extra,
+                             availableBytes=15_000_000_000 - kubelet_extra,
+                             usedPercent=70.0, withinLimit=kubelet_extra == 0)
+    overrides = dict(post_runtime=write("threshold-runtime", equality),
+                     post_capacity=write("threshold-capacity", equality_capacity))
+    if root_extra or kubelet_extra:
+        rejected(lambda: finalize(**overrides), "one byte above root/kubelet limit")
+    else:
+        finalize(**overrides)
+finalize()
+checkpoint_path = str(output / "checkpoint.json")
+disk.write_release_checkpoint(argparse.Namespace(
+    diagnosis=diagnosis_path, reclaim=final_args["output"], runtime=after_path,
+    capacity=post_capacity_path, source_sha=source, control_sha=source,
+    producer_run_id="501", output=checkpoint_path,
+))
+checkpoint = json.loads(Path(checkpoint_path).read_text())
+assert checkpoint["schemaVersion"] == "k3s-release-disk-checkpoint.v1"
+assert checkpoint["disposition"] == "READY_RECLAIMED"
+assert checkpoint["reclaimCategory"] == "system-journal"
+disk.validate_release_checkpoint(checkpoint)
+for updates in ({"disposition": "READY_NO_RECLAIM"}, {"reclaimCategory": "cri-owned-unused-images"}):
+    invalid = {**checkpoint, **updates}
+    invalid.pop("contentChecksumSha256")
+    rejected(lambda: disk.validate_release_checkpoint(disk.add_checksum(invalid)),
+             "invalid journal checkpoint authority")
+held = {key: after[key] for key in ("applicationRepository", "root", "mongo", "images", "runtime")}
+held.update(schemaVersion="k3s-node-disk-held-runtime.v1", snapshotProfile="held")
+for profile, runtime_file in (("public", after_path), ("held", write("held", held))):
+    disk.revalidate_release_checkpoint(argparse.Namespace(
+        checkpoint=checkpoint_path, runtime=runtime_file, capacity=post_capacity_path,
+        candidate_images=candidates_path, source_sha=source, producer_run_id="501",
+        profile=profile,
+    ))
+print("journal schema, planning, convergence, drift, residency, threshold and checkpoint contracts passed")
+PY
+
 checkpoint_runtime="$work_dir/checkpoint-runtime.json"
 checkpoint_capacity="$work_dir/checkpoint-capacity.json"
 python3 - "$runtime" "$candidate_images" "$checkpoint_runtime" <<'PY'
@@ -1511,6 +1767,9 @@ set -euo pipefail
 if [[ "$*" == "get nodes -o json" ]]; then
   printf '{"items":[{"metadata":{"name":"fixture-k3s"}}]}\n'
 elif [[ "$*" == "get --raw /api/v1/nodes/fixture-k3s/proxy/stats/summary" ]]; then
+  if [[ -n "${STUB_CAPACITY_LOG:-}" ]]; then
+    printf 'capacity\n' >>"$STUB_CAPACITY_LOG"
+  fi
   cat "${STUB_CAPACITY_SUMMARY:?}"
 else
   echo "unexpected kubectl invocation: $*" >&2
@@ -1559,6 +1818,14 @@ case "$action" in
     cat "$STUB_MONGO_STORAGE"
     ;;
   snapshot)
+    if [[ "${STUB_POST_CAPTURE_STATUS:-0}" != "0" &&
+          "$(awk '$1 == "snapshot" {count++} END {print count+0}' "$STUB_REMOTE_LOG")" == "2" ]]; then
+      exit "$STUB_POST_CAPTURE_STATUS"
+    fi
+    if [[ -n "${STUB_SNAPSHOT_RUNNER:-}" &&
+          "$(awk '$1 == "snapshot" {count++} END {print count+0}' "$STUB_REMOTE_LOG")" == "$STUB_SNAPSHOT_AT" ]]; then
+      exec "$STUB_SNAPSHOT_RUNNER"
+    fi
     cat "${STUB_CURRENT_RUNTIME:?}"
     ;;
   reclaim-cri-owned-unused-images)
@@ -1571,6 +1838,15 @@ case "$action" in
       "${STUB_CURRENT_RUNTIME:?}"
     cp "${STUB_APT_POST_SUMMARY:-${STUB_POST_SUMMARY:?}}" \
       "${STUB_CURRENT_SUMMARY:?}"
+    ;;
+  reclaim-system-journal)
+    [[ "$selected" == "[]" ]]
+    [[ "${STUB_JOURNAL_STATUS:-0}" == "0" ]] || exit "$STUB_JOURNAL_STATUS"
+    if [[ -n "${STUB_JOURNAL_REMOTE:-}" ]]; then
+      "$STUB_JOURNAL_REMOTE" reclaim-system-journal "$selected"
+    fi
+    cp "${STUB_JOURNAL_POST_RUNTIME:?}" "${STUB_CURRENT_RUNTIME:?}"
+    cp "${STUB_POST_SUMMARY:?}" "${STUB_CURRENT_SUMMARY:?}"
     ;;
   *)
     exit 1
@@ -1982,6 +2258,156 @@ jq -e '
 ' "$work_dir/orchestrated-apt-failure-reclaim.json" >/dev/null ||
   fail "failed APT cleanup lacked durable incomplete evidence"
 
+journal_bin="$work_dir/journal-bin"
+mkdir -p "$journal_bin"
+for command_name in bash base64 jq; do
+  ln -s "$(command -v "$command_name")" "$journal_bin/$command_name"
+done
+cat >"$journal_bin/journalctl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$STUB_JOURNAL_LOG"
+printf '/synthetic-private-journal/stdout-marker\n'
+printf '/synthetic-private-journal/stderr-marker\n' >&2
+case "$*" in
+  --rotate) exit "${STUB_ROTATE_STATUS:-0}" ;;
+  "--directory=/var/log/journal --vacuum-size=536870912") exit "${STUB_VACUUM_STATUS:-0}" ;;
+  *) exit 99 ;;
+esac
+SH
+chmod +x "$journal_bin/journalctl"
+
+for journal_case in success candidacy candidacy-over fatal mutation-failure rotate-failure vacuum-failure \
+  post-capture-failure fatal-post-capture candidacy-post-capture; do
+  cp "$journal_cases/before.json" "$work_dir/current-runtime.json"
+  cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+  : >"$work_dir/remote.log"
+  : >"$work_dir/journal-capacity.log"
+  : >"$work_dir/journal-command.log"
+  journal_checkpoint="$work_dir/journal-$journal_case-checkpoint.json"
+  journal_result="$work_dir/journal-$journal_case-reclaim.json"
+  journal_log="$work_dir/journal-$journal_case.log"
+  printf 'stale\n' >"$journal_checkpoint"
+  journal_args=(
+    STUB_JOURNAL_STATUS=0 STUB_PRELOAD_STATUS=0 STUB_POST_CAPTURE_STATUS=0
+    STUB_ROTATE_STATUS=0 STUB_VACUUM_STATUS=0
+    STUB_PRELOAD_POST_RUNTIME="$journal_cases/complete.json"
+  )
+  case "$journal_case" in
+    candidacy | candidacy-post-capture)
+      journal_args+=(STUB_PRELOAD_STATUS=20 STUB_PRELOAD_POST_RUNTIME="$journal_cases/partial.json")
+      ;;
+    candidacy-over)
+      journal_args+=(STUB_PRELOAD_STATUS=20 STUB_PRELOAD_POST_RUNTIME="$journal_cases/over-limit.json"
+        STUB_PRELOAD_POST_SUMMARY="$work_dir/summary-over.json")
+      ;;
+    fatal | fatal-post-capture)
+      journal_args+=(STUB_PRELOAD_STATUS=42 STUB_PRELOAD_POST_RUNTIME="$journal_cases/partial.json")
+      ;;
+    mutation-failure)
+      journal_args+=(STUB_JOURNAL_STATUS=41)
+      ;;
+    rotate-failure)
+      journal_args+=(STUB_ROTATE_STATUS=41)
+      ;;
+    vacuum-failure)
+      journal_args+=(STUB_VACUUM_STATUS=42)
+      ;;
+  esac
+  case "$journal_case" in
+    *post-capture*) journal_args+=(STUB_POST_CAPTURE_STATUS=43) ;;
+  esac
+  journal_status=0
+  env "${common_env[@]}" \
+    PATH="$journal_bin:$stub_bin:$PATH" \
+    STUB_JOURNAL_REMOTE="$REMOTE" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
+    GITHUB_RUN_ID=501 DIAGNOSIS_RUN_ID=500 \
+    DIAGNOSIS_FILE="$journal_cases/diagnosis.json" \
+    CANDIDATE_IMAGES_FILE="$candidate_cases/different-valid.tsv" \
+    RECLAIM_CATEGORY=system-journal RECLAIM_IMAGE_IDS='[]' \
+    STUB_JOURNAL_POST_RUNTIME="$journal_cases/cleaned.json" \
+    STUB_CAPACITY_LOG="$work_dir/journal-capacity.log" \
+    "${journal_args[@]}" OUTPUT_FILE="$journal_result" \
+    CHECKPOINT_OUTPUT_FILE="$journal_checkpoint" \
+    "$ORCHESTRATOR" reclaim >"$journal_log" 2>&1 || journal_status=$?
+  expected_actions=$'snapshot\nreclaim-system-journal\npreload-candidate-images\nsnapshot'
+  expected_commands=$'--rotate\n--directory=/var/log/journal --vacuum-size=536870912'
+  case "$journal_case" in
+    mutation-failure | rotate-failure | vacuum-failure)
+      expected_actions=$'snapshot\nreclaim-system-journal\nsnapshot'
+      case "$journal_case" in
+        mutation-failure) expected_commands="" ;;
+        rotate-failure) expected_commands=--rotate ;;
+      esac
+      ;;
+  esac
+  [[ "$(awk -F '\t' '{print $1}' "$work_dir/remote.log")" == "$expected_actions" &&
+     "$(cat "$work_dir/journal-command.log")" == "$expected_commands" &&
+     "$(wc -l <"$work_dir/journal-capacity.log" | tr -d ' ')" == "2" ]] ||
+    fail "journal $journal_case changed single-mutation/preload order or skipped post capture"
+  if grep -Fq '/synthetic-private-journal/' "$journal_log"; then
+    fail "journal $journal_case exposed raw journalctl output through the orchestrator"
+  fi
+  jq -e '.category == "system-journal" and .selectedImageIds == []' \
+    "$journal_result" >/dev/null ||
+    fail "journal $journal_case lost bounded reclaim evidence"
+  if [[ "$journal_case" != mutation-failure && "$journal_case" != rotate-failure &&
+        "$journal_case" != vacuum-failure ]]; then
+    awk -F '\t' '$1 == "preload-candidate-images" {print $2}' "$work_dir/remote.log" \
+      >"$work_dir/journal-preload-refs.json"
+    cmp "$work_dir/diagnosis-candidate-refs.json" "$work_dir/journal-preload-refs.json" ||
+      fail "journal preload ignored diagnosis-bound, service-sorted candidate references"
+  fi
+  case "$journal_case" in
+    success)
+      [[ "$journal_status" == "0" ]] || fail "journal success failed: $(cat "$journal_log")"
+      jq -e '.disposition == "READY_RECLAIMED" and .reclaimCategory == "system-journal"' \
+        "$journal_checkpoint" >/dev/null || fail "journal success lacked its checkpoint"
+      ;;
+    candidacy)
+      [[ "$journal_status" == "0" ]] || fail "valid status-20 journal reclaim became fatal"
+      ;;
+    fatal*)
+      [[ "$journal_status" == "42" ]] || fail "journal fatal preload status was collapsed"
+      ;;
+    *)
+      [[ "$journal_status" != "0" ]] || fail "journal failure passed: $journal_case"
+      ;;
+  esac
+  if [[ "$journal_case" != success ]]; then
+    [[ ! -e "$journal_checkpoint" ]] || fail "journal failure retained a checkpoint"
+  fi
+  case "$journal_case" in
+    success | candidacy | fatal)
+      jq -e '.terminalStatus == "RECLAIMED" and .unexpectedAddedImageIds == []' \
+        "$journal_result" >/dev/null || fail "journal valid postconditions were not finalized"
+      ;;
+    *post-capture*)
+      jq -e '.terminalStatus == "INCOMPLETE" and .reason == "post-state-capture-failed"' \
+        "$journal_result" >/dev/null || fail "journal failed capture lacked incomplete evidence"
+      ;;
+    mutation-failure | rotate-failure | vacuum-failure)
+      jq -e '.terminalStatus == "INCOMPLETE" and .mutationCommandSucceeded == false' \
+        "$journal_result" >/dev/null || fail "journal command failure lost mutation status"
+      ;;
+    *)
+      jq -e '.terminalStatus == "INCOMPLETE"' "$journal_result" >/dev/null ||
+        fail "journal failed mutation or threshold lacked incomplete evidence"
+      ;;
+  esac
+  case "$journal_case" in
+    candidacy*)
+      grep -Fxq 'k3s_release_disk_checkpoint=INELIGIBLE reason=candidate_preload' \
+        "$journal_log" || fail "journal candidacy failure reason was lost"
+      ;;
+    fatal*)
+      if grep -Fq 'reason=candidate_preload' "$journal_log"; then
+        fail "journal fatal error was converted to candidacy status"
+      fi
+      ;;
+  esac
+done
+
 cp "$runtime" "$work_dir/current-runtime.json"
 cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
 env "${common_env[@]}" \
@@ -2067,6 +2493,110 @@ grep -Fq \
   "crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock --image-endpoint unix:///run/k3s/containerd/containerd.sock rmi $RECLAIM_ID" \
   "$work_dir/k3s-crictl.log" ||
   fail "remote CRI reclaim did not use bundled k3s crictl with exact endpoint and ID"
+
+for journal_command_case in success rotate-failure vacuum-failure; do
+  : >"$work_dir/journal-command.log"
+  journal_command_args=(STUB_ROTATE_STATUS=0 STUB_VACUUM_STATUS=0)
+  expected_status=0
+  expected_diagnostic=""
+  expected_commands=$'--rotate\n--directory=/var/log/journal --vacuum-size=536870912'
+  case "$journal_command_case" in
+    rotate-failure)
+      journal_command_args+=(STUB_ROTATE_STATUS=41)
+      expected_status=41
+      expected_commands=--rotate
+      expected_diagnostic="k3s_disk_remote=reclaim-system-journal status=FAIL reason=system journal rotation failed"
+      ;;
+    vacuum-failure)
+      journal_command_args+=(STUB_VACUUM_STATUS=42)
+      expected_status=42
+      expected_diagnostic="k3s_disk_remote=reclaim-system-journal status=FAIL reason=system journal vacuum failed"
+      ;;
+  esac
+  journal_command_status=0
+  env PATH="$journal_bin" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
+    "${journal_command_args[@]}" "$REMOTE" reclaim-system-journal '[]' \
+    >"$work_dir/journal-command.stdout" 2>"$work_dir/journal-command.stderr" ||
+    journal_command_status=$?
+  [[ "$journal_command_status" == "$expected_status" &&
+     "$(cat "$work_dir/journal-command.log")" == "$expected_commands" ]] ||
+    fail "journal commands were changed, reordered, retried, or fell through: $journal_command_case"
+  [[ ! -s "$work_dir/journal-command.stdout" &&
+     "$(cat "$work_dir/journal-command.stderr")" == "$expected_diagnostic" ]] ||
+    fail "journal $journal_command_case exposed output other than fixed sanitized diagnostics"
+done
+for invalid_ids in "$selected" '[ ]' '{}'; do
+  : >"$work_dir/journal-command.log"
+  if PATH="$journal_bin" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
+      "$REMOTE" reclaim-system-journal "$invalid_ids" >/dev/null 2>&1; then
+    fail "journal mutation accepted nonliteral empty IDs"
+  fi
+  [[ ! -s "$work_dir/journal-command.log" ]] || fail "invalid IDs reached journalctl"
+done
+: >"$work_dir/journal-command.log"
+if PATH="$journal_bin" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
+    "$REMOTE" reclaim-system-journal '[]' --vacuum-size=1 >/dev/null 2>&1; then
+  fail "journal mutation accepted caller arguments"
+fi
+[[ ! -s "$work_dir/journal-command.log" ]] || fail "caller arguments reached journalctl"
+PATH="$journal_bin" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
+  K3S_DISK_SELECTED_IMAGE_IDS_B64=W10= \
+  "$REMOTE" reclaim-system-journal >"$work_dir/journal-encoded.log" 2>&1
+[[ "$(cat "$work_dir/journal-command.log")" == \
+   $'--rotate\n--directory=/var/log/journal --vacuum-size=536870912' ]] ||
+  fail "journal encoded transport changed its literal commands"
+[[ ! -s "$work_dir/journal-encoded.log" ]] ||
+  fail "journal encoded transport exposed raw command output"
+
+{
+  sed -n '/^fail()/,/^}/p' "$REMOTE"
+  sed -n '/^fixed_path_bytes()/,/^}/p' "$REMOTE"
+} >"$work_dir/journal-path-helper.sh"
+mkdir "$work_dir/journal-directory"
+ln -s "$work_dir/journal-directory" "$work_dir/journal-link"
+touch "$work_dir/journal-file"
+for path_case in directory non-root aliased-parent symlink file missing \
+  du-failure readlink-failure mount-failure; do
+  journal_path="$work_dir/journal-directory"
+  canonical_path="$journal_path"
+  stub_mount_target=/
+  expected_directory=true
+  expected_root=true
+  expected_failure=""
+  case "$path_case" in
+    non-root) stub_mount_target=/separate; expected_root=false ;;
+    aliased-parent) canonical_path="$work_dir/elsewhere"; expected_directory=false; expected_root=false ;;
+    symlink) journal_path="$work_dir/journal-link"; expected_directory=false; expected_root=false ;;
+    file) journal_path="$work_dir/journal-file"; expected_directory=false; expected_root=false ;;
+    missing) journal_path="$work_dir/journal-missing"; expected_directory=false; expected_root=false ;;
+    du-failure) expected_failure="aggregate size measurement failed for system-journal" ;;
+    readlink-failure) expected_failure="path resolution failed for system-journal" ;;
+    mount-failure) expected_failure="mount measurement failed for system-journal" ;;
+  esac
+  path_status=0
+  (
+    source "$work_dir/journal-path-helper.sh"
+    ACTION=snapshot
+    readlink() { printf '%s\n' "$canonical_path"; [[ "$path_case" != readlink-failure ]]; }
+    findmnt() { printf '%s\n' "$stub_mount_target"; [[ "$path_case" != mount-failure ]]; }
+    du() { printf '1234567890\n'; [[ "$path_case" != du-failure ]]; }
+    row="$(fixed_path_bytes system-journal "$journal_path")" || exit "$?"
+    printf '%s\n' "$row"
+  ) >"$work_dir/journal-path.stdout" 2>"$work_dir/journal-path.stderr" || path_status=$?
+  if [[ -n "$expected_failure" ]]; then
+    [[ "$path_status" != "0" && ! -s "$work_dir/journal-path.stdout" ]] ||
+      fail "failed journal $path_case emitted accepted consumer evidence"
+    grep -Fq "reason=$expected_failure" "$work_dir/journal-path.stderr" ||
+      fail "journal $path_case failed for the wrong reason"
+    continue
+  fi
+  [[ "$path_status" == "0" ]] || fail "journal path measurement failed: $path_case"
+  jq -e --argjson directory "$expected_directory" --argjson root "$expected_root" '
+    .category == "system-journal" and
+    .isDirectory == $directory and .onRootFilesystem == $root
+  ' "$work_dir/journal-path.stdout" >/dev/null ||
+    fail "journal directory/root evidence was incorrect: $path_case"
+done
 
 preload_bin="$work_dir/preload-bin"
 mkdir -p "$preload_bin"
@@ -2427,10 +2957,17 @@ case "${0##*/}:$*" in
   "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /var/lib/betstan/mongo")
     jq '{filesystems:[.mongo.mount]}' "$STUB_CURRENT_RUNTIME"
     ;;
+  "findmnt:--noheadings --output TARGET --target /var/log/journal")
+    printf '/\n'
+    ;;
   "df:--block-size=1 --output=size,used,avail,pcent,target /")
     printf 'Size Used Avail Use%% Mounted\n50000000000 37000000000 13000000000 74%% /\n'
     ;;
   "du:--bytes --summarize --one-file-system "*)
+    if [[ "$4" == "${STUB_DU_FAILURE_PATH:-}" ]]; then
+      printf '1234567890\t%s\n' "$4"
+      exit 47
+    fi
     printf '0\n'
     ;;
   "k3s:crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock --image-endpoint unix:///run/k3s/containerd/containerd.sock images -o json")
@@ -2488,6 +3025,11 @@ chmod +x "$snapshot_bin/jq" "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
 for snapshot_command in findmnt df du k3s systemctl; do
   ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
 done
+snapshot_journal_mount="$(
+  "$snapshot_bin/findmnt" --noheadings --output TARGET --target /var/log/journal
+)" || fail "snapshot journal mount fixture rejected the fixed probe"
+[[ "$snapshot_journal_mount" == "/" ]] ||
+  fail "snapshot journal mount fixture did not identify the root filesystem"
 
 expected_preload_b64="$(printf '%s' "$preload_refs" | base64 | tr -d '\n')"
 : >"$work_dir/preload-transport.log"
@@ -2592,6 +3134,16 @@ snapshot_case() {
     [[ "$expected" == "pass" ]] || fail "snapshot accepted $name"
     jq -e "$evidence" "$work_dir/snapshot-$name-work/runtime-before.json" >/dev/null ||
       fail "snapshot aggregate differs for $name"
+    jq -e '
+      .schemaVersion == "k3s-node-disk-runtime.v3" and
+      (.consumers | length) == 7 and
+      ([.consumers[] | select(.category == "system-journal")] | length) == 1 and
+      (.consumers[] | select(.category == "system-journal") |
+        .path == "/var/log/journal" and
+        (.isDirectory | type) == "boolean" and
+        (.onRootFilesystem | type) == "boolean")
+    ' "$work_dir/snapshot-$name-work/runtime-before.json" >/dev/null ||
+      fail "public snapshot did not produce strict seventh-consumer runtime v3"
     "$HELPER" validate-diagnosis --diagnosis "$output" \
       --source-sha "$SOURCE_SHA" --infrastructure-run-id 400 \
       --ghcr-build-run-id 300 --workflow-run-id 600 >/dev/null
@@ -2655,6 +3207,79 @@ printf '\n%s\n%s\n\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$
 snapshot_case header-and-absent-telemetry pass \
   '.queue == {queueCount:4,backlog:3,consumersHealthy:true} and
    .runtime.k3sVersion == "k3s version v1.34.5+k3s1 (fixture)"'
+
+cat >"$work_dir/measurement-snapshot-runner" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$STUB_LIB"
+source "$STUB_SNAPSHOT_REMOTE" snapshot
+SH
+chmod +x "$work_dir/measurement-snapshot-runner"
+for capture_phase in pre post; do
+  cp "$journal_cases/before.json" "$work_dir/current-runtime.json"
+  cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+  : >"$work_dir/remote.log"
+  : >"$work_dir/journal-capacity.log"
+  : >"$work_dir/journal-command.log"
+  : >"$work_dir/measurement-command.log"
+  measurement_work="$work_dir/journal-$capture_phase-measurement-work"
+  measurement_result="$work_dir/journal-$capture_phase-measurement-reclaim.json"
+  measurement_checkpoint="$work_dir/journal-$capture_phase-measurement-checkpoint.json"
+  measurement_log="$work_dir/journal-$capture_phase-measurement.log"
+  printf 'stale\n' >"$measurement_checkpoint"
+  snapshot_at=1
+  [[ "$capture_phase" != post ]] || snapshot_at=2
+  measurement_status=0
+  env "${snapshot_env[@]}" \
+    PATH="$snapshot_bin:$journal_bin:$stub_bin:$PATH" \
+    K3S_DISK_REMOTE_RUNNER="$work_dir/remote-runner" \
+    STUB_SNAPSHOT_RUNNER="$work_dir/measurement-snapshot-runner" \
+    STUB_SNAPSHOT_AT="$snapshot_at" STUB_SNAPSHOT_REMOTE="$REMOTE" \
+    STUB_LIB="$ROOT_DIR/infra/oci/scripts/lib.sh" STUB_DU_FAILURE_PATH=/var/log \
+    STUB_SNAPSHOT_COMMAND_LOG="$work_dir/measurement-command.log" \
+    STUB_CURRENT_RUNTIME="$work_dir/current-runtime.json" \
+    STUB_CAPACITY_SUMMARY="$work_dir/current-summary.json" \
+    STUB_JOURNAL_REMOTE="$REMOTE" STUB_JOURNAL_LOG="$work_dir/journal-command.log" \
+    STUB_JOURNAL_POST_RUNTIME="$journal_cases/cleaned.json" \
+    STUB_PRELOAD_POST_RUNTIME="$journal_cases/complete.json" \
+    STUB_CAPACITY_LOG="$work_dir/journal-capacity.log" \
+    GITHUB_RUN_ID=501 DIAGNOSIS_RUN_ID=500 \
+    DIAGNOSIS_FILE="$journal_cases/diagnosis.json" \
+    RECLAIM_CATEGORY=system-journal RECLAIM_IMAGE_IDS='[]' \
+    WORK_DIR="$measurement_work" OUTPUT_FILE="$measurement_result" \
+    CHECKPOINT_OUTPUT_FILE="$measurement_checkpoint" \
+    "$ORCHESTRATOR" reclaim >"$measurement_log" 2>&1 || measurement_status=$?
+  [[ "$measurement_status" != "0" && ! -e "$measurement_checkpoint" ]] ||
+    fail "journal $capture_phase measurement failure retained successful release authority"
+  grep -Fxq 'du:--bytes --summarize --one-file-system /var/log' \
+    "$work_dir/measurement-command.log" ||
+    fail "journal $capture_phase measurement did not reach the real consumer collection"
+  grep -Fq 'reason=aggregate size measurement failed for system-logs' "$measurement_log" ||
+    fail "journal $capture_phase measurement failed for the wrong reason"
+  if grep -Eq 'k3s_disk_recovery=reclaim status=PASS|/synthetic-private-journal/' "$measurement_log"; then
+    fail "journal $capture_phase measurement exposed native output or finalized successfully"
+  fi
+  if [[ "$capture_phase" == pre ]]; then
+    [[ "$(awk -F '\t' '{print $1}' "$work_dir/remote.log")" == snapshot &&
+       ! -s "$work_dir/journal-command.log" && ! -s "$work_dir/journal-capacity.log" &&
+       ! -s "$measurement_work/runtime-before.json" && ! -e "$measurement_result" ]] ||
+      fail "partial pre-state measurement reached mutation or emitted accepted evidence"
+  else
+    [[ "$(awk -F '\t' '{print $1}' "$work_dir/remote.log")" == \
+       $'snapshot\nreclaim-system-journal\npreload-candidate-images\nsnapshot' &&
+       "$(cat "$work_dir/journal-command.log")" == \
+       $'--rotate\n--directory=/var/log/journal --vacuum-size=536870912' &&
+       "$(wc -l <"$work_dir/journal-capacity.log" | tr -d ' ')" == "2" &&
+       ! -s "$measurement_work/runtime-after.json" ]] ||
+      fail "partial post-state measurement changed command order or skipped post evidence"
+    jq -e '
+      .category == "system-journal" and .terminalStatus == "INCOMPLETE" and
+      .reason == "post-state-capture-failed"
+    ' "$measurement_result" >/dev/null ||
+      fail "partial post-state measurement did not prevent successful finalization"
+  fi
+done
+
 awk -F '\t' '$1 != "telemetry"' "$candidate_images" >"$work_dir/candidate-missing.tsv"
 awk -F '\t' 'BEGIN {OFS="\t"} $1 == "telemetry" {$1="auth"} {print}' \
   "$candidate_images" >"$work_dir/candidate-duplicate.tsv"
@@ -2868,6 +3493,7 @@ required = (
     "name: oci-infrastructure",
     "- diagnose-disk",
     "- reclaim-disk",
+    "- system-journal",
     "github.run_attempt == 1",
     'OCI_K3S_RETAIN_TARGET_SSH: "true"',
     "bind-infrastructure-prerequisites-stan.sh",
