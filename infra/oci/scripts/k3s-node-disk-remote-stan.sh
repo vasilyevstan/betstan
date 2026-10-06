@@ -26,7 +26,7 @@ for command_name in jq base64; do
 done
 case "$ACTION" in
   snapshot)
-    required_commands=(findmnt df du k3s sha256sum curl systemctl)
+    required_commands=(findmnt readlink df du k3s sha256sum curl systemctl)
     ;;
   snapshot-held)
     required_commands=(findmnt df k3s systemctl)
@@ -56,6 +56,17 @@ case "$ACTION" in
     ;;
   reclaim-apt-package-cache)
     required_commands=(apt-get)
+    ;;
+  reclaim-system-journal)
+    required_commands=(journalctl)
+    [[ "$SELECTED_IMAGE_IDS" == "[]" ]] ||
+      fail "image IDs are not valid for system journal reclaim"
+    if [[ -n "${K3S_DISK_SELECTED_IMAGE_IDS_B64:-}" ]]; then
+      [[ "$#" == "1" ]] || fail "system journal reclaim does not accept arguments"
+    else
+      [[ "$#" == "1" || "$#" == "2" ]] ||
+        fail "system journal reclaim does not accept arguments"
+    fi
     ;;
   reclaim-cri-owned-unused-images)
     required_commands=(k3s)
@@ -261,11 +272,25 @@ mount_json() {
 fixed_path_bytes() {
   local category="$1"
   local path="$2"
-  local bytes=0
+  local bytes=0 is_directory=false on_root_filesystem=false
   if [[ -e "$path" ]]; then
     bytes="$(du --bytes --summarize --one-file-system "$path" | awk '{print $1}')"
   fi
   [[ "$bytes" =~ ^[0-9]+$ ]] || fail "invalid aggregate size for $category"
+  if [[ "$category" == "system-journal" ]]; then
+    if [[ -d "$path" && ! -L "$path" &&
+          "$(readlink -f -- "$path")" == "$path" ]]; then
+      is_directory=true
+      if [[ "$(findmnt --noheadings --output TARGET --target "$path")" == "/" ]]; then
+        on_root_filesystem=true
+      fi
+    fi
+    jq -cn --arg category "$category" --arg path "$path" --argjson bytes "$bytes" \
+      --argjson is_directory "$is_directory" --argjson on_root "$on_root_filesystem" \
+      '{category:$category,path:$path,bytes:$bytes,
+        isDirectory:$is_directory,onRootFilesystem:$on_root}'
+    return
+  fi
   jq -cn --arg category "$category" --arg path "$path" --argjson bytes "$bytes" \
     '{category:$category,path:$path,bytes:$bytes}'
 }
@@ -819,6 +844,7 @@ snapshot() {
       kubelet:/var/lib/kubelet \
       apt-package-cache:/var/cache/apt \
       system-logs:/var/log \
+      system-journal:/var/log/journal \
       mongo-data:/var/lib/betstan/mongo; do
       fixed_path_bytes "${spec%%:*}" "${spec#*:}"
     done | jq -cs 'sort_by(.category)'
@@ -830,7 +856,7 @@ snapshot() {
     "$images" "$containers" "$pods" "$workloads" \
     "$queue_count" "$queue_backlog" "$consumers_healthy" "$public_read" |
   jq -cs \
-    --arg schema "k3s-node-disk-runtime.v2" \
+    --arg schema "k3s-node-disk-runtime.v3" \
     --arg repository "$APPLICATION_REPOSITORY" \
     --arg k3s_version "$k3s_version" \
     --arg container_runtime "$container_runtime" \
@@ -964,6 +990,10 @@ case "$ACTION" in
     [[ "$SELECTED_IMAGE_IDS" == "[]" ]] ||
       fail "image IDs are not valid for apt package-cache reclaim"
     apt-get clean
+    ;;
+  reclaim-system-journal)
+    journalctl --rotate
+    journalctl --directory=/var/log/journal --vacuum-size=536870912
     ;;
   reclaim-cri-owned-unused-images)
     jq -e '

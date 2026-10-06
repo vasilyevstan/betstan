@@ -272,20 +272,46 @@ provenance remains available for governed diagnosis or reclaim. Authority,
 access, infrastructure-finalization, and cleanup failures remain fatal.
 [[Infrastructure]] describes the bounded preload behavior.
 
-When native APT cleanup succeeds within a governed first-attempt reclaim, the
-existing action immediately performs exactly one service-sorted preload of the
-bound diagnosis candidate `imageRef` values before post-state capture and
+Journal headroom uses the distinct protected operation
+`oci-k3s-disk-reclaim-journal`, fixed category `system-journal`, and empty image
+IDs. It retains current-source, first-attempt build/infrastructure/diagnosis
+bindings and the existing protected infrastructure environment. Both bound
+diagnosis and fresh runtime evidence must prove `/var/log/journal` is a real
+directory on the root filesystem and exceeds the literal 536870912-byte
+vacuum target. Gross journal bytes smaller than the larger fresh root/kubelet
+excess reject before mutation; this proves only impossibility, never predicted
+recoverability. Broad log totals or legacy diagnosis lacking journal evidence
+cannot grant journal authority.
+
+The fixed sequence is fresh validation/plan, `journalctl --rotate`, then
+`journalctl --directory=/var/log/journal --vacuum-size=536870912`, each once.
+There is no path/size override, volatile-journal vacuum, retry, generic delete,
+APT cleanup, or CRI fallback. Either journal command failing skips preload but
+still attempts post-runtime/capacity evidence and cannot produce a checkpoint.
+Journal finalization requires a measured decrease from both bound and fresh
+journal observations, no identity/workload/queue/public-state drift, and both
+authoritative post-filesystem byte checks.
+
+Public runtime v3 adds the strict seventh persistent-journal consumer; runtime
+v1/v2 retain their six-consumer readers and held runtime v1 is unchanged.
+Diagnosis v2, reclaim plan v1, reclaim v1, and checkpoint v1 do not change.
+Checkpoint `reclaimCategory=system-journal` is valid only under the existing
+`READY_RECLAIMED` rules; CRI remains checkpoint-ineligible.
+
+When native APT cleanup or fixed journal mutation succeeds within a governed
+first-attempt reclaim, the existing action immediately performs exactly one
+service-sorted preload of the bound diagnosis candidate `imageRef` values before post-state capture and
 finalization. It reuses the unchanged native, sequential, anonymous
 `k3s crictl pull` behavior and exact raw-root 70-percent pre/post admission,
-without retry, deletion, pruning, credentials, an alternate client, or a new
-governed operation, authority, schema, or threshold.
+without retry, deletion, pruning, credentials, or an alternate client. Shared
+preload logic does not change authority or thresholds.
 
-APT finalization allows a newly added native CRI image ID only when exact
+Non-CRI finalization allows a newly added native CRI image ID only when exact
 diagnosis candidate `imageRef` residency proves it uniquely. Any removal or
 foreign addition fails, and an added ID receives no exception when residency
 is ambiguous. Manifest and platform digests are not CRI image IDs. Status `20`
 remains candidacy failure, so post-state and reclaim evidence are preserved and
-a valid APT cleanup may still finish `RECLAIMED` and successful, but no
+a valid selected cleanup may still finish `RECLAIMED` and successful, but no
 checkpoint is emitted and the reason is `candidate_preload`. A non-`20`
 preload failure remains fatal after evidence capture where possible.
 Standalone finalization preload and CRI reclaim remain unchanged, and CRI

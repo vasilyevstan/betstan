@@ -174,7 +174,7 @@ cleanup recommendations, not cleanup authorization.
 
 Existing `k3s-node-disk-diagnosis.v1` evidence remains readable; new
 `k3s-node-disk-diagnosis.v2` evidence carries Mongo storage separately from
-the unchanged `k3s-node-disk-runtime.v1` snapshot and reclaim authority.
+the runtime snapshot and reclaim authority.
 Version 2's scoped identity projection preserves fingerprint comparison
 without exposing raw runtime identities. Rollout and rollback must preserve
 readers for retained evidence rather than relabeling v2 as v1. This extension
@@ -202,23 +202,48 @@ are removed, while otherwise-valid infrastructure provenance remains available
 to the governed diagnosis and reclaim path. Authority, access, host-identity,
 infrastructure-finalization, transport, and cleanup failures remain fatal.
 
-When native APT cleanup succeeds within a governed first-attempt reclaim, the
-reclaim immediately runs exactly one diagnosis-bound candidate preload before
-post-state capture and finalization. The ten exact diagnosis `imageRef` values
+Public runtime snapshots use strict `k3s-node-disk-runtime.v3` with seven fixed
+consumers, including `system-journal:/var/log/journal` and explicit real-directory
+and root-filesystem evidence. Runtime v1/v2 readers retain their six-consumer
+schemas; held runtime v1 remains unchanged. Diagnosis v2, reclaim plan v1,
+reclaim v1, and checkpoint v1 keep their existing versions.
+
+The distinct protected operation `oci-k3s-disk-reclaim-journal` selects only
+`system-journal` with `reclaim_image_ids=[]`. Both the bound diagnosis and fresh
+snapshot must prove the fixed persistent journal directory is on the root
+filesystem and exceeds 536870912 bytes. Broad `system-logs` evidence, missing
+journal evidence, or a volatile journal cannot authorize it. Planning rejects
+an attempt when gross journal bytes cannot cover the larger fresh raw-root or
+kubelet excess. This is only a conservative impossibility check: it persists no
+derived projection and does not promise exact recoverable space.
+
+The only journal mutation is `journalctl --rotate`, followed once by
+`journalctl --directory=/var/log/journal --vacuum-size=536870912`. It has no
+caller-selected path, size, environment override, retry, generic deletion, APT,
+or CRI fallback. Rotation or vacuum failure skips preload but still attempts
+post-runtime and capacity capture, retaining evidence without a checkpoint.
+Successful journal finalization requires measured journal bytes to decrease
+from both bound and fresh observations, stable identity/workload/queue/public
+state, and authoritative post-operation raw-root and kubelet admission.
+The vacuum target is not a claim that total directory bytes or freed bytes are
+exactly that amount.
+
+When native APT cleanup or fixed journal mutation succeeds within a governed
+first-attempt reclaim, the reclaim immediately runs exactly one diagnosis-bound
+candidate preload before post-state capture and finalization. The ten exact diagnosis `imageRef` values
 are service-sorted and sent through the same native, sequential, anonymous
 `k3s crictl pull` path. Its fresh raw-root measurements and exact 70-percent
 pre/post admission remain unchanged. It adds no retry, image deletion, pruning,
-credentials, alternate client, governed operation, authority, schema, or
-threshold.
+credentials, or alternate client, and does not relax authority or thresholds.
 
-APT finalization permits only newly added native CRI image IDs uniquely proven
-by exact diagnosis candidate `imageRef` residency. Any removal or foreign
+Non-CRI finalization permits only newly added native CRI image IDs uniquely
+proven by exact diagnosis candidate `imageRef` residency. Any removal or foreign
 addition fails, and an added ID receives no exception when candidate residency
 is ambiguous. Manifest and platform digests remain provenance attributes; they
 are not native CRI image IDs.
 
 Preload status `20` remains a candidacy failure. Post-state and reclaim
-evidence are still preserved: when the APT cleanup and its postconditions are
+evidence are still preserved: when the selected cleanup and its postconditions are
 valid, reclaim can remain `RECLAIMED` and successful, but the release
 checkpoint is withheld with `reason=candidate_preload`. A non-`20` preload
 failure remains fatal after evidence capture and finalization where possible.
@@ -239,14 +264,14 @@ measurement is over the limit, but over-limit evidence cannot create or
 revalidate an eligible checkpoint.
 
 A k3s checkpoint is release-eligible only for the current source and first
-attempt with either `READY_NO_RECLAIM`, or `READY_RECLAIMED` after APT-only
-reclaim. It still requires exact immutable CRI evidence for all ten candidate
-services and complete rollback residency. Checkpoint creation still requires
-the aggregate public-state contract; later revalidation applies its selected
+attempt with either `READY_NO_RECLAIM`, or `READY_RECLAIMED` after APT or
+`system-journal` reclaim. It still requires exact immutable CRI evidence for
+all ten candidate services and complete rollback residency. Checkpoint creation
+still requires the aggregate public-state contract; later revalidation applies its selected
 public or held profile. The existing lineage, identity, checksum, and kubelet
 checks remain mandatory. `OBSERVED`, over-limit, incomplete, unhealthy, rerun,
 identity-mismatched, or CRI-reclaimed results produce no eligible checkpoint,
-and APT reclaim never falls through to CRI reclaim.
+and neither non-CRI category falls through to another category.
 
 The k3s artifact has a strict runtime-specific shape: common source/control/run
 identity with `terminalStatus=RELEASE_ELIGIBLE`, plus top-level

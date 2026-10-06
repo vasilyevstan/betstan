@@ -178,6 +178,36 @@ grep -Fq -- '--operation oci-k3s-disk-reclaim-apt' "$WORKDIR/validator-calls.txt
   echo "FAIL apt reclaim did not select its exact protected operation"
 }
 
+JOURNAL_INPUTS="$(jq -c '
+  .reclaim_category = "system-journal" | .reclaim_image_ids = "[]"
+' <<<"$DISK_INPUTS")"
+run_case "k3s journal reclaim accepts only its fixed category" accept \
+  BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
+  SOURCE_SHA="$SHA" REPOSITORY=vasilyevstan/betstan \
+  DISPATCH_INPUTS="$JOURNAL_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+grep -Fq -- '--operation oci-k3s-disk-reclaim-journal' "$WORKDIR/validator-calls.txt" || {
+  FAIL=$((FAIL + 1))
+  echo "FAIL journal reclaim did not select its distinct protected operation"
+}
+for invalid_ids in 'null' '[]' '"[ ]"' '"[\"sha256:1111111111111111111111111111111111111111111111111111111111111111\"]"'; do
+  INVALID_JOURNAL_INPUTS="$(jq -c --argjson ids "$invalid_ids" \
+    '.reclaim_image_ids = $ids' <<<"$JOURNAL_INPUTS")"
+  run_case "journal rejects nonliteral empty image IDs: $invalid_ids" reject \
+    BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
+    SOURCE_SHA="$SHA" REPOSITORY=vasilyevstan/betstan \
+    DISPATCH_INPUTS="$INVALID_JOURNAL_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+  [[ ! -s "$WORKDIR/validator-calls.txt" ]] || {
+    FAIL=$((FAIL + 1))
+    echo "FAIL invalid journal IDs reached upstream validation"
+  }
+done
+INVALID_JOURNAL_INPUTS="$(jq -c '.ghcr_package_validation_run_id = "777"' \
+  <<<"$JOURNAL_INPUTS")"
+run_case "journal rejects CRI package authority" reject \
+  BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
+  SOURCE_SHA="$SHA" REPOSITORY=vasilyevstan/betstan \
+  DISPATCH_INPUTS="$INVALID_JOURNAL_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+
 DISK_INPUTS='{"approved_sha":"'"$SHA"'","runtime_mode":"k3s","phase":"reclaim-disk","candidate_build_run_id":"","obsolete_sha":"","obsolete_build_run_id":"","obsolete_generations":"","deployed_sha":"","deployed_run_id":"","fallback_sha":"","fallback_build_run_id":"","validation_run_id":"","ghcr_package_validation_run_id":"777","capacity_acquisition_run_id":"","reclaim_category":"cri-owned-unused-images"}'
 run_case "k3s CRI reclaim accepts one explicit category" accept \
   BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
@@ -256,13 +286,13 @@ for mode in k3s oke; do
   done
 done
 
-for category in none apt-package-cache cri-owned-unused-images; do
+for category in none apt-package-cache system-journal cri-owned-unused-images; do
   phase=reclaim-disk
   [[ "$category" != none ]] || phase=diagnose-disk
   COMPACT_DISK_INPUTS="$(jq -cn --arg sha "$SHA" --arg phase "$phase" \
     --arg category "$category" '{
       approved_sha:$sha, runtime_mode:"k3s", phase:$phase,
-      reclaim_category:$category
+      reclaim_category:$category, reclaim_image_ids:"[]"
     } + (if $category == "cri-owned-unused-images" then
       {ghcr_package_validation_run_id:"777"} else {} end)')"
   run_case "$category accepts omitted empty legacy inputs" accept \
@@ -332,6 +362,55 @@ run_case "historical subject never authorizes reclaim" reject \
   BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
   SOURCE_SHA="$HISTORICAL_SHA" REPOSITORY=vasilyevstan/betstan \
   DISPATCH_INPUTS="$HISTORICAL_RECLAIM_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+run_case "historical subject never authorizes journal reclaim" reject \
+  BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
+  SOURCE_SHA="$HISTORICAL_SHA" REPOSITORY=vasilyevstan/betstan \
+  DISPATCH_INPUTS="$JOURNAL_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+
+ruby -ryaml -e '
+  workflow = YAML.load_file(ARGV[0])
+  dispatch = (workflow["on"] || workflow[true]).fetch("workflow_dispatch")
+  expected = %w[none apt-package-cache system-journal cri-owned-unused-images]
+  abort "unexpected reclaim choices" unless dispatch.fetch("inputs").fetch("reclaim_category").fetch("options") == expected
+  step = workflow.fetch("jobs").fetch("k3s-disk-recovery").fetch("steps").find do |item|
+    item["name"] == "Validate bounded k3s disk request"
+  end
+  File.write(ARGV[1], step.fetch("run"))
+' "$WORKFLOW" "$WORKDIR/bounded-request.sh"
+request_env=(
+  PATH="$WORKDIR/bin:$PATH" GITHUB_REF_NAME=master SOURCE_SHA="$SHA"
+  CONTROL_SHA="$SHA" GITHUB_SHA="$SHA" FIXTURE_HEAD_SHA="$SHA"
+  GITHUB_RUN_ATTEMPT=1 BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s
+  OCI_DISK_MAX_PERCENT=70 GHCR_BUILD_RUN_ID=300 INFRASTRUCTURE_RUN_ID=400
+  PHASE=reclaim-disk CONFIRMATION="RECLAIM EVIDENCED K3S ROOT DISK"
+  DIAGNOSIS_RUN_ID=500 GHCR_PACKAGE_VALIDATION_RUN_ID= RECLAIM_IMAGE_IDS='[]'
+)
+for category in apt-package-cache system-journal cri-owned-unused-images; do
+  request_args=(RECLAIM_CATEGORY="$category")
+  if [[ "$category" == "cri-owned-unused-images" ]]; then
+    request_args+=(GHCR_PACKAGE_VALIDATION_RUN_ID=777 \
+      RECLAIM_IMAGE_IDS='["sha256:1111111111111111111111111111111111111111111111111111111111111111"]')
+  fi
+  env "${request_env[@]}" "${request_args[@]}" bash "$WORKDIR/bounded-request.sh" || {
+    echo "FAIL workflow rejected fixed reclaim category $category"
+    exit 1
+  }
+  PASS=$((PASS + 1))
+done
+for invalid_request in \
+  'RECLAIM_IMAGE_IDS=[ ]' \
+  'RECLAIM_IMAGE_IDS=["sha256:1111111111111111111111111111111111111111111111111111111111111111"]' \
+  'GHCR_PACKAGE_VALIDATION_RUN_ID=777' 'OCI_RUNTIME_MODE=oke' \
+  'GITHUB_RUN_ATTEMPT=2' 'OCI_DISK_MAX_PERCENT=71' \
+  'RECLAIM_CATEGORY=system-logs'; do
+  if env "${request_env[@]}" RECLAIM_CATEGORY=system-journal "$invalid_request" \
+      bash "$WORKDIR/bounded-request.sh" >/dev/null 2>&1; then
+    echo "FAIL workflow accepted invalid journal request $invalid_request"
+    exit 1
+  fi
+  PASS=$((PASS + 1))
+done
+echo "PASS real workflow validates fixed journal, APT and CRI selections"
 
 mkdir -p "$WORKDIR/workflow/infra/oci/scripts"
 ruby -ryaml -e '
