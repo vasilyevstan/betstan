@@ -114,9 +114,11 @@ rollback requirements remain unchanged.
 The infrastructure workflow separates read-only root-filesystem diagnosis from
 reclaim. A reclaim must bind the current source, first workflow attempt, exact
 infrastructure and image-build evidence, and the preceding diagnosis while
-remaining serialized with other protected operations. It may clean either the
-package cache or an exact set of repository-owned, unused container images
-identified by that diagnosis, never both or an arbitrary image set.
+remaining serialized with other protected operations. It selects exactly one
+category: the package cache, the fixed persistent `system-journal`, or an exact
+set of repository-owned, unused container images identified by that diagnosis.
+Categories cannot be combined or used as fallback, and arbitrary image sets
+are ineligible.
 
 For diagnosis only, the existing workflow, phase, and inputs also support an
 exact historical baseline `H` under control code from the exact current
@@ -207,26 +209,31 @@ consumers, including `system-journal:/var/log/journal` and explicit real-directo
 and root-filesystem evidence. Runtime v1/v2 readers retain their six-consumer
 schemas; held runtime v1 remains unchanged. Diagnosis v2, reclaim plan v1,
 reclaim v1, and checkpoint v1 keep their existing versions.
+Control readers predating this extension reject runtime v3 snapshots and
+`system-journal` checkpoints.
 
 The distinct protected operation `oci-k3s-disk-reclaim-journal` selects only
 `system-journal` with `reclaim_image_ids=[]`. Both the bound diagnosis and fresh
 snapshot must prove the fixed persistent journal directory is on the root
-filesystem and exceeds 536870912 bytes. Broad `system-logs` evidence, missing
-journal evidence, or a volatile journal cannot authorize it. Planning rejects
-an attempt when gross journal bytes cannot cover the larger fresh raw-root or
-kubelet excess. This is only a conservative impossibility check: it persists no
-derived projection and does not promise exact recoverable space.
+filesystem and exceeds the fixed retained target of 512 MiB (536870912 bytes).
+Broad `system-logs` evidence, missing journal evidence, or a volatile journal
+cannot authorize it. Planning rejects an attempt when gross journal bytes
+cannot cover the larger fresh raw-root or kubelet excess. This is only a
+conservative impossibility check: it persists no derived projection and does
+not promise exact recoverable space.
 
-The only journal mutation is `journalctl --rotate`, followed once by
-`journalctl --directory=/var/log/journal --vacuum-size=536870912`. It has no
-caller-selected path, size, environment override, retry, generic deletion, APT,
-or CRI fallback. Rotation or vacuum failure skips preload but still attempts
-post-runtime and capacity capture, retaining evidence without a checkpoint.
+The protected operation rotates the system journal once and limits archived-log
+cleanup to that fixed persistent directory. Deletion of archived persistent
+journals is irreversible; source or application rollback cannot restore deleted
+archives. There is no caller-selected path or size, environment override,
+volatile-journal vacuum, retry, generic deletion, APT cleanup, or CRI fallback.
+Rotation or cleanup failure skips preload but still attempts post-runtime and
+capacity capture, retaining evidence without a checkpoint.
 Successful journal finalization requires measured journal bytes to decrease
 from both bound and fresh observations, stable identity/workload/queue/public
 state, and authoritative post-operation raw-root and kubelet admission.
-The vacuum target is not a claim that total directory bytes or freed bytes are
-exactly that amount.
+The retained target guarantees neither an exact total directory size nor an
+exact amount of recovered space.
 
 When native APT cleanup or fixed journal mutation succeeds within a governed
 first-attempt reclaim, the reclaim immediately runs exactly one diagnosis-bound

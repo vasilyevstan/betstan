@@ -277,24 +277,27 @@ Journal headroom uses the distinct protected operation
 IDs. It retains current-source, first-attempt build/infrastructure/diagnosis
 bindings and the existing protected infrastructure environment. Both bound
 diagnosis and fresh runtime evidence must prove `/var/log/journal` is a real
-directory on the root filesystem and exceeds the literal 536870912-byte
-vacuum target. Gross journal bytes smaller than the larger fresh root/kubelet
-excess reject before mutation; this proves only impossibility, never predicted
-recoverability. Broad log totals or legacy diagnosis lacking journal evidence
-cannot grant journal authority.
+directory on the root filesystem and exceeds the fixed retained target of
+512 MiB (536870912 bytes). Gross journal bytes smaller than the larger fresh
+root/kubelet excess reject before mutation; this proves only impossibility,
+never predicted recoverability. Broad log totals or legacy diagnosis lacking
+journal evidence cannot grant journal authority.
 
-The fixed sequence is fresh validation/plan, `journalctl --rotate`, then
-`journalctl --directory=/var/log/journal --vacuum-size=536870912`, each once.
-There is no path/size override, volatile-journal vacuum, retry, generic delete,
-APT cleanup, or CRI fallback. Either journal command failing skips preload but
-still attempts post-runtime/capacity evidence and cannot produce a checkpoint.
-Journal finalization requires a measured decrease from both bound and fresh
-journal observations, no identity/workload/queue/public-state drift, and both
+After fresh validation and planning, the protected operation permits one journal
+rotation and one archived-log cleanup limited to that persistent directory.
+Deletion of archived persistent journals is irreversible; source or application
+rollback cannot restore deleted archives. The retained target does not guarantee
+an exact directory size or amount of recovered space. There is no path/size or
+environment override, volatile-journal vacuum, retry, generic deletion, APT
+cleanup, or CRI fallback. Rotation or cleanup failure skips preload but still
+attempts post-runtime/capacity evidence and cannot produce a checkpoint. Journal
+finalization requires a measured decrease from both bound and fresh journal
+observations, no identity/workload/queue/public-state drift, and both
 authoritative post-filesystem byte checks.
 
 Public runtime v3 adds the strict seventh persistent-journal consumer; runtime
 v1/v2 retain their six-consumer readers and held runtime v1 is unchanged.
-Diagnosis v2, reclaim plan v1, reclaim v1, and checkpoint v1 do not change.
+Diagnosis v2, reclaim plan v1, reclaim v1, and checkpoint v1 keep their versions.
 Checkpoint `reclaimCategory=system-journal` is valid only under the existing
 `READY_RECLAIMED` rules; CRI remains checkpoint-ineligible.
 
@@ -342,16 +345,20 @@ That source may be the approved SHA or the proven GitHub/infra/Markdown-only
 ancestor; a newly produced byte-equivalent build or infrastructure run is not
 interchangeable with the original.
 
-This finalization change adds no workflow, release phase, cleanup category,
-schema, threshold, credential path, or alternate image client. It is a stricter
-admission rule within the existing chain. Because the checked-in finalization
-and checkpoint source changed, rollout requires the normal focused
-branch-to-`dev` and `dev`-to-`master` promotion followed by a completely fresh
-exact-current-`master`-SHA build and downstream release-evidence chain; the
-ancestor-resume allowance above does not authorize reuse for this change.
+The journal extension adds one fixed cleanup category, its distinct protected
+operation, and public runtime v3. It adds no workflow, release phase, threshold
+change, credential path, or alternate image client. Because the checked-in
+finalization and checkpoint source changed, rollout requires the normal focused
+branch-to-`dev` and `dev`-to-`master` promotion followed by a fresh first-attempt
+build at the exact current `master` SHA and a new downstream release-evidence
+chain; the ancestor-resume allowance above does not authorize reuse for this
+change.
 Rollback is a separately reviewed forward correction or revert through the
 same promotion path and must produce its own fresh exact-current-SHA chain; it
-cannot revive removed candidate or checkpoint evidence.
+cannot revive removed candidate or checkpoint evidence. Application rollback
+must retain control code compatible with runtime v3 and journal checkpoints,
+as described in [[Infrastructure]]; evidence must not be relabeled to satisfy
+older readers.
 
 When `baseline_recovery_run_id` is nonzero, its hash-covered
 `baseline_recovery_source_sha` is also mandatory before authority. The shared

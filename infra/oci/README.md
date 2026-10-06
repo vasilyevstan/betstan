@@ -341,11 +341,19 @@ concurrent retirement fixture isolation without masking failed suites.
    `journalctl --directory=/var/log/journal --vacuum-size=536870912`, once each;
    no caller path/size, environment override, retry, volatile-journal vacuum,
    generic deletion, APT, or CRI fallback is permitted.
+   The fixed retained target is 512 MiB (536870912 bytes). Vacuuming irreversibly
+   deletes archived persistent-journal logs; neither source nor application
+   rollback can restore those archives. Active files, allocation granularity,
+   and concurrent writes mean the target guarantees neither an exact total
+   directory size nor a particular amount of recovered root space.
 
    Public runtime v3 carries the seventh persistent-journal consumer and strict
    directory/filesystem evidence. The v1/v2 six-consumer readers and held runtime
    v1 remain unchanged, as do diagnosis v2, reclaim plan v1, reclaim v1, and
-   checkpoint v1. Failed rotation or vacuum skips preload but still attempts
+   checkpoint v1. Older control readers reject runtime v3 and journal-backed
+   checkpoints. Application rollback must retain compatible current control
+   code; never downgrade readers or relabel retained evidence to bypass that
+   rejection. Failed rotation or vacuum skips preload but still attempts
    post-runtime/capacity capture and withholds any checkpoint. Journal bytes
    must decrease from both bound and fresh measurements, with unchanged
    identity/workload/queue/public state and both post-filesystem limits passing.
