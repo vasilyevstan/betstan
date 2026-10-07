@@ -910,9 +910,9 @@ jobs:
             retained-hold)
               ./infra/oci/scripts/live-data-maintenance-stan.sh verify-quiesced
               NAMESPACE="$OCI_K8S_NAMESPACE" \
-              LOCK_TOKEN="live-data-${RESOLVED_APPLIED_DATA_RUN_ID}-1" \
+              LOCK_TOKEN="live-data-${PREREQUISITE_RUN_ID}-1" \
               OPERATION_ID="live-data-apply-slip-index" \
-              SOURCE_SHA="$RESOLVED_APPLIED_SOURCE_SHA" \
+              SOURCE_SHA="$RESUME_SOURCE_SHA" \
                 ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify
               ;;
             *)
@@ -1076,13 +1076,13 @@ jobs:
           if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
             python3 - "$RUNNER_TEMP/pre-runtime-lock.json" \
-              "$OCI_K8S_NAMESPACE" "$RESOLVED_APPLIED_DATA_RUN_ID" \
-              "$RESOLVED_APPLIED_SOURCE_SHA" <<'PY'
+              "$OCI_K8S_NAMESPACE" "$PREREQUISITE_RUN_ID" \
+              "$RESUME_SOURCE_SHA" <<'PY'
           import json, os, re, subprocess, sys, time
           def require(value):
               if not value:
                   raise SystemExit("inherited lock snapshot is invalid")
-          path, namespace, root_run, source = sys.argv[1:]
+          path, namespace, predecessor_run, source = sys.argv[1:]
           result = subprocess.run(
               ["kubectl", "get", "configmap", "gaming-mongo-migration-lock",
                "-n", namespace, "-o", "json"], capture_output=True, check=True)
@@ -1092,7 +1092,7 @@ jobs:
           require(meta["name"] == "gaming-mongo-migration-lock")
           require(meta["namespace"] == namespace)
           require(data["state"] == "active")
-          require(data["holder"] == f"live-data-{root_run}-1")
+          require(data["holder"] == f"live-data-{predecessor_run}-1")
           require(data["operation-id"] == "live-data-apply-slip-index")
           require(data["source-sha"] == source)
           require(re.fullmatch(r"[A-Za-z0-9._:-]+", meta["uid"]))
@@ -1252,9 +1252,9 @@ jobs:
              [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
              [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = "retained-hold" ]; then
             NAMESPACE="$OCI_K8S_NAMESPACE" \
-            LOCK_TOKEN="live-data-${{ steps.provenance.outputs.resume_applied_data_run_id }}-1" \
+            LOCK_TOKEN="live-data-${PREREQUISITE_RUN_ID}-1" \
             OPERATION_ID="live-data-apply-slip-index" \
-            SOURCE_SHA="${{ steps.provenance.outputs.resume_applied_source_sha }}" \
+            SOURCE_SHA="${{ inputs.resume_source_sha }}" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh release
           fi
           NAMESPACE="$OCI_K8S_NAMESPACE" \

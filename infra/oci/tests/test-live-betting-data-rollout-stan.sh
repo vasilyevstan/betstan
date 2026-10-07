@@ -2436,11 +2436,11 @@ SH
 cat >"$resume_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${1:-}" == "verify" ]]
-[[ "${LOCK_TOKEN:-}" == "live-data-4007-1" ]]
+[[ "${1:-}" == "verify" || "${1:-}" == "release" ]]
+[[ "${LOCK_TOKEN:-}" == "live-data-${RESUME_PREREQUISITE_RUN_ID:-4007}-1" ]]
 [[ "${OPERATION_ID:-}" == "live-data-apply-slip-index" ]]
-[[ "${SOURCE_SHA:-}" == "1111111111111111111111111111111111111111" ]]
-printf 'lock:verify\n' >>"${RESUME_TEST_LOG:?}"
+[[ "${SOURCE_SHA:-}" == "${RESUME_PREREQUISITE_SOURCE_SHA:-1111111111111111111111111111111111111111}" ]]
+printf 'lock:%s\n' "$1" >>"${RESUME_TEST_LOG:?}"
 SH
 chmod +x \
   "$resume_fixture/bin/git" \
@@ -2525,7 +2525,8 @@ run_resume_fixture() {
     RESUME_LOCK_FIXTURE="$resume_fixture/lock.json" \
     RESUME_BAD_FENCE="${RESUME_BAD_FENCE:-false}" \
     RUNNER_TEMP="$resume_fixture" \
-    RESUME_SOURCE_SHA=2222222222222222222222222222222222222222 \
+    PREREQUISITE_RUN_ID="${RESUME_PREREQUISITE_RUN_ID:-4007}" \
+    RESUME_SOURCE_SHA="${RESUME_PREREQUISITE_SOURCE_SHA:-1111111111111111111111111111111111111111}" \
     RESUME_MAINTENANCE_MODE="$mode" \
     BASELINE_RECOVERY_SOURCE_SHA=none \
     RESOLVED_APPLIED_DATA_RUN_ID=4007 \
@@ -2697,6 +2698,45 @@ for mutation in image pod replicas fence; do
   run_resume_fixture pre-runtime-hold
 done
 
+export RESUME_PREREQUISITE_RUN_ID=4008
+export RESUME_PREREQUISITE_SOURCE_SHA=3333333333333333333333333333333333333333
+rm "$resume_fixture/pre-runtime-lock.json"
+if run_resume_fixture pre-runtime-hold >"$resume_fixture/stale-root.out" 2>&1; then
+  fail "second-hop pre-runtime resume accepted the root data lock"
+fi
+python3 - "$resume_fixture/lock.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["data"].update(holder="live-data-4008-1", **{"source-sha": "3" * 40})
+path.write_text(json.dumps(value))
+PY
+run_resume_fixture pre-runtime-hold
+for field in holder source-sha; do
+  rm "$resume_fixture/pre-runtime-lock.json"
+  python3 - "$resume_fixture/lock.json" "$field" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["data"][sys.argv[2]] = "foreign"
+path.write_text(json.dumps(value))
+PY
+  if run_resume_fixture pre-runtime-hold >"$resume_fixture/foreign-owner.out" 2>&1; then
+    fail "second-hop pre-runtime resume accepted foreign $field"
+  fi
+  python3 - "$resume_fixture/lock.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["data"].update(holder="live-data-4008-1", **{"source-sha": "3" * 40})
+path.write_text(json.dumps(value))
+PY
+  run_resume_fixture pre-runtime-hold
+done
+reset_resume_fixture
+run_resume_fixture retained-hold
+cp "$resume_fixture/pre-runtime-images.tsv" "$resume_fixture/actual-images.tsv"
+
 ruby -ryaml - "$WORKFLOW" >"$resume_fixture/acquire-step.sh" <<'RUBY'
 step = YAML.load_file(ARGV.fetch(0)).fetch("jobs").values.flat_map { |j| j.fetch("steps") }
   .find { |s| s["name"] == "Acquire database operation lock" }
@@ -2715,9 +2755,10 @@ case "$1" in
     [ "$EXPECTED_RESOURCE_VERSION" = 42 ]
     [ "$EXPECTED_FENCING_GENERATION" = 11 ]
     [ "$EXPECTED_LEASE_UNTIL_EPOCH" = 2900 ]
-    [ "$LOCK_TOKEN" = live-data-4007-1 ]
+    [ "$LOCK_TOKEN" = live-data-4008-1 ]
     [ "$OPERATION_ID" = live-data-apply-slip-index ]
-    [ "$SOURCE_SHA" = 1111111111111111111111111111111111111111 ]
+    [ "$SOURCE_SHA" = 3333333333333333333333333333333333333333 ]
+    [ "$EXPECTED_RESOURCE_VERSION" = "$(jq -er '.metadata.resourceVersion' "$RESUME_LOCK_FIXTURE")" ]
     [ "${RESUME_LOCK_FAILURE:-}" != release ] || exit 1
     if [ "${RESUME_LOCK_FAILURE:-}" = skipped ]; then
       echo 'shared_mongo_lock=release status=SKIPPED reason=not-holder'
@@ -2725,9 +2766,11 @@ case "$1" in
       echo 'shared_mongo_lock=release status=PASS strict_snapshot=true fencing_generation=12'
     fi
     ;;
-  acquire-released)
-    [ "$EXPECTED_LOCK_UID" = fixture-original-uid ]
-    [ "$EXPECTED_FENCING_GENERATION" = 12 ]
+  acquire-released|acquire)
+    if [ "$1" = acquire-released ]; then
+      [ "$EXPECTED_LOCK_UID" = fixture-original-uid ]
+      [ "$EXPECTED_FENCING_GENERATION" = 12 ]
+    fi
     [ "$LOCK_TOKEN" = live-data-901-1 ]
     [ "$SOURCE_SHA" = 2222222222222222222222222222222222222222 ]
     [ "${RESUME_LOCK_FAILURE:-}" != acquire ] || exit 1
@@ -2737,11 +2780,21 @@ case "$1" in
 esac
 SH
 chmod 755 "$resume_fixture/infra/azure/agents/shared-mongo-operation-lock-stan.sh"
-for failure in none release skipped acquire; do
+for failure in none release skipped acquire drift; do
   : >"$resume_log"
+  if [ "$failure" = drift ]; then
+    python3 - "$resume_fixture/lock.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["metadata"]["resourceVersion"] = "43"
+path.write_text(json.dumps(value))
+PY
+  fi
   if (
     cd "$resume_fixture"
     RESUME_TEST_LOG="$resume_log" RESUME_LOCK_FAILURE="$failure" \
+    RESUME_LOCK_FIXTURE="$resume_fixture/lock.json" \
     RUNNER_TEMP="$resume_fixture" OCI_K8S_NAMESPACE=betstan-oci \
     SHARED_MONGO_LOCK_TOKEN=live-data-901-1 \
     SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
@@ -2761,6 +2814,25 @@ for failure in none release skipped acquire; do
   [ "$(cat "$resume_log")" = "$expected" ] ||
     fail "lock $failure crossed a forbidden mutation boundary"
 done
+ruby -ryaml - "$WORKFLOW" >"$resume_fixture/retained-acquire-step.sh" <<'RUBY'
+step = YAML.load_file(ARGV.fetch(0)).fetch("jobs").values.flat_map { |j| j.fetch("steps") }
+  .find { |s| s["name"] == "Acquire database operation lock" }
+puts step.fetch("run")
+  .gsub("${{ steps.provenance_request.outputs.resume_maintenance_mode }}", "retained-hold")
+  .gsub("${{ inputs.resume_source_sha }}", "3" * 40)
+RUBY
+: >"$resume_log"
+(
+  cd "$resume_fixture"
+  RESUME_TEST_LOG="$resume_log" PREREQUISITE_RUN_ID=4008 \
+  FAILED_DEPLOY_RUN_ID=77 FAILED_ACTIVATION_RUN_ID=0 OCI_K8S_NAMESPACE=betstan-oci \
+  SHARED_MONGO_LOCK_TOKEN=live-data-901-1 SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
+  SHARED_MONGO_LOCK_LEASE_SECONDS=14400 SOURCE_SHA=2222222222222222222222222222222222222222 \
+    bash "$resume_fixture/retained-acquire-step.sh"
+)
+[ "$(cat "$resume_log")" = $'lock:release\nacquire' ] ||
+  fail "retained successor did not transfer its immediate predecessor lock"
+unset RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
 echo "PASS pre-runtime ten-image baseline, Telemetry/fence drift, private snapshot and release/acquire boundaries"
 
 for literal in \

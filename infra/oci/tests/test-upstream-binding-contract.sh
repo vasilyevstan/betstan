@@ -3267,6 +3267,219 @@ for mutation in deployment-predecessor failed-deploy applied-run applied-source;
 done
 ok "reject deployment, failed-deploy, and applied-predecessor cross-links"
 
+prepare_pre_runtime_activation_chain() {
+  prepare_activation_chain 623 610
+  local root="$WORK/profile-artifacts-623"
+  rewrite_profile_env "$root/predecessor" resume-authority.env resume_maintenance_mode pre-runtime-hold
+  rewrite_profile_env "$root/predecessor" resume-authority.env rehold_step_conclusion skipped
+  local predecessor_sha
+  predecessor_sha="$(sha256sum "$root/predecessor/SHA256SUMS" | awk '{print $1}')"
+  rewrite_profile_env "$root/successful-deployment" provenance.txt data_evidence_sha256 "$predecessor_sha" false
+  artifact_zip_directory_fixture 9814 "$root/predecessor"
+  artifact_zip_directory_fixture 9816 "$root/successful-deployment"
+  mkdir -p "$root/original-baselines"
+  cp -R "$root/baseline" "$root/original-baselines/oci-data-baseline-before"
+  artifact_zip_directory_fixture 9820 "$root/original-baselines"
+  python3 - "$FIXTURE_DIR" "$REPO" "$ROOT_DIR" "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA" <<'PY'
+import hashlib, json, pathlib, re, subprocess, sys
+directory, repo, checkout, root_source, resumed_source = sys.argv[1:]
+def path(endpoint):
+    return pathlib.Path(directory) / endpoint.translate(str.maketrans("/?=&", "____"))
+def write(endpoint, value):
+    path(endpoint).write_text(json.dumps(value))
+def read(endpoint):
+    return json.loads(path(endpoint).read_text())
+prefix = f"repos/{repo}"
+root_artifacts = read(f"{prefix}/actions/runs/42/artifacts?per_page=100")
+root_artifacts["artifacts"].append({
+    "name": "oci-live-data-baselines-42-1", "id": 9820,
+    "expired": False, "size_in_bytes": 8192})
+root_artifacts["total_count"] = 2
+write(f"{prefix}/actions/runs/42/artifacts?per_page=100", root_artifacts)
+write(f"{prefix}/actions/runs/610/artifacts?per_page=100", {"total_count": 0, "artifacts": []})
+for run, workflow, wid, event in (
+    (41, "oci-production-build.yml", 7641, "workflow_run"),
+    (44, "oci-infrastructure.yml", 7644, "workflow_dispatch"),
+):
+    write(f"{prefix}/actions/workflows/{workflow}", {"id": wid})
+    value = {
+        "id": run, "run_attempt": 1, "workflow_id": wid,
+        "path": f".github/workflows/{workflow}",
+        "head_repository": {"full_name": repo}, "head_branch": "master",
+        "head_sha": root_source, "status": "completed", "conclusion": "success",
+        "event": event, "created_at": "2025-12-31T20:00:00Z", "updated_at": "2025-12-31T20:10:00Z",
+    }
+    for suffix in ("", "/attempts/1"):
+        write(f"{prefix}/actions/runs/{run}{suffix}", value)
+blob = subprocess.check_output(["git", "-C", checkout, "show",
+    f"{root_source}:.github/workflows/oci-production-deploy.yml"])
+write(f"{prefix}/contents/.github/workflows/oci-production-deploy.yml?ref={root_source}",
+    {"sha": hashlib.sha1(f"blob {len(blob)}\0".encode() + blob).hexdigest()})
+names = re.findall(r"(?m)^      - name: (.+)$", blob.decode().split("\n  public-validate:\n")[0])
+boundary = names.index("Verify immutable image and infrastructure provenance")
+steps = [{
+    "name": name, "number": index + 2, "status": "completed",
+    "conclusion": "success" if index < boundary else "failure" if index == boundary else "skipped",
+    "started_at": "2025-12-31T21:25:00Z", "completed_at": "2025-12-31T21:26:00Z",
+} for index, name in enumerate(names)]
+for step in steps:
+    if step["name"] in {"Remove isolated OCI client state", "Upload sanitized live readiness evidence"}:
+        step["conclusion"] = "success"
+steps.insert(0, {"name": "Set up job", "number": 1, "status": "completed", "conclusion": "success"})
+for name in ("Post Checkout approved master commit", "Complete job"):
+    steps.append({"name": name, "number": len(steps) + 1, "status": "completed", "conclusion": "success"})
+write(f"{prefix}/actions/runs/610/attempts/1/jobs?per_page=100", {
+    "total_count": 2, "jobs": [
+        {"id": 61000, "run_id": 610, "name": "deploy", "status": "completed", "conclusion": "failure", "steps": steps},
+        {"id": 61001, "run_id": 610, "name": "public-validate", "status": "completed", "conclusion": "skipped", "steps": []},
+    ]})
+write(f"{prefix}/actions/runs/43/attempts/1/jobs?per_page=100", {
+    "total_count": 1, "jobs": [{"id": 4300, "run_id": 43, "name": "rollout", "steps": [{
+        "name": "Validate exact SHA phase and trusted upstream runs", "conclusion": "success",
+        "started_at": "2025-12-31T22:01:00Z", "completed_at": "2025-12-31T22:02:00Z"}]}]})
+failed = {
+    "approved_sha": root_source, "build_run_id": "41", "infrastructure_run_id": "44",
+    "data_run_id": "42", "checkpoint_source_sha": root_source, "disk_checkpoint_run_id": "44",
+    "baseline_recovery_run_id": "0", "baseline_recovery_source_sha": "none",
+    "confirmation": "DEPLOY OCI EXACT SHA",
+}
+resume = {key: value for key, value in failed.items() if key != "data_run_id"}
+resume.update(
+    approved_sha=resumed_source, resume_source_sha=root_source, phase="apply-slip-index",
+    prerequisite_run_id="42", failed_deploy_run_id="610", failed_activation_run_id="0",
+    failed_activation_user_id="0", confirmation="RESUME APPLIED LIVE DATA EXACT SHA")
+for job, values, timestamp in (
+    (61000, failed, "2025-12-31T21:25:30Z"), (4300, resume, "2025-12-31T22:01:30Z"),
+):
+    lines = ["##[group]Run set -euo pipefail", "env:"]
+    lines += [f"  {'SOURCE_SHA' if key == 'approved_sha' else key.upper()}: {value}" for key, value in values.items()]
+    lines += ["  DISPATCH_INPUTS: " + json.dumps(values), "##[endgroup]"]
+    path(f"{prefix}/actions/jobs/{job}/logs").write_text(
+        "".join(f"{timestamp} {line}\n" for line in lines))
+PY
+}
+
+saved_subject="$SUBJECT_SHA"
+saved_applied="$APPLIED_SOURCE_SHA"
+SUBJECT_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+APPLIED_SOURCE_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD^)"
+prepare_pre_runtime_activation_chain
+pre_runtime_cleanup_inputs="$(
+  profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA" |
+    jq -c '.failed_deploy_run_id = "610"'
+)"
+run_custom_binding "$activation_binding" 623 "$pre_runtime_cleanup_inputs" oke >/dev/null ||
+  fail "pre-runtime activation cleanup was rejected: $(cat "$WORK/err.txt")"
+for mutation in omitted substituted; do
+  failed=0
+  [ "$mutation" != substituted ] || failed=611
+  bad_inputs="$(jq -c --arg failed "$failed" '.failed_deploy_run_id=$failed' <<<"$pre_runtime_cleanup_inputs")"
+  if run_custom_binding "$activation_binding" 623 "$bad_inputs" oke >/dev/null; then
+    fail "pre-runtime activation cleanup accepted $mutation historical failure"
+  fi
+done
+for authority_mutation in applied_data_run_id applied_source_sha; do
+  prepare_pre_runtime_activation_chain
+  bad=99
+  [ "$authority_mutation" != applied_source_sha ] || bad=9999999999999999999999999999999999999999
+  rewrite_profile_env "$WORK/profile-artifacts-623/predecessor" resume-authority.env "$authority_mutation" "$bad"
+  artifact_zip_directory_fixture 9814 "$WORK/profile-artifacts-623/predecessor"
+  changed_sha="$(sha256sum "$WORK/profile-artifacts-623/predecessor/SHA256SUMS" | awk '{print $1}')"
+  rewrite_profile_env "$WORK/profile-artifacts-623/successful-deployment" provenance.txt data_evidence_sha256 "$changed_sha" false
+  artifact_zip_directory_fixture 9816 "$WORK/profile-artifacts-623/successful-deployment"
+  if run_custom_binding "$activation_binding" 623 "$pre_runtime_cleanup_inputs" oke >/dev/null; then
+    fail "pre-runtime cleanup accepted substituted original $authority_mutation"
+  fi
+done
+ok "pre-runtime resumed activation cleanup authenticates zero-artifact failure and rejects omitted/substituted authority"
+
+for mode in retained released; do
+  prepare_pre_runtime_activation_chain
+  post_root="$WORK/profile-artifacts-624"
+  rm -rf "$post_root"
+  mkdir -p "$post_root"
+  cp -R "$WORK/profile-artifacts-623/baseline" "$post_root/"
+  cp -R "$WORK/profile-artifacts-623/successful-deployment" "$post_root/failed-deployment"
+  write_profile_run 624 oci-production-deploy.yml "oci-deploy $SUBJECT_SHA" 7645 oci-production-baseline-624-1
+  rewrite_profile_env "$post_root/failed-deployment" provenance.txt deployment_run_id 624 false
+  ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" >"$post_root/intent.sh" <<'RUBY'
+puts YAML.load_file(ARGV[0]).fetch("jobs").fetch("deploy").fetch("steps")
+  .find { |step| step["name"] == "Write checksum-bound deployment recovery intent" }.fetch("run")
+RUBY
+  mkdir -p "$post_root/artifacts/oci-deploy" "$post_root/artifacts/data" \
+    "$post_root/artifacts/infrastructure"
+  cp "$WORK/profile-artifacts-623/build/images.tsv" "$post_root/artifacts/oci-deploy/"
+  cp "$WORK/profile-artifacts-623/predecessor/SHA256SUMS" "$post_root/artifacts/data/"
+  cp "$WORK/profile-artifacts-623/infrastructure/provenance.env" "$post_root/artifacts/infrastructure/"
+  cp -R "$post_root/baseline" "$post_root/artifacts/oci-baseline"
+  checkpoint_sha="$(jq -r .contentChecksumSha256 "$WORK/profile-artifacts-623/checkpoint/checkpoint.json")"
+  (
+    cd "$post_root"
+    SOURCE_SHA="$SUBJECT_SHA" GITHUB_RUN_ID=624 GITHUB_RUN_ATTEMPT=1 OCI_RUNTIME_MODE=oke \
+    BUILD_RUN_ID=41 DATA_RUN_ID=43 INFRASTRUCTURE_RUN_ID=44 CHECKPOINT_SOURCE_SHA="$APPLIED_SOURCE_SHA" \
+    DISK_CHECKPOINT_RUN_ID=44 DISK_CHECKPOINT_SHA256="$checkpoint_sha" DISK_CHECKPOINT_DISPOSITION=NOT_APPLICABLE \
+    BASELINE_RECOVERY_RUN_ID=0 BASELINE_RECOVERY_SOURCE_SHA=none bash intent.sh
+  )
+  cp -R "$post_root/artifacts/oci-deploy-recovery" "$post_root/deployment-recovery"
+  cp "$WORK/profile-artifacts-623/deployment-recovery/failure-lineage.env" "$post_root/deployment-recovery/"
+  intent_sha="$(sha256sum "$post_root/deployment-recovery/deployment-intent.env" | awk '{print $1}')"
+  rewrite_profile_env "$post_root/deployment-recovery" failure-lineage.env source_sha "$SUBJECT_SHA"
+  rewrite_profile_env "$post_root/deployment-recovery" failure-lineage.env deployment_run_id 624
+  rewrite_profile_env "$post_root/deployment-recovery" failure-lineage.env intent_sha256 "$intent_sha"
+  fixture "repos/$REPO/actions/runs/624/artifacts?per_page=100" <<'EOF2'
+{"total_count":3,"artifacts":[
+ {"name":"oci-production-baseline-624-1","id":10324,"expired":false,"size_in_bytes":8192},
+ {"name":"oci-deploy-provenance-624-1","id":20624,"expired":false,"size_in_bytes":8192},
+ {"name":"oci-deploy-recovery-authority-624-1","id":21624,"expired":false,"size_in_bytes":8192}]}
+EOF2
+  artifact_zip_directory_fixture 10324 "$post_root/baseline"
+  artifact_zip_directory_fixture 20624 "$post_root/failed-deployment"
+  artifact_zip_directory_fixture 21624 "$post_root/deployment-recovery"
+  if [ "$mode" = retained ]; then
+    binding="$retained_binding"
+    write_deploy_profile_jobs 624 failure skipped skipped skipped success
+  else
+    binding="$released_binding"
+    write_deploy_profile_jobs 624 success failure success success skipped
+  fi
+  inputs="$(profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA")"
+  run_custom_binding "$binding" 624 "$inputs" oke >/dev/null ||
+    fail "$mode post-runtime admission after pre-runtime resume failed: $(cat "$WORK/err.txt")"
+  for mutation in root hash; do
+    cp -R "$post_root/baseline" "$post_root/baseline-save"
+    if [ "$mutation" = root ]; then
+      rewrite_profile_env "$post_root/baseline" baseline-provenance.env baseline_capture_run_id 43
+    else
+      printf 'substituted\n' >"$post_root/baseline/evidence.txt"
+    fi
+    artifact_zip_directory_fixture 10324 "$post_root/baseline"
+    if run_custom_binding "$binding" 624 "$inputs" oke >/dev/null; then
+      fail "$mode post-runtime admission accepted substituted baseline $mutation"
+    fi
+    rm -rf "$post_root/baseline"
+    mv "$post_root/baseline-save" "$post_root/baseline"
+  done
+  artifact_zip_directory_fixture 10324 "$post_root/baseline"
+  inventory="$FIXTURE_DIR/$(printf '%s' "repos/$REPO/actions/runs/624/artifacts?per_page=100" | tr '/?=&' '____')"
+  cp "$inventory" "$post_root/artifact-inventory.json"
+  proof=oci-deploy-recovery-authority-624-1
+  [ "$mode" != released ] || proof=oci-deploy-provenance-624-1
+  for missing in oci-production-baseline-624-1 "$proof"; do
+    jq --arg missing "$missing" \
+      '.artifacts |= map(select(.name != $missing)) | .total_count=(.artifacts|length)' \
+      "$post_root/artifact-inventory.json" >"$inventory"
+    if run_custom_binding "$binding" 624 "$inputs" oke >/dev/null; then
+      fail "$mode post-runtime admission accepted missing actual $missing"
+    fi
+  done
+  cp "$post_root/artifact-inventory.json" "$inventory"
+  run_custom_binding "$binding" 624 "$inputs" oke >/dev/null ||
+    fail "$mode post-runtime fixture did not recover after rejected substitutions"
+  ok "$mode post-runtime admission preserves original capture with executed deployment-intent producer"
+done
+SUBJECT_SHA="$saved_subject"
+APPLIED_SOURCE_SHA="$saved_applied"
+
 ANCESTOR_PROFILE_SHA="bd1008081411d64d96dd0221126090577ea72c6b"
 ancestor_profile_run=622
 reset_fixtures

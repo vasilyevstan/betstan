@@ -571,6 +571,16 @@ jobs:
           rm -rf "$recovery_dir"
           mkdir -p "$recovery_dir"
           cp artifacts/oci-deploy/images.tsv "$recovery_dir/images.tsv"
+          baseline_capture_run_id="$(
+            awk -F= '$1 == "baseline_capture_run_id" {
+              if (found++) exit 1
+              value=$2
+            } END {
+              if (found != 1) exit 1
+              print value
+            }' artifacts/oci-baseline/baseline-provenance.env
+          )"
+          [[ "$baseline_capture_run_id" =~ ^[1-9][0-9]*$ ]]
           {
             printf 'schema_version=oci-deployment-recovery-authority-v1\n'
             printf 'source_sha=%s\n' "$SOURCE_SHA"
@@ -597,7 +607,7 @@ jobs:
               "$DISK_CHECKPOINT_DISPOSITION"
             printf 'baseline_sha256=%s\n' \
               "$(sha256sum artifacts/oci-baseline/SHA256SUMS | awk '{print $1}')"
-            printf 'baseline_capture_run_id=%s\n' "$DATA_RUN_ID"
+            printf 'baseline_capture_run_id=%s\n' "$baseline_capture_run_id"
             printf 'baseline_recovery_run_id=%s\n' "$BASELINE_RECOVERY_RUN_ID"
             printf 'baseline_recovery_source_sha=%s\n' \
               "$BASELINE_RECOVERY_SOURCE_SHA"

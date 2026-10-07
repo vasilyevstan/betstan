@@ -1275,6 +1275,8 @@ def parse_deployment_recovery_artifact(
     fence_outcome,
     rehold_outcome,
     label,
+    *,
+    baseline_capture_run_id=None,
 ):
     artifact = exact_artifact(
         repository,
@@ -1343,7 +1345,7 @@ def parse_deployment_recovery_artifact(
         "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
         "disk_checkpoint_disposition": checkpoint["disposition"],
         "baseline_sha256": baseline_manifest_sha256,
-        "baseline_capture_run_id": predecessor_run,
+        "baseline_capture_run_id": baseline_capture_run_id or predecessor_run,
         "baseline_recovery_run_id": predecessor["baseline_recovery_run_id"],
         "baseline_recovery_source_sha":
             predecessor["baseline_recovery_source_sha"],
@@ -1488,8 +1490,8 @@ def validate_failed_deploy_artifacts(
         repository, dispatch_inputs, runtime_mode, f"{label} checkpoint"
     )
     predecessor_run = require_dispatch_run(dispatch_inputs, "prerequisite_run_id")
-    predecessor, predecessor_manifest_sha256 = parse_live_v6_artifact(
-        repository, predecessor_run, f"{label} predecessor"
+    predecessor, predecessor_manifest_sha256, predecessor_files = parse_live_v6_artifact(
+        repository, predecessor_run, f"{label} predecessor", include_files=True
     )
     validate_live_v6_lineage(
         predecessor,
@@ -1502,6 +1504,15 @@ def validate_failed_deploy_artifacts(
     )
 
     root_run, root_source = predecessor_run, subject_sha
+    predecessor_authority = parse_resume_authority(
+        predecessor_files, predecessor, f"{label} predecessor"
+    )
+    if predecessor_authority is not None and (
+        predecessor_authority["resume_maintenance_mode"] == "pre-runtime-hold"
+    ):
+        root_run, root_source = validate_pre_runtime_resume_chain(
+            repository, predecessor_run, runtime_mode, seen=seen
+        )
     if pre_runtime:
         native = failed_deploy_native_inputs(repository, run_id, subject_sha, label)
         expected_native = {
@@ -1550,9 +1561,10 @@ def validate_failed_deploy_artifacts(
             failed.get("created_at"), label
         ):
             fail(f"{label} failed deployment predates its data handoff")
-        root_run, root_source = validate_pre_runtime_resume_chain(
-            repository, predecessor_run, runtime_mode, seen=seen
-        )
+        if predecessor_authority is not None and (
+            predecessor_authority["resume_maintenance_mode"] != "pre-runtime-hold"
+        ):
+            fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
         artifact = exact_artifact(
             repository, root_run, f"oci-live-data-baselines-{root_run}-1", label
         )
@@ -1606,6 +1618,7 @@ def validate_failed_deploy_artifacts(
             fence_outcome,
             rehold_outcome,
             f"{label} recovery authority",
+            baseline_capture_run_id=root_run,
         )
     else:
         parse_deployment_artifact(
@@ -2058,6 +2071,12 @@ def validate_failed_activation_artifacts(
     if failed_deploy_input == "0":
         if resume_authority is not None:
             fail(f"{label} omitted the predecessor failed deployment")
+    elif resume_authority is not None and (
+        resume_authority["resume_maintenance_mode"] == "pre-runtime-hold"
+    ):
+        if resume_authority["failed_deploy_run_id"] != failed_deploy_input:
+            fail(f"{label} failed deployment lineage is inconsistent")
+        validate_pre_runtime_resume_chain(repository, predecessor_run, runtime_mode)
     else:
         if (
             POSITIVE_INTEGER.fullmatch(failed_deploy_input) is None
