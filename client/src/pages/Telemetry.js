@@ -445,7 +445,7 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, generatedAt
       }}
     >
       <time className="telemetry-metric__date" dateTime={buckets[activeIndex]}>
-        {isDaily ? '00:00-24:00 UTC' : `${buckets[activeIndex].slice(11, 16)} UTC`}
+        {isDaily ? `${buckets[activeIndex]} UTC` : `${buckets[activeIndex].slice(11, 16)} UTC`}
       </time>
       <data className="telemetry-metric__value" value={values[activeIndex]}>
         {values[activeIndex]}
