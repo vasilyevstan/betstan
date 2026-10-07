@@ -261,6 +261,14 @@ later revalidation applies its selected public or held profile. Candidate and
 rollback CRI residency, lineage, identity, checksums, and kubelet checks remain
 mandatory at their applicable boundaries.
 
+Protected k3s live-data and deployment windows retain the existing target SSH
+key and known-host material until their read-only node disk revalidation is
+finished. The existing unconditional cleanup removes that material and closes
+access, including on failure. API-only callers keep the default early removal
+after API forwarding is established. This caller-specific retention leaves
+strict SSH checks, bounded sessions, disk thresholds, physical locks, immutable
+source/checksum binding, and the normal release and rollback flow unchanged.
+
 Checkpoint creation and each public or held revalidation independently require
 fresh kubelet node-filesystem and raw-root byte measurements to satisfy
 `usedBytes * 100 <= capacityBytes * 70`. Equality passes; one byte over the
