@@ -353,6 +353,11 @@ That source may be the approved SHA or the proven GitHub/infra/Markdown-only
 ancestor; a newly produced byte-equivalent build or infrastructure run is not
 interchangeable with the original.
 
+The deploy consumer uses the validated `CHECKPOINT_SOURCE_SHA` for infrastructure
+provenance and the live instance's source tag. Deployment, lock, and release
+provenance continue to use the current control `SOURCE_SHA`. Callers that omit
+the checkpoint source retain the existing equal-source behavior.
+
 The journal extension adds one fixed cleanup category, its distinct protected
 operation, and public runtime v3. It adds no workflow, release phase, threshold
 change, credential path, or alternate image client. Because the checked-in

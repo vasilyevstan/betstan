@@ -793,4 +793,163 @@ grep -Fq 'sudo findmnt -n -o UUID --target "$mount_path"' "$finalizer" ||
 grep -Fq 'sudo findmnt -n -o FSTYPE --target "$mount_path"' "$finalizer" ||
   fail "k3s finalizer cannot validate the protected Mongo filesystem"
 
+deploy_fixture="$WORK_DIR/deploy-consumer"
+mkdir -p "$deploy_fixture/infra/oci/scripts" "$deploy_fixture/infra/azure/agents" "$deploy_fixture/bin"
+cp "$OCI_DIR/scripts/"{deploy.sh,lib.sh,application-registry.sh} \
+  "$deploy_fixture/infra/oci/scripts/"
+# Execute the consumer's identity preflight and provenance writer unchanged,
+# without replaying unrelated workload rollout operations.
+python3 - "$deploy_fixture/infra/oci/scripts/deploy.sh" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+preflight = source[:source.index('\noci_prepare_private_dir "$OUTPUT_DIR"')]
+provenance = source[source.index("\n{\n  printf 'source_sha=%s\\n'"):
+                    source.rindex("\nmongo_upgrade_recovery_required=false")]
+path.write_text(preflight + """
+oci_prepare_private_dir "$OUTPUT_DIR"
+cp "$DEPLOY_FIXTURE/rendered.yaml" "$RENDERED_FILE"
+cp "$DEPLOY_FIXTURE/queues.txt" "$OUTPUT_DIR/rabbitmq-baseline.txt"
+""" + provenance)
+PY
+cp "$ROOT_DIR/infra/azure/agents/live-betting-readiness-lib.sh" \
+  "$deploy_fixture/infra/azure/agents/"
+cat >"$deploy_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$SOURCE_SHA" == "$EXPECTED_CONTROL_SHA" ]]
+[[ "$LOCK_TOKEN" == live-data-43-1 && "$OPERATION_ID" == live-data-apply-slip-index ]]
+printf 'lock_%s_source_sha=%s\n' "$1" "$SOURCE_SHA" >>"$DEPLOY_FIXTURE/roles.log"
+SH
+cat >"$deploy_fixture/bin/oci" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  --version) echo 3.90.0 ;;
+  "compute instance get "*)
+    jq -cn --arg source "$FIXTURE_INSTANCE_SOURCE" '{
+      data: {"compartment-id":"ocid1.compartment.oc1..fixture",
+        "lifecycle-state":"RUNNING", shape:"VM.Standard.A1.Flex",
+        "freeform-tags":{"betstan-runtime":"k3s","source-sha":$source}}}' ;;
+  *) exit 98 ;;
+esac
+SH
+cat >"$deploy_fixture/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$SOURCE_SHA" == "$EXPECTED_CONTROL_SHA" ]]
+case "$*" in
+  "config view "*) echo '{"clusters":[{"cluster":{"server":"https://127.0.0.1:16443"}}]}' ;;
+  "get node "*) echo '{"spec":{"providerID":"oci://ocid1.instance.oc1..fixture"},"metadata":{"labels":{"kubernetes.io/arch":"arm64"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}' ;;
+  *) echo "unexpected deploy fixture kubectl: $*" >&2; exit 98 ;;
+esac
+SH
+chmod +x "$deploy_fixture/bin/"* "$deploy_fixture/infra/oci/scripts/"*.sh
+python3 - "$deploy_fixture" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+services = ["auth", "bet", "backoffice", "client", "event", "gamemaster",
+            "moderation", "resulting", "slip", "telemetry"]
+digest = "sha256:" + f"{1:064d}"
+repository = "ghcr.io/vasilyevstan/betstan-images"
+(root / "images.tsv").write_text("".join(
+    f"{service}\t{repository}\t{repository}@{digest}\t{digest}\t{digest}\n"
+    for service in services))
+(root / "rendered.yaml").write_text("kind: Deployment\n")
+(root / "queues.txt").write_text("fixture-queue\n")
+PY
+control_source="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+infrastructure_source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+instance_fingerprint="$(printf '%s' ocid1.instance.oc1..fixture | sha256sum | awk '{print $1}')"
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" "$deploy_fixture" <<'RUBY'
+workflow = YAML.load_file(ARGV[0]).fetch("jobs").fetch("deploy")
+abort "control source wiring changed" unless workflow.fetch("env").fetch("SOURCE_SHA") == "${{ inputs.approved_sha }}"
+abort "checkpoint source wiring changed" unless workflow.fetch("env").fetch("CHECKPOINT_SOURCE_SHA") == "${{ inputs.checkpoint_source_sha }}"
+steps = workflow.fetch("steps")
+%w[renew_lock release_lock].each do |id|
+  File.write(File.join(ARGV[1], "#{id}.sh"), steps.find { |step| step["id"] == id }.fetch("run"))
+end
+RUBY
+run_deploy_source_fixture() {
+  local checkpoint="$1" infra="$2" instance_source="$3"
+  cat >"$deploy_fixture/infrastructure.env" <<EOF
+source_sha=$infra
+runtime_mode=k3s
+infrastructure_finalized=true
+compartment_ocid=ocid1.compartment.oc1..fixture
+ingress_ipv4=8.8.8.8
+public_host=betstan.xyz
+canonical_host=betstan.xyz
+redirect_host=www.betstan.xyz
+diagnostic_host=8.8.8.8.nip.io
+application_registry_provider=ghcr
+application_registry_host=ghcr.io
+application_registry_repository=ghcr.io/vasilyevstan/betstan-images
+application_registry_public_anonymous=true
+ocir_application_repository_absent=true
+node_shape=VM.Standard.A1.Flex
+node_ocpus=2
+node_memory_gb=12
+mongo_volume_gb=50
+lb_min_mbps=10
+lb_max_mbps=10
+expected_monthly_cost=0
+instance_ocid=ocid1.instance.oc1..fixture
+instance_fingerprint=$instance_fingerprint
+lb_ocid=ocid1.loadbalancer.oc1..fixture
+k3s_node_name=fixture-node
+EOF
+  rm -rf "$deploy_fixture/output"
+  : >"$deploy_fixture/roles.log"
+  (
+    cd "$ROOT_DIR"
+    unset CHECKPOINT_SOURCE_SHA
+    [[ "$checkpoint" == default ]] || export CHECKPOINT_SOURCE_SHA="$checkpoint"
+    export SOURCE_SHA="$control_source" EXPECTED_CONTROL_SHA="$control_source"
+    export DEPLOY_FIXTURE="$deploy_fixture" FIXTURE_INSTANCE_SOURCE="$instance_source"
+    export GITHUB_RUN_ID=99
+    export OCI_K8S_NAMESPACE=betstan-oci OCI_RUNTIME_MODE=k3s OCI_CLI_VERSION=3.90.0
+    export OCI_CERT_EMAIL=fixture@example.invalid OCI_JWT_KEY=fixture-not-a-secret
+    export OCI_COMPARTMENT_OCID=ocid1.compartment.oc1..fixture
+    export IMAGE_PROVENANCE_FILE="$deploy_fixture/images.tsv"
+    export INFRA_PROVENANCE_FILE="$deploy_fixture/infrastructure.env"
+    export OUTPUT_DIR="$deploy_fixture/output" PATH="$deploy_fixture/bin:$PATH"
+    bash "$deploy_fixture/infra/oci/scripts/deploy.sh" || exit "$?"
+    cd "$deploy_fixture"
+    export DATA_RUN_ID=43 SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS=3600
+    bash renew_lock.sh || exit "$?"
+    bash release_lock.sh
+  )
+}
+run_deploy_source_fixture default "$control_source" "$control_source" >"$deploy_fixture/default.out" 2>&1 ||
+  fail "default equal-source deployment failed: $(tail -n 4 "$deploy_fixture/default.out")"
+run_deploy_source_fixture "$infrastructure_source" "$infrastructure_source" "$infrastructure_source" \
+  >"$deploy_fixture/ancestor.out" 2>&1 ||
+  fail "checkpoint-source deployment failed: $(tail -n 4 "$deploy_fixture/ancestor.out")"
+grep -Fxq "source_sha=$control_source" "$deploy_fixture/output/provenance.txt" ||
+  fail "deployment provenance advanced to the infrastructure source"
+for role in lock_renew lock_release lock_verify-released; do
+  grep -Fxq "${role}_source_sha=$control_source" "$deploy_fixture/roles.log" ||
+    fail "$role lost the current control source"
+done
+for mutation in infra instance role malformed; do
+  checkpoint="$infrastructure_source"
+  infra="$infrastructure_source"
+  instance_source="$infrastructure_source"
+  expected="infrastructure provenance source SHA mismatch"
+  case "$mutation" in
+    infra) infra="$control_source" ;;
+    instance) instance_source="$control_source"; expected="live k3s instance differs from infrastructure provenance" ;;
+    role) checkpoint="$control_source" ;;
+    malformed) checkpoint=invalid; expected="CHECKPOINT_SOURCE_SHA must be a full lowercase commit SHA" ;;
+  esac
+  if run_deploy_source_fixture "$checkpoint" "$infra" "$instance_source" >"$deploy_fixture/rejected.out" 2>&1; then
+    fail "deployment accepted mismatched $mutation source"
+  fi
+  grep -Fq "$expected" "$deploy_fixture/rejected.out" ||
+    fail "$mutation failed outside its source identity boundary"
+  [[ ! -s "$deploy_fixture/roles.log" && ! -e "$deploy_fixture/output/provenance.txt" ]] ||
+    fail "$mutation source mismatch crossed the deployment mutation boundary"
+done
+echo "deploy_source_roles=PASS default=unchanged checkpoint=original control=current negatives=4"
 echo "oci_k3s_runtime_contract=PASS"
