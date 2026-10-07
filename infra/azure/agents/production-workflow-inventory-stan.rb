@@ -1348,8 +1348,6 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "validate-partial-recovery-authority-stan.sh" =>
       "partial-recovery evidence validation",
     "EXPECTED_BASELINE_RECOVERY_RUN_ID" => "recovery authority phase-chain binding",
-    "oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1" =>
-      "failed-deploy rollback baseline binding",
     "protected_operation=oci-live-data-resume-activation" =>
       "fixed failed-activation profile selection",
     "--policy-json \"$policy_json\"" =>
@@ -1382,6 +1380,62 @@ def validate_live_data_rollout_workflow!(file, document, content)
       /#{Regexp.escape(literal)}/,
       "#{name} is missing #{label}"
     )
+  end
+
+  steps = document.fetch("jobs", {}).fetch("rollout", {}).fetch("steps", [])
+  producers = steps.select { |step| step["id"] == "provenance_request" }
+  downloads = steps.select { |step| step["name"] == "Download failed deploy protected baseline" }
+  binding_error = "#{name} is missing failed-deploy rollback baseline binding"
+  fail_inventory(binding_error) unless producers.length == 1 && downloads.length == 1
+  producer = producers.first
+  download = downloads.first
+  expected_download = {
+    "name" => "${{ steps.provenance_request.outputs.baseline_artifact_name }}",
+    "path" => "artifacts/oci-data-baseline-before",
+    "github-token" => "${{ github.token }}",
+    "repository" => "${{ github.repository }}",
+    "run-id" => "${{ steps.provenance_request.outputs.baseline_run_id }}"
+  }
+  expected_condition = [
+    "inputs.failed_deploy_run_id != '0'",
+    "inputs.failed_activation_run_id == '0'",
+    "steps.provenance_request.outputs.resume_maintenance_mode != 'pre-runtime-hold'"
+  ].join(" && ")
+  unless steps.index(producer) < steps.index(download) &&
+         !producer.key?("if") && !producer.key?("continue-on-error") &&
+         !download.key?("continue-on-error") &&
+         download["uses"].to_s.start_with?("actions/download-artifact@") &&
+         download["with"] == expected_download &&
+         download["if"].to_s.split.join(" ") == expected_condition
+    fail_inventory(binding_error)
+  end
+  script = producer["run"].to_s
+  commands = shell_logical_commands(script)
+  validator_calls = commands.select do |command|
+    command.start_with?("./infra/oci/scripts/upstream_run_binding_stan.py ")
+  end
+  expected_validator = %w[
+    ./infra/oci/scripts/upstream_run_binding_stan.py validate-all
+    --repository $REPOSITORY --policy-json $policy_json --subject-sha $SOURCE_SHA
+    --dispatch-inputs $DISPATCH_INPUTS --runtime-mode $OCI_RUNTIME_MODE
+    --result-json $RUNNER_TEMP/live-data-upstream-result.json
+    --baseline-dir artifacts/oci-data-baseline-before
+  ]
+  publisher = <<~'SH'
+    jq -er '
+      .failed_deploy_run_id |
+      select(type == "object") |
+      to_entries[] | "\(.key)=\(.value)"
+    ' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"
+  SH
+  publisher_pattern = publisher.split.map { |word| Regexp.escape(word) }.join('\s+')
+  publication = script.match(/^\s*#{publisher_pattern}\s*$/)
+  unless commands.first == "set -euo pipefail" &&
+         validator_calls.length == 1 &&
+         Shellwords.shellsplit(validator_calls.first) == expected_validator &&
+         publication &&
+         publication.begin(0) > script.index("./infra/oci/scripts/upstream_run_binding_stan.py")
+    fail_inventory(binding_error)
   end
 
   require_content(

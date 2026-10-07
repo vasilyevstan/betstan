@@ -255,7 +255,9 @@ jobs:
             --policy-json "$policy_json" \
             --subject-sha "$SOURCE_SHA" \
             --dispatch-inputs "$DISPATCH_INPUTS" \
-            --runtime-mode "$OCI_RUNTIME_MODE"
+            --runtime-mode "$OCI_RUNTIME_MODE" \
+            --result-json "$RUNNER_TEMP/live-data-upstream-result.json" \
+            --baseline-dir artifacts/oci-data-baseline-before
 
           validate_run() {
             local workflow_file="$1"
@@ -351,121 +353,11 @@ jobs:
               validate_run \
                 oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID" \
                 workflow_dispatch "$prerequisite_source_sha" failure
-              failed_deploy_jobs="$(
-                gh api \
-                  "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/attempts/1/jobs?per_page=100"
-              )"
-              deploy_job_count="$(
-                jq '[.jobs[] | select(.name == "deploy")] | length' \
-                  <<<"$failed_deploy_jobs"
-              )"
-              public_validate_job_count="$(
-                jq '[.jobs[] | select(.name == "public-validate")] | length' \
-                  <<<"$failed_deploy_jobs"
-              )"
-              [ "$deploy_job_count" = "1" ]
-              [ "$public_validate_job_count" = "1" ]
-              deploy_job_conclusion="$(
-                jq -r '.jobs[] | select(.name == "deploy") | .conclusion' \
-                  <<<"$failed_deploy_jobs"
-              )"
-              public_validate_job_conclusion="$(
-                jq -r \
-                  '.jobs[] | select(.name == "public-validate") | .conclusion' \
-                  <<<"$failed_deploy_jobs"
-              )"
-              lock_release_step_count="$(
-                jq '[
-                  .jobs[] |
-                  select(.name == "deploy") |
-                  .steps[] |
-                  select(.name == "Release transferred lock after protected validation")
-                ] | length' <<<"$failed_deploy_jobs"
-              )"
-              fence_release_step_count="$(
-                jq '[
-                  .jobs[] |
-                  select(.name == "deploy") |
-                  .steps[] |
-                  select(.name == "Release live data maintenance fence")
-                ] | length' <<<"$failed_deploy_jobs"
-              )"
-              rehold_step_count="$(
-                jq '[
-                  .jobs[] |
-                  select(.name == "deploy") |
-                  .steps[] |
-                  select(.name == "Re-enter maintenance after an incomplete deployment")
-                ] | length' <<<"$failed_deploy_jobs"
-              )"
-              [ "$lock_release_step_count" = "1" ]
-              [ "$fence_release_step_count" = "1" ]
-              [ "$rehold_step_count" = "1" ]
-              lock_release_step_conclusion="$(
-                jq -r '
-                  .jobs[] |
-                  select(.name == "deploy") |
-                  .steps[] |
-                  select(.name == "Release transferred lock after protected validation") |
-                  .conclusion
-                ' <<<"$failed_deploy_jobs"
-              )"
-              fence_release_step_conclusion="$(
-                jq -r '
-                  .jobs[] |
-                  select(.name == "deploy") |
-                  .steps[] |
-                  select(.name == "Release live data maintenance fence") |
-                  .conclusion
-                ' <<<"$failed_deploy_jobs"
-              )"
-              rehold_step_conclusion="$(
-                jq -r '
-                  .jobs[] |
-                  select(.name == "deploy") |
-                  .steps[] |
-                  select(.name == "Re-enter maintenance after an incomplete deployment") |
-                  .conclusion
-                ' <<<"$failed_deploy_jobs"
-              )"
-              case "$deploy_job_conclusion:$public_validate_job_conclusion:$lock_release_step_conclusion:$fence_release_step_conclusion:$rehold_step_conclusion" in
-                success:failure:success:success:skipped)
-                  resume_maintenance_mode=released-runtime
-                  ;;
-                failure:skipped:skipped:skipped:success | \
-                  failure:skipped:failure:skipped:success | \
-                  failure:skipped:success:failure:success)
-                  resume_maintenance_mode=retained-hold
-                  ;;
-                *)
-                  echo "Unsupported failed deployment outcomes: deploy=$deploy_job_conclusion public-validate=$public_validate_job_conclusion lock-release=$lock_release_step_conclusion fence-release=$fence_release_step_conclusion rehold=$rehold_step_conclusion" >&2
-                  exit 1
-                  ;;
-              esac
-              if [ "$resume_maintenance_mode" = "released-runtime" ]; then
-                [ "$CONFIRMATION" = \
-                  "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA" ]
-              else
-                [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA EXACT SHA" ]
-              fi
-              printf 'resume_maintenance_mode=%s\n' \
-                "$resume_maintenance_mode" >> "$GITHUB_OUTPUT"
-              {
-                printf 'failed_deploy_job_conclusion=%s\n' "$deploy_job_conclusion"
-                printf 'public_validate_job_conclusion=%s\n' \
-                  "$public_validate_job_conclusion"
-                printf 'lock_release_step_conclusion=%s\n' \
-                  "$lock_release_step_conclusion"
-                printf 'fence_release_step_conclusion=%s\n' \
-                  "$fence_release_step_conclusion"
-                printf 'rehold_step_conclusion=%s\n' "$rehold_step_conclusion"
-              } >> "$GITHUB_OUTPUT"
-              baseline_artifact_name="oci-production-baseline-${FAILED_DEPLOY_RUN_ID}-1"
-              baseline_artifact_count="$(
-                gh api "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/artifacts?per_page=100" \
-                  --jq "[.artifacts[] | select(.name == \"$baseline_artifact_name\" and .expired == false)] | length"
-              )"
-              [ "$baseline_artifact_count" = "1" ]
+              jq -er '
+                .failed_deploy_run_id |
+                select(type == "object") |
+                to_entries[] | "\(.key)=\(.value)"
+              ' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"
             fi
             if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
               printf 'resume_maintenance_mode=released-runtime\n' \
@@ -520,14 +412,15 @@ jobs:
       - name: Download failed deploy protected baseline
         if: >-
           inputs.failed_deploy_run_id != '0' &&
-          inputs.failed_activation_run_id == '0'
+          inputs.failed_activation_run_id == '0' &&
+          steps.provenance_request.outputs.resume_maintenance_mode != 'pre-runtime-hold'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1
+          name: ${{ steps.provenance_request.outputs.baseline_artifact_name }}
           path: artifacts/oci-data-baseline-before
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.failed_deploy_run_id }}
+          run-id: ${{ steps.provenance_request.outputs.baseline_run_id }}
 
       - name: Download explicitly selected recovery baseline authority
         if: inputs.baseline_recovery_run_id != '0'
@@ -1011,12 +904,15 @@ jobs:
           case "$RESUME_MAINTENANCE_MODE" in
             released-runtime)
               ;;
+            pre-runtime-hold)
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+              ;;
             retained-hold)
               ./infra/oci/scripts/live-data-maintenance-stan.sh verify-quiesced
               NAMESPACE="$OCI_K8S_NAMESPACE" \
-              LOCK_TOKEN="live-data-${RESOLVED_APPLIED_DATA_RUN_ID}-1" \
+              LOCK_TOKEN="live-data-${PREREQUISITE_RUN_ID}-1" \
               OPERATION_ID="live-data-apply-slip-index" \
-              SOURCE_SHA="$RESOLVED_APPLIED_SOURCE_SHA" \
+              SOURCE_SHA="$RESUME_SOURCE_SHA" \
                 ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify
               ;;
             *)
@@ -1025,18 +921,34 @@ jobs:
               ;;
           esac
 
-          for service in auth bet backoffice client event gamemaster moderation resulting slip; do
+          runtime_images="$resume_images"
+          services=(auth bet backoffice client event gamemaster moderation resulting slip)
+          supporting_services=(auth client)
+          if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; then
+            runtime_images="$baseline_dir/images.tsv"
+            services+=(telemetry)
+            supporting_services+=(telemetry)
+            [ "$(wc -l <"$runtime_images" | tr -d ' ')" = 10 ]
+          fi
+          for service in "${services[@]}"; do
             expected_ref="$(
               awk -F '\t' -v service="$service" '
                 $1 == service { count++; value=$3 }
                 END { if (count != 1) exit 1; print value }
-              ' "$resume_images"
+              ' "$runtime_images"
             )"
             deployment="gaming-${service}-depl"
             actual_ref="$(
               kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" \
                 -o jsonpath='{.spec.template.spec.containers[0].image}'
             )"
+            if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; then
+              [ "$actual_ref" = "$expected_ref" ] || {
+                echo "::error::Pre-runtime baseline image mismatch for ${service}"
+                exit 1
+              }
+              continue
+            fi
             case "$service" in
               auth|client)
                 if [ "$actual_ref" != "$expected_ref" ]; then
@@ -1076,18 +988,18 @@ jobs:
             esac
           done
 
-          for service in auth client; do
+          for service in "${supporting_services[@]}"; do
             expected_manifest="$(
               awk -F '\t' -v service="$service" '
                 $1 == service { count++; value=$4 }
                 END { if (count != 1) exit 1; print value }
-              ' "$resume_images"
+              ' "$runtime_images"
             )"
             expected_platform="$(
               awk -F '\t' -v service="$service" '
                 $1 == service { count++; value=$5 }
                 END { if (count != 1) exit 1; print value }
-              ' "$resume_images"
+              ' "$runtime_images"
             )"
             deployment="gaming-${service}-depl"
             container="gaming-${service}"
@@ -1097,6 +1009,34 @@ jobs:
               kubectl get pods -n "$OCI_K8S_NAMESPACE" \
                 -l "app=gaming-${service}" -o json
             )"
+            if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; then
+              desired="$(
+                awk -F '\t' -v service="$service" '
+                  $1 == service { count++; value=$4 }
+                  END { if (count != 1) exit 1; print value }
+                ' "$baseline_dir/deployments.tsv"
+              )"
+              [[ "$desired" =~ ^[1-9][0-9]*$ ]]
+              [ "$service" != telemetry ] || [ "$desired" = 1 ]
+              kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" -o json |
+                jq -e --argjson desired "$desired" '
+                  .spec.replicas == $desired and
+                  .status.observedGeneration == .metadata.generation and
+                  .status.replicas == $desired and
+                  .status.updatedReplicas == $desired and
+                  .status.readyReplicas == $desired and
+                  .status.availableReplicas == $desired
+                ' >/dev/null
+              jq -e --argjson desired "$desired" --arg container "$container" '
+                (.items | length) == $desired and
+                (.items | all(
+                  .metadata.deletionTimestamp == null and
+                  .status.phase == "Running" and
+                  ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 1 and
+                  ([.status.containerStatuses[]? | select(.name == $container)] | length) == 1
+                ))
+              ' <<<"$pods_json" >/dev/null
+            fi
             if ! jq -e \
                 --arg container "$container" \
                 --arg manifest "$expected_manifest" \
@@ -1132,6 +1072,45 @@ jobs:
               exit 1
             fi
           done
+
+          if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; then
+            ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+            python3 - "$RUNNER_TEMP/pre-runtime-lock.json" \
+              "$OCI_K8S_NAMESPACE" "$PREREQUISITE_RUN_ID" \
+              "$RESUME_SOURCE_SHA" <<'PY'
+          import json, os, re, subprocess, sys, time
+          def require(value):
+              if not value:
+                  raise SystemExit("inherited lock snapshot is invalid")
+          path, namespace, predecessor_run, source = sys.argv[1:]
+          result = subprocess.run(
+              ["kubectl", "get", "configmap", "gaming-mongo-migration-lock",
+               "-n", namespace, "-o", "json"], capture_output=True, check=True)
+          lock = json.loads(result.stdout)
+          meta, data = lock["metadata"], lock["data"]
+          require(lock["kind"] == "ConfigMap" and lock["apiVersion"] == "v1")
+          require(meta["name"] == "gaming-mongo-migration-lock")
+          require(meta["namespace"] == namespace)
+          require(data["state"] == "active")
+          require(data["holder"] == f"live-data-{predecessor_run}-1")
+          require(data["operation-id"] == "live-data-apply-slip-index")
+          require(data["source-sha"] == source)
+          require(re.fullmatch(r"[A-Za-z0-9._:-]+", meta["uid"]))
+          require(re.fullmatch(r"[1-9][0-9]*", meta["resourceVersion"]))
+          for key in ("acquired-at-epoch", "lease-duration-seconds",
+                      "lease-until-epoch", "fencing-generation"):
+              require(re.fullmatch(r"[1-9][0-9]*", data[key]))
+              require(int(data[key]) < 9007199254740990)
+          require(int(data["lease-duration-seconds"]) == 1800)
+          require(int(data["acquired-at-epoch"]) <= (
+              int(data["lease-until-epoch"]) - int(data["lease-duration-seconds"])
+          ) <= int(time.time()))
+          require(data.get("released-at-epoch") == "0")
+          fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, "w") as output:
+              json.dump(lock, output)
+          PY
+          fi
 
           mkdir -p artifacts/oci-live-data-rollout/evidence
           cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
@@ -1220,7 +1199,8 @@ jobs:
           profile=public
           if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
              [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
-             [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
+             { [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] ||
+               [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; }; then
             profile=held
           fi
           SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
@@ -1233,13 +1213,48 @@ jobs:
       - name: Acquire database operation lock
         id: operation_lock
         run: |
+          set -euo pipefail
+          if [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = "pre-runtime-hold" ]; then
+            snapshot="$RUNNER_TEMP/pre-runtime-lock.json"
+            [ -f "$snapshot" ] && [ ! -L "$snapshot" ]
+            expected_uid="$(jq -er '.metadata.uid' "$snapshot")"
+            observed_generation="$(jq -er '.data["fencing-generation"]' "$snapshot")"
+            released_generation="$((observed_generation + 1))"
+            release_result="$(
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
+              LOCK_TOKEN="$(jq -er '.data.holder' "$snapshot")" \
+              OPERATION_ID="$(jq -er '.data["operation-id"]' "$snapshot")" \
+              SOURCE_SHA="$(jq -er '.data["source-sha"]' "$snapshot")" \
+              EXPECTED_LOCK_UID="$expected_uid" \
+              EXPECTED_RESOURCE_VERSION="$(jq -er '.metadata.resourceVersion' "$snapshot")" \
+              EXPECTED_FENCING_GENERATION="$observed_generation" \
+              EXPECTED_LEASE_UNTIL_EPOCH="$(jq -er '.data["lease-until-epoch"]' "$snapshot")" \
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release
+            )" || exit 1
+            [[ "$release_result" == "shared_mongo_lock=release status=PASS "* ]] || exit 1
+            [[ "$release_result" == *" strict_snapshot=true fencing_generation=$released_generation" ]] || exit 1
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$SOURCE_SHA" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
+            EXPECTED_LOCK_UID="$expected_uid" \
+            EXPECTED_FENCING_GENERATION="$released_generation" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire-released || exit 1
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify || exit 1
+            exit 0
+          fi
           if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
              [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
              [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = "retained-hold" ]; then
             NAMESPACE="$OCI_K8S_NAMESPACE" \
-            LOCK_TOKEN="live-data-${{ steps.provenance.outputs.resume_applied_data_run_id }}-1" \
+            LOCK_TOKEN="live-data-${PREREQUISITE_RUN_ID}-1" \
             OPERATION_ID="live-data-apply-slip-index" \
-            SOURCE_SHA="${{ steps.provenance.outputs.resume_applied_source_sha }}" \
+            SOURCE_SHA="$RESUME_SOURCE_SHA" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh release
           fi
           NAMESPACE="$OCI_K8S_NAMESPACE" \
@@ -1262,7 +1277,8 @@ jobs:
              [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh enter
           else
-            [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] || {
+            { [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] ||
+              [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; } || {
               echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
               exit 1
             }

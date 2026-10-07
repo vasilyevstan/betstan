@@ -69,6 +69,7 @@ document = {
     "metadata": {
         "name": name,
         "namespace": namespace,
+        "uid": "fixture-lock-uid",
         "resourceVersion": "1",
     },
     "data": data,
@@ -123,11 +124,37 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
   fi
 
+  if [[ "${STUB_SIMULATE_UID_ON_GET:-}" == "$count" ||
+        "${STUB_SIMULATE_VERSION_ON_GET:-}" == "$count" ]]; then
+    python3 - "$state_file" "$count" <<'PY'
+import json
+import os
+import sys
+
+path, count = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+if os.environ.get("STUB_SIMULATE_UID_ON_GET") == count:
+    document["metadata"]["uid"] = "recreated-lock-uid"
+if os.environ.get("STUB_SIMULATE_VERSION_ON_GET") == count:
+    document["metadata"]["resourceVersion"] = str(
+        int(document["metadata"]["resourceVersion"]) + 1
+    )
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle)
+PY
+  fi
+
   cat "$state_file"
   exit 0
 fi
 
 if [[ "${1:-}" == "replace" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
+  if [[ "${STUB_FAIL_REPLACE:-}" == "true" ]]; then
+    cat >/dev/null
+    echo "simulated resourceVersion conflict" >&2
+    exit 1
+  fi
   replacement="$(mktemp)"
   cat >"$replacement"
   python3 - "$state_file" "$replacement" <<'PY'
@@ -249,6 +276,7 @@ document = {
     "metadata": {
         "name": "gaming-mongo-migration-lock",
         "namespace": "default",
+        "uid": "fixture-lock-uid",
         "resourceVersion": resource_version,
     },
     "data": data,
@@ -542,5 +570,136 @@ run_lock_case \
   NOW_EPOCH=2001 \
   "$LOCK_SCRIPT" verify >/dev/null ||
   fail "verify rejected the concurrently renewed owner lock"
+
+reset_strict_fixture() {
+  write_lock_document active holder-owner owner-rollout "$SHA_A" \
+    1000 60 1060 0 11 41
+  reset_get_counter
+}
+
+run_strict_release() {
+  run_lock_case holder-owner owner-rollout "$SHA_A" \
+    EXPECTED_LOCK_UID=fixture-lock-uid \
+    EXPECTED_RESOURCE_VERSION=41 \
+    EXPECTED_FENCING_GENERATION=11 \
+    EXPECTED_LEASE_UNTIL_EPOCH=1060 \
+    NOW_EPOCH=2000 \
+    "$@" \
+    "$LOCK_SCRIPT" release
+}
+
+for strict_case in uid version generation lease incomplete foreign operation source released malformed duration future inconsistent missing; do
+  reset_strict_fixture
+  strict_args=(NOW_EPOCH=2000)
+  case "$strict_case" in
+    uid) strict_args=(EXPECTED_LOCK_UID=other-lock-uid) ;;
+    version) strict_args=(EXPECTED_RESOURCE_VERSION=40) ;;
+    generation) strict_args=(EXPECTED_FENCING_GENERATION=10) ;;
+    lease) strict_args=(EXPECTED_LEASE_UNTIL_EPOCH=1061) ;;
+    incomplete) strict_args=(EXPECTED_RESOURCE_VERSION=) ;;
+    operation) strict_args=(OPERATION_ID=other-rollout) ;;
+    source) strict_args=("SOURCE_SHA=$SHA_B") ;;
+    foreign)
+      write_lock_document active other-owner owner-rollout "$SHA_A" \
+        1000 60 1060 0 11 41
+      ;;
+    released)
+      write_lock_document released '' owner-rollout "$SHA_A" \
+        1000 0 0 1999 11 41
+      ;;
+    malformed)
+      write_lock_document active holder-owner owner-rollout "$SHA_A" \
+        1000 __ABSENT__ 1060 0 11 41
+      ;;
+    duration)
+      write_lock_document active holder-owner owner-rollout "$SHA_A" \
+        1000 59 1060 0 11 41
+      ;;
+    future)
+      write_lock_document active holder-owner owner-rollout "$SHA_A" \
+        2001 60 2061 0 11 41
+      strict_args=(EXPECTED_LEASE_UNTIL_EPOCH=2061)
+      ;;
+    inconsistent)
+      write_lock_document active holder-owner owner-rollout "$SHA_A" \
+        1060 60 1060 0 11 41
+      ;;
+    missing) rm -f -- "$STATE_FILE" ;;
+  esac
+  if [[ -f "$STATE_FILE" ]]; then
+    cp "$STATE_FILE" "$WORK_DIR/strict-before.json"
+  fi
+  if run_strict_release "${strict_args[@]}" >"$WORK_DIR/strict-rejection.out" 2>&1; then
+    fail "strict release accepted $strict_case snapshot"
+  fi
+  if [[ "$strict_case" == "missing" ]]; then
+    [[ ! -e "$STATE_FILE" ]] || fail "strict release recreated a missing lock"
+  else
+    cmp -s "$STATE_FILE" "$WORK_DIR/strict-before.json" ||
+      fail "rejected strict release changed the $strict_case snapshot"
+  fi
+done
+
+for race in uid version replace; do
+  reset_strict_fixture
+  case "$race" in
+    uid) strict_args=(STUB_SIMULATE_UID_ON_GET=2) ;;
+    version) strict_args=(STUB_SIMULATE_VERSION_ON_GET=2) ;;
+    replace) strict_args=(STUB_FAIL_REPLACE=true) ;;
+  esac
+  if run_strict_release "${strict_args[@]}" >"$WORK_DIR/strict-race.out" 2>&1; then
+    fail "strict release ignored the $race compare-and-swap race"
+  fi
+  assert_lock_values state active holder holder-owner fencing-generation 11
+done
+
+reset_strict_fixture
+output="$(run_strict_release)" ||
+  fail "strict release rejected the exact expired owner's snapshot"
+assert_lock_output_contains "$output" 'strict_snapshot=true fencing_generation=12'
+assert_lock_values state released holder '' operation-id owner-rollout \
+  source-sha "$SHA_A" fencing-generation 12
+
+if run_lock_case holder-next next-rollout "$SHA_B" \
+  EXPECTED_LOCK_UID=fixture-lock-uid EXPECTED_FENCING_GENERATION=11 \
+  LOCK_LEASE_SECONDS=60 NOW_EPOCH=2001 \
+  "$LOCK_SCRIPT" acquire-released >"$WORK_DIR/strict-acquire.out" 2>&1; then
+  fail "released-only acquisition ignored the exact released generation"
+fi
+assert_lock_values state released holder '' fencing-generation 12
+
+run_lock_case holder-next next-rollout "$SHA_B" \
+  EXPECTED_LOCK_UID=fixture-lock-uid EXPECTED_FENCING_GENERATION=12 \
+  LOCK_LEASE_SECONDS=60 NOW_EPOCH=2001 \
+  "$LOCK_SCRIPT" acquire-released >/dev/null ||
+  fail "released-only acquisition rejected the exact strict-release result"
+assert_lock_values state active holder holder-next operation-id next-rollout \
+  source-sha "$SHA_B" fencing-generation 13
+
+if run_lock_case holder-racer racer-rollout "$SHA_A" \
+  EXPECTED_LOCK_UID=fixture-lock-uid EXPECTED_FENCING_GENERATION=12 \
+  LOCK_LEASE_SECONDS=60 NOW_EPOCH=2002 \
+  "$LOCK_SCRIPT" acquire-released >"$WORK_DIR/strict-competitor.out" 2>&1; then
+  fail "released-only acquisition replaced a competing owner"
+fi
+assert_lock_values state active holder holder-next fencing-generation 13
+
+output="$(
+  run_lock_case holder-racer racer-rollout "$SHA_A" "$LOCK_SCRIPT" release
+)"
+assert_lock_output_contains "$output" 'status=SKIPPED reason=not-holder'
+assert_lock_values state active holder holder-next fencing-generation 13
+
+write_lock_document released '' owner-rollout "$SHA_A" 1000 0 0 2000 12 42
+output="$(
+  run_lock_case holder-owner owner-rollout "$SHA_A" "$LOCK_SCRIPT" release
+)"
+assert_lock_output_contains "$output" 'status=SKIPPED reason=already-released'
+
+rm -f -- "$STATE_FILE"
+output="$(
+  run_lock_case holder-owner owner-rollout "$SHA_A" "$LOCK_SCRIPT" release
+)"
+assert_lock_output_contains "$output" 'status=SKIPPED reason=not-found'
 
 echo "shared_mongo_operation_lock_tests=PASS"

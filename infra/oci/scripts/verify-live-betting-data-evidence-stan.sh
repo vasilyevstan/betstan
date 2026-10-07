@@ -381,6 +381,13 @@ if resume_authority_path.exists():
             ("failure", "skipped", "skipped", "success"),
         }:
             fail("retained-hold resume authority has an invalid outcome tuple")
+    elif mode == "pre-runtime-hold":
+        if (
+            resume_version != "live-betting-data-resume-v2"
+            or outcome != ("failure", "skipped", "skipped", "skipped", "skipped")
+            or failed_activation_run_id != "0"
+        ):
+            fail("pre-runtime resume authority has an invalid v2 tuple")
     elif mode == "released-runtime":
         if outcome != ("success", "failure", "success", "success", "skipped"):
             fail("released-runtime resume authority has an invalid v2 tuple")
@@ -1081,6 +1088,24 @@ if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
         .display_title == ("oci-live-data apply-slip-index " + $source_sha)
       ' >/dev/null ||
     fail "original applied data run does not match the resolved source authority"
+  if [[ -f "$EVIDENCE_DIR/resume-authority.env" ]] &&
+     grep -Fxq 'resume_maintenance_mode=pre-runtime-hold' \
+       "$EVIDENCE_DIR/resume-authority.env"; then
+    python3 - "$(dirname "${BASH_SOURCE[0]}")/upstream_run_binding_stan.py" \
+      "$RESUME_REPOSITORY" "$EXPECTED_RUN_ID" \
+      "$applied_data_run_id" "$applied_source_sha" \
+      "${EXPECTED_DISK_CHECKPOINT_DISPOSITION:-}" <<'PY'
+import importlib.util, sys
+path, repo, run_id, applied_run, applied_source, disposition = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("upstream_binding", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+runtime = "oke" if disposition == "NOT_APPLICABLE" else "k3s"
+resolved = module.validate_pre_runtime_resume_chain(repo, run_id, runtime)
+if resolved != (applied_run, applied_source):
+    module.fail("native pre-runtime lineage differs from the local evidence")
+PY
+  fi
 fi
 
 if [[ -n "$resolution" ]]; then
