@@ -829,6 +829,11 @@ cd resulting && npm ci && npm run test:ci
   private-key content, and region explicitly; otherwise a noninteractive run
   may report only `Abort:`. Lock the complete credential mapping in a workflow
   contract rather than relying on an earlier authenticated step.
+  The same rule applies to `gh` invoked inside a provenance helper: its calling
+  step needs `GH_TOKEN: ${{ github.token }}`. An earlier step or an artifact
+  action's `github-token` input does not supply that environment. Regression
+  tests must exercise the real caller's effective environment, not inject a
+  token independently.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline requires the exact supported service
   identities, matching live public GHCR digests, and authenticated deployment

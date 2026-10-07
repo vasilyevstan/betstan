@@ -10,6 +10,7 @@ source "$SCRIPT_DIR/application-registry.sh"
 source "$OCI_ROOT_DIR/infra/azure/agents/live-betting-readiness-lib.sh"
 
 SOURCE_SHA="${SOURCE_SHA:-${1:-}}"
+CHECKPOINT_SOURCE_SHA="${CHECKPOINT_SOURCE_SHA:-$SOURCE_SHA}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-${2:-}}"
 INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-${3:-}}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OCI_ROOT_DIR/artifacts/oci-deploy}"
@@ -19,6 +20,8 @@ OCI_CANONICAL_HOST="${OCI_CANONICAL_HOST:-betstan.xyz}"
 OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
 
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be a full lowercase commit SHA"
+[[ "$CHECKPOINT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  oci_die "CHECKPOINT_SOURCE_SHA must be a full lowercase commit SHA"
 [[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] ||
   oci_die "GITHUB_RUN_ID is required for the deployment clock observation"
 [[ -f "$IMAGE_PROVENANCE_FILE" ]] || oci_die "verified image provenance TSV is required"
@@ -46,7 +49,7 @@ unset application_registry_public_anonymous ocir_application_repository_absent
 unset node_shape node_ocpus node_memory_gb mongo_volume_gb lb_min_mbps lb_max_mbps expected_monthly_cost
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
-[[ "${source_sha:-}" == "$SOURCE_SHA" ]] || oci_die "infrastructure provenance source SHA mismatch"
+[[ "${source_sha:-}" == "$CHECKPOINT_SOURCE_SHA" ]] || oci_die "infrastructure provenance source SHA mismatch"
 oci_require_vars \
   runtime_mode infrastructure_finalized compartment_ocid ingress_ipv4 \
   public_host canonical_host redirect_host diagnostic_host \
@@ -108,7 +111,7 @@ else
   instance="$(oci compute instance get --instance-id "$instance_ocid")"
   jq -e \
     --arg compartment "$compartment_ocid" \
-    --arg sha "$SOURCE_SHA" '
+    --arg sha "$CHECKPOINT_SOURCE_SHA" '
       .data."compartment-id" == $compartment and
       .data."lifecycle-state" == "RUNNING" and
       .data.shape == "VM.Standard.A1.Flex" and

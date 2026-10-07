@@ -1386,6 +1386,82 @@ rm "$tmp_dir/oci-live-data-rollout.yml.bak"
 assert_fail "live data rollout without failed-activation user binding" \
   "oci-live-data-rollout must expose exactly these workflow_dispatch inputs"
 
+for baseline_mutation in \
+  artifact-name run-id destination mode-gate producer-id duplicate-producer \
+  commented-validator wrong-policy result-file imported-baseline \
+  published-file published-selector ignored-error; do
+  reset_fixtures
+  write_complete_oci_set
+  python3 - "$tmp_dir/oci-live-data-rollout.yml" "$baseline_mutation" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+mutation = sys.argv[2]
+text = path.read_text()
+changes = {
+    "artifact-name": (
+        "name: ${{ steps.provenance_request.outputs.baseline_artifact_name }}",
+        "name: oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1",
+    ),
+    "run-id": (
+        "run-id: ${{ steps.provenance_request.outputs.baseline_run_id }}",
+        "run-id: ${{ inputs.failed_deploy_run_id }}",
+    ),
+    "destination": (
+        "          path: artifacts/oci-data-baseline-before\n",
+        "          path: artifacts/unverified-baseline\n",
+    ),
+    "mode-gate": (
+        "steps.provenance_request.outputs.resume_maintenance_mode != 'pre-runtime-hold'",
+        "steps.provenance_request.outputs.resume_maintenance_mode == 'pre-runtime-hold'",
+    ),
+    "producer-id": ("id: provenance_request", "id: other_provenance"),
+    "duplicate-producer": (
+        "      - name: Reject competing production activity",
+        "      - id: provenance_request\n        run: echo duplicate\n"
+        "      - name: Reject competing production activity",
+    ),
+    "commented-validator": (
+        "          ./infra/oci/scripts/upstream_run_binding_stan.py validate-all",
+        "          # ./infra/oci/scripts/upstream_run_binding_stan.py validate-all",
+    ),
+    "wrong-policy": (
+        '--policy-json "$policy_json"',
+        '--policy-json "$untrusted_policy"',
+    ),
+    "result-file": (
+        '--result-json "$RUNNER_TEMP/live-data-upstream-result.json"',
+        '--result-json "$RUNNER_TEMP/unbound-result.json"',
+    ),
+    "imported-baseline": (
+        "--baseline-dir artifacts/oci-data-baseline-before",
+        "--baseline-dir artifacts/unverified-baseline",
+    ),
+    "published-file": (
+        '\' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"',
+        '\' "$RUNNER_TEMP/unbound-result.json" >> "$GITHUB_OUTPUT"',
+    ),
+    "published-selector": (
+        "                .failed_deploy_run_id |",
+        "                .prerequisite_run_id |",
+    ),
+    "ignored-error": (
+        "        id: provenance_request\n",
+        "        id: provenance_request\n        continue-on-error: true\n",
+    ),
+}
+old, new = changes[mutation]
+assert text.count(old) == 1, (mutation, text.count(old))
+text = text.replace(old, new)
+if mutation == "wrong-policy":
+    text += '\n# --policy-json "$policy_json"\n'
+path.write_text(text)
+PY
+  assert_fail "live data baseline binding mutation $baseline_mutation" \
+    "oci-live-data-rollout is missing failed-deploy rollback baseline binding"
+done
+
 reset_fixtures
 write_complete_oci_set
 sed -i.bak \
