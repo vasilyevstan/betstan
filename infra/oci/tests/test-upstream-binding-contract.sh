@@ -3280,7 +3280,7 @@ prepare_pre_runtime_activation_chain() {
   mkdir -p "$root/original-baselines"
   cp -R "$root/baseline" "$root/original-baselines/oci-data-baseline-before"
   artifact_zip_directory_fixture 9820 "$root/original-baselines"
-  python3 - "$FIXTURE_DIR" "$REPO" "$ROOT_DIR" "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA" <<'PY'
+  python3 - "$FIXTURE_DIR" "$REPO" "$WORK/repository" "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA" <<'PY'
 import hashlib, json, pathlib, re, subprocess, sys
 directory, repo, checkout, root_source, resumed_source = sys.argv[1:]
 def path(endpoint):
@@ -3361,8 +3361,23 @@ PY
 
 saved_subject="$SUBJECT_SHA"
 saved_applied="$APPLIED_SOURCE_SHA"
-SUBJECT_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-APPLIED_SOURCE_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD^)"
+saved_directory="$PWD"
+git init --quiet --initial-branch=upstream-fixture "$WORK/repository"
+cd "$WORK/repository"
+git config user.name "Upstream Fixture"
+git config user.email "upstream-fixture@example.invalid"
+git config commit.gpgsign false
+mkdir -p .github/workflows
+cp "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" .github/workflows/
+git add .github/workflows/oci-production-deploy.yml
+git commit --quiet -m "Record fixture workflow" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+APPLIED_SOURCE_SHA="$(git rev-parse HEAD)"
+printf '\n# Fixture control-only descendant.\n' >>.github/workflows/oci-production-deploy.yml
+git add .github/workflows/oci-production-deploy.yml
+git commit --quiet -m "Record fixture control descendant" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+SUBJECT_SHA="$(git rev-parse HEAD)"
 prepare_pre_runtime_activation_chain
 pre_runtime_cleanup_inputs="$(
   profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA" |
@@ -3479,6 +3494,7 @@ EOF2
 done
 SUBJECT_SHA="$saved_subject"
 APPLIED_SOURCE_SHA="$saved_applied"
+cd "$saved_directory"
 
 ANCESTOR_PROFILE_SHA="bd1008081411d64d96dd0221126090577ea72c6b"
 ancestor_profile_run=622
