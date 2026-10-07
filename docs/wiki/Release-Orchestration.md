@@ -387,7 +387,23 @@ modules, plugins, or job expressions. Dispatcher, approver, and workflows read
 the protected operation environment's authoritative `OCI_RUNTIME_MODE` again
 at each prerequisite-decay boundary before intent, claim, or approval.
 
-Failed deployment recovery is classified exactly. A retained hold requires
+Failed deployment recovery is classified exactly. Provenance verification uses
+step-local default workflow authentication without expanded permissions. The
+existing retained-hold profile also admits a narrowly proven pre-runtime
+provenance failure with no deployment recovery artifact. Complete authenticated
+native run/step, trusted workflow-blob, and dispatch evidence must bind the
+original successful v6 handoff, build, infrastructure, checkpoint, and original
+before-baseline. That baseline, not candidate images, governs this case:
+current ingress fencing, seven-writer quiescence, all ten baseline images, and
+baseline-consistent Auth, Client, and Telemetry health/state must be positively
+verified. Lease expiry grants no live authority; lock transition requires
+snapshot-bound own release and exact released-only acquisition. Ambiguity or
+conflict stops with maintenance retained, without generic expired-lock reclaim,
+expired-lock renewal, replay, force release, or writer restoration. This is an
+additive mode within the existing operation, not a new workflow; existing
+schema keys and post-runtime cases remain unchanged. Rollout and rollback
+require compatible control readers; older readers reject unsupported lineage
+rather than relabeling evidence. A post-runtime retained hold still requires
 successful maintenance re-entry and accepts only lock/fence release results
 `skipped/skipped`, `failure/skipped`, or `success/failure`; the last case relies
 on re-entry having reacquired the exact lock and re-held maintenance. A
@@ -411,10 +427,10 @@ Each fixed profile downloads and parses its exact artifacts; run metadata and
 job conclusions alone are insufficient. ZIP paths and members must be safe and
 complete, checksum manifests and baseline capture identity must match, and the
 complete predecessor-v6, deployment, build, infrastructure, checkpoint, and
-activation tuples must resolve without substitution. Retained-hold deployment
-recovery uses the checksum-sealed intent written before lock renewal plus the
-post-rehold failure lineage. Failed-activation cleanup uses a separate exact
-recovery-authority artifact rather than treating the workflow's larger
+activation tuples must resolve without substitution. Post-runtime retained-hold
+deployment recovery uses the checksum-sealed intent written before lock renewal
+plus the post-rehold failure lineage. Failed-activation cleanup uses a separate
+exact recovery-authority artifact rather than treating the workflow's larger
 diagnostic evidence directory as that authority.
 
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this

@@ -96,6 +96,310 @@ for entries, allowed in (
 PY
 ok "partial-recovery empty failures scope"
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$ROOT_DIR" <<'PY'
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import re
+import subprocess
+import sys
+
+spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+source = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", "HEAD"], text=True).strip()
+blob = subprocess.check_output([
+    "git", "-C", sys.argv[2], "show",
+    f"{source}:.github/workflows/oci-production-deploy.yml",
+])
+names = re.findall(r"(?m)^      - name: (.+)$", blob.decode().split("\n  public-validate:\n")[0])
+boundary = names.index("Verify immutable image and infrastructure provenance")
+steps = [{
+    "name": name, "number": index + 2, "status": "completed",
+    "conclusion": "success" if index < boundary else "failure" if index == boundary else "skipped",
+    "started_at": "2026-10-07T09:09:15Z", "completed_at": "2026-10-07T09:09:17Z",
+} for index, name in enumerate(names)]
+for step in steps:
+    if step["name"] in {"Remove isolated OCI client state", "Upload sanitized live readiness evidence"}:
+        step["conclusion"] = "success"
+steps.insert(0, {"name": "Set up job", "number": 1, "status": "completed", "conclusion": "success"})
+for name in ("Post Checkout approved master commit", "Complete job"):
+    steps.append({"name": name, "number": len(steps) + 1, "status": "completed", "conclusion": "success"})
+original = [
+    {"id": 1234, "run_id": 77, "name": "deploy", "status": "completed", "conclusion": "failure", "steps": steps},
+    {"id": 1235, "run_id": 77, "name": "public-validate", "status": "completed", "conclusion": "skipped", "steps": []},
+]
+jobs = copy.deepcopy(original)
+artifacts = []
+m.jobs_for_run = lambda *_: jobs
+m.artifact_inventory = lambda *_: artifacts
+m.fixed_run_metadata = lambda *_: {"head_sha": source}
+m.gh_api = lambda _: {"sha": hashlib.sha1(f"blob {len(blob)}\0".encode() + blob).hexdigest()}
+profile = "oci-failed-deploy-retained-hold-v1"
+def validate():
+    return m.validate_failed_deploy_jobs("example/repo", "77", profile, "fixture")
+def reject(call):
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            call()
+        except SystemExit:
+            return
+    raise AssertionError("invalid pre-runtime evidence accepted")
+assert validate() == ("skipped", "skipped", "skipped")
+for name in names[boundary + 1:]:
+    if name in {"Remove isolated OCI client state", "Upload sanitized live readiness evidence"}:
+        continue
+    jobs = copy.deepcopy(original)
+    next(s for s in jobs[0]["steps"] if s["name"] == name)["conclusion"] = "success"
+    reject(validate)
+for mutation in ("unknown", "missing", "duplicate-step", "duplicate-job", "cancelled", "public"):
+    jobs = copy.deepcopy(original)
+    if mutation == "unknown":
+        jobs[0]["steps"][1]["name"] = "Unexpected runtime operation"
+    elif mutation == "missing":
+        jobs[0]["steps"].pop(1)
+    elif mutation == "duplicate-step":
+        jobs[0]["steps"].append(copy.deepcopy(jobs[0]["steps"][1]))
+    elif mutation == "duplicate-job":
+        jobs.append(copy.deepcopy(jobs[1]))
+    elif mutation == "cancelled":
+        jobs[0]["conclusion"] = "cancelled"
+    else:
+        jobs[1]["conclusion"] = "success"
+    reject(validate)
+jobs = copy.deepcopy(original)
+artifacts = [{"id": 1}]
+reject(validate)
+artifacts = []
+mapping = {
+    "approved_sha": "SOURCE_SHA", "build_run_id": "BUILD_RUN_ID",
+    "infrastructure_run_id": "INFRASTRUCTURE_RUN_ID", "data_run_id": "DATA_RUN_ID",
+    "checkpoint_source_sha": "CHECKPOINT_SOURCE_SHA", "disk_checkpoint_run_id": "DISK_CHECKPOINT_RUN_ID",
+    "baseline_recovery_run_id": "BASELINE_RECOVERY_RUN_ID",
+    "baseline_recovery_source_sha": "BASELINE_RECOVERY_SOURCE_SHA", "confirmation": "CONFIRMATION",
+}
+inputs = dict(zip(mapping, (source, "21", "22", "23", source, "24", "0", "none", "DEPLOY OCI EXACT SHA")))
+def log(values=inputs):
+    lines = ["##[group]Run set -euo pipefail", "env:"]
+    lines += [f"  {env}: {values[key]}" for key, env in mapping.items()]
+    lines += ["  DISPATCH_INPUTS: " + json.dumps(values, indent=2), "  PRIVATE_CREDENTIAL: do-not-emit", "##[endgroup]"]
+    return ("\n".join("2026-10-07T09:09:16.1234567Z " + line for line in "\n".join(lines).splitlines()) + "\n").encode()
+m.gh_api_bytes = lambda _: log()
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    assert m.failed_deploy_native_inputs("example/repo", "77", source, "fixture") == inputs
+assert output.getvalue() == ""
+native_log = re.sub(rb"(?m)^2026-10-07T09:09:16.1234567Z (?=  \"|})", b"", log())
+native_log += b"2026-10-07T09:09:17Z env:\n2026-10-07T09:09:17Z   GH_TOKEN: instructional-placeholder\n"
+native_log += b"2026-10-07T09:09:17Z ##[group]Run actions/upload-artifact\n2026-10-07T09:09:17Z env:\n2026-10-07T09:09:17Z ##[endgroup]\n"
+m.gh_api_bytes = lambda _: native_log
+assert m.failed_deploy_native_inputs("example/repo", "77", source, "fixture") == inputs
+for raw in (
+    b"native log unavailable",
+    log().replace(b"  DATA_RUN_ID: 23", b"  DATA_RUN_ID: 99"),
+    log().replace(b"DISPATCH_INPUTS:", b"ABSENT_INPUTS:"),
+    log().replace(b"  DATA_RUN_ID: 23", b"  DATA_RUN_ID: 23\n2026-10-07T09:09:16Z   DATA_RUN_ID: 23"),
+    log().replace(b'"data_run_id": "23",', b'"data_run_id": "23", "data_run_id": "99",'),
+):
+    m.gh_api_bytes = lambda _, raw=raw: raw
+    reject(lambda: m.failed_deploy_native_inputs("example/repo", "77", source, "fixture"))
+before = b"original before"
+after = b"later after"
+def sealed(prefix, payload):
+    return {prefix + "/baseline": payload, prefix + "/SHA256SUMS":
+        f"{hashlib.sha256(payload).hexdigest()}  baseline\n".encode()}
+files = sealed("oci-data-baseline-before", before) | sealed("oci-data-baseline-after", after)
+assert m.original_before_baseline(files, "fixture")["baseline"] == before
+reject(lambda: m.original_before_baseline(files | sealed("duplicate/oci-data-baseline-before", before), "fixture"))
+reject(lambda: m.original_before_baseline(sealed("oci-data-baseline-after", after), "fixture"))
+baseline = dict.fromkeys(m.BASELINE_PROVENANCE_KEYS, "fixture")
+baseline.update(
+    baseline_capture_run_id="23", baseline_capture_run_attempt="1",
+    registry_provider="ghcr", registry_host="ghcr.io",
+    registry_repository=m.APPLICATION_REPOSITORY, registry_public_anonymous="true",
+)
+baseline_raw = "".join(f"{key}={value}\n" for key, value in sorted(baseline.items())).encode()
+baseline_manifest = f"{hashlib.sha256(baseline_raw).hexdigest()}  baseline-provenance.env\n".encode()
+baseline_files = {
+    "oci-data-baseline-before/baseline-provenance.env": baseline_raw,
+    "oci-data-baseline-before/SHA256SUMS": baseline_manifest,
+} | sealed("oci-data-baseline-after", after)
+data = dict.fromkeys(m.LIVE_V6_KEYS, "true")
+data.update(
+    schema_version="live-betting-v6", source_sha=source, build_run_id="21",
+    infrastructure_run_id="22", checkpoint_source_sha=source, disk_checkpoint_run_id="24",
+    disk_checkpoint_sha256="c" * 64, disk_checkpoint_disposition="NOT_APPLICABLE",
+    baseline_sha256=hashlib.sha256(baseline_manifest).hexdigest(),
+    baseline_recovery_run_id="0", baseline_recovery_source_sha="none",
+    workflow_run_id="23", workflow_run_attempt="1", phase="apply-slip-index",
+    status="PASS", completed_at="2026-10-07T08:50:00Z",
+)
+checkpoint = dict(sourceSha=source, producerRunId="24", ghcrBuildRunId="21",
+                  infrastructureRunId="22", contentChecksumSha256="c" * 64,
+                  disposition="NOT_APPLICABLE")
+m.parse_checkpoint_artifact = lambda *_: checkpoint
+m.parse_infrastructure_provenance = lambda *_: ({}, "d" * 64)
+m.parse_live_v6_artifact = lambda *_, include_files=False: (
+    (data, "b" * 64, {}) if include_files else (data, "b" * 64))
+def metadata(repo, run, workflow, *_):
+    return {
+        "head_sha": source,
+        "display_title": f"oci-live-data apply-slip-index {source}" if workflow == "oci-live-data-rollout.yml"
+                         else f"oci-deploy {source}",
+        "updated_at": "2026-10-07T09:09:17Z" if run == "77" else "2026-10-07T08:50:00Z",
+        "created_at": "2026-10-07T09:00:00Z",
+    }
+m.fixed_run_metadata = metadata
+m.exact_artifact = lambda repo, run, name, label: (
+    {"id": 1} if (run, name) == ("23", "oci-live-data-baselines-23-1")
+    else m.fail("invented failed-deployment baseline"))
+m.artifact_files = lambda *_: baseline_files
+m.gh_api_bytes = lambda _: log()
+dispatch = dict(inputs, prerequisite_run_id="23")
+def validate_artifacts():
+    return m.validate_failed_deploy_artifacts(
+        "example/repo", "77", source, None, dispatch, "oke",
+        profile, "skipped", "skipped", "skipped", "fixture", pre_runtime=True)
+assert validate_artifacts()["baseline_run_id"] == "23"
+assert validate_artifacts()["resume_maintenance_mode"] == "pre-runtime-hold"
+for key, bad in (
+    ("data_run_id", "99"), ("approved_sha", "9" * 40),
+    ("build_run_id", "99"), ("infrastructure_run_id", "99"),
+    ("disk_checkpoint_run_id", "99"), ("checkpoint_source_sha", "9" * 40),
+    ("baseline_recovery_run_id", "99"), ("baseline_recovery_source_sha", "9" * 40),
+):
+    changed = dict(inputs, **{key: bad})
+    m.gh_api_bytes = lambda _, changed=changed: log(changed)
+    reject(validate_artifacts)
+m.gh_api_bytes = lambda _: log()
+data["baseline_sha256"] = "0" * 64
+reject(validate_artifacts)
+data["baseline_sha256"] = hashlib.sha256(baseline_manifest).hexdigest()
+
+# Two resumptions must retain the root capture while each failed native
+# dispatch binds its actual immediate predecessor, not that root.
+resume_images = b"checksum-bound candidate image fixture\n"
+def resumed(run, failed):
+    evidence = dict(data, workflow_run_id=run)
+    authority = {
+        "schema_version": "live-betting-data-resume-v2",
+        "applied_data_run_id": "23", "applied_source_sha": source,
+        "failed_deploy_run_id": failed, "resume_maintenance_mode": "pre-runtime-hold",
+        "failed_deploy_job_conclusion": "failure",
+        "public_validate_job_conclusion": "skipped",
+        "lock_release_step_conclusion": "skipped",
+        "fence_release_step_conclusion": "skipped",
+        "rehold_step_conclusion": "skipped", "failed_activation_run_id": "0",
+        "current_source_sha": source, "baseline_sha256": data["baseline_sha256"],
+        "runtime_images_sha256": hashlib.sha256(resume_images).hexdigest(),
+        "checkpoint_source_sha": source, "disk_checkpoint_run_id": "24",
+        "disk_checkpoint_sha256": "c" * 64, "disk_checkpoint_disposition": "NOT_APPLICABLE",
+        "application_change_scope": "github-infra-docs-only", "status": "PASS",
+    }
+    return evidence, {
+        "resume-authority.env": "".join(f"{k}={v}\n" for k, v in authority.items()).encode(),
+        "resume-images.tsv": resume_images,
+    }
+lineages = {"23": (data, {}), "25": resumed("25", "77"), "26": resumed("26", "78")}
+def parse_data(repo, run, label, *, include_files=False):
+    evidence, files = lineages[run]
+    return (evidence, "b" * 64, files) if include_files else (evidence, "b" * 64)
+m.parse_live_v6_artifact = parse_data
+times = {
+    "23": ("08:40", "08:50"), "77": ("09:00", "09:09"),
+    "25": ("09:10", "09:20"), "78": ("09:30", "09:39"),
+    "26": ("09:40", "09:50"),
+}
+def chain_metadata(repo, run, workflow, *_):
+    created, completed = times.get(run, ("08:00", "08:10"))
+    return dict(
+        head_sha=source,
+        display_title=f"oci-live-data apply-slip-index {source}" if workflow == "oci-live-data-rollout.yml"
+                      else f"oci-deploy {source}",
+        created_at=f"2026-10-07T{created}:00Z", updated_at=f"2026-10-07T{completed}:30Z",
+    )
+m.fixed_run_metadata = chain_metadata
+chain_jobs = {}
+for run, minute in (("77", "09"), ("78", "39")):
+    these_jobs = copy.deepcopy(original)
+    for offset, job in enumerate(these_jobs):
+        job.update(run_id=int(run), id=int(run) * 100 + offset)
+        for step in job["steps"]:
+            if "started_at" in step:
+                step["started_at"] = f"2026-10-07T09:{minute}:15Z"
+                step["completed_at"] = f"2026-10-07T09:{minute}:17Z"
+    chain_jobs[run] = these_jobs
+m.jobs_for_run = lambda repo, run, label: chain_jobs[run]
+native_inputs = {"77": inputs, "78": dict(inputs, data_run_id="25")}
+resume_requests = {}
+for run, failed, prerequisite, minute in (("25", "77", "23", "10"), ("26", "78", "25", "40")):
+    values = {k: v for k, v in inputs.items() if k != "data_run_id"}
+    values.update(
+        resume_source_sha=source, phase="apply-slip-index", prerequisite_run_id=prerequisite,
+        failed_deploy_run_id=failed, failed_activation_run_id="0", failed_activation_user_id="0",
+        confirmation="RESUME APPLIED LIVE DATA EXACT SHA",
+    )
+    resume_requests[run] = values
+    chain_jobs[run] = [{
+        "id": int(run) * 100, "run_id": int(run), "name": "rollout",
+        "steps": [{
+            "name": "Validate exact SHA phase and trusted upstream runs", "conclusion": "success",
+            "started_at": f"2026-10-07T09:{minute}:15Z", "completed_at": f"2026-10-07T09:{minute}:17Z",
+        }],
+    }]
+native_reads = []
+def chain_log(endpoint):
+    for run, minute in (("25", "10"), ("26", "40")):
+        if f"/{run}00/" in endpoint:
+            values = resume_requests[run]
+            env_names = dict(mapping, resume_source_sha="RESUME_SOURCE_SHA", phase="PHASE",
+                prerequisite_run_id="PREREQUISITE_RUN_ID", failed_deploy_run_id="FAILED_DEPLOY_RUN_ID",
+                failed_activation_run_id="FAILED_ACTIVATION_RUN_ID", failed_activation_user_id="FAILED_ACTIVATION_USER_ID")
+            lines = ["##[group]Run set -euo pipefail", "env:"]
+            lines += [f"  {env_names[k]}: {v}" for k, v in values.items()]
+            lines += ["  DISPATCH_INPUTS: " + json.dumps(values), "##[endgroup]"]
+            return "".join(f"2026-10-07T09:{minute}:16Z {line}\n" for line in lines).encode()
+    run = "77" if "/7700/" in endpoint else "78" if "/7800/" in endpoint else None
+    assert run is not None
+    native_reads.append(run)
+    raw = log(native_inputs[run])
+    return raw if run == "77" else raw.replace(b"T09:09:", b"T09:39:")
+m.gh_api_bytes = chain_log
+def deployment_predecessor():
+    m.validate_live_predecessor_profile(
+        "example/repo",
+        {"workflow": "oci-live-data-rollout.yml", "input": "data_run_id",
+         "artifactContent": {"equals": {"schema_version": "live-betting-v6", "phase": "apply-slip-index"}}},
+        source, "26", dispatch, "oke",
+    )
+assert m.validate_pre_runtime_resume_chain("example/repo", "26", "oke") == ("23", source)
+deployment_predecessor()
+assert {"77", "78"}.issubset(native_reads)
+native_inputs["78"] = dict(inputs, data_run_id="23")
+reject(deployment_predecessor)
+native_inputs["78"] = dict(inputs, data_run_id="25")
+saved = copy.deepcopy(lineages)
+for key, bad in (
+    ("applied_data_run_id", "25"), ("applied_source_sha", "9" * 40),
+    ("failed_deploy_run_id", "77"), ("baseline_sha256", "0" * 64),
+    ("disk_checkpoint_run_id", "99"),
+):
+    raw = saved["26"][1]["resume-authority.env"].decode()
+    lineages["26"][1]["resume-authority.env"] = re.sub(
+        rf"(?m)^{key}=.*$", f"{key}={bad}", raw).encode()
+    reject(deployment_predecessor)
+    lineages = copy.deepcopy(saved)
+native_inputs["78"] = dict(inputs, data_run_id="26")
+reject(deployment_predecessor)
+native_inputs["78"] = dict(inputs, data_run_id="25")
+deployment_predecessor()
+print("PASS root -> resume -> failed deployment -> successor -> deployment recursive native lineage")
+PY
+ok "pre-runtime strict inventory, native private tuple, and original before-baseline"
+
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib
 import hashlib

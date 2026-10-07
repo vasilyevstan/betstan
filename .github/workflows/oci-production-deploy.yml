@@ -314,6 +314,8 @@ jobs:
 
       - name: Verify immutable image and infrastructure provenance
         id: provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           PROVENANCE_DIR=artifacts/build \

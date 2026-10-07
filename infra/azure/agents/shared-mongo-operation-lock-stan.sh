@@ -128,6 +128,7 @@ replace_lock_state() {
   local next_released_at_epoch="${14}"
   local next_fencing_generation="${15}"
   local expected_uid="${16:-*}"
+  local expected_resource_version="${17:-*}"
   kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" -o json |
     python3 -c '
 import json
@@ -150,11 +151,18 @@ import sys
     next_released_at_epoch,
     next_fencing_generation,
     expected_uid,
+    expected_resource_version,
 ) = sys.argv[1:]
 document = json.load(sys.stdin)
 data = document.setdefault("data", {})
 if expected_uid != "*" and document.get("metadata", {}).get("uid") != expected_uid:
     raise SystemExit("lock UID compare-and-swap precondition failed")
+if (
+    expected_resource_version != "*"
+    and document.get("metadata", {}).get("resourceVersion")
+    != expected_resource_version
+):
+    raise SystemExit("lock resourceVersion compare-and-swap precondition failed")
 
 checks = {
     "state": expected_state,
@@ -184,7 +192,8 @@ json.dump(document, sys.stdout)
       "$expected_fencing_generation" "$next_state" "$next_holder" \
       "$next_operation_id" "$next_source_sha" "$next_acquired_at_epoch" \
       "$next_lease_duration_seconds" "$next_lease_until_epoch" \
-      "$next_released_at_epoch" "$next_fencing_generation" "$expected_uid" |
+      "$next_released_at_epoch" "$next_fencing_generation" "$expected_uid" \
+      "$expected_resource_version" |
     kubectl replace -f - >/dev/null
 }
 
@@ -336,6 +345,17 @@ case "$ACTION" in
     ;;
   release)
     validate_identity
+    strict_release=false
+    if [[ -n "${EXPECTED_LOCK_UID:-}${EXPECTED_RESOURCE_VERSION:-}${EXPECTED_FENCING_GENERATION:-}${EXPECTED_LEASE_UNTIL_EPOCH:-}" ]]; then
+      strict_release=true
+      [[ "${EXPECTED_LOCK_UID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ &&
+         "${EXPECTED_RESOURCE_VERSION:-}" =~ ^[1-9][0-9]{0,127}$ &&
+         "${EXPECTED_FENCING_GENERATION:-}" =~ ^[1-9][0-9]{0,15}$ &&
+         "${EXPECTED_LEASE_UNTIL_EPOCH:-}" =~ ^[1-9][0-9]{0,15}$ ]] ||
+        fail "strict release requires a complete valid expected lock snapshot"
+      (( EXPECTED_FENCING_GENERATION < 9007199254740990 )) ||
+        fail "strict release fencing generation exceeds the safe handoff range"
+    fi
     error_file="$(mktemp)"
     trap 'rm -f "$error_file"' EXIT
     if ! lock_json="$(
@@ -343,6 +363,8 @@ case "$ACTION" in
         2>"$error_file"
     )"; then
       if grep -Eqi 'not[ -]?found' "$error_file"; then
+        [[ "$strict_release" == "false" ]] ||
+          fail "strict release expected an existing owned lock"
         echo "shared_mongo_lock=release status=SKIPPED reason=not-found"
         exit 0
       fi
@@ -353,40 +375,70 @@ case "$ACTION" in
 import json
 import sys
 
-data = json.load(sys.stdin).get("data", {})
+document = json.load(sys.stdin)
+data = document.get("data", {})
 print("|".join([
     data.get("state", ""),
     data.get("holder", ""),
     data.get("operation-id", ""),
     data.get("source-sha", ""),
     data.get("acquired-at-epoch", ""),
+    data.get("lease-duration-seconds", ""),
     data.get("lease-until-epoch", ""),
     data.get("fencing-generation", ""),
+    document.get("metadata", {}).get("uid", ""),
+    document.get("metadata", {}).get("resourceVersion", ""),
 ]))
 ' <<<"$lock_json"
     )"
     IFS='|' read -r state holder operation_id source_sha acquired_at_epoch \
-      lease_until_epoch fencing_generation <<<"$lock_state"
+      lease_duration_seconds lease_until_epoch fencing_generation \
+      observed_uid observed_resource_version <<<"$lock_state"
     if [[ "$state" == "released" ]]; then
+      [[ "$strict_release" == "false" ]] ||
+        fail "strict release cannot consume an already released lock"
       echo "shared_mongo_lock=release status=SKIPPED reason=already-released"
       exit 0
     fi
     if [[ "$holder" != "$LOCK_TOKEN" ||
       "$operation_id" != "$OPERATION_ID" ||
       "$source_sha" != "$SOURCE_SHA" ]]; then
+      [[ "$strict_release" == "false" ]] ||
+        fail "strict release lock does not match the expected owner"
       echo "shared_mongo_lock=release status=SKIPPED reason=not-holder"
       exit 0
     fi
-    [[ "$acquired_at_epoch" =~ ^[1-9][0-9]*$ ]] || acquired_at_epoch=0
     now_epoch="$(current_epoch)"
+    if [[ "$strict_release" == "true" ]]; then
+      [[ "$state" == "active" &&
+         "$observed_uid" == "$EXPECTED_LOCK_UID" &&
+         "$observed_resource_version" == "$EXPECTED_RESOURCE_VERSION" &&
+         "$fencing_generation" == "$EXPECTED_FENCING_GENERATION" &&
+         "$lease_until_epoch" == "$EXPECTED_LEASE_UNTIL_EPOCH" ]] ||
+        fail "strict release lock differs from the observed snapshot"
+      [[ "$acquired_at_epoch" =~ ^[1-9][0-9]{0,15}$ &&
+         "$lease_duration_seconds" =~ ^[1-9][0-9]{0,4}$ ]] ||
+        fail "strict release lease metadata is invalid"
+      (( acquired_at_epoch <= now_epoch &&
+         lease_until_epoch > acquired_at_epoch &&
+         lease_duration_seconds >= 60 && lease_duration_seconds <= 86400 )) ||
+        fail "strict release lease metadata is inconsistent"
+    else
+      [[ "$acquired_at_epoch" =~ ^[1-9][0-9]*$ ]] || acquired_at_epoch=0
+    fi
     next_fencing_generation="$(next_generation "$fencing_generation")"
     replace_lock_state active "$LOCK_TOKEN" "$OPERATION_ID" "$SOURCE_SHA" \
       "$(cas_expected_value "$lease_until_epoch")" \
       "$(cas_expected_value "$fencing_generation")" \
       released "" "$OPERATION_ID" "$SOURCE_SHA" \
-      "$acquired_at_epoch" "0" "0" "$now_epoch" "$next_fencing_generation" ||
+      "$acquired_at_epoch" "0" "0" "$now_epoch" "$next_fencing_generation" \
+      "${EXPECTED_LOCK_UID:-*}" "${EXPECTED_RESOURCE_VERSION:-*}" ||
       fail "lock changed while releasing"
-    echo "shared_mongo_lock=release status=PASS released_at_epoch=$now_epoch"
+    if [[ "$strict_release" == "true" ]]; then
+      echo "shared_mongo_lock=release status=PASS released_at_epoch=$now_epoch strict_snapshot=true fencing_generation=$next_fencing_generation"
+    else
+      echo "shared_mongo_lock=release status=PASS released_at_epoch=$now_epoch"
+    fi
     ;;
   force-release)
     validate_identity

@@ -1480,6 +1480,9 @@ def validate_failed_deploy_artifacts(
     fence_outcome,
     rehold_outcome,
     label,
+    *,
+    pre_runtime=False,
+    seen=None,
 ):
     checkpoint = parse_checkpoint_artifact(
         repository, dispatch_inputs, runtime_mode, f"{label} checkpoint"
@@ -1498,7 +1501,66 @@ def validate_failed_deploy_artifacts(
         f"{label} predecessor",
     )
 
-    baseline_files = artifact_files(repository, artifact, f"{label} baseline")
+    root_run, root_source = predecessor_run, subject_sha
+    if pre_runtime:
+        native = failed_deploy_native_inputs(repository, run_id, subject_sha, label)
+        expected_native = {
+            "approved_sha": subject_sha,
+            "build_run_id": predecessor["build_run_id"],
+            "infrastructure_run_id": predecessor["infrastructure_run_id"],
+            "data_run_id": predecessor_run,
+            "checkpoint_source_sha": predecessor["checkpoint_source_sha"],
+            "disk_checkpoint_run_id": predecessor["disk_checkpoint_run_id"],
+            "baseline_recovery_run_id": predecessor["baseline_recovery_run_id"],
+            "baseline_recovery_source_sha": predecessor["baseline_recovery_source_sha"],
+            "confirmation": "DEPLOY OCI EXACT SHA",
+        }
+        if native != expected_native:
+            fail(f"{label} native failed dispatch differs from the original data tuple")
+        dependency_completions = []
+        for dependency, workflow, event in (
+            ("build_run_id", "oci-production-build.yml", "workflow_run"),
+            ("infrastructure_run_id", "oci-infrastructure.yml", "workflow_dispatch"),
+            ("disk_checkpoint_run_id", "oci-infrastructure.yml", "workflow_dispatch"),
+        ):
+            metadata = fixed_run_metadata(
+                repository, native[dependency], workflow, "success", label, event
+            )
+            if metadata["head_sha"] != native["checkpoint_source_sha"]:
+                fail(f"{label} original release dependency source differs")
+            dependency_completions.append(parse_timestamp(metadata.get("updated_at"), label))
+        parse_infrastructure_provenance(
+            repository, native["checkpoint_source_sha"],
+            native["infrastructure_run_id"], native["build_run_id"], label
+        )
+        prior = require_fixed_run(
+            repository, predecessor_run, "oci-live-data-rollout.yml", "success",
+            subject_sha, f"oci-live-data apply-slip-index {subject_sha}", label,
+        )
+        if any(
+            completion > parse_timestamp(prior.get("created_at"), label)
+            for completion in dependency_completions
+        ):
+            fail(f"{label} original release dependency postdates its data run")
+        failed = require_fixed_run(
+            repository, run_id, "oci-production-deploy.yml", "failure",
+            subject_sha, f"oci-deploy {subject_sha}", label,
+        )
+        if parse_timestamp(prior.get("updated_at"), label) > parse_timestamp(
+            failed.get("created_at"), label
+        ):
+            fail(f"{label} failed deployment predates its data handoff")
+        root_run, root_source = validate_pre_runtime_resume_chain(
+            repository, predecessor_run, runtime_mode, seen=seen
+        )
+        artifact = exact_artifact(
+            repository, root_run, f"oci-live-data-baselines-{root_run}-1", label
+        )
+        baseline_files = original_before_baseline(
+            artifact_files(repository, artifact, label), label
+        )
+    else:
+        baseline_files = artifact_files(repository, artifact, f"{label} baseline")
     baseline_manifest_sha256 = validate_checksum_manifest(
         baseline_files, f"{label} baseline"
     )
@@ -1511,7 +1573,7 @@ def validate_failed_deploy_artifacts(
         BASELINE_PROVENANCE_KEYS,
     )
     if (
-        baseline["baseline_capture_run_id"] != predecessor_run
+        baseline["baseline_capture_run_id"] != root_run
         or baseline["baseline_capture_run_attempt"] != "1"
         or baseline["registry_provider"] != "ghcr"
         or baseline["registry_host"] != "ghcr.io"
@@ -1520,6 +1582,15 @@ def validate_failed_deploy_artifacts(
         or baseline_manifest_sha256 != predecessor["baseline_sha256"]
     ):
         fail(f"{label} rollback baseline does not match its predecessor capture")
+    if pre_runtime:
+        return {
+            "resume_maintenance_mode": "pre-runtime-hold",
+            "baseline_run_id": root_run,
+            "baseline_artifact_name": f"oci-live-data-baselines-{root_run}-1",
+            "applied_data_run_id": root_run,
+            "applied_source_sha": root_source,
+            "_baseline_files": baseline_files,
+        }
     if profile == "oci-failed-deploy-retained-hold-v1":
         parse_deployment_recovery_artifact(
             repository,
@@ -1641,7 +1712,10 @@ def parse_resume_authority(files, predecessor, label):
         authority["rehold_step_conclusion"],
     )
     mode = authority["resume_maintenance_mode"]
-    if mode == "released-runtime":
+    if mode == "pre-runtime-hold":
+        if outcome != ("failure", "skipped", "skipped", "skipped", "skipped"):
+            fail(f"{label} pre-runtime resume authority outcome is invalid")
+    elif mode == "released-runtime":
         if outcome != ("success", "failure", "success", "success", "skipped"):
             fail(f"{label} released resume authority outcome is invalid")
     elif mode == "retained-hold":
@@ -1658,6 +1732,208 @@ def parse_resume_authority(files, predecessor, label):
     else:
         fail(f"{label} resume authority maintenance mode is invalid")
     return authority
+
+
+def original_before_baseline(files, label):
+    manifests = [
+        path for path in files
+        if path.endswith("/oci-data-baseline-before/SHA256SUMS")
+        or path == "oci-data-baseline-before/SHA256SUMS"
+    ]
+    if len(manifests) != 1:
+        fail(f"{label} must contain one original before baseline")
+    prefix = manifests[0].removesuffix("SHA256SUMS")
+    selected = {
+        path.removeprefix(prefix): raw
+        for path, raw in files.items() if path.startswith(prefix)
+    }
+    validate_checksum_manifest(selected, label)
+    return selected
+
+
+def failed_deploy_native_inputs(repository, run_id, source_sha, label, *, resume_dispatch=False):
+    """Read only runner-generated environment in the exact failed step log.
+
+    Raw logs stay in captured process memory: never persist or echo them.
+    """
+    jobs = jobs_for_run(repository, run_id, label)
+    deploy = exact_job(jobs, "rollout" if resume_dispatch else "deploy", label)
+    job_id = deploy.get("id")
+    if type(job_id) is not int or job_id < 1 or deploy.get("run_id") != int(run_id):
+        fail(f"{label} native job identity is invalid")
+    step_name = (
+        "Validate exact SHA phase and trusted upstream runs" if resume_dispatch
+        else "Verify immutable image and infrastructure provenance"
+    )
+    step = [
+        item for item in deploy["steps"]
+        if item.get("name") == step_name
+    ]
+    if len(step) != 1:
+        fail(f"{label} native provenance step is ambiguous")
+    if step[0].get("conclusion") != ("success" if resume_dispatch else "failure"):
+        fail(f"{label} native input step outcome differs")
+    start = parse_timestamp(step[0].get("started_at"), label)
+    end = parse_timestamp(step[0].get("completed_at"), label)
+    if end < start:
+        fail(f"{label} native provenance step chronology is invalid")
+    try:
+        raw = gh_api_bytes(
+            f"repos/{repository}/actions/jobs/{job_id}/logs"
+        ).decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{label} native log encoding is invalid")
+    lines = []
+    timestamp = None
+    for line in raw.splitlines():
+        match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\S+Z) (.*)", line)
+        if match:
+            timestamp = re.sub(r"(\.\d{6})\d+(?=Z$)", r"\1", match[1])
+        if timestamp and start <= parse_timestamp(timestamp, label) < end + dt.timedelta(seconds=1):
+            lines.append(match[2] if match else line)
+    blocks = []
+    current = None
+    in_step_group = False
+    for line in lines:
+        line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        if line.startswith("##[group]"):
+            if current is not None:
+                fail(f"{label} native environment group is incomplete")
+            in_step_group = line == "##[group]Run set -euo pipefail"
+        elif line == "##[endgroup]":
+            if in_step_group and current is not None:
+                blocks.append("\n".join(current))
+                current = None
+            in_step_group = False
+        elif in_step_group and line in {"env:", "  env:"}:
+            if current is not None:
+                fail(f"{label} native environment is ambiguous")
+            current = []
+        elif in_step_group and current is not None:
+            current.append(line)
+    if len(blocks) != 1 or current is not None:
+        fail(f"{label} native failed-step environment is absent or ambiguous")
+    text = blocks[0]
+    matches = list(re.finditer(r"(?m)^  DISPATCH_INPUTS: ", text))
+    if len(matches) != 1:
+        fail(f"{label} native dispatch inputs are absent or duplicated")
+    def unique_pairs(pairs):
+        values = {}
+        for key, value in pairs:
+            if key in values:
+                fail(f"{label} native dispatch input is duplicated")
+            values[key] = value
+        return values
+    try:
+        inputs, _ = json.JSONDecoder(object_pairs_hook=unique_pairs).raw_decode(
+            text[matches[0].end():]
+        )
+    except (ValueError, TypeError):
+        fail(f"{label} native dispatch input is malformed")
+    mapping = {
+        "approved_sha": "SOURCE_SHA", "build_run_id": "BUILD_RUN_ID",
+        "infrastructure_run_id": "INFRASTRUCTURE_RUN_ID",
+        "data_run_id": "DATA_RUN_ID", "checkpoint_source_sha": "CHECKPOINT_SOURCE_SHA",
+        "disk_checkpoint_run_id": "DISK_CHECKPOINT_RUN_ID",
+        "baseline_recovery_run_id": "BASELINE_RECOVERY_RUN_ID",
+        "baseline_recovery_source_sha": "BASELINE_RECOVERY_SOURCE_SHA",
+        "confirmation": "CONFIRMATION",
+    }
+    if resume_dispatch:
+        del mapping["data_run_id"]
+        mapping.update({
+            "resume_source_sha": "RESUME_SOURCE_SHA", "phase": "PHASE",
+            "prerequisite_run_id": "PREREQUISITE_RUN_ID",
+            "failed_deploy_run_id": "FAILED_DEPLOY_RUN_ID",
+            "failed_activation_run_id": "FAILED_ACTIVATION_RUN_ID",
+            "failed_activation_user_id": "FAILED_ACTIVATION_USER_ID",
+        })
+    if not isinstance(inputs, dict) or set(inputs) != set(mapping):
+        fail(f"{label} native dispatch input key set is invalid")
+    for key, env_key in mapping.items():
+        values = re.findall(rf"(?m)^  {env_key}: ([^\r\n]*)$", text)
+        if len(values) != 1 or values[0] != inputs[key]:
+            fail(f"{label} native environment disagrees with dispatch input {key}")
+    if inputs["approved_sha"] != source_sha:
+        fail(f"{label} native dispatch source is substituted")
+    for key in (
+        "build_run_id", "infrastructure_run_id", "disk_checkpoint_run_id",
+        "prerequisite_run_id" if resume_dispatch else "data_run_id",
+    ):
+        require_dispatch_run(inputs, key)
+    require_dispatch_sha(inputs, "checkpoint_source_sha")
+    return inputs
+
+
+def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=None):
+    seen = set() if seen is None else set(seen)
+    if run_id in seen or len(seen) >= 20:
+        fail("resume authority is cyclic or exceeds the lineage bound")
+    seen.add(run_id)
+    evidence, _, files = parse_live_v6_artifact(
+        repository, run_id, "resume predecessor", include_files=True
+    )
+    authority = parse_resume_authority(files, evidence, "resume predecessor")
+    if authority is None:
+        return run_id, evidence["source_sha"]
+    if authority["resume_maintenance_mode"] != "pre-runtime-hold":
+        fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
+    failed_run = authority["failed_deploy_run_id"]
+    metadata = fixed_run_metadata(
+        repository, failed_run, "oci-production-deploy.yml", "failure",
+        "resume failed deployment",
+    )
+    source_sha = metadata["head_sha"]
+    validate_descendant_scope(source_sha, evidence["source_sha"])
+    profile = "oci-failed-deploy-retained-hold-v1"
+    outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, "resume")
+    if outcomes != ("skipped", "skipped", "skipped"):
+        fail("pre-runtime resume authority relabels another failed-deploy profile")
+    native = failed_deploy_native_inputs(repository, failed_run, source_sha, "resume")
+    request = failed_deploy_native_inputs(
+        repository, run_id, evidence["source_sha"], "resume request", resume_dispatch=True
+    )
+    expected_request = {
+        key: native[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id",
+            "baseline_recovery_source_sha",
+        )
+    }
+    expected_request.update({
+        "approved_sha": evidence["source_sha"], "resume_source_sha": source_sha,
+        "prerequisite_run_id": native["data_run_id"], "failed_deploy_run_id": failed_run,
+        "phase": "apply-slip-index", "failed_activation_run_id": "0",
+        "failed_activation_user_id": "0", "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA",
+    })
+    if request != expected_request:
+        fail("pre-runtime resume request substituted its native predecessor or failed deployment")
+    dispatch = dict(native, prerequisite_run_id=native["data_run_id"])
+    result = validate_failed_deploy_artifacts(
+        repository, failed_run, source_sha, None, dispatch, runtime_mode,
+        profile, *outcomes, "resume", pre_runtime=True, seen=seen,
+    )
+    prior, _ = parse_live_v6_artifact(repository, native["data_run_id"], "resume")
+    for key in LIVE_V6_KEYS - {
+        "source_sha", "workflow_run_id", "completed_at",
+    }:
+        if evidence[key] != prior[key]:
+            fail(f"pre-runtime resume substituted {key}")
+    if (
+        result["applied_data_run_id"] != authority["applied_data_run_id"]
+        or result["applied_source_sha"] != authority["applied_source_sha"]
+    ):
+        fail("pre-runtime resume substituted its original applied authority")
+    current = require_fixed_run(
+        repository, run_id, "oci-live-data-rollout.yml", "success",
+        evidence["source_sha"], f"oci-live-data apply-slip-index {evidence['source_sha']}",
+        "resume",
+    )
+    if parse_timestamp(metadata.get("updated_at"), "resume") > parse_timestamp(
+        current.get("created_at"), "resume"
+    ):
+        fail("pre-runtime resume predates the failed deployment")
+    return result["applied_data_run_id"], result["applied_source_sha"]
 
 
 def validate_failed_activation_artifacts(
@@ -1972,6 +2248,82 @@ def validate_failed_deploy_jobs(repository, run_id, profile, label):
     reenter = step_conclusion(
         deploy, "Re-enter maintenance after an incomplete deployment", label
     )
+    if profile == "oci-failed-deploy-retained-hold-v1" and reenter == "skipped":
+        metadata = fixed_run_metadata(
+            repository, run_id, "oci-production-deploy.yml", "failure", label
+        )
+        source_sha = metadata["head_sha"]
+        path = ".github/workflows/oci-production-deploy.yml"
+        blob = subprocess.run(
+            ["git", "show", f"{source_sha}:{path}"],
+            capture_output=True, check=False,
+        )
+        if blob.returncode != 0:
+            fail(f"{label} trusted failed workflow blob is unavailable")
+        blob_sha = hashlib.sha1(
+            f"blob {len(blob.stdout)}\0".encode() + blob.stdout
+        ).hexdigest()
+        if gh_api(f"repos/{repository}/contents/{path}?ref={source_sha}").get("sha") != blob_sha:
+            fail(f"{label} native failed workflow blob differs")
+        try:
+            workflow = blob.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"{label} trusted workflow is not UTF-8")
+        if re.findall(r"(?m)^  ([a-z][a-z-]*):$", workflow.partition("\njobs:\n")[2]) != [
+            "deploy", "public-validate"
+        ]:
+            fail(f"{label} trusted workflow job inventory changed")
+        names = re.findall(
+            r"(?m)^      - name: (.+)$",
+            workflow.split("\n  public-validate:\n")[0],
+        )
+        boundary = "Verify immutable image and infrastructure provenance"
+        if len(names) != len(set(names)) or names.count(boundary) != 1:
+            fail(f"{label} trusted workflow step inventory is ambiguous")
+        index = names.index(boundary)
+        required_admissions = {
+            "Initialize isolated OCI paths", "Checkout approved master commit",
+            "Validate exact SHA and trusted upstream runs",
+            "Download exact OCI image provenance",
+            "Download exact OCI infrastructure provenance",
+            "Download exact live data readiness evidence",
+            "Download exact release disk checkpoint",
+            "Download exact pre-mutation rollback baseline",
+        }
+        if set(names[:index]) != required_admissions:
+            fail(f"{label} trusted pre-runtime admission inventory changed")
+        expected = {
+            name: "success" if offset < index else
+            "failure" if offset == index else "skipped"
+            for offset, name in enumerate(names)
+        }
+        expected.update({
+            "Set up job": "success",
+            "Post Checkout approved master commit": "success",
+            "Complete job": "success",
+            "Remove isolated OCI client state": "success",
+            "Upload sanitized live readiness evidence": "success",
+        })
+        actual_names = [item.get("name") for item in deploy["steps"]]
+        numbers = [item.get("number") for item in deploy["steps"]]
+        if (
+            len(jobs) != 2 or deploy.get("conclusion") != "failure"
+            or deploy.get("status") != "completed"
+            or public.get("conclusion") != "skipped"
+            or public.get("status") != "completed" or public["steps"]
+            or len(actual_names) != len(set(actual_names))
+            or set(actual_names) != set(expected)
+            or [name for name in actual_names if name in names] != names
+            or not all(type(number) is int and number > 0 for number in numbers)
+            or numbers != sorted(set(numbers))
+        ):
+            fail(f"{label} pre-runtime job/step inventory differs")
+        for step in deploy["steps"]:
+            if step.get("status") != "completed" or step["conclusion"] != expected[step["name"]]:
+                fail(f"{label} pre-runtime step outcome differs")
+        if artifact_inventory(repository, run_id, label):
+            fail(f"{label} pre-runtime failed run must have zero artifacts")
+        return lock, fence, reenter
     if profile == "oci-failed-deploy-retained-hold-v1":
         recovery_intent = step_conclusion(
             deploy,
@@ -3479,8 +3831,8 @@ def validate_live_predecessor_profile(
         runtime_mode,
         f"{binding['input']} checkpoint",
     )
-    evidence, _ = parse_live_v6_artifact(
-        repository, run_id, binding["input"]
+    evidence, _, files = parse_live_v6_artifact(
+        repository, run_id, binding["input"], include_files=True
     )
     validate_live_v6_lineage(
         evidence,
@@ -3491,6 +3843,9 @@ def validate_live_predecessor_profile(
         phase,
         binding["input"],
     )
+    authority = parse_resume_authority(files, evidence, binding["input"])
+    if authority and authority["resume_maintenance_mode"] == "pre-runtime-hold":
+        validate_pre_runtime_resume_chain(repository, run_id, runtime_mode)
 
 
 def validate_binding(
@@ -3626,6 +3981,25 @@ def validate_binding(
     artifact_name = substitute(
         binding["artifactTemplate"], expected_head_sha, run_id
     )
+    profile = binding.get("runProfile")
+    if profile == "oci-failed-deploy-retained-hold-v1":
+        outcomes = validate_failed_deploy_jobs(repository, run_id, profile, binding["input"])
+        if outcomes == ("skipped", "skipped", "skipped"):
+            result = validate_failed_deploy_artifacts(
+                repository, run_id, expected_head_sha, None, dispatch_inputs,
+                runtime_mode, profile, *outcomes, binding["input"], pre_runtime=True,
+            )
+            return {
+                "baselineFiles": result.pop("_baseline_files"),
+                "artifactName": result["baseline_artifact_name"],
+                "createdAt": base.get("created_at"),
+                "completedAt": base.get("updated_at"),
+                "resume": dict(result, failed_deploy_job_conclusion="failure",
+                    public_validate_job_conclusion="skipped",
+                    lock_release_step_conclusion="skipped",
+                    fence_release_step_conclusion="skipped",
+                    rehold_step_conclusion="skipped"),
+            }
     artifact = exact_artifact(
         repository, run_id, artifact_name, binding["input"]
     )
@@ -3667,11 +4041,25 @@ def validate_binding(
             runtime_mode,
             base.get("display_title"),
         )
-    return {
+    facts = {
         "artifactName": artifact_name,
         "createdAt": base.get("created_at"),
         "completedAt": base.get("updated_at"),
     }
+    if profile in RUN_PROFILES - {"oci-failed-activation-cleanup-v1"}:
+        lock, fence, rehold = validate_failed_deploy_jobs(repository, run_id, profile, binding["input"])
+        retained = profile == "oci-failed-deploy-retained-hold-v1"
+        facts["resume"] = {
+            "resume_maintenance_mode": "retained-hold" if retained else "released-runtime",
+            "baseline_run_id": run_id,
+            "baseline_artifact_name": artifact_name,
+            "failed_deploy_job_conclusion": "failure" if retained else "success",
+            "public_validate_job_conclusion": "skipped" if retained else "failure",
+            "lock_release_step_conclusion": lock,
+            "fence_release_step_conclusion": fence,
+            "rehold_step_conclusion": rehold,
+        }
+    return facts
 
 
 def command_validate(args):
@@ -3794,6 +4182,26 @@ def command_validate_all(args):
         validated[name] = facts
         print(f"upstream_binding={name} run={inputs[name]} status=OK")
     print(f"upstream_bindings_validated={len(bindings)}")
+    if args.result_json:
+        safe_results = {
+            name: facts["resume"] for name, facts in validated.items()
+            if "resume" in facts
+        }
+        with open(args.result_json, "x", encoding="utf-8") as handle:
+            json.dump(safe_results, handle, sort_keys=True)
+    if args.baseline_dir:
+        for facts in validated.values():
+            if "baselineFiles" not in facts:
+                continue
+            root = Path(args.baseline_dir)
+            if root.is_symlink() or (root.exists() and any(root.iterdir())):
+                fail("original before baseline output must be empty")
+            root.mkdir(parents=True, exist_ok=True)
+            for relative, raw in facts["baselineFiles"].items():
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("xb") as handle:
+                    handle.write(raw)
 
 
 def main():
@@ -3817,6 +4225,8 @@ def main():
     every.add_argument("--subject-sha", required=True)
     every.add_argument("--dispatch-inputs", required=True)
     every.add_argument("--runtime-mode", default="")
+    every.add_argument("--result-json", default="")
+    every.add_argument("--baseline-dir", default="")
     every.set_defaults(func=command_validate_all)
 
     args = parser.parse_args()
