@@ -1817,7 +1817,7 @@ case "$action" in
     [[ -n "${STUB_MONGO_STORAGE:-}" ]] || exit 1
     cat "$STUB_MONGO_STORAGE"
     ;;
-  snapshot)
+  snapshot|snapshot-held)
     if [[ "${STUB_POST_CAPTURE_STATUS:-0}" != "0" &&
           "$(awk '$1 == "snapshot" {count++} END {print count+0}' "$STUB_REMOTE_LOG")" == "2" ]]; then
       exit "$STUB_POST_CAPTURE_STATUS"
@@ -1901,6 +1901,112 @@ common_env=(
   WORK_DIR="$work_dir/orchestrator-work"
   GITHUB_RUN_ATTEMPT=1
 )
+
+access_producer="$work_dir/access-producer.sh"
+python3 - "$ROOT_DIR/infra/oci/scripts/configure-k3s-access.sh" \
+  "$access_producer" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+parts = [next(line for line in source.splitlines()
+              if line.startswith('OCI_K3S_RETAIN_TARGET_SSH='))]
+for name in ("write_session_state", "release_target_ssh_key"):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}$", source, re.M | re.S)
+    assert match, f"missing access producer function: {name}"
+    parts.append(match.group())
+parts.append("write_session_state")
+release = re.search(
+    r'^if \[\[ "\$OCI_K3S_RETAIN_TARGET_SSH" == "false" \]\]; then\n.*?^fi$',
+    source, re.M | re.S,
+)
+assert release, "missing default target-key removal"
+parts.append(release.group())
+Path(sys.argv[2]).write_text("\n".join(parts) + "\n", encoding="utf-8")
+PY
+
+produce_access_state() (
+  local key_dir="$1" OCI_K3S_RETAIN_TARGET_SSH="$2"
+  local SESSION_STATE_FILE="$key_dir/session.env"
+  local target_private_key="$key_dir/key" target_public_key="$key_dir/key.pub"
+  local target_known_hosts="$key_dir/known-hosts"
+  local bastion_ocid=ocid1.bastion.oc1.fixture
+  local ssh_session_id=ocid1.bastionsession.oc1.fixture ssh_session_name=fixture
+  local ssh_tunnel_pid="$tunnel_pid" api_tunnel_pid="$tunnel_pid"
+  local bastion_endpoint=fixture.example
+  local instance_ocid=ocid1.instance.oc1..test instance_private_ip=10.0.0.2
+  local OCI_K3S_OS_USER=ubuntu OCI_K3S_LOCAL_SSH_PORT=12222
+  oci_die() { fail "$@"; }
+  mkdir -p "$key_dir"
+  touch "$target_private_key" "$target_public_key" "$target_known_hosts"
+  source "$access_producer"
+)
+
+jq '{node:{fs:{capacityBytes,usedBytes,availableBytes}}}' \
+  "$checkpoint_capacity" >"$work_dir/access-capacity-summary.json"
+for workflow in oci-live-data-rollout.yml oci-production-deploy.yml; do
+  retain="$(
+    python3 - "$ROOT_DIR/.github/workflows/$workflow" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = workflow.index("      - name: Open ephemeral OCI Bastion access to k3s")
+end = workflow.index("\n      - name:", start + 1)
+setting = re.search(
+    r'^          OCI_K3S_RETAIN_TARGET_SSH: "(true|false)"$',
+    workflow[start:end], re.M,
+)
+print(setting.group(1) if setting else "")
+PY
+  )"
+  access_dir="$work_dir/$workflow-access"
+  profile=public
+  snapshot="$checkpoint_runtime"
+  expected_snapshot=snapshot
+  if [[ "$workflow" == "oci-production-deploy.yml" ]]; then
+    profile=held
+    snapshot="$held_runtime"
+    expected_snapshot=snapshot-held
+  fi
+  produce_access_state "$access_dir" "$retain"
+  : >"$work_dir/remote.log"
+  env "${common_env[@]}" \
+    SESSION_STATE_FILE="$access_dir/session.env" \
+    STUB_CURRENT_RUNTIME="$snapshot" \
+    STUB_CAPACITY_SUMMARY="$work_dir/access-capacity-summary.json" \
+    GITHUB_RUN_ID=710 CONTROL_SHA="$SOURCE_SHA" \
+    CHECKPOINT_FILE="$checkpoint" DISK_CHECKPOINT_RUN_ID=700 \
+    REVALIDATION_PROFILE="$profile" \
+    "$ORCHESTRATOR" revalidate >"$access_dir/revalidate.log" 2>&1 || {
+      cat "$access_dir/revalidate.log" >&2
+      fail "$workflow cannot revalidate with its actual access producer state"
+    }
+  [[ "$(cut -f1 "$work_dir/remote.log")" == "$expected_snapshot" ]] ||
+    fail "$workflow did not use only its required read-only snapshot profile"
+
+  produce_access_state "$access_dir" ""
+  [[ ! -e "$access_dir/key" && ! -e "$access_dir/key.pub" &&
+     ! -e "$access_dir/known-hosts" ]] ||
+    fail "default API-only access retained target SSH key material"
+  : >"$work_dir/remote.log"
+  if env "${common_env[@]}" \
+      SESSION_STATE_FILE="$access_dir/session.env" \
+      STUB_CURRENT_RUNTIME="$snapshot" \
+      STUB_CAPACITY_SUMMARY="$work_dir/access-capacity-summary.json" \
+      GITHUB_RUN_ID=710 CONTROL_SHA="$SOURCE_SHA" \
+      CHECKPOINT_FILE="$checkpoint" DISK_CHECKPOINT_RUN_ID=700 \
+      REVALIDATION_PROFILE="$profile" \
+      "$ORCHESTRATOR" revalidate >"$access_dir/default.log" 2>&1; then
+    fail "$workflow accepted the default access state without target SSH keys"
+  fi
+  grep -Fq 'k3s access state is incomplete' "$access_dir/default.log" ||
+    fail "$workflow failed outside the expected missing-access boundary"
+  [[ ! -s "$work_dir/remote.log" ]] ||
+    fail "$workflow reached the node after its target SSH keys were removed"
+done
 
 preload_wrapper_output="$work_dir/preload-wrapper-output.json"
 preload_wrapper_checkpoint="$work_dir/preload-wrapper-checkpoint.json"

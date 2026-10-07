@@ -492,6 +492,7 @@ jobs:
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          OCI_K3S_RETAIN_TARGET_SSH: "true"
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access

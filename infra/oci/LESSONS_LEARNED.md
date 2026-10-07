@@ -666,6 +666,12 @@ conversation summaries are not authority.
 
 ### Workflow orchestration
 
+- Node-level disk checkpoint revalidation needs the target SSH key and known
+  hosts after API forwarding. Live-data and deployment access steps must opt
+  into the existing bounded retention mode; API-only callers keep early key
+  removal, and unconditional access cleanup still removes retained material.
+  Test each caller's actual setting against the access producer's serialized
+  state, not a handwritten complete session fixture or a stale blanket ban.
 - `production-build`, `oci-validate`, and branch policy subscribe to
   `pull_request.edited`. Restoring detailed bodies on merged or closed PRs can
   therefore start production-capable CI. Do that work outside a live data,
