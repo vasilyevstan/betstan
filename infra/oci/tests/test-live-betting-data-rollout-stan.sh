@@ -2819,12 +2819,12 @@ step = YAML.load_file(ARGV.fetch(0)).fetch("jobs").values.flat_map { |j| j.fetch
   .find { |s| s["name"] == "Acquire database operation lock" }
 puts step.fetch("run")
   .gsub("${{ steps.provenance_request.outputs.resume_maintenance_mode }}", "retained-hold")
-  .gsub("${{ inputs.resume_source_sha }}", "3" * 40)
 RUBY
 : >"$resume_log"
 (
   cd "$resume_fixture"
   RESUME_TEST_LOG="$resume_log" PREREQUISITE_RUN_ID=4008 \
+  RESUME_SOURCE_SHA=3333333333333333333333333333333333333333 \
   FAILED_DEPLOY_RUN_ID=77 FAILED_ACTIVATION_RUN_ID=0 OCI_K8S_NAMESPACE=betstan-oci \
   SHARED_MONGO_LOCK_TOKEN=live-data-901-1 SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
   SHARED_MONGO_LOCK_LEASE_SECONDS=14400 SOURCE_SHA=2222222222222222222222222222222222222222 \
