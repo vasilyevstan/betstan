@@ -61,6 +61,11 @@ PREFLIGHT_READ_BLOBS = {
     "infra/oci/scripts/application-registry.sh": "c97bc549688b9d04e727fbad175a6f558832c365",
     "infra/oci/scripts/validate-partial-recovery-authority-stan.sh": "bf089777892d70d13b4bcf880d7e5311e26c00b9",
 }
+PREFLIGHT_READ_DIAGNOSTIC_BLOBS = {
+    **PREFLIGHT_READ_BLOBS,
+    "infra/oci/scripts/upstream_run_binding_stan.py": "972562e235c3f3c7a6c08c88ecd97ec7bb582923",
+}
+PREFLIGHT_READ_PROFILES = (PREFLIGHT_READ_BLOBS, PREFLIGHT_READ_DIAGNOSTIC_BLOBS)
 PREFLIGHT_READ_ACTIONS = (
     "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
     "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
@@ -3242,7 +3247,7 @@ def command_preflight_read_context(args):
         print(canonical_json({
             "runId": record["runId"], "version": record["version"],
             "controlSha": record["controlSha"], "workflowBlobSha": record["workflowBlobSha"],
-            "snapshot": snapshot, "closureProfile": PREFLIGHT_READ_BLOBS,
+            "snapshot": snapshot, "closureProfile": PREFLIGHT_READ_DIAGNOSTIC_BLOBS,
             "actionPins": PREFLIGHT_READ_ACTIONS,
         }))
 
@@ -3260,7 +3265,10 @@ def validate_preflight_read_receipts(record):
             fail("preflight-read receipt is not bound to the original run and operation")
 
 
-def validate_preflight_read_observation(record, observation, current_master):
+def validate_preflight_read_observation(
+    record, observation, current_master, *,
+    admitted_profiles=(PREFLIGHT_READ_DIAGNOSTIC_BLOBS,),
+):
     path = ".github/workflows/oci-live-data-rollout.yml"
     if (
         not isinstance(observation, dict)
@@ -3286,12 +3294,15 @@ def validate_preflight_read_observation(record, observation, current_master):
     for action in PREFLIGHT_READ_ACTIONS:
         if not re.search(r"^[ \t]+uses: " + re.escape(action) + r"[ \t]*(?:#[^\n]*)?$", source, re.MULTILINE):
             fail("preflight-read executed action pin differs from the reviewed closure")
-    expected_files = {name: {"local": sha, "github": sha} for name, sha in PREFLIGHT_READ_BLOBS.items()}
-    if observation["closure"] != {
-        "historicalControl": record["controlSha"], "currentControl": current_master,
-        "historical": expected_files, "current": expected_files,
-        "actions": list(PREFLIGHT_READ_ACTIONS),
-    }:
+    for profile in admitted_profiles:
+        expected_files = {name: {"local": sha, "github": sha} for name, sha in profile.items()}
+        if observation["closure"] == {
+            "historicalControl": record["controlSha"], "currentControl": current_master,
+            "historical": expected_files, "current": expected_files,
+            "actions": list(PREFLIGHT_READ_ACTIONS),
+        }:
+            break
+    else:
         fail("preflight-read historical/current dependency closure differs from the reviewed profile")
     if current_master == record["controlSha"]:
         if observation["compare"] is not None:
@@ -3429,7 +3440,10 @@ def validate_preflight_read_retirement(record):
     retired_at = parse_utc(retirement["retiredAt"], "preflight-read retirement time")
     if any(retired_at < parse_utc(receipt["approvedAt"], "approval time") for receipt in record["approvals"]):
         fail("preflight-read retirement predates approval")
-    validate_preflight_read_observation(record, retirement["evidence"], retirement["masterShaAtRetirement"])
+    validate_preflight_read_observation(
+        record, retirement["evidence"], retirement["masterShaAtRetirement"],
+        admitted_profiles=PREFLIGHT_READ_PROFILES,
+    )
     if (
         retirement["secondObservationDigest"] != evidence_digest(retirement["evidence"])
         or retirement["evidenceDigest"] != preflight_read_retirement_digest(record, retirement)

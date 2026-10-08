@@ -381,10 +381,21 @@ alone are not evidence of empty artifacts.
 
 Two independently collected complete native observations must agree, including
 approval count and environment multiplicity against the preserved receipts.
-The fixed nine-path historical/current Git and GitHub blob profile binds the
-read-only dependency closure and pinned checkout/upload actions. The dispatcher
-rechecks native evidence, disabled workflow, actual master, clean checkout and
-production exclusivity before the existing locked generation CAS.
+The fixed nine-path Git and GitHub blob profiles bind the read-only dependency
+closure and pinned checkout/upload actions. Stored v5 evidence accepts exactly
+the original profile or its diagnostic-reader successor, differing only in the
+shared-reader blob. New retirement context and writer admission require the
+diagnostic profile. Historical and current closure, including local/GitHub
+values, must match the same complete profile; mixed profiles fail closed.
+The dispatcher rechecks native evidence, disabled workflow, actual master,
+clean checkout and production exclusivity before the existing locked generation CAS.
+
+Byte-read failures retain their classification/status/attempt/disposition fields
+and append `request_kind` (`artifact-zip`, `job-log`, or `unrecognized`) plus a
+bounded, observation-only `diagnostic`. Only limited existing timeout signatures
+are identified; unknown or conflicting observations remain `unclassified`.
+These fields expose no raw transport output and do not change retries or establish
+the cause of a failure. They authorize no fallback or replay.
 
 Only the authority becomes v5 `retired` with reason
 `preflight-read-only-failure`; its original payload, approval receipts, seal,
@@ -392,8 +403,9 @@ intent and capture remain preserved. This performs no provider or runtime
 mutation and creates no replacement authority. Later preparation is separate
 and uses normal spent-generation archival. v1–v4 and zero-execution retirement
 remain unchanged; ordinary new records remain v1. Once v5 exists, retain a
-v5-compatible reader or use a reviewed forward correction, never relabel or
-rewrite the record for an older reader.
+reader compatible with both complete profiles or use a reviewed forward
+correction. An old-only parser is not a rollback after diagnostic-profile records
+exist; never relabel, migrate, or rewrite the original proof.
 
 The request schema is:
 
