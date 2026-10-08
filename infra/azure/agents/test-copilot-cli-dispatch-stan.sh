@@ -3004,6 +3004,16 @@ preflight_blobs = {
     "infra/oci/scripts/application-registry.sh": "c97bc549688b9d04e727fbad175a6f558832c365",
     "infra/oci/scripts/validate-partial-recovery-authority-stan.sh": "bf089777892d70d13b4bcf880d7e5311e26c00b9",
 }
+preflight_diagnostic_blobs = {
+    **preflight_blobs,
+    "infra/oci/scripts/upstream_run_binding_stan.py": "972562e235c3f3c7a6c08c88ecd97ec7bb582923",
+}
+assert a.PREFLIGHT_READ_BLOBS == preflight_blobs
+assert a.PREFLIGHT_READ_DIAGNOSTIC_BLOBS == preflight_diagnostic_blobs
+assert a.PREFLIGHT_READ_PROFILES == (preflight_blobs, preflight_diagnostic_blobs)
+assert {path for path in preflight_blobs if preflight_blobs[path] != preflight_diagnostic_blobs[path]} == {
+    "infra/oci/scripts/upstream_run_binding_stan.py",
+}
 v4_directory, v4_run = case / "authority", before["runId"]
 policy = json.loads(subprocess.check_output([policy_script, "get", "oci-live-data-resume-deploy"]))
 request = {
@@ -3025,7 +3035,7 @@ def issue_preflight_fixture(d, transport, run_id):
                      "run_id": run_id, "run_json": d / "issued-run.json"})
 
 
-def preflight_fixture():
+def preflight_fixture(profile=preflight_diagnostic_blobs):
     d = setup()
     options = local_prepare(d)
     snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
@@ -3060,7 +3070,7 @@ def preflight_fixture():
             for index, (number, name, conclusion) in enumerate(preflight_steps)
         ],
     }
-    files = {path: {"local": sha, "github": sha} for path, sha in preflight_blobs.items()}
+    files = {path: {"local": sha, "github": sha} for path, sha in profile.items()}
     observation = {
         "schemaVersion": "betstan.copilot-cli-preflight-read-evidence.v1",
         "run": native_run, "attempts": [{"run": copy.deepcopy(native_run),
@@ -3078,7 +3088,7 @@ def preflight_fixture():
                         "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
                     ]},
     }
-    f.update(preflightRead=observation, preflightBlobs=preflight_blobs)
+    f.update(preflightRead=observation, preflightBlobs=profile)
     write(d / "fixture.json", f)
     (d / "preflight-fixture").touch()
     (d / "dispatches").write_text("1")
@@ -3100,6 +3110,111 @@ def preflight_retire_options(d):
     options["token"] = common["token"]
     return options, common
 
+
+# An independent historical v5 fixture, not a new retirement through the
+# upgraded writer. Its reference encoding and original profile remain fixed.
+case, consumed, historical_observation = preflight_fixture(preflight_blobs)
+historical_intent = intent(case)
+historical_intent_file = next((case / "authority").glob("request-*.json"))
+historical_intent_bytes = historical_intent_file.read_bytes()
+historical_capture = case / "authority" / historical_intent["captureFile"]
+historical_capture_bytes = historical_capture.read_bytes()
+context = json.loads(invoke("preflight-read-context", {
+    **cleanup_options(case), "policy_json": json.dumps(policy),
+}))
+assert context["closureProfile"] == preflight_diagnostic_blobs
+options, common = preflight_retire_options(case)
+error = invoke("retire-preflight-read-only-failure", options, ok=False)
+assert "dependency closure differs" in error
+assert a.load_record(case / "authority", consumed["runId"]) == consumed
+assert historical_intent_file.read_bytes() == historical_intent_bytes
+assert historical_capture.read_bytes() == historical_capture_bytes
+invoke("release-lock", common)
+run(case, "--retire-preflight-read-only-failure", ok=False)
+assert a.load_record(case / "authority", consumed["runId"]) == consumed
+
+def historical_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+historical_retirement = {
+    "reason": "preflight-read-only-failure", "recordVersion": consumed["version"],
+    "retiredAt": consumed["approvals"][-1]["approvedAt"], "masterShaAtRetirement": master,
+    "policy": copy.deepcopy(policy), "intentDigest": historical_digest(historical_intent),
+    "captureSha256": hashlib.sha256(historical_capture_bytes).hexdigest(),
+    "evidence": historical_observation,
+    "secondObservationDigest": historical_digest(historical_observation),
+}
+original_digest = historical_digest({
+    "schemaVersion": "betstan.copilot-cli-authority.v5",
+    "authority": {key: value for key, value in consumed.items()
+                  if key not in {"schemaVersion", "state", "version"}},
+    "retirement": historical_retirement,
+})
+historical_retirement["evidenceDigest"] = original_digest
+historical_record = {
+    **consumed, "schemaVersion": "betstan.copilot-cli-authority.v5",
+    "state": "retired", "version": consumed["version"] + 1,
+    "retirement": historical_retirement,
+}
+historical_record_file = case / "authority" / f'{consumed["runId"]}.json'
+write(historical_record_file, historical_record)
+original_bytes = historical_record_file.read_bytes()
+assert a.load_record(case / "authority", consumed["runId"]) == historical_record
+assert a.retired_bound_intent(case / "authority", historical_intent)
+a.preserve_spent_intent(case / "authority", historical_intent)
+historical_archive = next((case / "authority").glob("spent-*.json"))
+archive_bytes = historical_archive.read_bytes()
+assert json.loads(archive_bytes) == historical_intent
+a.preserve_spent_intent(case / "authority", historical_intent)
+assert a.find_blocking_authorities(
+    case / "authority", a.validate_request_data(request, policy, repository, master),
+) == []
+assert historical_record_file.read_bytes() == original_bytes
+assert a.load_record(case / "authority", consumed["runId"])["retirement"]["evidenceDigest"] == original_digest
+assert historical_intent_file.read_bytes() == historical_intent_bytes
+assert historical_capture.read_bytes() == historical_capture_bytes
+assert historical_archive.read_bytes() == archive_bytes
+
+profile_negatives = []
+diagnostic_files = {
+    path: {"local": sha, "github": sha} for path, sha in preflight_diagnostic_blobs.items()
+}
+for side in ("historical", "current"):
+    mixed = copy.deepcopy(historical_observation)
+    mixed["closure"][side] = copy.deepcopy(diagnostic_files)
+    profile_negatives.append(mixed)
+    for origin in ("local", "github"):
+        mixed = copy.deepcopy(historical_observation)
+        mixed["closure"][side]["infra/oci/scripts/upstream_run_binding_stan.py"][origin] = \
+            preflight_diagnostic_blobs["infra/oci/scripts/upstream_run_binding_stan.py"]
+        profile_negatives.append(mixed)
+for mutate in (
+    lambda v: v["closure"]["historical"].pop("infra/oci/scripts/lib.sh"),
+    lambda v: v["closure"]["current"].update({"extra": {"local": "e" * 40, "github": "e" * 40}}),
+    lambda v: v["closure"]["historical"]["infra/oci/scripts/lib.sh"].update(local="e" * 40, github="e" * 40),
+    lambda v: v["closure"]["actions"].__setitem__(0, "actions/checkout@" + "e" * 40),
+):
+    bad = copy.deepcopy(historical_observation); mutate(bad); profile_negatives.append(bad)
+for bad in profile_negatives:
+    try:
+        a.validate_preflight_read_observation(
+            consumed, bad, master, admitted_profiles=a.PREFLIGHT_READ_PROFILES,
+        )
+    except SystemExit: pass
+    else: raise AssertionError("stored-v5 validation admitted a mixed or incomplete profile")
+for mutate in (
+    lambda v: v["retirement"].update(evidenceDigest="0" * 64),
+    lambda v: v["retirement"].update(secondObservationDigest="0" * 64),
+    lambda v: v["retirement"]["evidence"]["closure"].update(current=copy.deepcopy(diagnostic_files)),
+):
+    bad = copy.deepcopy(historical_record); mutate(bad); write(historical_record_file, bad)
+    try: a.load_record(case / "authority", consumed["runId"])
+    except SystemExit: pass
+    else: raise AssertionError("tampered original-profile v5 proof was accepted")
+write(historical_record_file, historical_record)
+assert historical_record_file.read_bytes() == original_bytes
+assert a.retired_bound_intent(case / "authority", historical_intent)
+print("preflight_read_original_v5_digest_spent_linkage_and_diagnostic_only_admission=PASS", flush=True)
 
 d, original, observation = preflight_fixture()
 intent_file = next((d / "authority").glob("request-*.json"))

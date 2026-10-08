@@ -106,10 +106,12 @@ import json
 import re
 import subprocess
 import sys
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+native_byte_reader = m.gh_api_bytes
 source = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", "HEAD"], text=True).strip()
 blob = subprocess.check_output([
     "git", "-C", sys.argv[2], "show",
@@ -265,6 +267,55 @@ def validate_artifacts():
         profile, "skipped", "skipped", "skipped", "fixture", pre_runtime=True)
 assert validate_artifacts()["baseline_run_id"] == "23"
 assert validate_artifacts()["resume_maintenance_mode"] == "pre-runtime-hold"
+
+# Exercise the real failed-deploy call order and native-log parser while the
+# existing parsed-artifact fixtures isolate this transport-only correction.
+reads_in_order = [
+    "repos/example/repo/actions/artifacts/901/zip",
+    "repos/example/repo/actions/artifacts/902/zip",
+    "repos/example/repo/actions/jobs/1234/logs",
+    "repos/example/repo/actions/artifacts/903/zip",
+]
+def transported(endpoint, reader):
+    def read(*args, **kwargs):
+        m.gh_api_bytes(endpoint)
+        return reader(*args, **kwargs)
+    return read
+
+for failed_index in range(4):
+    observed_reads = []
+    def transport(argv, **kwargs):
+        assert kwargs == {"capture_output": True, "check": False, "timeout": 120}
+        assert argv[:2] == ["gh", "api"] and len(argv) == 3
+        observed_reads.append(argv[2])
+        if argv[2] == reads_in_order[failed_index]:
+            return subprocess.CompletedProcess(argv, 1, b"private-body-do-not-emit", b"unproven-private-error")
+        return subprocess.CompletedProcess(argv, 0, log() if argv[2].endswith("/logs") else b"fixture archive", b"")
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.object(m, "gh_api_bytes", native_byte_reader), \
+            patch.object(m, "parse_checkpoint_artifact", transported(reads_in_order[0], m.parse_checkpoint_artifact)), \
+            patch.object(m, "parse_live_v6_artifact", transported(reads_in_order[1], m.parse_live_v6_artifact)), \
+            patch.object(m, "parse_infrastructure_provenance", transported(reads_in_order[3], m.parse_infrastructure_provenance)), \
+            patch.object(m.subprocess, "run", side_effect=transport), \
+            patch.object(m.time, "sleep") as sleep, \
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        print("preceding binding status=OK\n" * 4, end="")
+        try:
+            validate_artifacts()
+        except SystemExit as error:
+            assert error.code == 1
+        else:
+            raise AssertionError("failed-deploy byte-read fault was accepted")
+    kind = "job-log" if failed_index == 2 else "artifact-zip"
+    assert stderr.getvalue() == (
+        "upstream binding rejected: artifact download classification=unknown"
+        f" attempt=1/3 disposition=not-retryable request_kind={kind} diagnostic=unclassified\n"
+    )
+    assert stdout.getvalue() == "preceding binding status=OK\n" * 4
+    assert observed_reads == reads_in_order[:failed_index + 1]
+    sleep.assert_not_called()
+print("PASS bounded diagnostics before, at, and after the failed-deploy native-log read")
+
 for key, bad in (
     ("data_run_id", "99"), ("approved_sha", "9" * 40),
     ("build_run_id", "99"), ("infrastructure_run_id", "99"),
@@ -538,7 +589,7 @@ set -euo pipefail
 [ "${1:-}" = "api" ] || { echo "unexpected gh invocation: $*" >&2; exit 1; }
 file="$FIXTURE_DIR/$(printf '%s' "$2" | tr '/?=&' '____')"
 [ -f "$file" ] || { echo "no fixture for $2" >&2; exit 1; }
-if [[ "$2" == */zip ]]; then
+if [[ "$2" == */zip || -f "$file.1.status" || -f "$file.1.sleep" || -f "$file.calls" ]]; then
   attempt=0
   if [ -f "$file.calls" ]; then read -r attempt <"$file.calls"; fi
   attempt=$((attempt + 1))
@@ -727,6 +778,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from unittest.mock import patch
@@ -762,13 +814,16 @@ def reset_download(body=valid_archive):
 
 def failure(attempt, diagnostic, output=valid_archive):
     sidecar(f".{attempt}.status").write_text("1\n")
-    sidecar(f".{attempt}.stderr").write_text(diagnostic)
+    sidecar(f".{attempt}.stderr").write_bytes(
+        diagnostic if isinstance(diagnostic, bytes) else diagnostic.encode()
+    )
     sidecar(f".{attempt}.stdout").write_bytes(output)
 
 
-def invoke(accepted, calls, sleeps, expected=valid_archive):
+def invoke(accepted, calls, sleeps, expected=valid_archive, expected_kind="artifact-zip"):
     stdout, stderr = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    with patch.object(module.subprocess, "run", wraps=subprocess.run) as run, \
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         try:
             value = module.gh_api_bytes(endpoint)
         except SystemExit as error:
@@ -779,6 +834,21 @@ def invoke(accepted, calls, sleeps, expected=valid_archive):
     assert backoffs == sleeps
     assert stdout.getvalue() == ""
     assert secret not in stderr.getvalue() and signed_url not in stderr.getvalue()
+    for call in run.call_args_list:
+        assert call.args == (["gh", "api", endpoint],)
+        assert call.kwargs == {
+            "capture_output": True, "check": False,
+            "timeout": module.ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS,
+        }
+    for line in stderr.getvalue().splitlines():
+        assert re.fullmatch(
+            r"(?:upstream binding rejected: )?artifact download "
+            r"classification=(?:http|network|ambiguous|unknown|timeout|local-execution|command|cancelled|empty-body|oversized-body)"
+            r"(?: status=[1-5][0-9]{2})? attempt=[1-3]/3 disposition=(?:retry|exhausted|not-retryable)"
+            rf" request_kind={expected_kind}"
+            r" diagnostic=(?:unclassified|tls-handshake-timeout|deadline-exceeded|io-timeout)",
+            line,
+        ), "byte-read diagnostics exposed nonconstant material"
     return stderr.getvalue()
 
 
@@ -790,6 +860,7 @@ with patch.object(module.time, "sleep", side_effect=backoffs.append):
         failure(1, f"gh: {secret} {signed_url} (HTTP {status})\n")
         diagnostic = invoke(True, 2, [1])
         assert f"status={status}" in diagnostic and "disposition=retry" in diagnostic
+        assert "diagnostic=unclassified" in diagnostic
 
     reset_download()
     failure(1, "gh: HTTP 502\n", b"")
@@ -801,19 +872,19 @@ with patch.object(module.time, "sleep", side_effect=backoffs.append):
         failure(attempt, "gh: HTTP 504\n")
     assert "disposition=exhausted" in invoke(False, 3, [1, 2])
 
-    for diagnostic in (
-        f'Get "{signed_url}": net/http: TLS handshake timeout',
-        f'Get "{signed_url}": context deadline exceeded (Client.Timeout exceeded while awaiting headers)',
-        "read tcp 192.0.2.1:1234->192.0.2.2:443: read: connection reset by peer",
-        "dial tcp 192.0.2.2:443: i/o timeout",
-        "write tcp 192.0.2.1:1234->192.0.2.2:443: i/o timeout",
-        "read tcp [2001:db8::1]:1234->[2001:db8::2]:443: read: connection reset by peer",
-        "dial tcp [fe80::1%eth0]:443: i/o timeout",
-        "gh: i/o timeout",
+    for diagnostic, code in (
+        (f'Get "{signed_url}": net/http: TLS handshake timeout', "tls-handshake-timeout"),
+        (f'Get "{signed_url}": context deadline exceeded (Client.Timeout exceeded while awaiting headers)', "deadline-exceeded"),
+        ("read tcp 192.0.2.1:1234->192.0.2.2:443: read: connection reset by peer", "unclassified"),
+        ("dial tcp 192.0.2.2:443: i/o timeout", "unclassified"),
+        ("write tcp 192.0.2.1:1234->192.0.2.2:443: i/o timeout", "unclassified"),
+        ("read tcp [2001:db8::1]:1234->[2001:db8::2]:443: read: connection reset by peer", "unclassified"),
+        ("dial tcp [fe80::1%eth0]:443: i/o timeout", "unclassified"),
+        ("gh: i/o timeout", "io-timeout"),
     ):
         reset_download()
         failure(1, diagnostic)
-        invoke(True, 2, [1])
+        assert f"diagnostic={code}" in invoke(True, 2, [1])
 
     for diagnostic in (
         "gh: i/o timeout (HTTP 401)",
@@ -845,7 +916,40 @@ with patch.object(module.time, "sleep", side_effect=backoffs.append):
     ):
         reset_download()
         failure(1, diagnostic)
-        assert "disposition=not-retryable" in invoke(False, 1, [])
+        output = invoke(False, 1, [])
+        assert "disposition=not-retryable" in output and "diagnostic=unclassified" in output
+
+    original_endpoint, original_fixture = endpoint, fixture
+    for endpoint, kind in (
+        (original_endpoint, "artifact-zip"),
+        ("repos/example/repo/actions/jobs/771/logs", "job-log"),
+        ("repos/example/repo/actions/runs/771/logs", "unrecognized"),
+        (original_endpoint + "?signed=private", "unrecognized"),
+        (original_endpoint + "/", "unrecognized"),
+        ("repos/example/repo/actions/artifacts/0/zip", "unrecognized"),
+    ):
+        fixture = original_fixture.parent / endpoint.translate(str.maketrans("/?=&", "____"))
+        reset_download()
+        failure(1, f'Get "{signed_url}": net/http: TLS handshake timeout')
+        output = invoke(True, 2, [1], expected_kind=kind)
+        assert output == (
+            "artifact download classification=network attempt=1/3 disposition=retry"
+            f" request_kind={kind} diagnostic=tls-handshake-timeout\n"
+        )
+    endpoint, fixture = original_endpoint, original_fixture
+    for raw, accepted, calls, sleeps in (
+        (b"private-error\xff\x00", False, 1, []),
+        (f'Get "{signed_url}'.encode() + b'\xff": net/http: TLS handshake timeout', True, 2, [1]),
+        (b"net/http: TLS handshake timeout\ni/o timeout", False, 1, []),
+        (b"gh: HTTP 503\nAuthorization: Bearer synthetic-private-token", False, 1, []),
+    ):
+        reset_download()
+        failure(1, raw, b"private-job-log-and-body")
+        assert "diagnostic=unclassified" in invoke(accepted, calls, sleeps)
+    reset_download()
+    failure(1, "gh: i/o timeout")
+    with patch.object(module, "_artifact_download_diagnostic", return_value="unclassified"):
+        assert "classification=network" in invoke(True, 2, [1])
 
     reset_download(b"")
     invoke(False, 1, [])
@@ -871,6 +975,9 @@ with patch.object(module.time, "sleep", side_effect=backoffs.append):
                     raise AssertionError("local failure or cancellation was accepted")
             assert run.call_count == 1 and backoffs == []
             assert secret not in stderr.getvalue() and signed_url not in stderr.getvalue()
+            assert stderr.getvalue().endswith(" request_kind=artifact-zip diagnostic=unclassified\n")
+            assert run.call_args.args == (["gh", "api", endpoint],)
+            assert run.call_args.kwargs == {"capture_output": True, "check": False, "timeout": 120}
 
 
 def require_child_gone():

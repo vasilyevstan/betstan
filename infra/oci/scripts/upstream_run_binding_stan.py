@@ -377,8 +377,36 @@ def _classify_artifact_download_failure(returncode, stderr):
     return "unknown", None, False
 
 
+def _artifact_download_diagnostic(stderr):
+    try:
+        text = (stderr or b"").decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return "unclassified"
+    prefix = r'(?:gh: )?(?:(?:Get|Head) "[^"\r\n]+": )?'
+    signatures = (
+        (r"net/http: TLS handshake timeout", "tls-handshake-timeout"),
+        (
+            r"context deadline exceeded(?: \(Client\.Timeout exceeded while awaiting headers\))?",
+            "deadline-exceeded",
+        ),
+        (r"i/o timeout", "io-timeout"),
+    )
+    matches = [
+        code for signature, code in signatures
+        if re.fullmatch(prefix + signature, text)
+    ]
+    return matches[0] if len(matches) == 1 else "unclassified"
+
+
 def gh_api_bytes(path):
+    if re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/artifacts/[1-9][0-9]*/zip", path):
+        request_kind = "artifact-zip"
+    elif re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/jobs/[1-9][0-9]*/logs", path):
+        request_kind = "job-log"
+    else:
+        request_kind = "unrecognized"
     for attempt in range(1, ARTIFACT_DOWNLOAD_ATTEMPTS + 1):
+        captured_stderr = None
         try:
             result = subprocess.run(
                 ["gh", "api", path],
@@ -400,6 +428,7 @@ def gh_api_bytes(path):
                     return result.stdout
                 status, retryable = None, False
             else:
+                captured_stderr = result.stderr
                 classification, status, retryable = (
                     _classify_artifact_download_failure(
                         result.returncode, result.stderr
@@ -408,12 +437,17 @@ def gh_api_bytes(path):
         disposition = (
             "retry" if attempt < ARTIFACT_DOWNLOAD_ATTEMPTS else "exhausted"
         ) if retryable else "not-retryable"
+        diagnostic = (
+            _artifact_download_diagnostic(captured_stderr)
+            if classification == "network" else "unclassified"
+        )
         message = f"artifact download classification={classification}"
         if status is not None:
             message += f" status={status}"
         message += (
             f" attempt={attempt}/{ARTIFACT_DOWNLOAD_ATTEMPTS}"
             f" disposition={disposition}"
+            f" request_kind={request_kind} diagnostic={diagnostic}"
         )
         if disposition != "retry":
             fail(message)
