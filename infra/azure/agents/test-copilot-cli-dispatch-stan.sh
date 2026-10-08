@@ -1897,6 +1897,10 @@ elif endpoint.startswith("actions/runs/"):
             drift = f.get("preflightDrift", "")
             if reads == f.get("preflightDriftAt", 2):
                 if drift == "attempt": preflight["run"]["run_attempt"] = 2
+                elif drift in {"latest-updated", "attempt-updated", "latest-url", "attempt-url"}:
+                    endpoint_run = preflight["run"] if drift.startswith("latest-") else preflight["attempts"][0]["run"]
+                    if drift.endswith("-updated"): endpoint_run["updated_at"] = "2026-01-01T00:02:00Z"
+                    else: endpoint_run["jobs_url"] = endpoint_run["url"] + "/jobs?changed"
                 elif drift == "approval": preflight["approvals"][0]["comment"] += " changed"
                 elif drift == "artifact": preflight["artifacts"] = {"total_count": 1, "artifacts": [{"id": 1}]}
                 elif drift == "pending": preflight["pending"] = [{"environment": {"id": 91}}]
@@ -3216,7 +3220,36 @@ assert historical_record_file.read_bytes() == original_bytes
 assert a.retired_bound_intent(case / "authority", historical_intent)
 print("preflight_read_original_v5_digest_spent_linkage_and_diagnostic_only_admission=PASS", flush=True)
 
+# Keep an independently encoded, equal-window diagnostic-profile v5 readable too.
+diagnostic_record = copy.deepcopy(historical_record)
+diagnostic_retirement = diagnostic_record["retirement"]
+for side in ("historical", "current"):
+    diagnostic_retirement["evidence"]["closure"][side] = copy.deepcopy(diagnostic_files)
+diagnostic_retirement["secondObservationDigest"] = historical_digest(diagnostic_retirement["evidence"])
+diagnostic_retirement["evidenceDigest"] = historical_digest({
+    "schemaVersion": "betstan.copilot-cli-authority.v5",
+    "authority": {key: value for key, value in consumed.items()
+                  if key not in {"schemaVersion", "state", "version"}},
+    "retirement": {key: value for key, value in diagnostic_retirement.items() if key != "evidenceDigest"},
+})
+write(historical_record_file, diagnostic_record)
+diagnostic_bytes = historical_record_file.read_bytes()
+assert a.load_record(case / "authority", consumed["runId"]) == diagnostic_record
+assert a.retired_bound_intent(case / "authority", historical_intent)
+assert historical_record_file.read_bytes() == diagnostic_bytes
+assert historical_archive.read_bytes() == archive_bytes
+write(historical_record_file, historical_record)
+assert historical_record_file.read_bytes() == original_bytes
+
 d, original, observation = preflight_fixture()
+observation["run"]["updated_at"] = "2026-01-01T00:00:50Z"
+observation["attempts"][0]["run"]["updated_at"] = "2026-01-01T00:00:51Z"
+for endpoint_run, suffix in ((observation["run"], ""), (observation["attempts"][0]["run"], "/attempts/1")):
+    for kind in ("jobs", "logs"):
+        endpoint_run[kind + "_url"] = endpoint_run["url"] + suffix + "/" + kind
+f = json.loads((d / "fixture.json").read_text())
+f["preflightRead"] = observation
+write(d / "fixture.json", f)
 intent_file = next((d / "authority").glob("request-*.json"))
 old_intent = intent(d)
 old_intent_bytes = intent_file.read_bytes()
@@ -3228,6 +3261,14 @@ assert retired["schemaVersion"] == "betstan.copilot-cli-authority.v5"
 assert retired["retirement"]["reason"] == "preflight-read-only-failure"
 assert retired["version"] == original["version"] + 1 and retired["state"] == "retired"
 assert all(retired[key] == original[key] for key in a.RECORD_V1_KEYS - {"schemaVersion", "state", "version"})
+assert retired["retirement"]["evidence"] == observation
+assert retired["retirement"]["secondObservationDigest"] == historical_digest(observation)
+assert retired["retirement"]["evidenceDigest"] == historical_digest({
+    "schemaVersion": "betstan.copilot-cli-authority.v5",
+    "authority": {key: value for key, value in original.items()
+                  if key not in {"schemaVersion", "state", "version"}},
+    "retirement": {key: value for key, value in retired["retirement"].items() if key != "evidenceDigest"},
+})
 assert intent_file.read_bytes() == old_intent_bytes
 assert capture.read_bytes() == capture_bytes and a.file_identity(capture) == capture_identity
 assert (d / "dispatches").read_text() == "1"
@@ -3273,6 +3314,10 @@ for mutate in (
     lambda value: value["retirement"].update(recordVersion=0),
     lambda value: value.update(version=value["version"] + 1),
     lambda value: value["retirement"]["evidence"]["closure"]["current"].pop("infra/oci/scripts/lib.sh"),
+    lambda value: value["retirement"]["evidence"]["run"].update(updated_at="2026-01-01T00:00:51Z"),
+    lambda value: value["retirement"]["evidence"]["attempts"][0]["run"].update(updated_at="2026-01-01T00:00:50Z"),
+    lambda value: value["retirement"]["evidence"]["run"].update(jobs_url="https://example.invalid/jobs"),
+    lambda value: value["retirement"]["evidence"]["attempts"][0]["run"].update(logs_url="https://example.invalid/logs"),
 ):
     bad = copy.deepcopy(retired); mutate(bad); write(record_file, bad)
     try: a.load_record(d / "authority", original["runId"])
@@ -3305,6 +3350,18 @@ assert capture.read_bytes() == capture_bytes and intent_file.read_bytes() != old
 print("preflight_read_retirement_dispatch_preservation_old_reader_replacement=PASS", flush=True)
 
 d, original, observation = preflight_fixture()
+for latest_update, attempt_update in (
+    ("00:01:00", "00:01:00"),
+    ("00:00:50", "00:00:51"),
+    ("00:00:51", "00:00:50"),
+    ("00:00:50", "04:00:00"),
+    ("04:00:00", "00:00:50"),
+):
+    good = copy.deepcopy(observation)
+    good["run"]["updated_at"] = f"2026-01-01T{latest_update}Z"
+    good["attempts"][0]["run"]["updated_at"] = f"2026-01-01T{attempt_update}Z"
+    a.validate_preflight_read_observation(original, good, master)
+print("preflight_read_endpoint_local_chronology=PASS cases=5", flush=True)
 bad_observations = []
 for field, value in (
     ("id", 0), ("id", True), ("workflow_id", 1), ("run_attempt", 2),
@@ -3313,10 +3370,19 @@ for field, value in (
     ("path", ".github/workflows/oci-live-betting-activate.yml"), ("display_title", "wrong"),
     ("status", "queued"), ("conclusion", "success"), ("run_started_at", None),
     ("created_at", "2027-01-01T00:00:00Z"), ("updated_at", "bad"),
+    ("created_at", None), ("updated_at", None), ("created_at", "bad"), ("run_started_at", "bad"),
+    ("created_at", "2025-12-31T23:59:59Z"), ("run_started_at", "2026-01-01T00:00:00Z"),
+    ("run_started_at", "2026-01-01T00:01:01Z"), ("updated_at", "2026-01-01T00:00:00Z"),
+    ("updated_at", "2026-01-01T00:00:49Z"),
 ):
     for which in ("latest", "attempt"):
         bad = copy.deepcopy(observation)
         (bad["run"] if which == "latest" else bad["attempts"][0]["run"])[field] = value
+        bad_observations.append(bad)
+for which in ("latest", "attempt"):
+    for field in ("created_at", "run_started_at", "updated_at"):
+        bad = copy.deepcopy(observation)
+        (bad["run"] if which == "latest" else bad["attempts"][0]["run"]).pop(field)
         bad_observations.append(bad)
 for field, value in (
     ("id", 0), ("run_id", 1), ("run_attempt", 2), ("head_sha", old),
@@ -3413,12 +3479,15 @@ for field, pages in (
     run(d, "--retire-preflight-read-only-failure", ok=False)
     assert a.load_record(d / "authority", original["runId"]) == original
     del f[field]; write(d / "fixture.json", f)
-for mutation in ("attempt", "approval", "artifact", "pending", "master", "workflow",
+for mutation in ("attempt", "latest-updated", "attempt-updated", "latest-url", "attempt-url",
+                 "approval", "artifact", "pending", "master", "workflow",
                  "helper", "local-helper", "version", "capture", "capture-replace", "intent", "request"):
     case, before, _ = preflight_fixture()
     f = json.loads((case / "fixture.json").read_text()); f["preflightDrift"] = mutation
     write(case / "fixture.json", f)
-    run(case, "--retire-preflight-read-only-failure", ok=False)
+    result = run(case, "--retire-preflight-read-only-failure", ok=False)
+    if mutation in {"latest-updated", "attempt-updated", "latest-url", "attempt-url"}:
+        assert "preflight-read terminal observations changed" in result.stderr
     assert json.loads((case / "authority" / f'{before["runId"]}.json').read_text())["state"] == "consumed"
     assert (case / "dispatches").read_text() == "1"
 case, before, _ = preflight_fixture()

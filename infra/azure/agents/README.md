@@ -381,6 +381,10 @@ alone are not evidence of empty artifacts.
 
 Two independently collected complete native observations must agree, including
 approval count and environment multiplicity against the preserved receipts.
+Latest-run and attempt-one creation/start times must match; each endpoint retains
+its own independently coherent update time, and the job interval must fit both
+windows. Endpoint update times and URLs may differ, but their raw values remain
+in the proof and digests and must stay unchanged across collection rounds.
 The fixed nine-path Git and GitHub blob profiles bind the read-only dependency
 closure and pinned checkout/upload actions. Stored v5 evidence accepts exactly
 the original profile or its diagnostic-reader successor, differing only in the
@@ -405,7 +409,9 @@ and uses normal spent-generation archival. v1–v4 and zero-execution retirement
 remain unchanged; ordinary new records remain v1. Once v5 exists, retain a
 reader compatible with both complete profiles or use a reviewed forward
 correction. An old-only parser is not a rollback after diagnostic-profile records
-exist; never relabel, migrate, or rewrite the original proof.
+exist. After unequal-endpoint-timestamp proofs are emitted, rollback also requires
+the endpoint-local chronology and both-window checks above, together with both
+complete profiles; never relabel, migrate, or rewrite the original proof.
 
 The request schema is:
 

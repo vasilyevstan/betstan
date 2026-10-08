@@ -601,9 +601,15 @@ steps and no-assigned-runner requirements remain unchanged. Admission binds
 the complete 39-entry native step sequence and the historical/current workflow
 and executed dependency closure to a frozen reviewed profile. Two independently
 collected, complete authenticated observations must be canonically identical
-and prove the exact attempt and single assigned-runner job, with no later
-attempt, artifacts or pending deployments, and complete native approval history
-matched to preserved same-run receipts.
+across collection rounds and prove the exact attempt and single assigned-runner
+job, with no later attempt, artifacts or pending deployments, and complete native
+approval history matched to preserved same-run receipts. Within each observation,
+latest-run and exact-attempt responses must agree on immutable identity and
+creation/run-start times. Their update times need not match, but each endpoint
+must retain creation ≤ run start ≤ update, with the entire job interval inside
+that endpoint's run-start-to-update window. No tolerance or wider combined window
+is used. Both raw responses remain preserved without normalization in the
+evidence and its digests.
 Successful upload steps alone do not prove an empty artifact inventory.
 Fresh source, disabled-workflow, exclusivity, native-evidence and generation
 checks precede the existing locked compare-and-swap transition; incomplete
@@ -632,9 +638,12 @@ retirement collection and writing admit only the diagnostic profile. Stored
 v5 loading accepts either complete profile without rewriting records, digests
 or history; schema and evidence shape are unchanged.
 Promote the diagnostic reader and compatible authority reader/writer together.
-After diagnostic-profile emission, rollback must retain both profiles or use a
-reviewed forward correction, never an old-only downgrade, record relabeling or
-deletion of spent history.
+After diagnostic-profile emission, rollback must retain both profiles. Once a
+retirement stores unequal endpoint update times, the rollback reader must also
+support endpoint-local chronology; v5 schema support alone is insufficient.
+Use a reviewed forward correction if either capability cannot be retained,
+never an old-only downgrade, timestamp rewriting, record relabeling or deletion
+of spent history.
 
 Per-request one-use rules and repository-global active, inflight,
 and exclusivity boundaries remain distinct and unchanged; the spent generation
