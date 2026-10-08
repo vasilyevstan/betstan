@@ -12,6 +12,7 @@ set -euo pipefail
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --dispatch-prepared
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --discard-prepared
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --retire-zero-execution
+#   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --retire-preflight-read-only-failure
 
 umask 077
 
@@ -75,7 +76,7 @@ validate_local_context() {
 }
 
 usage() {
-  fail "usage: $0 /absolute/path/request.json [--dispatch | --resume-captured | --resume-run <run-id> | --prepare-disabled-ghosts | --dispatch-prepared | --discard-prepared | --retire-zero-execution]"
+  fail "usage: $0 /absolute/path/request.json [--dispatch | --resume-captured | --resume-run <run-id> | --prepare-disabled-ghosts | --dispatch-prepared | --discard-prepared | --retire-zero-execution | --retire-preflight-read-only-failure]"
 }
 
 [[ -n "$REQUEST_FILE" ]] || usage
@@ -85,7 +86,7 @@ case "$ACTION" in
   --dispatch)
     [[ -z "$RESUME_RUN_ID" ]] || usage
     ;;
-  --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared|--retire-zero-execution)
+  --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared|--retire-zero-execution|--retire-preflight-read-only-failure)
     [[ "$#" = 2 ]] || usage
     ;;
   --resume-captured)
@@ -196,6 +197,7 @@ cleanup() {
     "$zero_first_file" "$zero_second_file" "$zero_attempt_file" \
     "$zero_attempts_file" "$zero_workflow_file" "$zero_historical_file" \
     "$zero_compare_file" "$zero_artifacts_file"
+  rm -f "$tmp_dir"/preflight-*.json
   rmdir "$tmp_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -285,6 +287,85 @@ collect_zero_execution() {
       run: $run[0], attempts: $attempts, workflow: $workflow[0], historicalWorkflow: $history[0],
       compare: $compare[0], pending: $pending[0], approvals: $approvals[0], artifacts: $artifacts[0]}' \
     >"$destination"
+}
+
+collect_preflight_read() {
+  local destination="$1" side control path expected local_blob native_blob files
+  local historical='{}' current='{}'
+  gh api "repos/$repository/actions/workflows/$workflow" >"$tmp_dir/preflight-workflow.json"
+  gh api "repos/$repository/contents/$workflow_path?ref=$preflight_control" >"$tmp_dir/preflight-history.json"
+  gh api "repos/$repository/actions/runs/$preflight_run_id" >"$tmp_dir/preflight-run.json"
+  jq -e '.run_attempt == 1' "$tmp_dir/preflight-run.json" >/dev/null ||
+    fail "preflight-read retirement forbids any later attempt"
+  gh api "repos/$repository/actions/runs/$preflight_run_id/attempts/1" >"$tmp_dir/preflight-attempt.json"
+  gh api "repos/$repository/actions/runs/$preflight_run_id/attempts/1/jobs?per_page=100" --paginate |
+    jq -se '
+      if length == 1 and (.[0].total_count | type == "number") and
+        .[0].total_count == 1 and (.[0].jobs | type == "array" and length == 1)
+      then .[0] else error("incomplete or extended preflight-read job pages") end
+    ' >"$tmp_dir/preflight-jobs.json"
+  gh api "repos/$repository/actions/runs/$preflight_run_id/pending_deployments?per_page=100" --paginate |
+    jq -se 'if length == 1 and .[0] == [] then .[0]
+      else error("pending or incomplete preflight-read deployments") end' >"$tmp_dir/preflight-pending.json"
+  gh api "repos/$repository/actions/runs/$preflight_run_id/approvals?per_page=100" --paginate |
+    jq -se '
+      if length > 0 and all(.[]; type == "array") and
+        (.[-1] | length < 100) and all(.[0:-1][]; length == 100)
+      then add else error("incomplete preflight-read approval pages") end
+    ' >"$tmp_dir/preflight-approvals.json"
+  gh api "repos/$repository/actions/runs/$preflight_run_id/artifacts?per_page=100" --paginate |
+    jq -se '
+      if length == 1 and (.[0].total_count | type == "number") and
+        .[0].total_count == 0 and .[0].artifacts == []
+      then .[0] else error("nonempty or incomplete preflight-read artifact pages") end
+    ' >"$tmp_dir/preflight-artifacts.json"
+  if [[ "$preflight_control" = "$live_master" ]]; then
+    printf 'null\n' >"$tmp_dir/preflight-compare.json"
+  else
+    gh api "repos/$repository/compare/$preflight_control...$live_master?per_page=100" --paginate |
+      jq -se '
+        .[0] as $first |
+        if length > 0 and all(.[]; .total_commits == $first.total_commits and
+          .status == $first.status and .base_commit.sha == $first.base_commit.sha and
+          .merge_base_commit.sha == $first.merge_base_commit.sha)
+        then $first + {commits: [.[].commits[]]}
+        else error("incomplete or drifting preflight-read ancestry pages") end
+      ' >"$tmp_dir/preflight-compare.json"
+  fi
+  for side in historical current; do
+    control="$preflight_control"
+    [[ "$side" != current ]] || control="$live_master"
+    files='{}'
+    while IFS= read -r path; do
+      expected="$(jq -er --arg path "$path" '.closureProfile[$path]' <<<"$preflight_context")"
+      local_blob="$(git -C "$ROOT_DIR" rev-parse "$control:$path")"
+      native_blob="$(gh api "repos/$repository/contents/$path?ref=$control" |
+        jq -er --arg path "$path" 'select(.type == "file" and .path == $path) | .sha | select(type == "string")')"
+      [[ "$local_blob" = "$expected" && "$native_blob" = "$expected" ]] ||
+        fail "preflight-read dependency closure differs from the reviewed profile"
+      files="$(jq -cn --argjson files "$files" --arg path "$path" \
+        --arg local "$local_blob" --arg github "$native_blob" \
+        '$files + {($path): {local: $local, github: $github}}')"
+    done < <(jq -r '.closureProfile | keys[]' <<<"$preflight_context")
+    if [[ "$side" = historical ]]; then historical="$files"; else current="$files"; fi
+  done
+  jq -n --slurpfile run "$tmp_dir/preflight-run.json" \
+    --slurpfile attempt "$tmp_dir/preflight-attempt.json" --slurpfile jobs "$tmp_dir/preflight-jobs.json" \
+    --slurpfile workflow "$tmp_dir/preflight-workflow.json" --slurpfile history "$tmp_dir/preflight-history.json" \
+    --slurpfile compare "$tmp_dir/preflight-compare.json" --slurpfile pending "$tmp_dir/preflight-pending.json" \
+    --slurpfile approvals "$tmp_dir/preflight-approvals.json" --slurpfile artifacts "$tmp_dir/preflight-artifacts.json" \
+    --arg historicalControl "$preflight_control" --arg currentControl "$live_master" \
+    --argjson historical "$historical" --argjson current "$current" \
+    --argjson actions "$(jq '.actionPins' <<<"$preflight_context")" '
+      if all([$run, $attempt, $jobs, $workflow, $history, $compare, $pending, $approvals, $artifacts][];
+        length == 1) then {
+        schemaVersion: "betstan.copilot-cli-preflight-read-evidence.v1",
+        run: $run[0], attempts: [{run: $attempt[0], jobs: $jobs[0]}],
+        workflow: $workflow[0], historicalWorkflow: $history[0], compare: $compare[0],
+        pending: $pending[0], approvals: $approvals[0], artifacts: $artifacts[0],
+        closure: {historicalControl: $historicalControl, currentControl: $currentControl,
+          historical: $historical, current: $current, actions: $actions}
+      } else error("duplicate or partial preflight-read native documents") end' >"$destination"
 }
 
 # Bind discovery and all nested validators to the verified script checkout.
@@ -393,6 +474,54 @@ else
     fail "trusted workflow path does not match policy"
   [[ "$workflow_state" = "active" || "$workflow_state" = "disabled_manually" ]] ||
     fail "trusted workflow has an unsupported state: $workflow_state"
+
+  if [[ "$ACTION" = "--retire-preflight-read-only-failure" ]]; then
+    [[ "$operation" = oci-live-data-resume-deploy && "$workflow_state" = disabled_manually ]] ||
+      fail "preflight-read retirement requires exact resume-deploy operation disabled at rest"
+    preflight_context="$(
+      "$AUTHORITY_HELPER" preflight-read-context \
+        --request "$REQUEST_FILE" --repository "$repository" --policy-json "$policy_json" \
+        --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+        --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR"
+    )"
+    preflight_run_id="$(jq -r '.runId' <<<"$preflight_context")"
+    preflight_control="$(jq -r '.controlSha' <<<"$preflight_context")"
+    [[ "$preflight_run_id" =~ ^[1-9][0-9]*$ && "$preflight_control" =~ ^[0-9a-f]{40}$ ]] ||
+      fail "preflight-read bound identity is invalid"
+    git -C "$ROOT_DIR" cat-file -e "${preflight_control}^{commit}" ||
+      fail "preflight-read historical control is unavailable locally"
+    git -C "$ROOT_DIR" merge-base --is-ancestor "$preflight_control" "$live_master" ||
+      fail "preflight-read historical control is not an ancestor of current master"
+    acquire_authority_lock "$preflight_run_id"
+    validate_production_exclusivity
+    collect_preflight_read "$tmp_dir/preflight-first.json"
+    collect_preflight_read "$tmp_dir/preflight-second.json"
+    collect_preflight_read "$tmp_dir/preflight-final.json"
+    jq -e --slurpfile final "$tmp_dir/preflight-final.json" '. == $final[0]' \
+      "$tmp_dir/preflight-second.json" >/dev/null ||
+      fail "preflight-read native evidence changed before retirement"
+    validate_production_exclusivity
+    validate_local_context "$live_master"
+    [[ "$(gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha')" = "$live_master" ]] ||
+      fail "master changed before preflight-read retirement"
+    [[ "$(gh api "repos/$repository/actions/workflows/$workflow" --jq '[.id,.path,.state] | @tsv')" = \
+      "$(printf '%s\t%s\tdisabled_manually' "$workflow_id" "$workflow_path")" ]] ||
+      fail "workflow changed before preflight-read retirement"
+    gh api "repos/$repository/actions/runs/$preflight_run_id" >"$run_file"
+    jq -e --slurpfile current "$run_file" '.run == $current[0]' \
+      "$tmp_dir/preflight-second.json" >/dev/null ||
+      fail "run changed immediately before preflight-read retirement"
+    "$AUTHORITY_HELPER" retire-preflight-read-only-failure \
+      --request "$REQUEST_FILE" --repository "$repository" --policy-json "$policy_json" \
+      --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+      --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR" \
+      --current-master "$live_master" --expected-snapshot "$(jq -r '.snapshot' <<<"$preflight_context")" \
+      --token "$authority_lock_token" \
+      --first-observation "$tmp_dir/preflight-first.json" --second-observation "$tmp_dir/preflight-second.json"
+    release_authority_lock
+    printf 'dispatch=RETIRED run_id=%s authority_state=retired next_action=explicit-new-preparation\n' "$preflight_run_id"
+    exit 0
+  fi
 
   if [[ "$ACTION" = "--retire-zero-execution" ]]; then
     [[ "$workflow_state" = "disabled_manually" ]] ||

@@ -36,6 +36,7 @@ RECORD_SCHEMA_V1 = "betstan.copilot-cli-authority.v1"
 RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
 RECORD_SCHEMA_V3 = "betstan.copilot-cli-authority.v3"
 RECORD_SCHEMA_V4 = "betstan.copilot-cli-authority.v4"
+RECORD_SCHEMA_V5 = "betstan.copilot-cli-authority.v5"
 # New records retain the established v1 shape. Only the explicit,
 # evidence-bound stale-claim retirement migrates a record to v2.
 RECORD_SCHEMA = RECORD_SCHEMA_V1
@@ -47,6 +48,64 @@ PREREQUISITE_REJECTION_EVIDENCE_SCHEMA = (
 )
 ZERO_EXECUTION_EVIDENCE_SCHEMA = "betstan.copilot-cli-zero-execution-evidence.v1"
 ZERO_EXECUTION_MAX_ATTEMPTS = 100
+PREFLIGHT_READ_EVIDENCE_SCHEMA = "betstan.copilot-cli-preflight-read-evidence.v1"
+PREFLIGHT_READ_OPERATION = "oci-live-data-resume-deploy"
+PREFLIGHT_READ_BLOBS = {
+    ".github/workflows/oci-live-data-rollout.yml": "27a98e345050fefb799c706fde03d8f79e14ed6c",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh": "4681e877c673294e1f70974eaa6d2be7ea526f2a",
+    "infra/oci/scripts/upstream_run_binding_stan.py": "e2c82998ca820abf25f7b5255a30842253adbf55",
+    "infra/oci/scripts/k3s_disk_recovery_stan.py": "6a320e73943b15fec954be2297ea5eaa729c8a11",
+    "infra/oci/scripts/validate-legacy-oci-provenance.py": "240a4bf56cd8e5763f475dc3baa0250a7c1add5f",
+    "infra/oci/scripts/verify-images.sh": "77ff8ecdcf9b8f86ed5be3550a3cd9f91c57a514",
+    "infra/oci/scripts/lib.sh": "caabac06cc16147e12ac536112d3aa5f14d54a34",
+    "infra/oci/scripts/application-registry.sh": "c97bc549688b9d04e727fbad175a6f558832c365",
+    "infra/oci/scripts/validate-partial-recovery-authority-stan.sh": "bf089777892d70d13b4bcf880d7e5311e26c00b9",
+}
+PREFLIGHT_READ_ACTIONS = (
+    "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+)
+PREFLIGHT_READ_STEPS = (
+    (1, "Set up job", "success"),
+    (2, "Initialize isolated OCI data paths", "success"),
+    (3, "Checkout approved current master commit", "success"),
+    (4, "Validate exact SHA phase and trusted upstream runs", "failure"),
+    (5, "Reject competing production activity", "skipped"),
+    (6, "Download exact OCI image provenance", "skipped"),
+    (7, "Download exact OCI infrastructure provenance", "skipped"),
+    (8, "Download exact release disk checkpoint", "skipped"),
+    (9, "Download prerequisite data evidence", "skipped"),
+    (10, "Download failed deploy protected baseline", "skipped"),
+    (11, "Download explicitly selected recovery baseline authority", "skipped"),
+    (12, "Bind historical recovery source through its exact artifact", "skipped"),
+    (13, "Verify immutable release and phase provenance", "skipped"),
+    (14, "Install pinned OCI CLI", "skipped"),
+    (15, "Verify OKE identity", "skipped"),
+    (16, "Verify k3s identity", "skipped"),
+    (17, "Reconcile expired and authorize current runner IPv4", "skipped"),
+    (18, "Configure kubectl from exact cluster OCID", "skipped"),
+    (19, "Open ephemeral OCI Bastion access to k3s", "skipped"),
+    (20, "Verify exact failed-deploy resume state", "skipped"),
+    (21, "Capture and validate pre-mutation rollback baseline", "skipped"),
+    (22, "Revalidate exact release disk checkpoint before lock mutation", "skipped"),
+    (23, "Acquire database operation lock", "skipped"),
+    (24, "Enter or re-establish live data maintenance", "skipped"),
+    (25, "Demote and verify exact retained live-acceptance account", "skipped"),
+    (26, "Delete exact orphaned live-acceptance slips", "skipped"),
+    (27, "Execute exact-digest live data phase", "skipped"),
+    (28, "Restore runtime or verify final deploy handoff", "skipped"),
+    (29, "Capture post-phase runtime baseline", "skipped"),
+    (30, "Require executed data-step evidence", "skipped"),
+    (31, "Upload exact sanitized data evidence", "success"),
+    (32, "Upload protected rollout baselines", "success"),
+    (33, "Restore runtime or retain hold if final handoff packaging failed", "skipped"),
+    (34, "Release database operation lock unless handed to deploy", "skipped"),
+    (35, "Revoke exact runner rule", "skipped"),
+    (36, "Close ephemeral OCI Bastion access", "skipped"),
+    (37, "Remove isolated OCI client state", "success"),
+    (74, "Post Checkout approved current master commit", "success"),
+    (75, "Complete job", "success"),
+)
 AUTHORITY_OWNER = "github-copilot-cli"
 AUTHORITY_TTL_SECONDS = 24 * 60 * 60
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -172,6 +231,14 @@ ZERO_EXECUTION_RETIREMENT_KEYS = RETIREMENT_KEYS | {
 ZERO_EXECUTION_OBSERVATION_KEYS = {
     "schemaVersion", "run", "attempts", "workflow", "historicalWorkflow",
     "compare", "pending", "approvals", "artifacts",
+}
+PREFLIGHT_READ_RETIREMENT_KEYS = RETIREMENT_KEYS | {
+    "recordVersion", "policy", "intentDigest", "captureSha256",
+    "secondObservationDigest", "evidence",
+}
+PREFLIGHT_READ_OBSERVATION_KEYS = {
+    "schemaVersion", "run", "attempts", "workflow", "historicalWorkflow",
+    "compare", "pending", "approvals", "artifacts", "closure",
 }
 PREREQUISITE_REJECTION_SNAPSHOT_KEYS = {
     "run",
@@ -1172,6 +1239,9 @@ def load_record(directory, run_id):
     elif schema_version == RECORD_SCHEMA_V4:
         if set(record) != RECORD_V2_KEYS:
             fail("authority record has an unexpected schema")
+    elif schema_version == RECORD_SCHEMA_V5:
+        if set(record) != RECORD_V2_KEYS:
+            fail("authority record has an unexpected schema")
     else:
         fail("authority record schema version is unsupported")
     if str(record["runId"]) != str(run_id):
@@ -1245,7 +1315,7 @@ def load_record(directory, run_id):
     if (
         record["state"] == "retired"
         and record["approvals"]
-        and schema_version != RECORD_SCHEMA_V4
+        and schema_version not in {RECORD_SCHEMA_V4, RECORD_SCHEMA_V5}
     ):
         fail("retired authority record unexpectedly has approval receipts")
     if schema_version == RECORD_SCHEMA_V2:
@@ -1504,6 +1574,8 @@ def load_record(directory, run_id):
             )
     elif schema_version == RECORD_SCHEMA_V4:
         validate_zero_execution_retirement(record)
+    elif schema_version == RECORD_SCHEMA_V5:
+        validate_preflight_read_retirement(record)
     return record
 
 
@@ -3135,6 +3207,285 @@ def command_retire_zero_execution(args):
         }))
 
 
+def preflight_read_context(args, directory):
+    key, intent = matching_prepared_request(args, directory, bound=True)
+    record = bound_intent_record(directory, intent)
+    if (
+        record["operation"] != PREFLIGHT_READ_OPERATION
+        or record["schemaVersion"] != RECORD_SCHEMA_V1
+        or record["state"] != "consumed"
+        or record["workflow"] != "oci-live-data-rollout.yml"
+        or record["workflowBlobSha"] != PREFLIGHT_READ_BLOBS[args.workflow_path]
+    ):
+        fail("preflight-read retirement requires the exact consumed resume-deploy generation")
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    if intent["preparedSeal"]["policySha256"] != evidence_digest(policy):
+        fail("preflight-read policy differs from the prepared seal")
+    verify_record(
+        record, policy, args.repository, record["controlSha"],
+        args.workflow_id, intent["workflowBlobSha"], retirement_only=True,
+    )
+    validate_preflight_read_receipts(record)
+    capture = zero_execution_capture(directory, intent)
+    snapshot = evidence_digest({
+        "intent": prepared_snapshot(directory, key, intent), "record": record,
+        "recordFile": file_identity(record_path(directory, record["runId"])),
+        "capture": capture, "requestFile": file_identity(args.request),
+    })
+    return key, intent, record, policy, capture, snapshot
+
+
+def command_preflight_read_context(args):
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
+    with repository_claim_lock(directory, nonblocking=True):
+        _, _, record, _, _, snapshot = preflight_read_context(args, directory)
+        print(canonical_json({
+            "runId": record["runId"], "version": record["version"],
+            "controlSha": record["controlSha"], "workflowBlobSha": record["workflowBlobSha"],
+            "snapshot": snapshot, "closureProfile": PREFLIGHT_READ_BLOBS,
+            "actionPins": PREFLIGHT_READ_ACTIONS,
+        }))
+
+
+def validate_preflight_read_receipts(record):
+    if not record["approvals"] or record["inflightApproval"] is not None:
+        fail("preflight-read retirement requires consumed approval and no inflight claim")
+    for receipt in record["approvals"]:
+        if (
+            receipt["runId"] != record["runId"]
+            or receipt["operation"] != PREFLIGHT_READ_OPERATION
+            or parse_utc(receipt["approvedAt"], "approval time")
+            < parse_utc(record["createdAt"], "authority creation time")
+        ):
+            fail("preflight-read receipt is not bound to the original run and operation")
+
+
+def validate_preflight_read_observation(record, observation, current_master):
+    path = ".github/workflows/oci-live-data-rollout.yml"
+    if (
+        not isinstance(observation, dict)
+        or set(observation) != PREFLIGHT_READ_OBSERVATION_KEYS
+        or observation["schemaVersion"] != PREFLIGHT_READ_EVIDENCE_SCHEMA
+        or record["operation"] != PREFLIGHT_READ_OPERATION
+        or record["workflow"] != "oci-live-data-rollout.yml"
+        or record["workflowBlobSha"] != PREFLIGHT_READ_BLOBS[path]
+        or not isinstance(current_master, str) or not FULL_SHA.fullmatch(current_master)
+    ):
+        fail("preflight-read observation schema or exact operation is invalid")
+    workflow = observation["workflow"]
+    if (
+        not isinstance(workflow, dict) or type(workflow.get("id")) is not int
+        or any(workflow.get(name) != value for name, value in (
+            ("id", record["workflowId"]), ("path", path), ("state", "disabled_manually"),
+        ))
+    ):
+        fail("preflight-read workflow identity or disabled state mismatch")
+    source, _ = decode_historical_workflow(
+        observation["historicalWorkflow"], path, expected_blob_sha=PREFLIGHT_READ_BLOBS[path],
+    )
+    for action in PREFLIGHT_READ_ACTIONS:
+        if not re.search(r"^[ \t]+uses: " + re.escape(action) + r"[ \t]*(?:#[^\n]*)?$", source, re.MULTILINE):
+            fail("preflight-read executed action pin differs from the reviewed closure")
+    expected_files = {name: {"local": sha, "github": sha} for name, sha in PREFLIGHT_READ_BLOBS.items()}
+    if observation["closure"] != {
+        "historicalControl": record["controlSha"], "currentControl": current_master,
+        "historical": expected_files, "current": expected_files,
+        "actions": list(PREFLIGHT_READ_ACTIONS),
+    }:
+        fail("preflight-read historical/current dependency closure differs from the reviewed profile")
+    if current_master == record["controlSha"]:
+        if observation["compare"] is not None:
+            fail("same-control preflight retirement has unexpected ancestry evidence")
+    else:
+        validate_strict_ancestor_compare(observation["compare"], record["controlSha"], current_master)
+
+    attempts = observation["attempts"]
+    if (
+        not isinstance(attempts, list) or len(attempts) != 1
+        or not isinstance(attempts[0], dict) or set(attempts[0]) != {"run", "jobs"}
+    ):
+        fail("preflight-read retirement requires only the complete first attempt")
+    windows = []
+    for run in (observation["run"], attempts[0]["run"]):
+        if not isinstance(run, dict) or not isinstance(run.get("head_repository"), dict):
+            fail("preflight-read run identity is incomplete")
+        for name in ("id", "workflow_id", "run_attempt"):
+            require_exact_integer(run.get(name), name, minimum=1)
+        validate_run_against_record(run, record)
+        if run.get("status") != "completed" or run.get("conclusion") != "failure":
+            fail("preflight-read run is not an exact first-attempt failure")
+        window = tuple(parse_utc(run.get(name), name) for name in (
+            "created_at", "run_started_at", "updated_at",
+        ))
+        if not window[0] <= window[1] <= window[2]:
+            fail("preflight-read run timestamps are incoherent")
+        windows.append(window)
+    if windows[0] != windows[1]:
+        fail("preflight-read latest run and first attempt disagree")
+    jobs = attempts[0]["jobs"]
+    if (
+        not isinstance(jobs, dict) or type(jobs.get("total_count")) is not int
+        or jobs["total_count"] != 1 or not isinstance(jobs.get("jobs"), list)
+        or len(jobs["jobs"]) != 1 or not isinstance(jobs["jobs"][0], dict)
+    ):
+        fail("preflight-read jobs do not completely identify exactly one rollout job")
+    job = jobs["jobs"][0]
+    require_exact_integer(job.get("id"), "preflight-read job ID", minimum=1)
+    require_exact_integer(job.get("runner_id"), "preflight-read assigned runner", minimum=1)
+    if (
+        type(job.get("run_id")) is not int or job["run_id"] != record["runId"]
+        or type(job.get("run_attempt")) is not int or job["run_attempt"] != 1
+        or job.get("name") != "rollout" or job.get("status") != "completed"
+        or job.get("conclusion") != "failure" or job.get("head_sha") != record["controlSha"]
+        or not isinstance(job.get("runner_name"), str) or not job["runner_name"].strip()
+    ):
+        fail("preflight-read rollout job or assigned runner identity mismatch")
+    started = parse_utc(job.get("started_at"), "job start")
+    completed = parse_utc(job.get("completed_at"), "job completion")
+    if not windows[0][1] <= started <= completed <= windows[0][2]:
+        fail("preflight-read job timestamps are outside the failed run")
+    steps = job.get("steps")
+    if not isinstance(steps, list) or len(steps) != len(PREFLIGHT_READ_STEPS):
+        fail("preflight-read step inventory is incomplete or extended")
+    previous = started
+    for step, expected in zip(steps, PREFLIGHT_READ_STEPS):
+        if (
+            not isinstance(step, dict) or type(step.get("number")) is not int
+            or tuple(step.get(name) for name in ("number", "name", "conclusion")) != expected
+            or step.get("status") != "completed"
+            or "started_at" not in step or "completed_at" not in step
+        ):
+            fail("preflight-read steps differ from the exact reviewed 39-step sequence")
+        if step["conclusion"] == "skipped" and step["started_at"] is None and step["completed_at"] is None:
+            continue
+        step_start = parse_utc(step["started_at"], "step start")
+        step_end = parse_utc(step["completed_at"], "step completion")
+        if not started <= step_start <= step_end <= completed:
+            fail("preflight-read step timestamps are outside the job")
+        if step["conclusion"] != "skipped":
+            if step_start < previous:
+                fail("preflight-read executed steps run backward")
+            previous = step_end
+    if observation["pending"] != []:
+        fail("preflight-read run still has pending deployments")
+    artifacts = observation["artifacts"]
+    if (
+        not isinstance(artifacts, dict) or type(artifacts.get("total_count")) is not int
+        or artifacts["total_count"] != 0 or artifacts.get("artifacts") != []
+    ):
+        fail("preflight-read uploads produced artifacts or artifact evidence is incomplete")
+    validate_preflight_read_receipts(record)
+    reviews = observation["approvals"]
+    if not isinstance(reviews, list) or len(reviews) != len(record["approvals"]):
+        fail("preflight-read native approval count differs from preserved receipts")
+    environments, seen = [], set()
+    for review in reviews:
+        if (
+            not isinstance(review, dict) or review.get("state") != "approved"
+            or not isinstance(review.get("user"), dict)
+            or not isinstance(review["user"].get("login"), str) or not review["user"]["login"].strip()
+            or not isinstance(review.get("comment"), str)
+            or not isinstance(review.get("environments"), list) or len(review["environments"]) != 1
+            or not isinstance(review["environments"][0], dict)
+        ):
+            fail("preflight-read native approval is incomplete or ambiguous")
+        require_exact_integer(review["user"].get("id"), "native approval user", minimum=1)
+        environment = require_exact_integer(review["environments"][0].get("id"), "native approval environment", minimum=1)
+        digest = evidence_digest(review)
+        if digest in seen:
+            fail("preflight-read native approval history contains duplicate reviews")
+        seen.add(digest)
+        environments.append(str(environment))
+    if sorted(environments) != sorted(str(receipt["environmentId"]) for receipt in record["approvals"]):
+        fail("preflight-read approval environment multiplicity differs from preserved receipts")
+    if len(set(environments)) != len(environments):
+        fail("preflight-read approval-to-receipt correspondence is ambiguous")
+
+
+def preflight_read_retirement_digest(record, retirement):
+    return evidence_digest({
+        "schemaVersion": RECORD_SCHEMA_V5,
+        "authority": {name: record[name] for name in RECORD_V1_KEYS - {"schemaVersion", "state", "version"}},
+        "retirement": {name: value for name, value in retirement.items() if name != "evidenceDigest"},
+    })
+
+
+def validate_preflight_read_retirement(record):
+    retirement = record["retirement"]
+    if (
+        record["state"] != "retired" or not isinstance(retirement, dict)
+        or set(retirement) != PREFLIGHT_READ_RETIREMENT_KEYS
+        or retirement["reason"] != "preflight-read-only-failure"
+        or type(retirement["recordVersion"]) is not int or retirement["recordVersion"] < 1
+        or record["version"] != retirement["recordVersion"] + 1
+    ):
+        fail("preflight-read retirement has an invalid schema or version")
+    for name in ("evidenceDigest", "intentDigest", "captureSha256", "secondObservationDigest"):
+        require_digest(retirement[name], name)
+    verify_record(
+        record, retirement["policy"], record["repository"], record["controlSha"],
+        record["workflowId"], record["workflowBlobSha"], retirement_only=True,
+    )
+    retired_at = parse_utc(retirement["retiredAt"], "preflight-read retirement time")
+    if any(retired_at < parse_utc(receipt["approvedAt"], "approval time") for receipt in record["approvals"]):
+        fail("preflight-read retirement predates approval")
+    validate_preflight_read_observation(record, retirement["evidence"], retirement["masterShaAtRetirement"])
+    if (
+        retirement["secondObservationDigest"] != evidence_digest(retirement["evidence"])
+        or retirement["evidenceDigest"] != preflight_read_retirement_digest(record, retirement)
+    ):
+        fail("preflight-read retirement digest does not match its complete evidence")
+
+
+def command_retire_preflight_read(args):
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
+    first = load_json_file(args.first_observation, "first preflight-read observation", exact_mode=0o600)
+    second = load_json_file(args.second_observation, "second preflight-read observation", exact_mode=0o600)
+    if file_identity(args.first_observation) == file_identity(args.second_observation):
+        fail("preflight-read retirement requires independently collected observations")
+    with repository_claim_lock(directory, nonblocking=True):
+        key, intent, record, policy, capture, snapshot = preflight_read_context(args, directory)
+        require_lock(directory, record["runId"], args.token)
+        if snapshot != args.expected_snapshot:
+            fail("preflight-read authority/request/capture/version changed before retirement")
+        normalized = validate_request_data(
+            {name: (REQUEST_SCHEMA if name == "schemaVersion" else intent[name]) for name in REQUEST_KEYS},
+            policy, args.repository, record["controlSha"],
+        )
+        if find_blocking_authorities(directory, normalized) != [
+            (f"intent:{key}", "bound"), (str(record["runId"]), "consumed"),
+        ]:
+            fail("preflight-read retirement is blocked by other repository authority")
+        for observation in (first, second):
+            validate_preflight_read_observation(record, observation, args.current_master)
+        if canonical_json(first) != canonical_json(second):
+            fail("preflight-read terminal observations changed")
+
+        def retire(current):
+            if current != record or preflight_read_context(args, directory)[-1] != snapshot:
+                fail("preflight-read generation changed before CAS")
+            retirement = {
+                "reason": "preflight-read-only-failure", "recordVersion": current["version"],
+                "retiredAt": utc_text(utc_now()), "masterShaAtRetirement": args.current_master,
+                "policy": policy, "intentDigest": evidence_digest(intent),
+                "captureSha256": capture["sha256"], "evidence": first,
+                "secondObservationDigest": evidence_digest(second),
+            }
+            retirement["evidenceDigest"] = preflight_read_retirement_digest(current, retirement)
+            current.update(
+                schemaVersion=RECORD_SCHEMA_V5, state="retired",
+                version=current["version"] + 1, retirement=retirement,
+            )
+            validate_preflight_read_retirement(current)
+            return current
+
+        updated = update_record_with_lock(directory, record["runId"], args.token, retire)
+        print(canonical_json({
+            "runId": updated["runId"], "state": updated["state"], "version": updated["version"],
+            "evidenceDigest": updated["retirement"]["evidenceDigest"],
+        }))
+
+
 @contextlib.contextmanager
 def intent_mutation_guard(directory, key, expected_capture_file, *, require_capture=False):
     original = load_intent(directory, key)
@@ -3469,6 +3820,15 @@ def retired_bound_intent(directory, intent):
     if intent["schemaVersion"] != PREPARED_INTENT_SCHEMA or intent["state"] != "bound":
         return False
     record = bound_intent_record(directory, intent)
+    if record["schemaVersion"] == RECORD_SCHEMA_V5:
+        retirement = record["retirement"]
+        if (
+            retirement["intentDigest"] != evidence_digest(intent)
+            or retirement["captureSha256"] != zero_execution_capture(directory, intent)["sha256"]
+            or intent["preparedSeal"]["policySha256"] != evidence_digest(retirement["policy"])
+        ):
+            fail("preflight-read retirement does not match its preserved generation")
+        return True
     if record["schemaVersion"] == RECORD_SCHEMA_V4:
         retirement = record["retirement"]
         if (
@@ -4548,12 +4908,14 @@ def build_parser():
     for name, function in (
         ("zero-execution-context", command_zero_execution_context),
         ("retire-zero-execution", command_retire_zero_execution),
+        ("preflight-read-context", command_preflight_read_context),
+        ("retire-preflight-read-only-failure", command_retire_preflight_read),
     ):
         special = subparsers.add_parser(name)
         common_authority_arguments(special)
         for argument in ("request", "repository", "workflow-id", "workflow-path", "policy-json"):
             special.add_argument(f"--{argument}", required=True)
-        if name == "retire-zero-execution":
+        if name in {"retire-zero-execution", "retire-preflight-read-only-failure"}:
             for argument in (
                 "current-master", "expected-snapshot", "token",
                 "first-observation", "second-observation",

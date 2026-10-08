@@ -582,17 +582,43 @@ were assigned, and no artifacts or pending approval gates exist. Immediate
 version and control revalidation may then write only the strict v4
 `approved-zero-execution` retirement variant. Existing v1/v2/v3,
 claimed/jobless, and prerequisite-rejection semantics remain unchanged.
+
+A distinct v5 `preflight-read-only-failure` retirement covers only an owned,
+terminal failed first attempt of `oci-live-data-resume-deploy` at the reviewed
+read-only preflight, before any production step executes. It uses the existing
+live-data rollout workflow, not a new workflow or protected operation. Unlike
+v4, an assigned runner and executed preflight steps are expected; v4's empty
+steps and no-assigned-runner requirements remain unchanged. Admission binds
+the complete 39-entry native step sequence and the historical/current workflow
+and executed dependency closure to a frozen reviewed profile. Two independently
+collected, complete authenticated observations must be canonically identical
+and prove the exact attempt and single assigned-runner job, with no later
+attempt, artifacts or pending deployments, and complete native approval history
+matched to preserved same-run receipts.
+Successful upload steps alone do not prove an empty artifact inventory.
+Fresh source, disabled-workflow, exclusivity, native-evidence and generation
+checks precede the existing locked compare-and-swap transition; incomplete
+evidence, ambiguity or drift stays fenced. The original request, capture,
+consumed record and approval receipts remain preserved. This adds no transport
+retry and makes no claim about the original failure's cause.
+
 Retirement changes only local authority state and adds immutable proof,
 preserving the original request, receipt, run identity, first-attempt identity,
 capture, seal, and intent. It performs no cancellation, rerun, approval,
-enablement, dispatch, provider, or data operation. A later explicit normal
-preparation archives the spent generation before replacing the same prepared
-slot and validates current prerequisites; preparation itself creates no run or
-approval. A subsequent normal dispatch receives a distinct run ID at executable
-attempt one, its own authority, and a new approval receipt, with no silent
-cancellation override or inherited approval. New-schema records require
-compatible readers or reviewed forward correction, never downgrade relabeling
-or deletion. Per-request one-use rules and repository-global active, inflight,
+enablement, dispatch, provider, or data operation, creates no run or replacement
+authority, and neither releases production locks nor changes the runtime hold.
+A later explicit normal preparation archives the spent generation before
+replacing the same prepared slot and validates current prerequisites;
+preparation itself creates no run or approval. A subsequent normal dispatch
+receives a distinct run ID at executable attempt one, fresh one-use authority,
+and a new approval receipt under all normal gates, with no silent cancellation
+override or inherited approval. V5-capable readers retain unchanged v1-v4
+support, and new ordinary authority records remain v1; older readers reject v5.
+Promote compatible readers and the writer together before emitting v5. After
+emission, retain compatible readers or use reviewed forward correction, never
+downgrade relabeling or deletion of spent history.
+
+Per-request one-use rules and repository-global active, inflight,
 and exclusivity boundaries remain distinct and unchanged; the spent generation
 stays preserved and cannot be reopened or replayed, and the two target
 workflows can never consume or reuse each other's requests, observations,
