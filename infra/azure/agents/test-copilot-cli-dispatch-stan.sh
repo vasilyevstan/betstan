@@ -3014,7 +3014,7 @@ preflight_diagnostic_blobs = {
 }
 preflight_archive_blobs = {
     **preflight_diagnostic_blobs,
-    "infra/oci/scripts/upstream_run_binding_stan.py": "11aa51ed15c02d234f30868bb6c6da7a6d1afb56",
+    "infra/oci/scripts/upstream_run_binding_stan.py": "59dcc0ae622545e1172e2ae8fd11222cdbf2c8db",
 }
 assert a.PREFLIGHT_READ_BLOBS == preflight_blobs
 assert a.PREFLIGHT_READ_DIAGNOSTIC_BLOBS == preflight_diagnostic_blobs

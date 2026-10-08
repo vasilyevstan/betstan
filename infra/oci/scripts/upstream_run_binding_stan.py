@@ -757,13 +757,17 @@ def artifact_files(
     return zip_files(archive, label, allowed_empty_suffixes=allowed_empty_suffixes)
 
 
-def zip_files(archive, label, *, allowed_empty_suffixes=frozenset()):
+def zip_files(
+    archive, label, *, allowed_empty_suffixes=frozenset(), require_original_names=False,
+):
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             infos = bundle.infolist()
             files = {}
             total_size = 0
             for info in infos:
+                if require_original_names and info.orig_filename != info.filename:
+                    fail(f"{label} native log archive contains a modified entry name")
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == stat.S_IFLNK:
                     fail(f"{label} artifact contains a symlink")
@@ -1832,7 +1836,7 @@ def failed_deploy_native_inputs(repository, run_id, source_sha, label, *, resume
         fail(f"{label} native provenance step chronology is invalid")
     files = zip_files(
         gh_api_bytes(f"repos/{repository}/actions/runs/{run_id}/attempts/1/logs"),
-        label,
+        label, require_original_names=True,
     )
     matches = [
         raw for name, raw in files.items()

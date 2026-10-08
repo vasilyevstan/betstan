@@ -246,6 +246,33 @@ for resume_dispatch in (False, True):
             assert read_native() == direct
         read.assert_called_once_with(archive_endpoint)
         assert not stdout.getvalue() and not stderr.getvalue()
+    original_name = f"0_{job_name}.txt!/other"
+    nul_name = original_name.replace("!", "\0")
+    packed = log_archive(raw, (original_name,))
+    assert packed.count(original_name.encode()) == 2
+    packed = packed.replace(original_name.encode(), nul_name.encode())
+    assert packed.count(nul_name.encode()) == 2
+    with zipfile.ZipFile(io.BytesIO(packed)) as bundle:
+        info, = bundle.infolist()
+        assert info.orig_filename == nul_name
+        assert info.filename == f"0_{job_name}.txt" != info.orig_filename
+    with patch.object(m, "gh_api_bytes", return_value=packed) as read:
+        assert m.artifact_files("example/repo", {"id": 9}, "fixture")[info.filename] == raw
+    read.assert_called_once_with("repos/example/repo/actions/artifacts/9/zip")
+    with patch.object(m, "gh_api_bytes", return_value=packed) as read, \
+            contextlib.redirect_stdout(io.StringIO()) as stdout, \
+            contextlib.redirect_stderr(io.StringIO()) as stderr:
+        try:
+            read_native()
+        except SystemExit as error:
+            assert error.code == 1
+        else:
+            raise AssertionError("NUL-truncated native log identity was accepted")
+    read.assert_called_once_with(archive_endpoint)
+    assert not stdout.getvalue()
+    assert stderr.getvalue() == (
+        "upstream binding rejected: fixture native log archive contains a modified entry name\n"
+    )
     for names in (
         (f"0_{job_name}.txt", f"-1_{job_name}.txt"),
         (f"0_{job_name}.txt", f"2_{job_name}.txt"),

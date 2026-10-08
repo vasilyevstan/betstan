@@ -67,7 +67,7 @@ PREFLIGHT_READ_DIAGNOSTIC_BLOBS = {
 }
 PREFLIGHT_READ_ARCHIVE_BLOBS = {
     **PREFLIGHT_READ_DIAGNOSTIC_BLOBS,
-    "infra/oci/scripts/upstream_run_binding_stan.py": "11aa51ed15c02d234f30868bb6c6da7a6d1afb56",
+    "infra/oci/scripts/upstream_run_binding_stan.py": "59dcc0ae622545e1172e2ae8fd11222cdbf2c8db",
 }
 PREFLIGHT_READ_PROFILES = (
     PREFLIGHT_READ_BLOBS, PREFLIGHT_READ_DIAGNOSTIC_BLOBS, PREFLIGHT_READ_ARCHIVE_BLOBS,
