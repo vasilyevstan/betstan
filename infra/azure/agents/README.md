@@ -369,6 +369,32 @@ one-use restrictions and global unresolved-operation fences remain distinct.
 Once v4 records exist, retain compatible readers or use a reviewed forward
 correction; do not rewrite records or delete history to permit a downgrade.
 
+`"$request" --retire-preflight-read-only-failure` is a separate retirement-only
+exception for `oci-live-data-resume-deploy`, not its released-runtime twin or
+other phases. The original unchanged request and bound prepared intent identify
+the consumed run; no caller-supplied run ID is accepted. From clean exact current
+master with the workflow disabled, it requires the reviewed first-attempt failure:
+one assigned-runner rollout job with exactly 39 native steps, failure only at
+read-only upstream validation, every runtime-access/mutation/recovery step
+skipped, and zero artifacts and pending deployments. Successful upload steps
+alone are not evidence of empty artifacts.
+
+Two independently collected complete native observations must agree, including
+approval count and environment multiplicity against the preserved receipts.
+The fixed nine-path historical/current Git and GitHub blob profile binds the
+read-only dependency closure and pinned checkout/upload actions. The dispatcher
+rechecks native evidence, disabled workflow, actual master, clean checkout and
+production exclusivity before the existing locked generation CAS.
+
+Only the authority becomes v5 `retired` with reason
+`preflight-read-only-failure`; its original payload, approval receipts, seal,
+intent and capture remain preserved. This performs no provider or runtime
+mutation and creates no replacement authority. Later preparation is separate
+and uses normal spent-generation archival. v1–v4 and zero-execution retirement
+remain unchanged; ordinary new records remain v1. Once v5 exists, retain a
+v5-compatible reader or use a reviewed forward correction, never relabel or
+rewrite the record for an older reader.
+
 The request schema is:
 
 ```json
