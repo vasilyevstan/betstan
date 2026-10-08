@@ -238,15 +238,24 @@ Before deployment, the release chain verifies:
 - absence of competing production operations.
 
 **Upstream artifact transport.** The retry contract is limited to the same
-authenticated artifact GET: at most three attempts, each with a 120-second
-subprocess timeout, and 1/2-second backoffs only before eligible retries.
+authenticated artifact or job-log GET: at most three attempts, each with a
+120-second subprocess timeout, and 1/2-second backoffs only before eligible retries.
 The 363-second configured allowance excludes process overhead and is not a
 whole-validator deadline. Only positively identified HTTP 500/502/503/504,
 network timeout/reset, or subprocess timeout is retryable; permanent,
 authentication, not-found, cancellation, unknown/ambiguous, content, and
 provenance failures remain fail-closed. Failed-attempt bytes are discarded,
 successful bytes still undergo existing validation, and diagnostics are fixed
-and sanitized. These are transport retries, not protected-workflow reruns or
+and sanitized. Failure/retry messages retain classification, optional validated
+HTTP status, attempt and disposition, and append fixed `request_kind`
+(`artifact-zip`, `job-log`, or `unrecognized`) and static `diagnostic`
+observation fields. Unrecognized or conflicting signatures yield
+`unclassified`; no raw diagnostic content is emitted. These fields describe
+observations, not proven root causes, and never influence retry decisions.
+Transport, returned bytes, timeouts, backoff, cancellation and binding checks
+are unchanged; successful byte reads remain silent. This diagnostic change
+adds no requests, read replay, fallback or alternate archive transport.
+These are transport retries, not protected-workflow reruns or
 reuse of consumed authority, and do not establish that an unclassified failure
 would recover.
 
@@ -614,9 +623,18 @@ receives a distinct run ID at executable attempt one, fresh one-use authority,
 and a new approval receipt under all normal gates, with no silent cancellation
 override or inherited approval. V5-capable readers retain unchanged v1-v4
 support, and new ordinary authority records remain v1; older readers reject v5.
-Promote compatible readers and the writer together before emitting v5. After
-emission, retain compatible readers or use reviewed forward correction, never
-downgrade relabeling or deletion of spent history.
+
+The original nine-blob closure profile is retained, with one diagnostic-reader
+profile differing only in the reader blob. Historical and current closure
+sides, including local and authenticated remote values, must match the same
+complete profile; mixed, incomplete or unknown profiles are rejected. New
+retirement collection and writing admit only the diagnostic profile. Stored
+v5 loading accepts either complete profile without rewriting records, digests
+or history; schema and evidence shape are unchanged.
+Promote the diagnostic reader and compatible authority reader/writer together.
+After diagnostic-profile emission, rollback must retain both profiles or use a
+reviewed forward correction, never an old-only downgrade, record relabeling or
+deletion of spent history.
 
 Per-request one-use rules and repository-global active, inflight,
 and exclusivity boundaries remain distinct and unchanged; the spent generation
