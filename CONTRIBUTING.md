@@ -200,9 +200,19 @@ Never create, copy, or retrofit a record for a human-created run. An ambiguous
 dispatch with no captured run URL remains blocked for explicit operator
 reconciliation; never infer a run from timing or title. After a dispatcher
 crash, use `--resume-captured` when the durable capture contains the URL, or
-`--resume-run <run-id>` after a bound run has not materialized. A terminal
-first-attempt run may become `retired` only when it has zero jobs and zero
-pending deployments. An ambiguous approval response leaves the record
+`--resume-run <run-id>` after a bound run has not materialized. The default
+terminal first-attempt retirement rule requires zero jobs and zero pending
+deployments. The separate approved-zero-execution proof still requires empty
+step lists and no assigned runner. The distinct v5
+`preflight-read-only-failure` proof admits only the fixed, reviewed
+`oci-live-data-resume-deploy` execution profile: complete authenticated native
+evidence and the pinned executable closure must prove that every
+production-capable step was skipped. It preserves the original consumed
+generation and receipts; it never reruns that attempt, changes the runtime
+hold, or creates execution authority. Replacement requires a separate normal
+preparation and fresh one-use authority with all existing gates.
+
+An ambiguous approval response leaves the record
 `inflight`; use the approver's explicit `--reconcile` path and never replay the
 POST directly. Reconciliation may consume the gate only when GitHub review
 history contains a new exact approved review for the recorded reviewer,
@@ -228,6 +238,12 @@ readers intentionally fail closed. Retain the exact recovery and audit
 evidence, including captures and spent seals. Never delete spent archives or
 manually edit private authority state to make an older reader work; use exact
 recovery or a reviewed forward correction instead.
+
+Promote v5-compatible authority readers and writer together before emitting a
+v5 retirement record. Existing v1-v4 records retain their original meaning;
+older readers must reject v5 rather than reinterpret it. Once v5 exists, retain
+compatible readers or use a reviewed forward correction, never relabel records
+or delete their preserved evidence to permit a rollback.
 
 Any unresolved `dispatching` or `bound` intent, or `claimed` or `inflight`
 record, blocks every protected dispatch for the same repository and control

@@ -1644,6 +1644,11 @@ lock = open(d / "provider.lock", "a")
 fcntl.flock(lock, fcntl.LOCK_EX)
 f = json.loads((d / "fixture.json").read_text())
 args = sys.argv[1:]
+if f.get("preflightRead"):
+    with (d / "preflight-provider-calls").open("a") as calls:
+        calls.write(json.dumps(args) + "\n")
+    assert not set(args).intersection({"--method", "-X", "-f", "-F", "--input"}), \
+        "retirement attempted a provider write"
 mutation = os.environ.get("TRANSITION_DRIFT", "")
 count = int((d / "collections").read_text()) if (d / "collections").exists() else 0
 active = count >= int(os.environ.get("TRANSITION_DRIFT_AT", "1"))
@@ -1689,6 +1694,7 @@ def upstream_run(run_id, workflow_id, path, event, title, conclusion="success"):
 if args[:2] == ["repo", "view"]:
     print(f["repository"]); sys.exit()
 if args[:2] == ["workflow", "run"]:
+    assert not f.get("preflightRead"), "retirement attempted a provider write"
     assert args[2] == "oci-live-data-rollout.yml"
     assert args[args.index("--ref") + 1] == "master"
     assert json.load(sys.stdin) == f["inputs"]
@@ -1724,6 +1730,8 @@ if endpoint.startswith("actions/runs?status=queued"):
 state = os.environ.get("TRANSITION_STATE", "disabled_manually")
 if active and mutation == "state": state = "disabled_manually"
 wf = {"id": f["workflowId"], "path": f["path"], "state": state}
+if f.get("preflightWorkflowState"):
+    wf["state"] = f["preflightWorkflowState"]
 if active and mutation == "workflow-id": wf["id"] += 1
 if active and mutation == "workflow-path": wf["path"] = ".github/workflows/oci-production-deploy.yml"
 if endpoint == "git/ref/heads/master":
@@ -1735,7 +1743,15 @@ elif endpoint.startswith("commits/") and endpoint.endswith("/pulls"):
 elif endpoint in ("actions/workflows/oci-live-data-rollout.yml", f'actions/workflows/{f["workflowId"]}'):
     output(wf)
 elif endpoint.startswith("contents/"):
-    if f.get("zeroExecution"):
+    if f.get("preflightRead"):
+        path = endpoint.removeprefix("contents/").split("?")[0]
+        value = f["historical"] if path == f["path"] else {
+            "type": "file", "path": path, "sha": f["preflightBlobs"][path],
+        }
+        if f.get("preflightNativeBlobDrift") == path:
+            value = {**value, "sha": "e" * 40}
+        output(value)
+    elif f.get("zeroExecution"):
         output(f["historical"])
     elif endpoint.endswith("?ref=" + f["master"]):
         output({"sha": "d" * 40 if active and mutation == "blob" else f["blob"]})
@@ -1863,12 +1879,71 @@ elif endpoint.startswith("compare/"):
     value = f.get("zeroCompare", f["compare"]) if endpoint.startswith(
         "compare/" + f.get("zeroExecution", {}).get("run", {}).get("head_sha", "!") + "..."
     ) else f["compare"]
+    if f.get("preflightRead") and endpoint.startswith(
+        "compare/" + f["preflightRead"]["run"]["head_sha"] + "..."
+    ):
+        value = f["preflightRead"]["compare"]
     if active and mutation == "ancestry": value["status"] = "diverged"
     if active and mutation == "compare-final": value["commits"][-1]["sha"] = "e" * 40
     output(value)
 elif endpoint.startswith("actions/runs/"):
     suffix = endpoint.removeprefix("actions/runs/")
     run_id = int(suffix.split("/")[0])
+    preflight = f.get("preflightRead") if run_id == f["newRun"] else None
+    if preflight:
+        if "/" not in suffix:
+            reads = int((d / "preflight-reads").read_text()) if (d / "preflight-reads").exists() else 0
+            reads += 1; save("preflight-reads", reads)
+            drift = f.get("preflightDrift", "")
+            if reads == f.get("preflightDriftAt", 2):
+                if drift == "attempt": preflight["run"]["run_attempt"] = 2
+                elif drift == "approval": preflight["approvals"][0]["comment"] += " changed"
+                elif drift == "artifact": preflight["artifacts"] = {"total_count": 1, "artifacts": [{"id": 1}]}
+                elif drift == "pending": preflight["pending"] = [{"environment": {"id": 91}}]
+                elif drift == "master": f["master"] = "e" * 40
+                elif drift == "workflow": f["preflightWorkflowState"] = "active"
+                elif drift == "helper": f["preflightNativeBlobDrift"] = "infra/oci/scripts/lib.sh"
+                elif drift == "local-helper": f["preflightLocalBlobDrift"] = "infra/oci/scripts/lib.sh"
+                elif drift == "version":
+                    p = d / "authority" / f'{run_id}.json'
+                    value = json.loads(p.read_text()); value["version"] += 1
+                    p.write_text(json.dumps(value))
+                elif drift in {"capture", "capture-replace", "intent"}:
+                    p = next((d / "authority").glob("request-*.json"))
+                    value = json.loads(p.read_text())
+                    if drift == "intent":
+                        value["version"] += 1; p.write_text(json.dumps(value))
+                    else:
+                        p = d / "authority" / value["captureFile"]
+                        if drift == "capture":
+                            with p.open("a") as stream: stream.write("changed\n")
+                        else:
+                            p.rename(d / "old-capture")
+                            p.write_bytes((d / "old-capture").read_bytes()); p.chmod(0o600)
+                elif drift == "request":
+                    p = d / "request.json"; value = json.loads(p.read_text())
+                    value["inputs"]["build_run_id"] = "99"; p.write_text(json.dumps(value))
+                f["preflightRead"] = preflight; save("fixture.json", json.dumps(f))
+            output(preflight["run"])
+        elif "/attempts/" in suffix:
+            assert "/attempts/1" in suffix, "retirement requested a later attempt"
+            value = preflight["attempts"][0]["jobs" if "/jobs?" in suffix else "run"]
+            if "/jobs?" in suffix:
+                assert "--paginate" in args
+                pages = f.get("preflightJobPages", [value])
+                for page in pages: output(page)
+            else: output(value)
+        elif "/pending_deployments?" in suffix:
+            assert "--paginate" in args
+            for page in f.get("preflightPendingPages", [preflight["pending"]]): output(page)
+        elif "/approvals?" in suffix:
+            assert "--paginate" in args
+            for page in f.get("preflightApprovalPages", [preflight["approvals"]]): output(page)
+        elif "/artifacts?" in suffix:
+            assert "--paginate" in args
+            for page in f.get("preflightArtifactPages", [preflight["artifacts"]]): output(page)
+        else: raise AssertionError(args)
+        sys.exit()
     zero = f.get("zeroExecution") if run_id == f["newRun"] else None
     if zero:
         if "/" not in suffix:
@@ -1960,7 +2035,19 @@ git() {
       fi ;;
     "rev-parse --show-toplevel") printf '%s\n' "$TRANSITION_ROOT" ;;
     "rev-parse HEAD") printf '%s\n' "$TRANSITION_MASTER" ;;
-    "rev-parse "*) printf '%s\n' "$TRANSITION_BLOB" ;;
+    "rev-parse "*)
+      if [[ ! -f "$TRANSITION_CASE/preflight-fixture" ]]; then
+        printf '%s\n' "$TRANSITION_BLOB"
+      else
+      python3 -c '
+import json, os, sys
+from pathlib import Path
+f = json.loads((Path(os.environ["TRANSITION_CASE"]) / "fixture.json").read_text())
+path = sys.argv[1].split(":", 1)[-1]
+print(("e" * 40 if f.get("preflightLocalBlobDrift") == path else
+       f["preflightBlobs"][path]) if f.get("preflightRead") else os.environ["TRANSITION_BLOB"])
+' "$2"
+      fi ;;
     "cat-file -e"|"fetch --quiet"|"merge-base --is-ancestor")
       [[ "${TRANSITION_ZERO_DRIFT:-}" != non-ancestor ]] ;;
     *) return 1 ;;
@@ -2863,6 +2950,442 @@ try: a.validate_zero_execution_observation(before, bad, advanced)
 except SystemExit: pass
 else: raise AssertionError("non-ancestor retirement control was accepted")
 print("approved_zero_execution_retirement_tests=PASS", flush=True)
+
+# Independent native profile: never generate this fixture from the classifier.
+preflight_steps = [
+    (1, "Set up job", "success"),
+    (2, "Initialize isolated OCI data paths", "success"),
+    (3, "Checkout approved current master commit", "success"),
+    (4, "Validate exact SHA phase and trusted upstream runs", "failure"),
+    (5, "Reject competing production activity", "skipped"),
+    (6, "Download exact OCI image provenance", "skipped"),
+    (7, "Download exact OCI infrastructure provenance", "skipped"),
+    (8, "Download exact release disk checkpoint", "skipped"),
+    (9, "Download prerequisite data evidence", "skipped"),
+    (10, "Download failed deploy protected baseline", "skipped"),
+    (11, "Download explicitly selected recovery baseline authority", "skipped"),
+    (12, "Bind historical recovery source through its exact artifact", "skipped"),
+    (13, "Verify immutable release and phase provenance", "skipped"),
+    (14, "Install pinned OCI CLI", "skipped"),
+    (15, "Verify OKE identity", "skipped"),
+    (16, "Verify k3s identity", "skipped"),
+    (17, "Reconcile expired and authorize current runner IPv4", "skipped"),
+    (18, "Configure kubectl from exact cluster OCID", "skipped"),
+    (19, "Open ephemeral OCI Bastion access to k3s", "skipped"),
+    (20, "Verify exact failed-deploy resume state", "skipped"),
+    (21, "Capture and validate pre-mutation rollback baseline", "skipped"),
+    (22, "Revalidate exact release disk checkpoint before lock mutation", "skipped"),
+    (23, "Acquire database operation lock", "skipped"),
+    (24, "Enter or re-establish live data maintenance", "skipped"),
+    (25, "Demote and verify exact retained live-acceptance account", "skipped"),
+    (26, "Delete exact orphaned live-acceptance slips", "skipped"),
+    (27, "Execute exact-digest live data phase", "skipped"),
+    (28, "Restore runtime or verify final deploy handoff", "skipped"),
+    (29, "Capture post-phase runtime baseline", "skipped"),
+    (30, "Require executed data-step evidence", "skipped"),
+    (31, "Upload exact sanitized data evidence", "success"),
+    (32, "Upload protected rollout baselines", "success"),
+    (33, "Restore runtime or retain hold if final handoff packaging failed", "skipped"),
+    (34, "Release database operation lock unless handed to deploy", "skipped"),
+    (35, "Revoke exact runner rule", "skipped"),
+    (36, "Close ephemeral OCI Bastion access", "skipped"),
+    (37, "Remove isolated OCI client state", "success"),
+    (74, "Post Checkout approved current master commit", "success"),
+    (75, "Complete job", "success"),
+]
+preflight_blobs = {
+    ".github/workflows/oci-live-data-rollout.yml": "27a98e345050fefb799c706fde03d8f79e14ed6c",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh": "4681e877c673294e1f70974eaa6d2be7ea526f2a",
+    "infra/oci/scripts/upstream_run_binding_stan.py": "e2c82998ca820abf25f7b5255a30842253adbf55",
+    "infra/oci/scripts/k3s_disk_recovery_stan.py": "6a320e73943b15fec954be2297ea5eaa729c8a11",
+    "infra/oci/scripts/validate-legacy-oci-provenance.py": "240a4bf56cd8e5763f475dc3baa0250a7c1add5f",
+    "infra/oci/scripts/verify-images.sh": "77ff8ecdcf9b8f86ed5be3550a3cd9f91c57a514",
+    "infra/oci/scripts/lib.sh": "caabac06cc16147e12ac536112d3aa5f14d54a34",
+    "infra/oci/scripts/application-registry.sh": "c97bc549688b9d04e727fbad175a6f558832c365",
+    "infra/oci/scripts/validate-partial-recovery-authority-stan.sh": "bf089777892d70d13b4bcf880d7e5311e26c00b9",
+}
+v4_directory, v4_run = case / "authority", before["runId"]
+policy = json.loads(subprocess.check_output([policy_script, "get", "oci-live-data-resume-deploy"]))
+request = {
+    **request, "operation": policy["operation"],
+    "inputs": {**request["inputs"], **policy["fixedInputs"],
+               "prerequisite_run_id": "46", "failed_deploy_run_id": "47"},
+}
+
+
+def issue_preflight_fixture(d, transport, run_id):
+    record = a.load_record(d / "authority", run_id)
+    write(d / "issued-run.json", {
+        "id": run_id, "workflow_id": 313, "path": workflow, "event": "workflow_dispatch",
+        "head_sha": master, "head_branch": "master", "head_repository": {"full_name": repository},
+        "run_attempt": 1, "display_title": record["displayTitle"],
+        "status": "waiting", "conclusion": None,
+    })
+    invoke("issue", {**{k: v for k, v in transport.items() if k != "normalized"},
+                     "run_id": run_id, "run_json": d / "issued-run.json"})
+
+
+def preflight_fixture():
+    d = setup()
+    options = local_prepare(d)
+    snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
+    invoke("dispatch-prepared", {**options, "expected_snapshot": snapshot, "owner_pid": os.getpid()})
+    f = json.loads((d / "fixture.json").read_text())
+    run_id = f["newRun"]
+    capture = intent(d)["captureFile"]
+    (d / "authority" / capture).write_text(f"https://github.com/{repository}/actions/runs/{run_id}\n")
+    transport = {k: v for k, v in options.items() if k not in {"request", "inputs_file", "observation_json"}}
+    invoke("record-dispatch-status", {**transport, "expected_version": 2,
+                                     "expected_capture_file": capture, "dispatch_status": 0})
+    invoke("bind-intent", {**transport, "expected_capture_file": capture})
+    issue_preflight_fixture(d, transport, run_id)
+    record = consume_fixture_approval(d, run_id)
+    native_run = {
+        **f["runs"][0], "id": run_id, "head_sha": master,
+        "display_title": record["displayTitle"], "status": "completed", "conclusion": "failure",
+        "html_url": record["runUrl"],
+        "url": f"https://api.github.com/repos/{repository}/actions/runs/{run_id}",
+        "created_at": "2026-01-01T00:00:00Z", "run_started_at": "2026-01-01T00:00:01Z",
+        "updated_at": "2026-01-01T00:01:00Z",
+    }
+    job = {
+        "id": run_id * 100, "run_id": run_id, "run_attempt": 1, "head_sha": master,
+        "name": "rollout", "status": "completed", "conclusion": "failure",
+        "runner_id": 1001, "runner_name": "native-hosted-runner",
+        "started_at": "2026-01-01T00:00:01Z", "completed_at": "2026-01-01T00:00:50Z",
+        "steps": [
+            {"number": number, "name": name, "status": "completed", "conclusion": conclusion,
+             "started_at": None if conclusion == "skipped" else f"2026-01-01T00:00:{index+2:02d}Z",
+             "completed_at": None if conclusion == "skipped" else f"2026-01-01T00:00:{index+3:02d}Z"}
+            for index, (number, name, conclusion) in enumerate(preflight_steps)
+        ],
+    }
+    files = {path: {"local": sha, "github": sha} for path, sha in preflight_blobs.items()}
+    observation = {
+        "schemaVersion": "betstan.copilot-cli-preflight-read-evidence.v1",
+        "run": native_run, "attempts": [{"run": copy.deepcopy(native_run),
+                                      "jobs": {"total_count": 1, "jobs": [job]}}],
+        "workflow": {"id": 313, "path": workflow, "state": "disabled_manually"},
+        "historicalWorkflow": f["historical"], "compare": None, "pending": [],
+        "approvals": [{"state": "approved", "comment": "fixture canonical approval",
+                       "user": {"id": 5, "login": "fixture", "type": "User"},
+                       "environments": [{"id": 91, "name": "oci-migration"}]}],
+        "artifacts": {"total_count": 0, "artifacts": []},
+        "closure": {"historicalControl": master, "currentControl": master,
+                    "historical": files, "current": copy.deepcopy(files),
+                    "actions": [
+                        "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+                        "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+                    ]},
+    }
+    f.update(preflightRead=observation, preflightBlobs=preflight_blobs)
+    write(d / "fixture.json", f)
+    (d / "preflight-fixture").touch()
+    (d / "dispatches").write_text("1")
+    return d, record, observation
+
+
+def preflight_retire_options(d):
+    context = {**cleanup_options(d), "policy_json": json.dumps(policy)}
+    snapshot = json.loads(invoke("preflight-read-context", context))["snapshot"]
+    common = {"authority_dir": d / "authority", "repo_root": root, "run_id": intent(d)["runId"]}
+    common["token"] = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
+    observation = json.loads((d / "fixture.json").read_text())["preflightRead"]
+    write(d / "first.json", observation); write(d / "second.json", observation)
+    return {
+        **context, "current_master": master, "expected_snapshot": snapshot,
+        "token": common["token"], "first_observation": d / "first.json",
+        "second_observation": d / "second.json",
+    }, common
+
+
+d, original, observation = preflight_fixture()
+intent_file = next((d / "authority").glob("request-*.json"))
+old_intent = intent(d)
+old_intent_bytes = intent_file.read_bytes()
+capture = d / "authority" / old_intent["captureFile"]
+capture_bytes, capture_identity = capture.read_bytes(), a.file_identity(capture)
+run(d, "--retire-preflight-read-only-failure")
+retired = a.load_record(d / "authority", original["runId"])
+assert retired["schemaVersion"] == "betstan.copilot-cli-authority.v5"
+assert retired["retirement"]["reason"] == "preflight-read-only-failure"
+assert retired["version"] == original["version"] + 1 and retired["state"] == "retired"
+assert all(retired[key] == original[key] for key in a.RECORD_V1_KEYS - {"schemaVersion", "state", "version"})
+assert intent_file.read_bytes() == old_intent_bytes
+assert capture.read_bytes() == capture_bytes and a.file_identity(capture) == capture_identity
+assert (d / "dispatches").read_text() == "1"
+assert (d / "preflight-reads").read_text() == "4"
+calls = [json.loads(line) for line in (d / "preflight-provider-calls").read_text().splitlines()]
+assert all(call[0] in {"api", "repo"} for call in calls)
+assert all(not set(call).intersection({"--method", "-X", "-f", "-F", "--input"}) for call in calls)
+assert a.retired_bound_intent(d / "authority", old_intent)
+run(d, "--retire-preflight-read-only-failure", ok=False)
+
+# Execute the byte-identical historical v1-v4 loader, pinned independently of
+# Git history; only this patch's three additive v5 reader edits are removed.
+import inspect
+old_loader = inspect.getsource(a.load_record).replace(
+    '    elif schema_version == RECORD_SCHEMA_V5:\n'
+    '        if set(record) != RECORD_V2_KEYS:\n'
+    '            fail("authority record has an unexpected schema")\n', "",
+).replace(
+    "and schema_version not in {RECORD_SCHEMA_V4, RECORD_SCHEMA_V5}",
+    "and schema_version != RECORD_SCHEMA_V4",
+).replace(
+    "    elif schema_version == RECORD_SCHEMA_V5:\n"
+    "        validate_preflight_read_retirement(record)\n", "",
+)
+assert hashlib.sha256(old_loader.encode()).hexdigest() == \
+    "77e2cfc6467df3bc14a0a3080a80febb12ac74e3cdccaa5cb68f46f13e10df41"
+old_namespace = {name: value for name, value in vars(a).items()
+                 if name != "RECORD_SCHEMA_V5" and not name.startswith("PREFLIGHT_READ_")}
+exec(compile(old_loader, "frozen-v4-authority-reader", "exec"), old_namespace)
+assert old_namespace["load_record"](v4_directory, v4_run)["schemaVersion"] == a.RECORD_SCHEMA_V4
+record_file = d / "authority" / f'{original["runId"]}.json'
+try: old_namespace["load_record"](d / "authority", original["runId"])
+except SystemExit as error: assert str(error) == "authority record schema version is unsupported"
+else: raise AssertionError("actual historical reader accepted v5")
+write(record_file, original)
+assert old_namespace["load_record"](d / "authority", original["runId"]) == original
+write(record_file, retired)
+
+for mutate in (
+    lambda value: value["retirement"].update(evidenceDigest="0" * 64),
+    lambda value: value["retirement"].update(secondObservationDigest="0" * 64),
+    lambda value: value["retirement"].update(captureSha256="0" * 64),
+    lambda value: value["retirement"].update(recordVersion=0),
+    lambda value: value.update(version=value["version"] + 1),
+    lambda value: value["retirement"]["evidence"]["closure"]["current"].pop("infra/oci/scripts/lib.sh"),
+):
+    bad = copy.deepcopy(retired); mutate(bad); write(record_file, bad)
+    try: a.load_record(d / "authority", original["runId"])
+    except SystemExit: pass
+    else: raise AssertionError("corrupted v5 evidence was accepted")
+write(record_file, retired)
+
+# A separate normal preparation archives the spent seal and cannot accept old
+# snapshots, capture identities, late status writes, or late bind writes.
+options = local_prepare(d)
+replacement = intent(d)
+assert replacement["captureFile"] != old_intent["captureFile"]
+assert json.loads(next((d / "authority").glob("spent-*.json")).read_text()) == old_intent
+snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
+invoke("dispatch-prepared", {**options, "expected_snapshot": snapshot, "owner_pid": os.getpid()})
+transport = {k: v for k, v in options.items() if k not in {"request", "inputs_file", "observation_json"}}
+invoke("record-dispatch-status", {**transport, "expected_version": 2,
+                                 "expected_capture_file": old_intent["captureFile"], "dispatch_status": 0}, ok=False)
+invoke("bind-intent", {**transport, "expected_capture_file": old_intent["captureFile"]}, ok=False)
+fresh_run = original["runId"] + 1
+(d / "authority" / replacement["captureFile"]).write_text(f"https://github.com/{repository}/actions/runs/{fresh_run}\n")
+invoke("record-dispatch-status", {**transport, "expected_version": 2,
+                                 "expected_capture_file": replacement["captureFile"], "dispatch_status": 0})
+invoke("bind-intent", {**transport, "expected_capture_file": replacement["captureFile"]})
+issue_preflight_fixture(d, transport, fresh_run)
+fresh = consume_fixture_approval(d, fresh_run)
+assert fresh["schemaVersion"] == a.RECORD_SCHEMA_V1 and fresh["approvals"] != original["approvals"]
+assert a.load_record(d / "authority", original["runId"]) == retired
+assert capture.read_bytes() == capture_bytes and intent_file.read_bytes() != old_intent_bytes
+print("preflight_read_retirement_dispatch_preservation_old_reader_replacement=PASS", flush=True)
+
+d, original, observation = preflight_fixture()
+bad_observations = []
+for field, value in (
+    ("id", 0), ("id", True), ("workflow_id", 1), ("run_attempt", 2),
+    ("run_attempt", True), ("event", "push"), ("head_branch", "dev"), ("head_sha", old),
+    ("head_repository", {"full_name": "foreign/repo"}), ("head_repository", None),
+    ("path", ".github/workflows/oci-live-betting-activate.yml"), ("display_title", "wrong"),
+    ("status", "queued"), ("conclusion", "success"), ("run_started_at", None),
+    ("created_at", "2027-01-01T00:00:00Z"), ("updated_at", "bad"),
+):
+    for which in ("latest", "attempt"):
+        bad = copy.deepcopy(observation)
+        (bad["run"] if which == "latest" else bad["attempts"][0]["run"])[field] = value
+        bad_observations.append(bad)
+for field, value in (
+    ("id", 0), ("run_id", 1), ("run_attempt", 2), ("head_sha", old),
+    ("name", "unknown"), ("status", "waiting"), ("conclusion", "success"),
+    ("runner_id", None), ("runner_id", 0), ("runner_id", True), ("runner_name", ""),
+    ("runner_name", None), ("started_at", None), ("completed_at", "2025-01-01T00:00:00Z"),
+):
+    bad = copy.deepcopy(observation); bad["attempts"][0]["jobs"]["jobs"][0][field] = value
+    bad_observations.append(bad)
+for index in range(39):
+    for field, value in (("number", 0), ("name", "unknown"), ("conclusion", "neutral"),
+                         ("status", "in_progress"), ("started_at", "invalid")):
+        bad = copy.deepcopy(observation)
+        bad["attempts"][0]["jobs"]["jobs"][0]["steps"][index][field] = value
+        bad_observations.append(bad)
+for mutate in (
+    lambda v: v["attempts"].append(copy.deepcopy(v["attempts"][0])),
+    lambda v: v.update(attempts=[]),
+    lambda v: v["attempts"][0]["jobs"].update(total_count=2),
+    lambda v: v["attempts"][0]["jobs"]["jobs"].append(copy.deepcopy(v["attempts"][0]["jobs"]["jobs"][0])),
+    lambda v: v["attempts"][0]["jobs"]["jobs"][0]["steps"].pop(),
+    lambda v: v["attempts"][0]["jobs"]["jobs"][0]["steps"].reverse(),
+    lambda v: v["attempts"][0]["jobs"]["jobs"][0]["steps"].append(v["attempts"][0]["jobs"]["jobs"][0]["steps"][0]),
+    lambda v: v["attempts"][0]["jobs"]["jobs"][0]["steps"][1].update(started_at="2026-01-01T00:00:01Z"),
+    lambda v: v.update(artifacts={"total_count": 1, "artifacts": [{"id": 1}]}),
+    lambda v: v.update(artifacts={"total_count": False, "artifacts": []}),
+    lambda v: v.update(pending=[{}]),
+    lambda v: v.update(approvals=[]),
+    lambda v: v["approvals"].append(copy.deepcopy(v["approvals"][0])),
+    lambda v: v["approvals"][0].update(state="rejected"),
+    lambda v: v["approvals"][0].pop("user"),
+    lambda v: v["approvals"][0].pop("comment"),
+    lambda v: v["approvals"][0]["environments"][0].update(id=92),
+    lambda v: v["approvals"][0]["environments"].append({"id": 91}),
+    lambda v: v["workflow"].update(state="active"),
+    lambda v: v["workflow"].update(id=1),
+    lambda v: v["historicalWorkflow"].update(sha="e" * 40),
+    lambda v: v["closure"]["actions"].pop(),
+    lambda v: v["closure"].update(currentControl=old),
+    lambda v: v["closure"].update(historicalControl=old),
+    lambda v: v.update(unknown=True),
+):
+    bad = copy.deepcopy(observation); mutate(bad); bad_observations.append(bad)
+for side in ("historical", "current"):
+    for path in preflight_blobs:
+        for origin in ("local", "github"):
+            bad = copy.deepcopy(observation); bad["closure"][side][path][origin] = "e" * 40
+            bad_observations.append(bad)
+for bad in bad_observations:
+    try: a.validate_preflight_read_observation(original, bad, master)
+    except SystemExit: pass
+    else: raise AssertionError("unsafe preflight-read evidence was accepted")
+for operation in ("oci-live-data-resume-deploy-released", "oci-live-data-dry-run", "oci-live-data-apply-slip-index"):
+    try: a.validate_preflight_read_observation({**original, "operation": operation}, observation, master)
+    except SystemExit: pass
+    else: raise AssertionError("another operation received preflight-read retirement")
+multiple = copy.deepcopy(original)
+multiple["approvals"].append({**multiple["approvals"][0], "environmentId": 92, "gateKey": "e" * 64})
+proof = copy.deepcopy(observation)
+proof["approvals"].append({**copy.deepcopy(proof["approvals"][0]), "comment": "second",
+                          "environments": [{"id": 92}]})
+a.validate_preflight_read_observation(multiple, proof, master)
+for duplicate in (False, True):
+    bad = copy.deepcopy(proof)
+    bad["approvals"][1] = copy.deepcopy(bad["approvals"][0]) if duplicate else {
+        **bad["approvals"][1], "environments": [{"id": 91}],
+    }
+    try: a.validate_preflight_read_observation(multiple, bad, master)
+    except SystemExit: pass
+    else: raise AssertionError("duplicate or wrong-multiplicity native approvals passed")
+ambiguous = copy.deepcopy(multiple)
+ambiguous["approvals"][1]["environmentId"] = 91
+bad = copy.deepcopy(proof)
+bad["approvals"][1]["environments"] = [{"id": 91}]
+try: a.validate_preflight_read_observation(ambiguous, bad, master)
+except SystemExit: pass
+else: raise AssertionError("ambiguous same-environment reviews were assigned invented join keys")
+print(f"preflight_read_native_profile_negatives=PASS cases={len(bad_observations) + 6}", flush=True)
+
+for field, pages in (
+    ("preflightJobPages", []),
+    ("preflightJobPages", [{"total_count": 1, "jobs": []}]),
+    ("preflightJobPages", [observation["attempts"][0]["jobs"]] * 2),
+    ("preflightApprovalPages", []),
+    ("preflightApprovalPages", [observation["approvals"] * 100]),
+    ("preflightApprovalPages", [observation["approvals"], []]),
+    ("preflightApprovalPages", [{}]),
+    ("preflightPendingPages", [[], []]),
+    ("preflightArtifactPages", [{"total_count": 1, "artifacts": []}]),
+    ("preflightArtifactPages", [{"total_count": 0, "artifacts": []}] * 2),
+):
+    f = json.loads((d / "fixture.json").read_text()); f[field] = pages
+    write(d / "fixture.json", f)
+    run(d, "--retire-preflight-read-only-failure", ok=False)
+    assert a.load_record(d / "authority", original["runId"]) == original
+    del f[field]; write(d / "fixture.json", f)
+for mutation in ("attempt", "approval", "artifact", "pending", "master", "workflow",
+                 "helper", "local-helper", "version", "capture", "capture-replace", "intent", "request"):
+    case, before, _ = preflight_fixture()
+    f = json.loads((case / "fixture.json").read_text()); f["preflightDrift"] = mutation
+    write(case / "fixture.json", f)
+    run(case, "--retire-preflight-read-only-failure", ok=False)
+    assert json.loads((case / "authority" / f'{before["runId"]}.json').read_text())["state"] == "consumed"
+    assert (case / "dispatches").read_text() == "1"
+case, before, _ = preflight_fixture()
+f = json.loads((case / "fixture.json").read_text()); f.update(preflightDrift="attempt", preflightDriftAt=4)
+write(case / "fixture.json", f)
+run(case, "--retire-preflight-read-only-failure", ok=False)
+assert a.load_record(case / "authority", before["runId"]) == before
+run(d, "--retire-preflight-read-only-failure", drift="other", ok=False)
+run(d, "--retire-preflight-read-only-failure", state="active", ok=False)
+print("preflight_read_collector_pagination_drift_write_spy=PASS", flush=True)
+
+case, before, proof = preflight_fixture()
+advanced = "c" * 40
+f = json.loads((case / "fixture.json").read_text())
+f["master"] = advanced
+f["compare"]["commits"] = [{"sha": advanced}]
+f["preflightRead"]["closure"]["currentControl"] = advanced
+f["preflightRead"]["compare"] = {
+    "status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
+    "base_commit": {"sha": master}, "merge_base_commit": {"sha": master},
+    "commits": [{"sha": advanced}],
+}
+write(case / "fixture.json", f)
+run(case, "--retire-preflight-read-only-failure", actual=advanced)
+advanced_record = a.load_record(case / "authority", before["runId"])
+assert advanced_record["controlSha"] == master
+assert advanced_record["retirement"]["masterShaAtRetirement"] == advanced
+run(case, "--dispatch", actual=advanced, ok=False)
+bad = copy.deepcopy(f["preflightRead"]); bad["compare"]["status"] = "diverged"
+try: a.validate_preflight_read_observation(before, bad, advanced)
+except SystemExit: pass
+else: raise AssertionError("non-ancestor preflight control was accepted")
+print("preflight_read_original_control_current_master_binding=PASS", flush=True)
+
+for crash_after_write in (False, True):
+    case, before, _ = preflight_fixture()
+    options, common = preflight_retire_options(case)
+    original_replace = a.atomic_replace
+    def interrupted_replace(path, value):
+        if crash_after_write: original_replace(path, value)
+        raise RuntimeError("fixture crash at atomic persistence boundary")
+    a.atomic_replace = interrupted_replace
+    try:
+        try: invoke("retire-preflight-read-only-failure", options)
+        except RuntimeError: pass
+        else: raise AssertionError("crash injection was not reached")
+    finally:
+        a.atomic_replace = original_replace
+    observed = a.load_record(case / "authority", before["runId"])
+    assert observed["state"] == ("retired" if crash_after_write else "consumed")
+    if not crash_after_write: assert observed == before
+    else: invoke("retire-preflight-read-only-failure", options, ok=False)
+    invoke("release-lock", common)
+
+case, before, _ = preflight_fixture()
+options, common = preflight_retire_options(case)
+invoke("retire-preflight-read-only-failure", {**options, "second_observation": options["first_observation"]}, ok=False)
+invoke("retire-preflight-read-only-failure", {**options, "expected_snapshot": "0" * 64}, ok=False)
+with open(case / "authority/.repository-claim.lock", "r+") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    invoke("retire-preflight-read-only-failure", options, ok=False)
+    fcntl.flock(lock, fcntl.LOCK_UN)
+original_scan = a.find_blocking_authorities
+def late_capture_write(*args):
+    result = original_scan(*args)
+    capture = case / "authority" / intent(case)["captureFile"]
+    with capture.open("a") as stream: stream.write("late local generation write\n")
+    return result
+a.find_blocking_authorities = late_capture_write
+try: invoke("retire-preflight-read-only-failure", options, ok=False)
+finally: a.find_blocking_authorities = original_scan
+assert a.load_record(case / "authority", before["runId"]) == before
+invoke("release-lock", common)
+
+case, before, _ = preflight_fixture()
+options, common = preflight_retire_options(case)
+argv = [str(helper), "retire-preflight-read-only-failure"]
+for key, value in options.items(): argv.extend(["--" + key.replace("_", "-"), str(value)])
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    results = list(pool.map(lambda _: subprocess.run(argv, capture_output=True, text=True, timeout=15), range(2)))
+assert sorted(result.returncode == 0 for result in results) == [False, True]
+assert a.load_record(case / "authority", before["runId"])["version"] == before["version"] + 1
+invoke("release-lock", common)
+print("preflight_read_generation_cas_race_crash_late_write=PASS", flush=True)
 print("prepared_dispatch_integration_tests=PASS")
 PY
 
