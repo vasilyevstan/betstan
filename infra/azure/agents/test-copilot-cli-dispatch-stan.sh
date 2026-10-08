@@ -3092,11 +3092,13 @@ def preflight_retire_options(d):
     common["token"] = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
     observation = json.loads((d / "fixture.json").read_text())["preflightRead"]
     write(d / "first.json", observation); write(d / "second.json", observation)
-    return {
+    options = {
         **context, "current_master": master, "expected_snapshot": snapshot,
-        "token": common["token"], "first_observation": d / "first.json",
+        "first_observation": d / "first.json",
         "second_observation": d / "second.json",
-    }, common
+    }
+    options["token"] = common["token"]
+    return options, common
 
 
 d, original, observation = preflight_fixture()
