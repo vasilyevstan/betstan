@@ -104,8 +104,11 @@ import importlib.util
 import io
 import json
 import re
+import stat
 import subprocess
 import sys
+import warnings
+import zipfile
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
@@ -184,12 +187,20 @@ mapping = {
     "baseline_recovery_source_sha": "BASELINE_RECOVERY_SOURCE_SHA", "confirmation": "CONFIRMATION",
 }
 inputs = dict(zip(mapping, (source, "21", "22", "23", source, "24", "0", "none", "DEPLOY OCI EXACT SHA")))
-def log(values=inputs):
+def log(values=inputs, env_names=mapping):
     lines = ["##[group]Run set -euo pipefail", "env:"]
-    lines += [f"  {env}: {values[key]}" for key, env in mapping.items()]
+    lines += [f"  {env}: {values[key]}" for key, env in env_names.items()]
     lines += ["  DISPATCH_INPUTS: " + json.dumps(values, indent=2), "  PRIVATE_CREDENTIAL: do-not-emit", "##[endgroup]"]
     return ("\n".join("2026-10-07T09:09:16.1234567Z " + line for line in "\n".join(lines).splitlines()) + "\n").encode()
-m.gh_api_bytes = lambda _: log()
+def log_archive(raw, names=("0_deploy.txt",)):
+    output = io.BytesIO()
+    with warnings.catch_warnings(), zipfile.ZipFile(output, "w") as bundle:
+        warnings.simplefilter("ignore", UserWarning)
+        for name in names:
+            bundle.writestr(name, raw)
+    return output.getvalue()
+
+m.gh_api_bytes = lambda _: log_archive(log())
 output = io.StringIO()
 with contextlib.redirect_stdout(output):
     assert m.failed_deploy_native_inputs("example/repo", "77", source, "fixture") == inputs
@@ -197,8 +208,79 @@ assert output.getvalue() == ""
 native_log = re.sub(rb"(?m)^2026-10-07T09:09:16.1234567Z (?=  \"|})", b"", log())
 native_log += b"2026-10-07T09:09:17Z env:\n2026-10-07T09:09:17Z   GH_TOKEN: instructional-placeholder\n"
 native_log += b"2026-10-07T09:09:17Z ##[group]Run actions/upload-artifact\n2026-10-07T09:09:17Z env:\n2026-10-07T09:09:17Z ##[endgroup]\n"
-m.gh_api_bytes = lambda _: native_log
+m.gh_api_bytes = lambda _: log_archive(native_log)
 assert m.failed_deploy_native_inputs("example/repo", "77", source, "fixture") == inputs
+archive_endpoint = "repos/example/repo/actions/runs/77/attempts/1/logs"
+for resume_dispatch in (False, True):
+    job_name = "rollout" if resume_dispatch else "deploy"
+    values, env_names = dict(inputs), dict(mapping)
+    jobs = copy.deepcopy(original)
+    if resume_dispatch:
+        values.pop("data_run_id"); env_names.pop("data_run_id")
+        values.update(
+            resume_source_sha=source, phase="apply-slip-index", prerequisite_run_id="23",
+            failed_deploy_run_id="76", failed_activation_run_id="0", failed_activation_user_id="0",
+            confirmation="RESUME APPLIED LIVE DATA EXACT SHA",
+        )
+        env_names.update({key: key.upper() for key in values if key not in env_names})
+        jobs = [jobs[0]]
+        jobs[0]["name"] = job_name
+        jobs[0]["steps"] = [{
+            "name": "Validate exact SHA phase and trusted upstream runs", "conclusion": "success",
+            "started_at": "2026-10-07T09:09:15Z", "completed_at": "2026-10-07T09:09:17Z",
+        }]
+    raw = log(values, env_names)
+    def read_native():
+        return m.failed_deploy_native_inputs(
+            "example/repo", "77", source, "fixture", resume_dispatch=resume_dispatch)
+    with patch.object(m, "zip_files", return_value={f"0_{job_name}.txt": raw}):
+        direct = read_native()
+    assert direct == values
+    for prefix in ("0", "77", "-1"):
+        name = f"{prefix}_{job_name}.txt"
+        packed = log_archive(raw, (name, f"{job_name}/step.txt"))
+        assert m.zip_files(packed, "fixture")[name] == raw
+        with patch.object(m, "gh_api_bytes", return_value=packed) as read, \
+                contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            assert read_native() == direct
+        read.assert_called_once_with(archive_endpoint)
+        assert not stdout.getvalue() and not stderr.getvalue()
+    for names in (
+        (f"0_{job_name}.txt", f"-1_{job_name}.txt"),
+        (f"0_{job_name}.txt", f"2_{job_name}.txt"),
+        (f"-1_{job_name}.txt", f"-2_{job_name}.txt"),
+        (f"0_{job_name}.txt", f"0_{job_name}.txt"),
+        ("unrelated.txt",), ("0_wrong-job.txt",),
+        (f"nested/0_{job_name}.txt",), (f"١_{job_name}.txt",),
+        (f"../0_{job_name}.txt",), (f"/0_{job_name}.txt",),
+        (f"nested\\0_{job_name}.txt",),
+    ):
+        with patch.object(m, "gh_api_bytes", return_value=log_archive(raw, names)) as read:
+            reject(read_native)
+        read.assert_called_once_with(archive_endpoint)
+    for file_type in (stat.S_IFLNK, stat.S_IFIFO):
+        unsafe = zipfile.ZipInfo("unsafe")
+        unsafe.create_system = 3
+        unsafe.external_attr = (file_type | 0o600) << 16
+        with patch.object(m, "gh_api_bytes", return_value=log_archive(raw, (f"0_{job_name}.txt", unsafe))):
+            reject(read_native)
+    packed = log_archive(raw, (f"0_{job_name}.txt",))
+    encrypted = bytearray(packed)
+    encrypted[6] |= 1
+    encrypted[encrypted.index(b"PK\x01\x02") + 8] |= 1
+    for bad_archive in (b"not a ZIP", bytes(encrypted), log_archive(b"", (f"0_{job_name}.txt",)),
+                        log_archive(b"\xff", (f"0_{job_name}.txt",))):
+        with patch.object(m, "gh_api_bytes", return_value=bad_archive):
+            reject(read_native)
+    with patch.object(m, "gh_api_bytes", return_value=packed), \
+            patch.object(m, "MAX_ARTIFACT_EVIDENCE_BYTES", len(raw) - 1):
+        reject(read_native)
+    with patch.object(m, "gh_api_bytes", return_value=log_archive(raw, (f"0_{job_name}.txt", "other.txt"))), \
+            patch.object(m, "MAX_ARTIFACT_ARCHIVE_BYTES", 2 * len(raw) - 1):
+        reject(read_native)
+jobs = copy.deepcopy(original)
+print("PASS primary attempt-one archive mapping, direct parser equivalence, and bounded ZIP rejection")
 for raw in (
     b"native log unavailable",
     log().replace(b"  DATA_RUN_ID: 23", b"  DATA_RUN_ID: 99"),
@@ -206,7 +288,7 @@ for raw in (
     log().replace(b"  DATA_RUN_ID: 23", b"  DATA_RUN_ID: 23\n2026-10-07T09:09:16Z   DATA_RUN_ID: 23"),
     log().replace(b'"data_run_id": "23",', b'"data_run_id": "23", "data_run_id": "99",'),
 ):
-    m.gh_api_bytes = lambda _, raw=raw: raw
+    m.gh_api_bytes = lambda _, raw=raw: log_archive(raw)
     reject(lambda: m.failed_deploy_native_inputs("example/repo", "77", source, "fixture"))
 before = b"original before"
 after = b"later after"
@@ -259,7 +341,7 @@ m.exact_artifact = lambda repo, run, name, label: (
     {"id": 1} if (run, name) == ("23", "oci-live-data-baselines-23-1")
     else m.fail("invented failed-deployment baseline"))
 m.artifact_files = lambda *_: baseline_files
-m.gh_api_bytes = lambda _: log()
+m.gh_api_bytes = lambda _: log_archive(log())
 dispatch = dict(inputs, prerequisite_run_id="23")
 def validate_artifacts():
     return m.validate_failed_deploy_artifacts(
@@ -273,7 +355,7 @@ assert validate_artifacts()["resume_maintenance_mode"] == "pre-runtime-hold"
 reads_in_order = [
     "repos/example/repo/actions/artifacts/901/zip",
     "repos/example/repo/actions/artifacts/902/zip",
-    "repos/example/repo/actions/jobs/1234/logs",
+    "repos/example/repo/actions/runs/77/attempts/1/logs",
     "repos/example/repo/actions/artifacts/903/zip",
 ]
 def transported(endpoint, reader):
@@ -290,7 +372,7 @@ for failed_index in range(4):
         observed_reads.append(argv[2])
         if argv[2] == reads_in_order[failed_index]:
             return subprocess.CompletedProcess(argv, 1, b"private-body-do-not-emit", b"unproven-private-error")
-        return subprocess.CompletedProcess(argv, 0, log() if argv[2].endswith("/logs") else b"fixture archive", b"")
+        return subprocess.CompletedProcess(argv, 0, log_archive(log()) if argv[2].endswith("/logs") else b"fixture archive", b"")
     stdout, stderr = io.StringIO(), io.StringIO()
     with patch.object(m, "gh_api_bytes", native_byte_reader), \
             patch.object(m, "parse_checkpoint_artifact", transported(reads_in_order[0], m.parse_checkpoint_artifact)), \
@@ -306,7 +388,7 @@ for failed_index in range(4):
             assert error.code == 1
         else:
             raise AssertionError("failed-deploy byte-read fault was accepted")
-    kind = "job-log" if failed_index == 2 else "artifact-zip"
+    kind = "attempt-log-zip" if failed_index == 2 else "artifact-zip"
     assert stderr.getvalue() == (
         "upstream binding rejected: artifact download classification=unknown"
         f" attempt=1/3 disposition=not-retryable request_kind={kind} diagnostic=unclassified\n"
@@ -323,9 +405,9 @@ for key, bad in (
     ("baseline_recovery_run_id", "99"), ("baseline_recovery_source_sha", "9" * 40),
 ):
     changed = dict(inputs, **{key: bad})
-    m.gh_api_bytes = lambda _, changed=changed: log(changed)
+    m.gh_api_bytes = lambda _, changed=changed: log_archive(log(changed))
     reject(validate_artifacts)
-m.gh_api_bytes = lambda _: log()
+m.gh_api_bytes = lambda _: log_archive(log())
 data["baseline_sha256"] = "0" * 64
 reject(validate_artifacts)
 data["baseline_sha256"] = hashlib.sha256(baseline_manifest).hexdigest()
@@ -404,7 +486,7 @@ for run, failed, prerequisite, minute in (("25", "77", "23", "10"), ("26", "78",
 native_reads = []
 def chain_log(endpoint):
     for run, minute in (("25", "10"), ("26", "40")):
-        if f"/{run}00/" in endpoint:
+        if endpoint == f"repos/example/repo/actions/runs/{run}/attempts/1/logs":
             values = resume_requests[run]
             env_names = dict(mapping, resume_source_sha="RESUME_SOURCE_SHA", phase="PHASE",
                 prerequisite_run_id="PREREQUISITE_RUN_ID", failed_deploy_run_id="FAILED_DEPLOY_RUN_ID",
@@ -412,12 +494,14 @@ def chain_log(endpoint):
             lines = ["##[group]Run set -euo pipefail", "env:"]
             lines += [f"  {env_names[k]}: {v}" for k, v in values.items()]
             lines += ["  DISPATCH_INPUTS: " + json.dumps(values), "##[endgroup]"]
-            return "".join(f"2026-10-07T09:{minute}:16Z {line}\n" for line in lines).encode()
-    run = "77" if "/7700/" in endpoint else "78" if "/7800/" in endpoint else None
+            raw = "".join(f"2026-10-07T09:{minute}:16Z {line}\n" for line in lines).encode()
+            return log_archive(raw, ("-1_rollout.txt",))
+    run = next((run for run in ("77", "78")
+                if endpoint == f"repos/example/repo/actions/runs/{run}/attempts/1/logs"), None)
     assert run is not None
     native_reads.append(run)
     raw = log(native_inputs[run])
-    return raw if run == "77" else raw.replace(b"T09:09:", b"T09:39:")
+    return log_archive(raw if run == "77" else raw.replace(b"T09:09:", b"T09:39:"))
 m.gh_api_bytes = chain_log
 def deployment_predecessor():
     m.validate_live_predecessor_profile(
@@ -923,6 +1007,9 @@ with patch.object(module.time, "sleep", side_effect=backoffs.append):
     for endpoint, kind in (
         (original_endpoint, "artifact-zip"),
         ("repos/example/repo/actions/jobs/771/logs", "job-log"),
+        ("repos/example/repo/actions/runs/771/attempts/1/logs", "attempt-log-zip"),
+        ("repos/example/repo/actions/runs/771/attempts/2/logs", "unrecognized"),
+        ("repos/example/repo/actions/runs/771/attempts/1/logs?private=value", "unrecognized"),
         ("repos/example/repo/actions/runs/771/logs", "unrecognized"),
         (original_endpoint + "?signed=private", "unrecognized"),
         (original_endpoint + "/", "unrecognized"),
@@ -3388,7 +3475,7 @@ prepare_pre_runtime_activation_chain() {
   cp -R "$root/baseline" "$root/original-baselines/oci-data-baseline-before"
   artifact_zip_directory_fixture 9820 "$root/original-baselines"
   python3 - "$FIXTURE_DIR" "$REPO" "$WORK/repository" "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA" <<'PY'
-import hashlib, json, pathlib, re, subprocess, sys
+import hashlib, io, json, pathlib, re, subprocess, sys, zipfile
 directory, repo, checkout, root_source, resumed_source = sys.argv[1:]
 def path(endpoint):
     return pathlib.Path(directory) / endpoint.translate(str.maketrans("/?=&", "____"))
@@ -3455,14 +3542,17 @@ resume.update(
     approved_sha=resumed_source, resume_source_sha=root_source, phase="apply-slip-index",
     prerequisite_run_id="42", failed_deploy_run_id="610", failed_activation_run_id="0",
     failed_activation_user_id="0", confirmation="RESUME APPLIED LIVE DATA EXACT SHA")
-for job, values, timestamp in (
-    (61000, failed, "2025-12-31T21:25:30Z"), (4300, resume, "2025-12-31T22:01:30Z"),
+for run, name, values, timestamp in (
+    (610, "deploy", failed, "2025-12-31T21:25:30Z"),
+    (43, "rollout", resume, "2025-12-31T22:01:30Z"),
 ):
     lines = ["##[group]Run set -euo pipefail", "env:"]
     lines += [f"  {'SOURCE_SHA' if key == 'approved_sha' else key.upper()}: {value}" for key, value in values.items()]
     lines += ["  DISPATCH_INPUTS: " + json.dumps(values), "##[endgroup]"]
-    path(f"{prefix}/actions/jobs/{job}/logs").write_text(
-        "".join(f"{timestamp} {line}\n" for line in lines))
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        bundle.writestr(f"-1_{name}.txt", "".join(f"{timestamp} {line}\n" for line in lines))
+    path(f"{prefix}/actions/runs/{run}/attempts/1/logs").write_bytes(output.getvalue())
 PY
 }
 
