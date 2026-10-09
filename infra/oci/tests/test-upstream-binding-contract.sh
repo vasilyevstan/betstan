@@ -852,7 +852,13 @@ def invoke(accepted, calls, sleeps, expected=valid_archive, expected_kind="artif
     return stderr.getvalue()
 
 
-with patch.object(module.time, "sleep", side_effect=backoffs.append):
+with patch.object(module, "time", wraps=module.time) as clock:
+    clock.sleep.side_effect = backoffs.append
+    subprocess.time.sleep(0)
+    assert backoffs == []
+    module.time.sleep(1)
+    assert backoffs == [1]
+    print("artifact_transport_clock_isolation=PASS")
     reset_download()
     assert invoke(True, 1, []) == ""
     for status in (500, 502, 503, 504):
@@ -995,7 +1001,8 @@ def timeout_backoff(seconds):
 
 
 with patch.object(module, "ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS", 0.5), \
-        patch.object(module.time, "sleep", side_effect=timeout_backoff):
+        patch.object(module, "time", wraps=module.time) as clock:
+    clock.sleep.side_effect = timeout_backoff
     for exhausted in (False, True):
         reset_download(b"fresh successful bytes")
         for attempt in range(1, 4 if exhausted else 2):
