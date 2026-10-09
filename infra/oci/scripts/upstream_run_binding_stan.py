@@ -2099,7 +2099,7 @@ def validate_held_handoff_native(
         "Revalidate exact release disk checkpoint before lock mutation",
         "Close ephemeral OCI Bastion access",
     })
-    for number, step in enumerate(job["steps"], 1):
+    for number, step in zip((*range(1, 38), 74, 75), job["steps"]):
         if (
             type(step.get("number")) is not int or step["number"] != number
             or step.get("status") != "completed"

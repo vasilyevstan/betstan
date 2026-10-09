@@ -374,6 +374,9 @@ held_steps = [{
 } for number, name in enumerate([
     "Set up job", *held_names, "Post Checkout approved current master commit", "Complete job",
 ], 1)]
+held_steps[-2]["number"] = 74
+held_steps[-1]["number"] = 75
+assert [step["number"] for step in held_steps] == [*range(1, 38), 74, 75]
 held_original = [{
     "id": 1234, "run_id": 77, "name": "rollout", "status": "completed",
     "conclusion": "success", "steps": held_steps,
@@ -395,14 +398,32 @@ with patch.object(m, "require_fixed_run", return_value=held_metadata), \
         patch.object(m, "gh_api", side_effect=held_blob), \
         patch.object(m, "gh_api_bytes", return_value=log_archive(log(values, env_names), ("0_rollout.txt",))):
     assert held_native() == held_metadata
+    assert held_jobs == held_original
     for index in range(len(held_steps)):
         held_jobs = copy.deepcopy(held_original)
         step = held_jobs[0]["steps"][index]
         step["conclusion"] = "success" if step["conclusion"] == "skipped" else "skipped"
         reject(held_native)
-    for mutation in ("missing", "duplicate", "unknown", "job", "run", "number", "time", "failure"):
+    for index, wrong in (
+        (0, True), (0, "1"), (0, 0), (0, -1), (1, 1), (36, 38),
+        (37, 38), (38, 39), (37, 73), (37, 75), (38, 74), (38, 76),
+        (37, "74"), (37, 0), (37, -74), (37, None), (38, 75.0),
+    ):
+        held_jobs = copy.deepcopy(held_original)
+        held_jobs[0]["steps"][index]["number"] = wrong
+        reject(held_native)
+    for cleanup_numbers in ((38, 39), (75, 74), (74, 74), (75, 75)):
+        held_jobs = copy.deepcopy(held_original)
+        held_jobs[0]["steps"][-2]["number"], held_jobs[0]["steps"][-1]["number"] = cleanup_numbers
+        reject(held_native)
+    for mutation in ("missing", "missing-post", "missing-number", "order",
+                     "duplicate", "unknown", "job", "run", "number", "time", "failure"):
         held_jobs = copy.deepcopy(held_original)
         if mutation == "missing": held_jobs[0]["steps"].pop()
+        elif mutation == "missing-post": held_jobs[0]["steps"].pop(-2)
+        elif mutation == "missing-number": held_jobs[0]["steps"][-2].pop("number")
+        elif mutation == "order":
+            held_jobs[0]["steps"][-2:] = reversed(held_jobs[0]["steps"][-2:])
         elif mutation == "duplicate": held_jobs[0]["steps"].append(copy.deepcopy(held_steps[1]))
         elif mutation == "unknown": held_jobs[0]["steps"][1]["name"] = "Untrusted operation"
         elif mutation == "job": held_jobs.append(copy.deepcopy(held_jobs[0]))
@@ -421,7 +442,7 @@ with patch.object(m, "require_fixed_run", return_value=held_metadata), \
         with patch.object(m, "gh_api", side_effect=lambda endpoint:
                           {"sha": "0" * 40} if changed in endpoint else held_blob(endpoint)):
             reject(held_native)
-print("PASS fixed successful held producer, complete native outcomes, and original root tuple")
+print("PASS fixed successful held producer, exact native slots 1..37/74/75, complete outcomes, and original root tuple")
 history_held = {
     "id": 77, "head_sha": source, "created_at": "2026-10-07T08:00:00Z",
     "updated_at": "2026-10-07T09:00:00Z",
