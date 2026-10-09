@@ -387,19 +387,25 @@ windows. Endpoint update times and URLs may differ, but their raw values remain
 in the proof and digests and must stay unchanged across collection rounds.
 The fixed nine-path Git and GitHub blob profiles bind the read-only dependency
 closure and pinned checkout/upload actions. Stored v5 evidence accepts exactly
-the original profile or its diagnostic-reader successor, differing only in the
-shared-reader blob. New retirement context and writer admission require the
-diagnostic profile. Historical and current closure, including local/GitHub
+the original, diagnostic-reader, or attempt-log-archive profile, differing only in
+the shared-reader blob. New retirement context and writer admission require the
+archive profile. Historical and current closure, including local/GitHub
 values, must match the same complete profile; mixed profiles fail closed.
 The dispatcher rechecks native evidence, disabled workflow, actual master,
 clean checkout and production exclusivity before the existing locked generation CAS.
 
 Byte-read failures retain their classification/status/attempt/disposition fields
-and append `request_kind` (`artifact-zip`, `job-log`, or `unrecognized`) plus a
+and append `request_kind` (`artifact-zip`, `job-log`, `attempt-log-zip`, or `unrecognized`) plus a
 bounded, observation-only `diagnostic`. Only limited existing timeout signatures
 are identified; unknown or conflicting observations remain `unclassified`.
 These fields expose no raw transport output and do not change retries or establish
-the cause of a failure. They authorize no fallback or replay.
+the cause of a failure. They authorize no fallback or replay. Failed-deploy and
+resume native inputs use only the exact attempt-one log archive, with the existing
+bounded in-memory ZIP checks. Exactly one original root filename must match
+`-?[0-9]+_<native-job-name>.txt` for the validated `deploy` or `rollout` job.
+Normal and legacy negative prefixes form one uniqueness set, not job-ID authority;
+nested basenames and per-step fragments are not substitutes. Selected bytes feed
+the unchanged native-input parser; no direct-job-log fallback is attempted.
 
 Only the authority becomes v5 `retired` with reason
 `preflight-read-only-failure`; its original payload, approval receipts, seal,
@@ -407,11 +413,15 @@ intent and capture remain preserved. This performs no provider or runtime
 mutation and creates no replacement authority. Later preparation is separate
 and uses normal spent-generation archival. v1–v4 and zero-execution retirement
 remain unchanged; ordinary new records remain v1. Once v5 exists, retain a
-reader compatible with both complete profiles or use a reviewed forward
-correction. An old-only parser is not a rollback after diagnostic-profile records
+reader compatible with the original and diagnostic profiles, plus the archive
+profile once emitted, or use a reviewed forward correction. An old-only parser
+is not a rollback after diagnostic-profile records
 exist. After unequal-endpoint-timestamp proofs are emitted, rollback also requires
-the endpoint-local chronology and both-window checks above, together with both
-complete profiles; never relabel, migrate, or rewrite the original proof.
+the endpoint-local chronology and both-window checks above, together with the
+original and diagnostic profiles and any emitted archive profile; never relabel,
+migrate, or rewrite the original proof. The archive-reader promotion must follow
+the timestamp correction's protected promotion and actual canonical retirement
+of its consumed predecessor; source implementation alone is not that retirement.
 
 The request schema is:
 

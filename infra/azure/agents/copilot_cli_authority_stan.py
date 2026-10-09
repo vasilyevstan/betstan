@@ -65,7 +65,13 @@ PREFLIGHT_READ_DIAGNOSTIC_BLOBS = {
     **PREFLIGHT_READ_BLOBS,
     "infra/oci/scripts/upstream_run_binding_stan.py": "972562e235c3f3c7a6c08c88ecd97ec7bb582923",
 }
-PREFLIGHT_READ_PROFILES = (PREFLIGHT_READ_BLOBS, PREFLIGHT_READ_DIAGNOSTIC_BLOBS)
+PREFLIGHT_READ_ARCHIVE_BLOBS = {
+    **PREFLIGHT_READ_DIAGNOSTIC_BLOBS,
+    "infra/oci/scripts/upstream_run_binding_stan.py": "59dcc0ae622545e1172e2ae8fd11222cdbf2c8db",
+}
+PREFLIGHT_READ_PROFILES = (
+    PREFLIGHT_READ_BLOBS, PREFLIGHT_READ_DIAGNOSTIC_BLOBS, PREFLIGHT_READ_ARCHIVE_BLOBS,
+)
 PREFLIGHT_READ_ACTIONS = (
     "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
     "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
@@ -3247,7 +3253,7 @@ def command_preflight_read_context(args):
         print(canonical_json({
             "runId": record["runId"], "version": record["version"],
             "controlSha": record["controlSha"], "workflowBlobSha": record["workflowBlobSha"],
-            "snapshot": snapshot, "closureProfile": PREFLIGHT_READ_DIAGNOSTIC_BLOBS,
+            "snapshot": snapshot, "closureProfile": PREFLIGHT_READ_ARCHIVE_BLOBS,
             "actionPins": PREFLIGHT_READ_ACTIONS,
         }))
 
@@ -3267,7 +3273,7 @@ def validate_preflight_read_receipts(record):
 
 def validate_preflight_read_observation(
     record, observation, current_master, *,
-    admitted_profiles=(PREFLIGHT_READ_DIAGNOSTIC_BLOBS,),
+    admitted_profiles=(PREFLIGHT_READ_ARCHIVE_BLOBS,),
 ):
     path = ".github/workflows/oci-live-data-rollout.yml"
     if (

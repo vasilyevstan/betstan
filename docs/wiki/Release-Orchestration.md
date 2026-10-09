@@ -238,7 +238,7 @@ Before deployment, the release chain verifies:
 - absence of competing production operations.
 
 **Upstream artifact transport.** The retry contract is limited to the same
-authenticated artifact or job-log GET: at most three attempts, each with a
+authenticated byte-read GET: at most three attempts, each with a
 120-second subprocess timeout, and 1/2-second backoffs only before eligible retries.
 The 363-second configured allowance excludes process overhead and is not a
 whole-validator deadline. Only positively identified HTTP 500/502/503/504,
@@ -248,16 +248,30 @@ provenance failures remain fail-closed. Failed-attempt bytes are discarded,
 successful bytes still undergo existing validation, and diagnostics are fixed
 and sanitized. Failure/retry messages retain classification, optional validated
 HTTP status, attempt and disposition, and append fixed `request_kind`
-(`artifact-zip`, `job-log`, or `unrecognized`) and static `diagnostic`
-observation fields. Unrecognized or conflicting signatures yield
+(`artifact-zip`, `job-log`, `attempt-log-zip`, or `unrecognized`) and static
+`diagnostic` observation fields. Unrecognized or conflicting signatures yield
 `unclassified`; no raw diagnostic content is emitted. These fields describe
 observations, not proven root causes, and never influence retry decisions.
-Transport, returned bytes, timeouts, backoff, cancellation and binding checks
-are unchanged; successful byte reads remain silent. This diagnostic change
-adds no requests, read replay, fallback or alternate archive transport.
+Classification, permissions, retry eligibility, timeouts, backoff, cancellation
+and binding checks are unchanged; successful byte reads remain silent.
 These are transport retries, not protected-workflow reruns or
 reuse of consumed authority, and do not establish that an unclassified failure
 would recover.
+
+Failed-deploy native-input validation uses the exact attempt-one run-log archive
+as its single primary byte source instead of a direct job-log request. Native
+latest/attempt-one metadata, the complete paginated attempt-one job inventory,
+and the exact unique `deploy` or `rollout` job remain authoritative. Archive and
+artifact reads share bounded in-memory ZIP validation, retaining path, duplicate,
+file-type, symlink, encryption, member-size and expansion checks; no filesystem
+extraction or raw-log persistence/output is added. Selection requires exactly one
+original root filename formed from an optional minus sign, ASCII digits, `_`,
+the validated job name and `.txt`, across normal and legacy forms. There is no
+preference, job-ID inference, nested-basename matching or fragment concatenation;
+ambiguity fails closed. The selected whole-job bytes feed the unchanged parser.
+There is no preliminary job-log request, fallback or extra read; eligible retries
+use the same attempt-one archive endpoint. This substitution neither establishes
+the original failure's cause nor guarantees future runner success.
 
 **Release disk checkpoint authority.** Registry verification of all ten
 immutable candidates is required, but does not establish k3s node CRI
@@ -630,18 +644,23 @@ and a new approval receipt under all normal gates, with no silent cancellation
 override or inherited approval. V5-capable readers retain unchanged v1-v4
 support, and new ordinary authority records remain v1; older readers reject v5.
 
-The original nine-blob closure profile is retained, with one diagnostic-reader
-profile differing only in the reader blob. Historical and current closure
+The original nine-blob closure profile and its diagnostic-reader variant are
+retained, with one exact archive-reader profile differing only in the reader
+blob. Historical and current closure
 sides, including local and authenticated remote values, must match the same
 complete profile; mixed, incomplete or unknown profiles are rejected. New
-retirement collection and writing admit only the diagnostic profile. Stored
-v5 loading accepts either complete profile without rewriting records, digests
-or history; schema and evidence shape are unchanged.
-Promote the diagnostic reader and compatible authority reader/writer together.
-After diagnostic-profile emission, rollback must retain both profiles. Once a
-retirement stores unequal endpoint update times, the rollback reader must also
-support endpoint-local chronology; v5 schema support alone is insufficient.
-Use a reviewed forward correction if either capability cannot be retained,
+retirement context, collection and writing admit only the archive profile.
+Stored v5 loading accepts all three complete profiles and retains endpoint-local
+chronology without rewriting records, digests or history; schema and evidence
+shape are unchanged. Promote the archive reader and compatible authority
+reader/writer together, only after protected promotion of endpoint-local
+chronology support and completed, persisted canonical retirement of the bound
+predecessor generation under its matching profile. No mixed-profile exception
+can replace this ordering.
+Rollback must retain endpoint-local chronology and every actually emitted
+profile, including the archive profile after its first emission; v5 schema
+support alone is insufficient. Use a reviewed forward correction if these
+capabilities cannot be retained,
 never an old-only downgrade, timestamp rewriting, record relabeling or deletion
 of spent history.
 
