@@ -236,6 +236,49 @@ for resume_dispatch in (False, True):
     with patch.object(m, "zip_files", return_value={f"0_{job_name}.txt": raw}):
         direct = read_native()
     assert direct == values
+    if resume_dispatch:
+        defaults = {"held_handoff_run_id": "0", "held_handoff_source_sha": "none"}
+        native_values = {**values, **defaults}
+        native_names = {**env_names, **{key: key.upper() for key in defaults}}
+        with patch.object(m, "gh_api_bytes", return_value=log_archive(
+            log(native_values, native_names), ("0_rollout.txt",),
+        )):
+            assert read_native() == values
+        assert native_values == {**values, **defaults}
+        for key, value in (
+            ("held_handoff_run_id", 0), ("held_handoff_run_id", "0 "),
+            ("held_handoff_run_id", "77"), ("held_handoff_source_sha", None),
+            ("held_handoff_source_sha", source), ("unknown", "0"),
+        ):
+            bad = {**native_values, key: value}
+            names = {**native_names, key: key.upper()}
+            with patch.object(m, "gh_api_bytes", return_value=log_archive(
+                log(bad, names), ("0_rollout.txt",),
+            )):
+                reject(read_native)
+        for absent in defaults:
+            bad = dict(native_values); del bad[absent]
+            names = dict(native_names); del names[absent]
+            with patch.object(m, "gh_api_bytes", return_value=log_archive(
+                log(bad, names), ("0_rollout.txt",),
+            )):
+                reject(read_native)
+        continuation = {
+            **values, "held_handoff_run_id": "76", "held_handoff_source_sha": source,
+            "confirmation": "CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA",
+        }
+        with patch.object(m, "gh_api_bytes", return_value=log_archive(
+            log(continuation, native_names), ("0_rollout.txt",),
+        )):
+            assert read_native() == continuation
+        for key, value in (
+            ("held_handoff_run_id", "0"), ("held_handoff_run_id", 76),
+            ("held_handoff_source_sha", "none"), ("held_handoff_source_sha", True),
+        ):
+            with patch.object(m, "gh_api_bytes", return_value=log_archive(
+                log({**continuation, key: value}, native_names), ("0_rollout.txt",),
+            )):
+                reject(read_native)
     for prefix in ("0", "77", "-1"):
         name = f"{prefix}_{job_name}.txt"
         packed = log_archive(raw, (name, f"{job_name}/step.txt"))
@@ -308,6 +351,182 @@ for resume_dispatch in (False, True):
         reject(read_native)
 jobs = copy.deepcopy(original)
 print("PASS primary attempt-one archive mapping, direct parser equivalence, and bounded ZIP rejection")
+with open(sys.argv[2] + "/.github/workflows/oci-live-data-rollout.yml", encoding="utf-8") as handle:
+    held_names = re.findall(r"(?m)^      - name: (.+)$", handle.read())
+held_skipped = {
+    "Download failed deploy protected baseline",
+    "Download explicitly selected recovery baseline authority",
+    "Bind historical recovery source through its exact artifact",
+    "Verify OKE identity",
+    "Reconcile expired and authorize current runner IPv4",
+    "Configure kubectl from exact cluster OCID",
+    "Demote and verify exact retained live-acceptance account",
+    "Delete exact orphaned live-acceptance slips",
+    "Capture post-phase runtime baseline",
+    "Restore runtime or retain hold if final handoff packaging failed",
+    "Release database operation lock unless handed to deploy",
+    "Revoke exact runner rule",
+}
+held_steps = [{
+    "name": name, "number": number, "status": "completed",
+    "conclusion": "skipped" if name in held_skipped else "success",
+    "started_at": "2026-10-07T09:09:15Z", "completed_at": "2026-10-07T09:09:17Z",
+} for number, name in enumerate([
+    "Set up job", *held_names, "Post Checkout approved current master commit", "Complete job",
+], 1)]
+held_original = [{
+    "id": 1234, "run_id": 77, "name": "rollout", "status": "completed",
+    "conclusion": "success", "steps": held_steps,
+    "started_at": "2026-10-07T09:09:14Z", "completed_at": "2026-10-07T09:09:20Z",
+}]
+held_jobs = copy.deepcopy(held_original)
+held_metadata = {
+    "head_sha": source, "created_at": "2026-10-07T09:00:00Z",
+    "updated_at": "2026-10-07T09:09:21Z",
+}
+def held_blob(endpoint):
+    return {"sha": "27a98e345050fefb799c706fde03d8f79e14ed6c" if ".yml?" in endpoint
+            else "1752489383424fa4bd55bbc7d36e4cac95e14d31"}
+def held_native(request=None):
+    return m.validate_held_handoff_native(
+        "example/repo", "77", source, values if request is None else request, "k3s", "fixture")
+with patch.object(m, "require_fixed_run", return_value=held_metadata), \
+        patch.object(m, "jobs_for_run", side_effect=lambda *_: held_jobs), \
+        patch.object(m, "gh_api", side_effect=held_blob), \
+        patch.object(m, "gh_api_bytes", return_value=log_archive(log(values, env_names), ("0_rollout.txt",))):
+    assert held_native() == held_metadata
+    for index in range(len(held_steps)):
+        held_jobs = copy.deepcopy(held_original)
+        step = held_jobs[0]["steps"][index]
+        step["conclusion"] = "success" if step["conclusion"] == "skipped" else "skipped"
+        reject(held_native)
+    for mutation in ("missing", "duplicate", "unknown", "job", "run", "number", "time", "failure"):
+        held_jobs = copy.deepcopy(held_original)
+        if mutation == "missing": held_jobs[0]["steps"].pop()
+        elif mutation == "duplicate": held_jobs[0]["steps"].append(copy.deepcopy(held_steps[1]))
+        elif mutation == "unknown": held_jobs[0]["steps"][1]["name"] = "Untrusted operation"
+        elif mutation == "job": held_jobs.append(copy.deepcopy(held_jobs[0]))
+        elif mutation == "run": held_jobs[0]["run_id"] = 78
+        elif mutation == "number": held_jobs[0]["steps"][1]["number"] = True
+        elif mutation == "time": held_jobs[0]["completed_at"] = "2026-10-07T09:09:13Z"
+        else: held_jobs[0]["conclusion"] = "failure"
+        reject(held_native)
+    held_jobs = copy.deepcopy(held_original)
+    for key in (
+        "resume_source_sha", "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+        "disk_checkpoint_run_id", "prerequisite_run_id", "failed_deploy_run_id",
+    ):
+        reject(lambda key=key: held_native({**values, key: "substituted"}))
+    for changed in (".yml?", ".sh?"):
+        with patch.object(m, "gh_api", side_effect=lambda endpoint:
+                          {"sha": "0" * 40} if changed in endpoint else held_blob(endpoint)):
+            reject(held_native)
+print("PASS fixed successful held producer, complete native outcomes, and original root tuple")
+history_held = {
+    "id": 77, "head_sha": source, "created_at": "2026-10-07T08:00:00Z",
+    "updated_at": "2026-10-07T09:00:00Z",
+}
+successor = {
+    "id": 78, "run_attempt": 1, "head_sha": source, "workflow_id": 4,
+    "path": ".github/workflows/oci-live-data-rollout.yml", "event": "workflow_dispatch",
+    "head_branch": "master", "head_repository": {"full_name": "example/repo"},
+    "display_title": f"oci-live-data apply-slip-index {source}",
+    "status": "completed", "conclusion": "success",
+    "created_at": "2026-10-07T09:30:00Z", "updated_at": "2026-10-07T10:30:00Z",
+}
+cutoff_job = {
+    "id": 1236, "run_id": 78, "name": "rollout", "status": "completed",
+    "started_at": "2026-10-07T09:59:00Z",
+    "steps": [{"name": "Validate exact SHA phase and trusted upstream runs",
+               "started_at": "2026-10-07T10:00:00Z"}],
+}
+history_mutation = ""
+history_reads = []
+correction_builds = {
+    name: {
+        "id": run_id, "path": ".github/workflows/" + name,
+        "head_repository": {"full_name": "example/repo"}, "head_branch": "master",
+        "created_at": "2026-10-07T09:05:00Z", "updated_at": "2026-10-07T09:20:00Z",
+        "status": "completed",
+    }
+    for name, run_id in (("production-build.yml", 80), ("oci-production-build.yml", 81))
+}
+def history_api(endpoint):
+    if "/actions/workflows/" in endpoint:
+        return {"id": 4}
+    return copy.deepcopy(successor)
+def history_pages(endpoint):
+    history_reads.append(endpoint)
+    name = endpoint.split("/workflows/", 1)[1].split("/", 1)[0]
+    rows = [copy.deepcopy(correction_builds[name])] if name in correction_builds else []
+    if name == "oci-live-data-rollout.yml":
+        rows = [
+            {**history_held, "path": ".github/workflows/" + name,
+             "head_repository": {"full_name": "example/repo"}, "head_branch": "master", "status": "completed"},
+            copy.deepcopy(successor),
+        ]
+        if history_mutation == "omitted-authenticated":
+            rows = []
+    if name == "oci-production-deploy.yml":
+        rows = [{
+            "id": 76, "path": ".github/workflows/" + name,
+            "head_repository": {"full_name": "example/repo"}, "head_branch": "master",
+            "created_at": "2026-10-07T07:00:00Z", "updated_at": "2026-10-07T07:30:00Z",
+            "status": "completed",
+        }]
+        if history_mutation in {"intervening", "older-intervening"}:
+            rows[0]["updated_at"] = "2026-10-07T09:45:00Z"
+            if history_mutation == "intervening":
+                rows[0]["created_at"] = "2026-10-07T09:40:00Z"
+        if history_mutation == "duplicate": rows.append(copy.deepcopy(rows[0]))
+        if history_mutation == "foreign": rows[0]["head_repository"]["full_name"] = "other/repo"
+        if history_mutation == "foreign-workflow-owner": rows[0]["id"] = 78
+        if history_mutation == "missing-branch": rows[0].pop("head_branch")
+        if history_mutation == "unresolved": rows[0]["status"] = "waiting"
+        if history_mutation == "later" and "&created=" not in endpoint:
+            rows.append({**rows[0], "id": 79, "created_at": "2026-10-07T11:00:00Z",
+                         "updated_at": "2026-10-07T11:30:00Z"})
+    total = len(rows)
+    if history_mutation == "incomplete": total += 1
+    if history_mutation == "bound": total = 1000
+    if history_mutation in {"paginated", "incoherent-pages"}:
+        return [{"total_count": total, "workflow_runs": rows[:1]},
+                {"total_count": total + (history_mutation == "incoherent-pages"), "workflow_runs": rows[1:]}]
+    return [{"total_count": total, "workflow_runs": rows}]
+with patch.object(m, "gh_api", side_effect=history_api), \
+        patch.object(m, "gh_api_pages", side_effect=history_pages), \
+        patch.object(m, "jobs_for_run", return_value=[cutoff_job]):
+    proof = m.held_handoff_history("example/repo", history_held, source, "78")
+    assert proof["cutoff_at"] == "2026-10-07T10:00:00Z"
+    assert history_reads and all("&created=%3C%3D2026-10-07T10:00:00Z" in p for p in history_reads)
+    assert all(not any("/workflows/" + name + "/" in p for p in history_reads) for name in correction_builds)
+    history_mutation = "paginated"
+    assert m.held_handoff_history("example/repo", history_held, source, "78") == proof
+    history_mutation = ""
+    successor.update(status="waiting", conclusion=None)
+    waiting = m.held_handoff_history("example/repo", history_held, source, "78")
+    assert waiting["cutoff_at"] is None
+    successor.update(status="completed", conclusion="success")
+    history_mutation = "later"
+    assert m.held_handoff_history("example/repo", history_held, source, "78") == proof
+    reject(lambda: m.held_handoff_history("example/repo", history_held, source))
+    for history_mutation in ("intervening", "older-intervening", "duplicate", "foreign", "unresolved",
+                             "incomplete", "bound", "omitted-authenticated", "incoherent-pages",
+                             "foreign-workflow-owner", "missing-branch"):
+        reject(lambda: m.held_handoff_history("example/repo", history_held, source, "78"))
+    history_mutation = ""
+    reject(lambda: m.held_handoff_history("example/repo", history_held, source, "99"))
+    for key, wrong in (
+        ("head_sha", "f" * 40), ("run_attempt", 2), ("path", ".github/workflows/other.yml"),
+        ("display_title", "another operation"), ("conclusion", "failure"),
+    ):
+        saved = successor[key]; successor[key] = wrong
+        reject(lambda: m.held_handoff_history("example/repo", history_held, source, "78"))
+        successor[key] = saved
+    cutoff_job["run_id"] = 99
+    reject(lambda: m.held_handoff_history("example/repo", history_held, source, "78"))
+    cutoff_job["run_id"] = 78
+print("PASS complete bounded held history, immutable cutoff, later deployment and unrelated exclusions")
 for raw in (
     b"native log unavailable",
     log().replace(b"  DATA_RUN_ID: 23", b"  DATA_RUN_ID: 99"),
@@ -559,6 +778,130 @@ reject(deployment_predecessor)
 native_inputs["78"] = dict(inputs, data_run_id="25")
 deployment_predecessor()
 print("PASS root -> resume -> failed deployment -> successor -> deployment recursive native lineage")
+
+held_images = "".join(
+    f"{name}\t{m.APPLICATION_REPOSITORY}\t{m.APPLICATION_REPOSITORY}@sha256:{index:064x}"
+    f"\tsha256:{index:064x}\tsha256:{index:064x}\n"
+    for index, name in enumerate(sorted(m.CURRENT_SERVICES), 1)
+).encode()
+held_evidence, held_files = resumed("39", "77")
+held_authority = m.parse_env(held_files["resume-authority.env"], "fixture")
+held_authority["runtime_images_sha256"] = hashlib.sha256(held_images).hexdigest()
+held_files = {
+    "resume-authority.env": "".join(f"{k}={v}\n" for k, v in held_authority.items()).encode(),
+    "provenance.env": "".join(f"{k}={v}\n" for k, v in held_evidence.items()).encode(),
+    "schema.env": b"fixture reports are exercised by the real producer suite\n",
+    "journal.json": b"{}",
+}
+for stage in ("preflight", "apply", "verify"):
+    for service in ("event", "gamemaster", "moderation", "resulting", "bet", "slip"):
+        held_files[f"reports/{stage}-{service}.json"] = b"{}"
+    held_files[f"reports/{stage}-backoffice-pre-september-cleanup.json"] = b"{}"
+for stage in ("preflight", "apply", "verify", "final"):
+    held_files[f"reports/{stage}-slip-index.json"] = b"{}"
+held_files["reports/preflight-event-reschedule.json"] = b"{}"
+held_files["SHA256SUMS"] = "".join(
+    f"{hashlib.sha256(raw).hexdigest()}  {name}\n" for name, raw in sorted(held_files.items())
+).encode()
+held_manifest_sha = m.validate_checksum_manifest(held_files, "known omission fixture")
+assert len(held_files) == 31
+reject(lambda: m.parse_resume_authority(held_files, held_evidence, "ordinary consumer"))
+held_request = dict(
+    resume_requests["25"], held_handoff_run_id="39", held_handoff_source_sha=source,
+    confirmation=m.HELD_HANDOFF_CONFIRMATION)
+held_history = dict(proof, held_handoff_run_id="39", successor_run_id="40")
+held_metadata = dict(history_held, id=39, head_sha=source)
+saved_artifact_reader = m.exact_artifact
+saved_native_parser = m.failed_deploy_native_inputs
+successor_files = {}
+successor_evidence = dict(held_evidence, workflow_run_id="40")
+def continuation_data(repo, run, label, *, include_files=False):
+    if run not in {"39", "40"}:
+        return parse_data(repo, run, label, include_files=include_files)
+    evidence, members = (held_evidence, held_files) if run == "39" else (successor_evidence, successor_files)
+    digest = m.validate_checksum_manifest(members, label)
+    return (evidence, digest, members) if include_files else (evidence, digest)
+def held_admission():
+    return m.validate_held_handoff_artifact(
+        "example/repo", "39", source, source, held_request, "oke", "held fixture", successor_run_id="40")
+with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
+        patch.object(m, "validate_held_handoff_native", return_value=held_metadata), \
+        patch.object(m, "held_handoff_history", side_effect=lambda *_: copy.deepcopy(held_history)), \
+        patch.object(m, "validate_held_handoff_reports") as report_check, \
+        patch.object(m, "exact_artifact", side_effect=lambda repo, run, name, label: (
+            {"id": 2100} if (run, name) == ("21", f"oci-image-provenance-{source}-21-1")
+            else saved_artifact_reader(repo, run, name, label))), \
+        patch.object(m, "artifact_member", return_value=held_images):
+    admitted = held_admission()
+    assert admitted["resume"]["applied_data_run_id"] == "23"
+    assert admitted["resume"]["held_handoff_run_id"] == "39"
+    assert admitted["resume"]["held_handoff_evidence_sha256"] == held_manifest_sha
+    report_check.assert_called_once_with(held_files, held_evidence)
+    for key, wrong in (
+        ("confirmation", "RESUME APPLIED LIVE DATA EXACT SHA"),
+        ("prerequisite_run_id", "39"), ("failed_deploy_run_id", "39"),
+        ("resume_source_sha", "9" * 40), ("build_run_id", "99"),
+        ("disk_checkpoint_run_id", "99"),
+    ):
+        old = held_request[key]; held_request[key] = wrong
+        reject(held_admission); held_request[key] = old
+    original_members = copy.deepcopy(held_files)
+    for mutation in ("missing-report", "unexpected-images", "bad-checksum", "root-authority"):
+        held_files = copy.deepcopy(original_members)
+        if mutation == "missing-report": held_files.pop("reports/final-slip-index.json")
+        elif mutation == "unexpected-images": held_files["resume-images.tsv"] = held_images
+        elif mutation == "bad-checksum": held_files["journal.json"] += b"\n"
+        else:
+            held_files["resume-authority.env"] = held_files["resume-authority.env"].replace(
+                b"applied_data_run_id=23\n", b"applied_data_run_id=25\n")
+        if mutation != "bad-checksum":
+            held_files["SHA256SUMS"] = "".join(
+                f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
+                for name, raw in sorted(held_files.items()) if name != "SHA256SUMS").encode()
+        reject(held_admission)
+    held_files = original_members
+    successor_authority = dict(
+        held_authority, schema_version="live-betting-data-resume-v3",
+        held_handoff_run_id="39", held_handoff_source_sha=source,
+        held_handoff_evidence_sha256=held_manifest_sha,
+    )
+    transfer = {
+        "schema_version": "live-betting-held-handoff-transfer-v1",
+        "held_handoff_run_id": "39", "held_handoff_source_sha": source,
+        "successor_run_id": "40", "successor_source_sha": source,
+        "snapshot_sha256": "d" * 64, "lock_uid": "fixture-uid",
+        "observed_resource_version": "42", "observed_fencing_generation": "11",
+        "observed_lease_until_epoch": "2900",
+        "release_result": "confirmed", "acquire_result": "confirmed", "verify_result": "confirmed",
+    }
+    successor_files.update({
+        "resume-authority.env": "".join(f"{k}={v}\n" for k, v in successor_authority.items()).encode(),
+        "resume-images.tsv": held_images,
+        "held-handoff-history.json": json.dumps(held_history).encode(),
+        "held-handoff-transfer.json": json.dumps(transfer).encode(),
+    })
+    successor_files["SHA256SUMS"] = "".join(
+        f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
+        for name, raw in sorted(successor_files.items())).encode()
+    native_run_reader = m.require_fixed_run
+    with patch.object(m, "require_fixed_run", side_effect=lambda repo, run, *args: (
+                {"id": 40, "head_sha": source} if run == "40" else native_run_reader(repo, run, *args))), \
+            patch.object(m, "failed_deploy_native_inputs", side_effect=lambda repo, run, *args, **kwargs: (
+                dict(held_request) if run == "40" else saved_native_parser(repo, run, *args, **kwargs))):
+        consume_successor = lambda: m.validate_pre_runtime_resume_chain("example/repo", "40", "oke")
+        assert consume_successor() == ("23", source)
+        for key, wrong in (
+            ("held_handoff_run_id", "23"), ("held_handoff_source_sha", "9" * 40),
+            ("prerequisite_run_id", "39"), ("resume_source_sha", "9" * 40),
+            ("failed_deploy_run_id", "78"), ("build_run_id", "99"), ("disk_checkpoint_run_id", "99"),
+        ):
+            old = held_request[key]; held_request[key] = wrong
+            reject(consume_successor); held_request[key] = old
+        held_history["cutoff_at"] = "2026-10-07T10:00:01Z"
+        reject(consume_successor)
+        held_history["cutoff_at"] = proof["cutoff_at"]
+        assert consume_successor() == ("23", source)
+print("PASS sole historical omission eligible only for continuation; v3 native roles and immutable history")
 PY
 ok "pre-runtime strict inventory, native private tuple, and original before-baseline"
 

@@ -1386,10 +1386,36 @@ rm "$tmp_dir/oci-live-data-rollout.yml.bak"
 assert_fail "live data rollout without failed-activation user binding" \
   "oci-live-data-rollout must expose exactly these workflow_dispatch inputs"
 
+for held_input in held_handoff_run_id held_handoff_source_sha; do
+  for held_mutation in default type missing-default; do
+    reset_fixtures
+    write_complete_oci_set
+    python3 - "$tmp_dir/oci-live-data-rollout.yml" "$held_input" "$held_mutation" <<'PY'
+from pathlib import Path
+import re, sys
+path, name, mutation = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+text = path.read_text()
+match = re.search(r"^      " + name + r":\n(?:^        .*\n)+", text, re.M)
+assert match is not None
+block = match.group()
+if mutation == "default":
+    block, count = re.subn(r"^        default:.*$", "        default: foreign", block, flags=re.M)
+elif mutation == "type":
+    block, count = re.subn(r"^        type: string$", "        type: boolean", block, flags=re.M)
+else:
+    block, count = re.subn(r"^        default:.*\n", "", block, flags=re.M)
+assert count == 1
+path.write_text(text[:match.start()] + block + text[match.end():])
+PY
+    assert_fail "live data rollout $held_input $held_mutation" \
+      "oci-live-data-rollout $held_input must retain its exact neutral string default"
+  done
+done
+
 for baseline_mutation in \
   artifact-name run-id destination mode-gate producer-id duplicate-producer \
   commented-validator wrong-policy result-file imported-baseline \
-  published-file published-selector ignored-error; do
+  published-file published-selector successor-binding history-destination ignored-error; do
   reset_fixtures
   write_complete_oci_set
   python3 - "$tmp_dir/oci-live-data-rollout.yml" "$baseline_mutation" <<'PY'
@@ -1443,8 +1469,16 @@ changes = {
         '\' "$RUNNER_TEMP/unbound-result.json" >> "$GITHUB_OUTPUT"',
     ),
     "published-selector": (
-        "                .failed_deploy_run_id |",
+        "                .[$binding] |",
         "                .prerequisite_run_id |",
+    ),
+    "successor-binding": (
+        '--successor-run-id "$GITHUB_RUN_ID"',
+        '--successor-run-id "$HELD_HANDOFF_RUN_ID"',
+    ),
+    "history-destination": (
+        "--held-history-file artifacts/oci-live-data-rollout/evidence/held-handoff-history.json",
+        "--held-history-file artifacts/unverified-history.json",
     ),
     "ignored-error": (
         "        id: provenance_request\n",

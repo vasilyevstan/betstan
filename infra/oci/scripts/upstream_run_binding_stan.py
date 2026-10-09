@@ -49,6 +49,7 @@ RUN_PROFILES = {
     "oci-failed-deploy-retained-hold-v1",
     "oci-failed-deploy-released-runtime-v1",
     "oci-failed-activation-cleanup-v1",
+    "oci-successful-held-handoff-v1",
 }
 CURRENT_SERVICES = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
@@ -270,11 +271,47 @@ LIVE_RESUME_AUTHORITY_V2_KEYS = {
     "application_change_scope",
     "status",
 }
+LIVE_RESUME_AUTHORITY_V3_KEYS = LIVE_RESUME_AUTHORITY_V2_KEYS | {
+    "held_handoff_run_id", "held_handoff_source_sha", "held_handoff_evidence_sha256",
+}
+HELD_HANDOFF_CONFIRMATION = "CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA"
+HELD_HANDOFF_DEFAULTS = {
+    "held_handoff_run_id": "0",
+    "held_handoff_source_sha": "none",
+}
 
 
 def fail(message):
     print(f"upstream binding rejected: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def live_data_native_inputs(inputs, expected_names):
+    if not isinstance(inputs, dict):
+        fail("live data native inputs must be an object")
+    values = dict(inputs)
+    expected = set(expected_names)
+    held_fields = set(HELD_HANDOFF_DEFAULTS)
+    if held_fields & expected:
+        if not held_fields <= expected:
+            fail("live data held-handoff input contract is incomplete")
+        if (
+            type(values.get("held_handoff_run_id")) is not str
+            or POSITIVE_INTEGER.fullmatch(values["held_handoff_run_id"]) is None
+            or type(values.get("held_handoff_source_sha")) is not str
+            or FULL_SHA.fullmatch(values["held_handoff_source_sha"]) is None
+            or values.get("confirmation") != HELD_HANDOFF_CONFIRMATION
+        ):
+            fail("live data held-handoff native inputs are invalid")
+    elif held_fields & values.keys():
+        if any(type(values.get(key)) is not str or values[key] != value
+               for key, value in HELD_HANDOFF_DEFAULTS.items()):
+            fail("legacy live data inputs require exact neutral held-handoff defaults")
+        for key in held_fields:
+            del values[key]
+    if set(values) != expected or any(type(value) is not str for value in values.values()):
+        fail("live data native input key set or types are invalid")
+    return values
 
 
 def gh_api(path):
@@ -561,9 +598,18 @@ def validate_binding_shape(binding):
     run_profile = binding.get("runProfile")
     if run_profile is not None and run_profile not in RUN_PROFILES:
         fail("binding runProfile is unsupported")
-    if (expected_conclusion == "failure") != (run_profile is not None):
+    held_profile = run_profile == "oci-successful-held-handoff-v1"
+    if held_profile:
+        if (
+            expected_conclusion != "success"
+            or binding["input"] != "held_handoff_run_id"
+            or binding.get("expectedHeadShaInput") != "held_handoff_source_sha"
+            or binding["workflow"] != "oci-live-data-rollout.yml"
+        ):
+            fail("successful held-handoff profile has a substituted binding")
+    elif (expected_conclusion == "failure") != (run_profile is not None):
         fail("failure conclusions are permitted only with a fixed recovery runProfile")
-    if run_profile is not None:
+    if run_profile is not None and not held_profile:
         expected_workflow = (
             "oci-live-betting-activate.yml"
             if run_profile == "oci-failed-activation-cleanup-v1"
@@ -1725,13 +1771,18 @@ def parse_resume_authority(files, predecessor, label):
         return None
     if len(matches) != 1:
         fail(f"{label} has duplicate resume authority")
-    authority = parse_env(
-        matches[0],
-        f"{label} resume authority",
-        LIVE_RESUME_AUTHORITY_V2_KEYS,
+    authority = parse_env(matches[0], f"{label} resume authority")
+    version = authority.get("schema_version")
+    required_keys = (
+        LIVE_RESUME_AUTHORITY_V3_KEYS if version == "live-betting-data-resume-v3"
+        else LIVE_RESUME_AUTHORITY_V2_KEYS
     )
+    if set(authority) != required_keys or version not in {
+        "live-betting-data-resume-v2", "live-betting-data-resume-v3",
+    }:
+        fail(f"{label} resume authority version or key set is invalid")
     expected = {
-        "schema_version": "live-betting-data-resume-v2",
+        "schema_version": version,
         "current_source_sha": predecessor["source_sha"],
         "baseline_sha256": predecessor["baseline_sha256"],
         "checkpoint_source_sha": predecessor["checkpoint_source_sha"],
@@ -1751,6 +1802,20 @@ def parse_resume_authority(files, predecessor, label):
             fail(f"{label} resume authority has an invalid {key}")
     if FULL_SHA.fullmatch(authority["applied_source_sha"]) is None:
         fail(f"{label} resume authority applied source is invalid")
+    if version == "live-betting-data-resume-v3":
+        if (
+            POSITIVE_INTEGER.fullmatch(authority["held_handoff_run_id"]) is None
+            or FULL_SHA.fullmatch(authority["held_handoff_source_sha"]) is None
+            or re.fullmatch(r"[0-9a-f]{64}", authority["held_handoff_evidence_sha256"]) is None
+            or authority["held_handoff_run_id"] in {
+                authority["applied_data_run_id"], authority["failed_deploy_run_id"],
+                predecessor["workflow_run_id"],
+            }
+            or authority["resume_maintenance_mode"] != "pre-runtime-hold"
+        ):
+            fail(f"{label} held-handoff authority roles are invalid")
+        unique_artifact_file(files, "held-handoff-history.json", label)
+        unique_artifact_file(files, "held-handoff-transfer.json", label)
     if re.fullmatch(r"[0-9a-f]{64}", authority["runtime_images_sha256"]) is None:
         fail(f"{label} resume authority runtime images checksum is invalid")
     _, resume_images = unique_artifact_file(
@@ -1913,6 +1978,12 @@ def failed_deploy_native_inputs(repository, run_id, source_sha, label, *, resume
             "failed_activation_run_id": "FAILED_ACTIVATION_RUN_ID",
             "failed_activation_user_id": "FAILED_ACTIVATION_USER_ID",
         })
+        if isinstance(inputs, dict) and inputs.get("confirmation") == HELD_HANDOFF_CONFIRMATION:
+            mapping.update({key: key.upper() for key in HELD_HANDOFF_DEFAULTS})
+        normalized = live_data_native_inputs(inputs, mapping)
+        mapping.update({key: key.upper() for key in HELD_HANDOFF_DEFAULTS if key in inputs})
+    else:
+        normalized = inputs
     if not isinstance(inputs, dict) or set(inputs) != set(mapping):
         fail(f"{label} native dispatch input key set is invalid")
     for key, env_key in mapping.items():
@@ -1927,7 +1998,460 @@ def failed_deploy_native_inputs(repository, run_id, source_sha, label, *, resume
     ):
         require_dispatch_run(inputs, key)
     require_dispatch_sha(inputs, "checkpoint_source_sha")
-    return inputs
+    return normalized
+
+
+def validate_held_handoff_native(
+    repository, run_id, source_sha, dispatch_inputs, runtime_mode, label,
+):
+    metadata = require_fixed_run(
+        repository, run_id, "oci-live-data-rollout.yml", "success", source_sha,
+        f"oci-live-data apply-slip-index {source_sha}", label,
+    )
+    if runtime_mode not in {"k3s", "oke"}:
+        fail(f"{label} held-handoff runtime mode is unsupported")
+    for path, expected_blob in (
+        (".github/workflows/oci-live-data-rollout.yml",
+         "27a98e345050fefb799c706fde03d8f79e14ed6c"),
+        ("infra/oci/scripts/live-betting-data-rollout-stan.sh",
+         "1752489383424fa4bd55bbc7d36e4cac95e14d31"),
+    ):
+        observed = gh_api(f"repos/{repository}/contents/{path}?ref={source_sha}")
+        if not isinstance(observed, dict) or observed.get("sha") != expected_blob:
+            fail(f"{label} does not have the known historical held-handoff producer")
+    names = (
+        "Initialize isolated OCI data paths",
+        "Checkout approved current master commit",
+        "Validate exact SHA phase and trusted upstream runs",
+        "Reject competing production activity",
+        "Download exact OCI image provenance",
+        "Download exact OCI infrastructure provenance",
+        "Download exact release disk checkpoint",
+        "Download prerequisite data evidence",
+        "Download failed deploy protected baseline",
+        "Download explicitly selected recovery baseline authority",
+        "Bind historical recovery source through its exact artifact",
+        "Verify immutable release and phase provenance",
+        "Install pinned OCI CLI",
+        "Verify OKE identity",
+        "Verify k3s identity",
+        "Reconcile expired and authorize current runner IPv4",
+        "Configure kubectl from exact cluster OCID",
+        "Open ephemeral OCI Bastion access to k3s",
+        "Verify exact failed-deploy resume state",
+        "Capture and validate pre-mutation rollback baseline",
+        "Revalidate exact release disk checkpoint before lock mutation",
+        "Acquire database operation lock",
+        "Enter or re-establish live data maintenance",
+        "Demote and verify exact retained live-acceptance account",
+        "Delete exact orphaned live-acceptance slips",
+        "Execute exact-digest live data phase",
+        "Restore runtime or verify final deploy handoff",
+        "Capture post-phase runtime baseline",
+        "Require executed data-step evidence",
+        "Upload exact sanitized data evidence",
+        "Upload protected rollout baselines",
+        "Restore runtime or retain hold if final handoff packaging failed",
+        "Release database operation lock unless handed to deploy",
+        "Revoke exact runner rule",
+        "Close ephemeral OCI Bastion access",
+        "Remove isolated OCI client state",
+    )
+    expected_names = [
+        "Set up job", *names, "Post Checkout approved current master commit", "Complete job",
+    ]
+    jobs = jobs_for_run(repository, run_id, label)
+    if len(jobs) != 1:
+        fail(f"{label} held-handoff job inventory is not exact")
+    job = exact_job(jobs, "rollout", label)
+    if (
+        type(job.get("id")) is not int or job["id"] < 1
+        or job.get("run_id") != int(run_id)
+        or job.get("status") != "completed"
+        or job.get("conclusion") != "success"
+    ):
+        fail(f"{label} held-handoff job did not complete successfully")
+    created = parse_timestamp(metadata.get("created_at"), label)
+    started = parse_timestamp(job.get("started_at"), label)
+    completed = parse_timestamp(job.get("completed_at"), label)
+    if not created <= started <= completed <= parse_timestamp(metadata.get("updated_at"), label):
+        fail(f"{label} held-handoff job chronology is invalid")
+    if [step.get("name") for step in job["steps"]] != expected_names:
+        fail(f"{label} held-handoff step inventory is not exact")
+    skipped = {
+        "Download failed deploy protected baseline",
+        "Demote and verify exact retained live-acceptance account",
+        "Delete exact orphaned live-acceptance slips",
+        "Capture post-phase runtime baseline",
+        "Restore runtime or retain hold if final handoff packaging failed",
+        "Release database operation lock unless handed to deploy",
+    }
+    if str(dispatch_inputs.get("baseline_recovery_run_id")) == "0":
+        skipped.update({
+            "Download explicitly selected recovery baseline authority",
+            "Bind historical recovery source through its exact artifact",
+        })
+    skipped.update({
+        "Verify OKE identity", "Reconcile expired and authorize current runner IPv4",
+        "Configure kubectl from exact cluster OCID", "Revoke exact runner rule",
+    } if runtime_mode == "k3s" else {
+        "Verify k3s identity", "Open ephemeral OCI Bastion access to k3s",
+        "Revalidate exact release disk checkpoint before lock mutation",
+        "Close ephemeral OCI Bastion access",
+    })
+    for number, step in enumerate(job["steps"], 1):
+        if (
+            type(step.get("number")) is not int or step["number"] != number
+            or step.get("status") != "completed"
+            or step.get("conclusion") != ("skipped" if step["name"] in skipped else "success")
+        ):
+            fail(f"{label} held-handoff step outcome is invalid")
+        if step["name"] in names and step["name"] not in skipped:
+            step_started = parse_timestamp(step.get("started_at"), label)
+            step_completed = parse_timestamp(step.get("completed_at"), label)
+            if not started <= step_started <= step_completed <= completed:
+                fail(f"{label} held-handoff step chronology is invalid")
+    native = failed_deploy_native_inputs(
+        repository, run_id, source_sha, label, resume_dispatch=True,
+    )
+    expected = {
+        key: dispatch_inputs.get(key) for key in (
+            "resume_source_sha", "build_run_id", "infrastructure_run_id",
+            "checkpoint_source_sha", "disk_checkpoint_run_id", "prerequisite_run_id",
+            "baseline_recovery_run_id", "baseline_recovery_source_sha", "failed_deploy_run_id",
+        )
+    }
+    expected.update({
+        "approved_sha": source_sha, "phase": "apply-slip-index",
+        "failed_activation_run_id": "0", "failed_activation_user_id": "0",
+        "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA",
+    })
+    if native != expected:
+        fail(f"{label} held handoff substituted the original root dispatch tuple")
+    return metadata
+
+
+def held_handoff_history(repository, held, subject_sha, successor_run_id=""):
+    policy = subprocess.run(
+        ["git", "show", f"{subject_sha}:infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"],
+        capture_output=True, text=True, check=False,
+    )
+    if policy.returncode:
+        fail("held-handoff source-bound policy inventory is unavailable")
+    result = subprocess.run(
+        ["bash", "-s", "--", "workflows"], input=policy.stdout,
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        fail("held-handoff protected workflow inventory is unavailable")
+    workflows = result.stdout.splitlines()
+    if not workflows or len(workflows) != len(set(workflows)) or any(
+        re.fullmatch(r"[a-z0-9-]+\.yml", name) is None for name in workflows
+    ):
+        fail("held-handoff protected workflow inventory is invalid")
+    workflows = sorted(set(workflows) - {
+        "common-package-publish.yml", "production-build.yml", "oci-production-build.yml",
+    })
+    lower = parse_timestamp(held.get("created_at"), "held-handoff history")
+    cutoff = None
+    if successor_run_id:
+        if POSITIVE_INTEGER.fullmatch(successor_run_id) is None:
+            fail("held-handoff successor run is invalid")
+        latest = gh_api(f"repos/{repository}/actions/runs/{successor_run_id}")
+        first = gh_api(f"repos/{repository}/actions/runs/{successor_run_id}/attempts/1")
+        workflow = gh_api(f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml")
+        expected = {
+            "id": int(successor_run_id), "run_attempt": 1, "head_sha": subject_sha,
+            "path": ".github/workflows/oci-live-data-rollout.yml",
+            "workflow_id": workflow.get("id"), "event": "workflow_dispatch",
+            "head_branch": "master", "display_title": f"oci-live-data apply-slip-index {subject_sha}",
+        }
+        for native in (latest, first):
+            if not isinstance(native, dict) or any(native.get(k) != v for k, v in expected.items()):
+                fail("held-handoff successor native identity differs")
+            if (native.get("head_repository") or {}).get("full_name") != repository:
+                fail("held-handoff successor repository differs")
+        if latest.get("status") != first.get("status") or latest.get("conclusion") != first.get("conclusion"):
+            fail("held-handoff successor attempt state differs")
+        if first.get("status") == "completed" and first.get("conclusion") != "success":
+            fail("held-handoff completed successor is not successful")
+        if parse_timestamp(held.get("updated_at"), "held handoff") > parse_timestamp(
+            first.get("created_at"), "successor",
+        ):
+            fail("held-handoff successor predates the held handoff")
+        if first.get("status") in {"in_progress", "completed"}:
+            job = exact_job(jobs_for_run(repository, successor_run_id, "successor"), "rollout", "successor")
+            if (
+                type(job.get("id")) is not int or job["id"] < 1
+                or job.get("run_id") != int(successor_run_id)
+                or job.get("status") != first["status"]
+            ):
+                fail("held-handoff successor cutoff belongs to another job")
+            steps = [step for step in job["steps"]
+                     if step.get("name") == "Validate exact SHA phase and trusted upstream runs"]
+            if len(steps) != 1:
+                fail("held-handoff successor cutoff is ambiguous")
+            cutoff = parse_timestamp(steps[0].get("started_at"), "successor cutoff")
+            if not parse_timestamp(first.get("created_at"), "successor") <= parse_timestamp(
+                job.get("started_at"), "successor job",
+            ) <= cutoff:
+                fail("held-handoff successor cutoff chronology is invalid")
+        elif first.get("status") not in {"queued", "waiting", "requested", "pending"}:
+            fail("held-handoff successor state is invalid")
+    counts = {}
+    for workflow in workflows:
+        endpoint = f"repos/{repository}/actions/workflows/{workflow}/runs?per_page=100"
+        if cutoff is not None:
+            endpoint += "&created=%3C%3D" + cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+        pages = gh_api_pages(endpoint)
+        totals = {page.get("total_count") for page in pages}
+        if len(totals) != 1 or any(type(n) is not int or not 0 <= n < 1000 for n in totals):
+            fail("held-handoff historical inventory is incomplete or exceeds its bound")
+        rows = []
+        for page in pages:
+            if not isinstance(page.get("workflow_runs"), list):
+                fail("held-handoff historical inventory is malformed")
+            rows.extend(page["workflow_runs"])
+        if len(rows) != next(iter(totals)):
+            fail("held-handoff historical inventory is incomplete")
+        ids = set()
+        for row in rows:
+            if (
+                not isinstance(row, dict) or type(row.get("id")) is not int
+                or row["id"] < 1 or row["id"] in ids
+                or row.get("path") != f".github/workflows/{workflow}"
+                or (row.get("head_repository") or {}).get("full_name") != repository
+                or type(row.get("head_branch")) is not str or not row["head_branch"]
+            ):
+                fail("held-handoff historical inventory identity is invalid")
+            ids.add(row["id"])
+            created = parse_timestamp(row.get("created_at"), "historical run")
+            updated = parse_timestamp(row.get("updated_at"), "historical run")
+            if updated < created or cutoff is not None and created > cutoff:
+                fail("held-handoff historical interval is inconsistent")
+            if row["id"] in {held["id"], int(successor_run_id or "0")}:
+                if workflow != "oci-live-data-rollout.yml":
+                    fail("held-handoff historical owner is bound to another workflow")
+                continue
+            if row.get("head_branch") != "master":
+                continue
+            if updated >= lower:
+                fail("an intervening protected production transition excludes this held handoff")
+            if row.get("status") != "completed":
+                fail("an unresolved historical production run excludes this held handoff")
+        if workflow == "oci-live-data-rollout.yml":
+            required_ids = {held["id"]}
+            if successor_run_id:
+                required_ids.add(int(successor_run_id))
+            if not required_ids <= ids:
+                fail("held-handoff history omitted an independently authenticated run")
+        counts[workflow] = len(rows)
+    return {
+        "schema_version": "live-betting-held-handoff-history-v1",
+        "repository": repository, "held_handoff_run_id": str(held["id"]),
+        "held_handoff_source_sha": held["head_sha"],
+        "successor_run_id": successor_run_id, "successor_source_sha": subject_sha,
+        "start_at": held["created_at"],
+        "cutoff_at": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ") if cutoff is not None else None,
+        "workflow_counts": counts,
+    }
+
+
+def record_held_handoff_transfer(path, snapshot_path, held_run, held_source, run_id, source, stage, state):
+    path, snapshot_path = Path(path), Path(snapshot_path)
+    raw = snapshot_path.read_bytes()
+    snapshot = json.loads(raw)
+    expected = {
+        "schema_version": "live-betting-held-handoff-transfer-v1",
+        "held_handoff_run_id": held_run, "held_handoff_source_sha": held_source,
+        "successor_run_id": run_id, "successor_source_sha": source,
+        "snapshot_sha256": hashlib.sha256(raw).hexdigest(),
+        "lock_uid": snapshot["metadata"]["uid"],
+        "observed_resource_version": snapshot["metadata"]["resourceVersion"],
+        "observed_fencing_generation": snapshot["data"]["fencing-generation"],
+        "observed_lease_until_epoch": snapshot["data"]["lease-until-epoch"],
+    }
+    if (
+        snapshot["data"].get("state") != "active"
+        or snapshot["data"].get("holder") != f"live-data-{held_run}-1"
+        or snapshot["data"].get("source-sha") != held_source
+        or snapshot["data"].get("operation-id") != "live-data-apply-slip-index"
+    ):
+        fail("held-handoff transfer snapshot substituted the physical owner")
+    if path.is_symlink():
+        fail("held-handoff transfer evidence cannot be a symbolic link")
+    if path.exists():
+        record = json.loads(path.read_bytes())
+        if any(record.get(key) != value for key, value in expected.items()):
+            fail("held-handoff transfer snapshot or owner drifted")
+    else:
+        record = dict(expected, release_result="not-attempted", acquire_result="not-attempted",
+                      verify_result="not-attempted")
+    previous = tuple(record.get(f"{name}_result") for name in ("release", "acquire", "verify"))
+    transitions = {
+        ("release", "unconfirmed"): ("not-attempted", "not-attempted", "not-attempted"),
+        ("release", "confirmed"): ("unconfirmed", "not-attempted", "not-attempted"),
+        ("acquire", "unconfirmed"): ("confirmed", "not-attempted", "not-attempted"),
+        ("acquire", "confirmed"): ("confirmed", "unconfirmed", "not-attempted"),
+        ("verify", "unconfirmed"): ("confirmed", "confirmed", "not-attempted"),
+        ("verify", "confirmed"): ("confirmed", "confirmed", "unconfirmed"),
+    }
+    if transitions.get((stage, state)) != previous:
+        fail("held-handoff transfer evidence cannot replay or skip a transition")
+    record[f"{stage}_result"] = state
+    temporary = path.with_name(path.name + ".new")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def validate_held_handoff_transfer(transfer, authority, current):
+    keys = {
+        "schema_version", "held_handoff_run_id", "held_handoff_source_sha",
+        "successor_run_id", "successor_source_sha", "snapshot_sha256", "lock_uid",
+        "observed_resource_version", "observed_fencing_generation", "observed_lease_until_epoch",
+        "release_result", "acquire_result", "verify_result",
+    }
+    if not isinstance(transfer, dict) or set(transfer) != keys:
+        fail("held-handoff transfer evidence has an invalid key set")
+    expected = {
+        "schema_version": "live-betting-held-handoff-transfer-v1",
+        "held_handoff_run_id": authority["held_handoff_run_id"],
+        "held_handoff_source_sha": authority["held_handoff_source_sha"],
+        "successor_run_id": str(current["id"]), "successor_source_sha": current["head_sha"],
+        "release_result": "confirmed", "acquire_result": "confirmed", "verify_result": "confirmed",
+    }
+    if any(transfer[key] != value for key, value in expected.items()):
+        fail("held-handoff transfer was not confirmed for the exact owners")
+    for key, pattern in (
+        ("snapshot_sha256", r"[0-9a-f]{64}"), ("lock_uid", r"[A-Za-z0-9._:-]+"),
+        ("observed_resource_version", r"[1-9][0-9]*"),
+        ("observed_fencing_generation", r"[1-9][0-9]*"),
+        ("observed_lease_until_epoch", r"[1-9][0-9]*"),
+    ):
+        if type(transfer[key]) is not str or re.fullmatch(pattern, transfer[key]) is None:
+            fail("held-handoff transfer snapshot binding is malformed")
+
+
+def validate_held_handoff_reports(files, evidence):
+    with tempfile.TemporaryDirectory(prefix=".held-handoff-evidence-", dir=Path.cwd()) as temporary:
+        directory = Path(temporary)
+        for relative, raw in files.items():
+            destination = directory / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(raw)
+        environment = os.environ.copy()
+        environment.update({
+            "EVIDENCE_DIR": str(directory), "EXPECTED_PHASE": "apply-slip-index",
+            "EXPECTED_RUN_ID": evidence["workflow_run_id"], "EXPECTED_RUN_ATTEMPT": "1",
+            "RESUME_BASELINE_DIR": "", "VERIFY_RESUME_APPLIED_RUN": "false", "RESUME_REPOSITORY": "",
+            **{f"EXPECTED_{key.upper()}": evidence[key] for key in (
+                "source_sha", "build_run_id", "infrastructure_run_id",
+                "baseline_recovery_run_id", "baseline_recovery_source_sha",
+                "checkpoint_source_sha", "disk_checkpoint_run_id",
+                "disk_checkpoint_sha256", "disk_checkpoint_disposition",
+            )},
+        })
+        result = subprocess.run(
+            [str(Path(__file__).with_name("verify-live-betting-data-evidence-stan.sh"))],
+            env=environment, capture_output=True, check=False,
+        )
+        if result.returncode != 0:
+            fail("held-handoff schema, journal, or sanitized reports are invalid")
+
+
+def validate_held_handoff_artifact(
+    repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
+    *, successor_run_id="",
+):
+    if dispatch_inputs.get("confirmation") != HELD_HANDOFF_CONFIRMATION:
+        fail("held-handoff profile is restricted to its fixed continuation operation")
+    if run_id in {
+        require_dispatch_run(dispatch_inputs, "prerequisite_run_id"),
+        require_dispatch_run(dispatch_inputs, "failed_deploy_run_id"),
+    }:
+        fail("held-handoff physical owner cannot substitute the original root")
+    validate_descendant_scope(source_sha, subject_sha)
+    held = validate_held_handoff_native(
+        repository, run_id, source_sha, dispatch_inputs, runtime_mode, label,
+    )
+    evidence, manifest_sha, files = parse_live_v6_artifact(
+        repository, run_id, label, include_files=True,
+    )
+    reports = {f"reports/{stage}-{service}.json"
+               for stage in ("preflight", "apply", "verify")
+               for service in ("event", "gamemaster", "moderation", "resulting", "bet", "slip")}
+    reports |= {f"reports/{stage}-slip-index.json" for stage in ("preflight", "apply", "verify", "final")}
+    reports |= {"reports/preflight-event-reschedule.json"}
+    reports |= {f"reports/{stage}-backoffice-pre-september-cleanup.json"
+                for stage in ("preflight", "apply", "verify")}
+    if set(files) != reports | {
+        "SHA256SUMS", "provenance.env", "schema.env", "journal.json", "resume-authority.env",
+    }:
+        fail("held handoff does not have exactly the known historical packaging omission")
+    authority = parse_env(files["resume-authority.env"], label, LIVE_RESUME_AUTHORITY_V2_KEYS)
+    root_source = require_dispatch_sha(dispatch_inputs, "resume_source_sha")
+    failed_run = require_dispatch_run(dispatch_inputs, "failed_deploy_run_id")
+    profile = "oci-failed-deploy-retained-hold-v1"
+    outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, label)
+    if outcomes != ("skipped", "skipped", "skipped"):
+        fail("held handoff does not preserve the original pre-runtime failure")
+    root = validate_failed_deploy_artifacts(
+        repository, failed_run, root_source, None, dispatch_inputs, runtime_mode,
+        profile, *outcomes, label, pre_runtime=True,
+    )
+    checkpoint = parse_checkpoint_artifact(repository, dispatch_inputs, runtime_mode, label)
+    validate_live_v6_lineage(
+        evidence, checkpoint, dispatch_inputs, run_id, source_sha, "apply-slip-index", label,
+    )
+    expected_authority = {
+        "schema_version": "live-betting-data-resume-v2",
+        "applied_data_run_id": root["applied_data_run_id"],
+        "applied_source_sha": root["applied_source_sha"], "failed_deploy_run_id": failed_run,
+        "resume_maintenance_mode": "pre-runtime-hold", "failed_deploy_job_conclusion": "failure",
+        "public_validate_job_conclusion": "skipped", "lock_release_step_conclusion": "skipped",
+        "fence_release_step_conclusion": "skipped", "rehold_step_conclusion": "skipped",
+        "failed_activation_run_id": "0", "current_source_sha": source_sha,
+        "baseline_sha256": validate_checksum_manifest(root["_baseline_files"], label),
+        "application_change_scope": "github-infra-docs-only", "status": "PASS",
+        **{key: evidence[key] for key in (
+            "checkpoint_source_sha", "disk_checkpoint_run_id",
+            "disk_checkpoint_sha256", "disk_checkpoint_disposition",
+        )},
+    }
+    build_run = require_dispatch_run(dispatch_inputs, "build_run_id")
+    checkpoint_source = require_dispatch_sha(dispatch_inputs, "checkpoint_source_sha")
+    build = exact_artifact(
+        repository, build_run, f"oci-image-provenance-{checkpoint_source}-{build_run}-1", label,
+    )
+    image_bytes = artifact_member(repository, build, "images.tsv", label)
+    candidate_images_checksum(image_bytes)
+    expected_authority["runtime_images_sha256"] = hashlib.sha256(image_bytes).hexdigest()
+    if authority != expected_authority:
+        fail("held-handoff authority substituted its root, checkpoint, or original image bytes")
+    validate_held_handoff_reports(files, evidence)
+    history = held_handoff_history(repository, held, subject_sha, successor_run_id)
+    return {
+        "artifactName": f"oci-live-data-rollout-{run_id}-1",
+        "createdAt": held["created_at"], "completedAt": held["updated_at"],
+        "baselineFiles": root.pop("_baseline_files"), "heldHistory": history,
+        "resume": {
+            **root, "held_handoff_run_id": run_id, "held_handoff_source_sha": source_sha,
+            "held_handoff_evidence_sha256": manifest_sha,
+            **{key: authority[key] for key in (
+                "failed_deploy_job_conclusion", "public_validate_job_conclusion",
+                "lock_release_step_conclusion", "fence_release_step_conclusion", "rehold_step_conclusion",
+            )},
+        },
+    }
 
 
 def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=None):
@@ -1941,6 +2465,54 @@ def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=
     authority = parse_resume_authority(files, evidence, "resume predecessor")
     if authority is None:
         return run_id, evidence["source_sha"]
+    if authority["schema_version"] == "live-betting-data-resume-v3":
+        current = require_fixed_run(
+            repository, run_id, "oci-live-data-rollout.yml", "success", evidence["source_sha"],
+            f"oci-live-data apply-slip-index {evidence['source_sha']}", "held-handoff successor",
+        )
+        request = failed_deploy_native_inputs(
+            repository, run_id, evidence["source_sha"], "held-handoff successor", resume_dispatch=True,
+        )
+        expected_request = {
+            "approved_sha": evidence["source_sha"],
+            "resume_source_sha": authority["applied_source_sha"],
+            "prerequisite_run_id": authority["applied_data_run_id"],
+            "failed_deploy_run_id": authority["failed_deploy_run_id"],
+            "held_handoff_run_id": authority["held_handoff_run_id"],
+            "held_handoff_source_sha": authority["held_handoff_source_sha"],
+            "phase": "apply-slip-index", "failed_activation_run_id": "0",
+            "failed_activation_user_id": "0", "confirmation": HELD_HANDOFF_CONFIRMATION,
+            **{key: evidence[key] for key in (
+                "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+                "disk_checkpoint_run_id", "baseline_recovery_run_id", "baseline_recovery_source_sha",
+            )},
+        }
+        if request != expected_request:
+            fail("held-handoff successor substituted its native root or previous physical holder")
+        result = validate_held_handoff_artifact(
+            repository, authority["held_handoff_run_id"], authority["held_handoff_source_sha"],
+            evidence["source_sha"], request, runtime_mode, "held-handoff predecessor",
+            successor_run_id=run_id,
+        )
+        for key in (
+            "applied_data_run_id", "applied_source_sha", "held_handoff_run_id",
+            "held_handoff_source_sha", "held_handoff_evidence_sha256",
+            "resume_maintenance_mode", "failed_deploy_job_conclusion", "public_validate_job_conclusion",
+            "lock_release_step_conclusion", "fence_release_step_conclusion", "rehold_step_conclusion",
+        ):
+            if authority[key] != result["resume"][key]:
+                fail("held-handoff successor substituted authenticated predecessor evidence")
+        _, raw_history = unique_artifact_file(files, "held-handoff-history.json", "held history")
+        try:
+            history = json.loads(raw_history)
+            _, raw_transfer = unique_artifact_file(files, "held-handoff-transfer.json", "held transfer")
+            transfer = json.loads(raw_transfer)
+        except (ValueError, UnicodeDecodeError):
+            fail("held-handoff successor transition evidence is malformed")
+        if history != result["heldHistory"]:
+            fail("held-handoff successor history differs from its immutable native cutoff")
+        validate_held_handoff_transfer(transfer, authority, current)
+        return authority["applied_data_run_id"], authority["applied_source_sha"]
     if authority["resume_maintenance_mode"] != "pre-runtime-hold":
         fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
     failed_run = authority["failed_deploy_run_id"]
@@ -3926,6 +4498,7 @@ def validate_binding(
     run_id,
     dispatch_inputs=None,
     runtime_mode=None,
+    successor_run_id="",
 ):
     validate_binding_shape(binding)
     if dispatch_inputs is None:
@@ -3947,7 +4520,7 @@ def validate_binding(
                 f"{binding['input']} expected head input "
                 f"{expected_head_input} is not a full SHA"
             )
-        if expected_head_input == "resume_source_sha":
+        if expected_head_input in {"resume_source_sha", "held_handoff_source_sha"}:
             validate_descendant_scope(expected_head_sha, subject_sha)
     expected_conclusion = binding.get("expectedConclusion", "success")
 
@@ -4053,6 +4626,11 @@ def validate_binding(
         binding["artifactTemplate"], expected_head_sha, run_id
     )
     profile = binding.get("runProfile")
+    if profile == "oci-successful-held-handoff-v1":
+        return validate_held_handoff_artifact(
+            repository, run_id, expected_head_sha, subject_sha, dispatch_inputs,
+            runtime_mode, binding["input"], successor_run_id=successor_run_id,
+        )
     if profile == "oci-failed-deploy-retained-hold-v1":
         outcomes = validate_failed_deploy_jobs(repository, run_id, profile, binding["input"])
         if outcomes == ("skipped", "skipped", "skipped"):
@@ -4198,6 +4776,16 @@ def command_validate_all(args):
     inputs = json.loads(args.dispatch_inputs)
     if not isinstance(inputs, dict):
         fail("dispatch inputs must be an object")
+    if args.policy_json and not args.manifest:
+        policy = json.loads(args.policy_json)
+        if isinstance(policy, dict) and policy.get("workflow") == "oci-live-data-rollout.yml":
+            if not isinstance(policy.get("inputNames"), list):
+                fail("live data policy input contract is missing")
+            inputs = live_data_native_inputs(inputs, policy["inputNames"])
+        if isinstance(policy, dict) and any(binding.get("runProfile") == "oci-successful-held-handoff-v1"
+               for binding in policy.get("upstreamRunBindings", [])):
+            if policy.get("operation") != "oci-live-data-continue-held-handoff":
+                fail("successful held-handoff profile is restricted to its fixed operation")
     bindings = resolve_bindings(args)
     for binding in bindings:
         validate_binding_shape(binding)
@@ -4228,6 +4816,7 @@ def command_validate_all(args):
             str(inputs[name]),
             inputs,
             args.runtime_mode,
+            getattr(args, "successor_run_id", ""),
         )
         if name in chronology_inputs:
             facts["createdAt"] = parse_timestamp(
@@ -4260,15 +4849,24 @@ def command_validate_all(args):
         }
         with open(args.result_json, "x", encoding="utf-8") as handle:
             json.dump(safe_results, handle, sort_keys=True)
+    if getattr(args, "held_history_file", ""):
+        histories = [facts["heldHistory"] for facts in validated.values() if "heldHistory" in facts]
+        if len(histories) != 1 or histories[0]["cutoff_at"] is None:
+            fail("held-handoff history requires an authenticated running successor cutoff")
+        output = Path(args.held_history_file)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("x", encoding="utf-8") as handle:
+            json.dump(histories[0], handle, sort_keys=True)
     if args.baseline_dir:
-        for facts in validated.values():
-            if "baselineFiles" not in facts:
-                continue
+        baselines = [facts["baselineFiles"] for facts in validated.values() if "baselineFiles" in facts]
+        if any(files != baselines[0] for files in baselines):
+            fail("held-handoff and original root baselines disagree")
+        for files in baselines[:1]:
             root = Path(args.baseline_dir)
             if root.is_symlink() or (root.exists() and any(root.iterdir())):
                 fail("original before baseline output must be empty")
             root.mkdir(parents=True, exist_ok=True)
-            for relative, raw in facts["baselineFiles"].items():
+            for relative, raw in files.items():
                 destination = root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with destination.open("xb") as handle:
@@ -4298,6 +4896,8 @@ def main():
     every.add_argument("--runtime-mode", default="")
     every.add_argument("--result-json", default="")
     every.add_argument("--baseline-dir", default="")
+    every.add_argument("--successor-run-id", default="")
+    every.add_argument("--held-history-file", default="")
     every.set_defaults(func=command_validate_all)
 
     args = parser.parse_args()

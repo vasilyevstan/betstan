@@ -1314,11 +1314,21 @@ def validate_live_data_rollout_workflow!(file, document, content)
       failed_deploy_run_id
       failed_activation_run_id
       failed_activation_user_id
+      held_handoff_run_id
+      held_handoff_source_sha
       confirmation
     ]
   )
   validate_exact_permissions!(name, document, { "actions" => "read", "contents" => "read" })
   validate_expected_action_pins!(name, content)
+
+  { "held_handoff_run_id" => "0", "held_handoff_source_sha" => "none" }.each do |input, neutral|
+    definition = workflow_dispatch_inputs(document)[input]
+    unless definition.is_a?(Hash) && definition["type"] == "string" &&
+           definition["required"] == true && definition["default"] == neutral
+      fail_inventory("#{name} #{input} must retain its exact neutral string default")
+    end
+  end
 
   phase = workflow_dispatch_inputs(document)["phase"]
   unless phase.is_a?(Hash) &&
@@ -1420,19 +1430,35 @@ def validate_live_data_rollout_workflow!(file, document, content)
     --dispatch-inputs $DISPATCH_INPUTS --runtime-mode $OCI_RUNTIME_MODE
     --result-json $RUNNER_TEMP/live-data-upstream-result.json
     --baseline-dir artifacts/oci-data-baseline-before
+    ${continuation_args[@]}
   ]
+  continuation = <<~'SH'
+    continuation_args=()
+    if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+      continuation_args=(
+        --successor-run-id "$GITHUB_RUN_ID"
+        --held-history-file artifacts/oci-live-data-rollout/evidence/held-handoff-history.json
+      )
+    fi
+  SH
   publisher = <<~'SH'
-    jq -er '
-      .failed_deploy_run_id |
+    result_binding=failed_deploy_run_id
+    [ "$HELD_HANDOFF_RUN_ID" = "0" ] || result_binding=held_handoff_run_id
+    jq -er --arg binding "$result_binding" '
+      .[$binding] |
       select(type == "object") |
       to_entries[] | "\(.key)=\(.value)"
     ' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"
   SH
   publisher_pattern = publisher.split.map { |word| Regexp.escape(word) }.join('\s+')
+  continuation_pattern = continuation.split.map { |word| Regexp.escape(word) }.join('\s+')
+  continuation_binding = script.match(/^\s*#{continuation_pattern}\s*$/)
   publication = script.match(/^\s*#{publisher_pattern}\s*$/)
   unless commands.first == "set -euo pipefail" &&
          validator_calls.length == 1 &&
          Shellwords.shellsplit(validator_calls.first) == expected_validator &&
+         continuation_binding &&
+         continuation_binding.end(0) <= script.index("./infra/oci/scripts/upstream_run_binding_stan.py") &&
          publication &&
          publication.begin(0) > script.index("./infra/oci/scripts/upstream_run_binding_stan.py")
     fail_inventory(binding_error)

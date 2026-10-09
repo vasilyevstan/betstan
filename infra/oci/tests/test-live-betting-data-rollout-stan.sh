@@ -2258,6 +2258,126 @@ for mutation in ("missing-images", "tampered-images", "missing-manifest", "tampe
                 raise AssertionError("resume authority accepted substituted image bytes")
 print("resume_producer_uploaded_artifact_contract=PASS")
 PY
+held_output="$work_dir/held-successor/$evidence_upload_path"
+mkdir -p "$held_output"
+PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+  "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" \
+  "$chained_output" "$held_output" "$SOURCE_SHA" "$CHECKPOINT_SOURCE_SHA" "$WORKFLOW" "$images_file" <<'PY'
+import importlib.util, json, os, re, subprocess, sys, textwrap
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+original, output = map(Path, sys.argv[2:4])
+source, checkpoint_source, workflow, images = sys.argv[4:]
+authority = m.parse_env((original / "resume-authority.env").read_bytes(), "fixture")
+authority.update(
+    schema_version="live-betting-data-resume-v3", resume_maintenance_mode="pre-runtime-hold",
+    failed_deploy_job_conclusion="failure", public_validate_job_conclusion="skipped",
+    lock_release_step_conclusion="skipped", fence_release_step_conclusion="skipped",
+    rehold_step_conclusion="skipped", checkpoint_source_sha=checkpoint_source,
+    held_handoff_run_id="3998", held_handoff_source_sha="3" * 40,
+    held_handoff_evidence_sha256="d" * 64,
+)
+text = Path(workflow).read_text()
+step = text[text.index("- name: Verify exact failed-deploy resume state"):
+            text.index("- name: Capture and validate pre-mutation rollback baseline")]
+body = textwrap.dedent(step[step.index("          mkdir -p artifacts/oci-live-data-rollout/evidence"):])
+body = re.sub(r"\$\{\{ steps\.[a-z0-9_]+\.outputs\.([a-z0-9_]+) \}\}",
+              lambda match: authority[match[1]], body)
+environment = dict(os.environ, RUNNER_TEMP=str(output.parent), SOURCE_SHA=source,
+    RESOLVED_APPLIED_DATA_RUN_ID=authority["applied_data_run_id"],
+    RESOLVED_APPLIED_SOURCE_SHA=authority["applied_source_sha"],
+    FAILED_DEPLOY_RUN_ID=authority["failed_deploy_run_id"],
+    RESUME_MAINTENANCE_MODE="pre-runtime-hold", FAILED_ACTIVATION_RUN_ID="0",
+    observed_baseline_sha=authority["baseline_sha256"], resume_images=images,
+    CHECKPOINT_SOURCE_SHA=checkpoint_source, DISK_CHECKPOINT_RUN_ID=authority["disk_checkpoint_run_id"],
+    HELD_HANDOFF_RUN_ID="3998", HELD_HANDOFF_SOURCE_SHA="3" * 40)
+(output.parent / "live-data-upstream-result.json").write_text(json.dumps({
+    "held_handoff_run_id": {"held_handoff_evidence_sha256": "d" * 64}}))
+subprocess.run(["bash", "-euo", "pipefail", "-c", body],
+               cwd=output.parents[2], env=environment, check=True)
+assert m.parse_env((output / "resume-authority.env").read_bytes(), "actual workflow writer") == authority
+history = {
+    "schema_version": "live-betting-held-handoff-history-v1", "repository": "example/repo",
+    "held_handoff_run_id": "3998", "held_handoff_source_sha": "3" * 40,
+    "successor_run_id": "4010", "successor_source_sha": source,
+    "start_at": "2026-10-07T08:00:00Z", "cutoff_at": "2026-10-07T10:00:00Z",
+    "workflow_counts": {"oci-live-data-rollout.yml": 2},
+}
+(output / "held-handoff-history.json").write_text(json.dumps(history))
+snapshot = output.parent / "held-snapshot.json"
+snapshot.write_text(json.dumps({
+    "metadata": {"uid": "fixture-held-uid", "resourceVersion": "42"},
+    "data": {"state": "active", "holder": "live-data-3998-1", "source-sha": "3" * 40,
+             "operation-id": "live-data-apply-slip-index", "fencing-generation": "11",
+             "lease-until-epoch": "2900"},
+}))
+for stage in ("release", "acquire", "verify"):
+    for state in ("unconfirmed", "confirmed"):
+        m.record_held_handoff_transfer(
+            output / "held-handoff-transfer.json", snapshot, "3998", "3" * 40,
+            "4010", source, stage, state)
+PY
+run_phase apply-slip-index final 4010 "$held_output" 0 none "$chained_baseline_sha"
+[[ "$(job_sequence_summary)" == *"index:dry-run index:apply index:dry-run"* ]] ||
+  fail "held-handoff successor did not execute the full Slip index work"
+PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+  "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" \
+  "$held_output" "$images_file" <<'PY'
+import contextlib, hashlib, importlib.util, io, json, sys, zipfile
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root, images = map(Path, sys.argv[2:])
+packed = io.BytesIO()
+with zipfile.ZipFile(packed, "w") as archive:
+    for path in sorted(root.rglob("*")):
+        if path.is_file(): archive.writestr(path.relative_to(root).as_posix(), path.read_bytes())
+files = m.zip_files(packed.getvalue(), "actual v3 producer upload")
+def consume(selected):
+    m.validate_checksum_manifest(selected, "actual v3 producer upload")
+    provenance = m.parse_env(selected["provenance.env"], "actual v3 provenance")
+    authority = m.parse_resume_authority(selected, provenance, "actual v3 producer upload")
+    m.validate_held_handoff_reports(selected, provenance)
+    return authority
+authority = consume(files)
+assert authority["schema_version"] == "live-betting-data-resume-v3"
+assert authority["applied_source_sha"] != authority["checkpoint_source_sha"]
+assert files["resume-images.tsv"] == images.read_bytes()
+assert authority["runtime_images_sha256"] == hashlib.sha256(images.read_bytes()).hexdigest()
+for mutation in (
+    "missing-images", "missing-history", "missing-transfer", "unconfirmed-release",
+    "unconfirmed-acquire", "unconfirmed-verify", "root-holder", "holder-source",
+    "successor-source", "cutoff-missing", "unknown-authority-key",
+):
+    changed = dict(files)
+    if mutation.startswith("missing-"):
+        name = {"missing-images": "resume-images.tsv", "missing-history": "held-handoff-history.json",
+                "missing-transfer": "held-handoff-transfer.json"}[mutation]
+        changed.pop(name)
+    elif mutation.startswith("unconfirmed-"):
+        record = json.loads(changed["held-handoff-transfer.json"])
+        record[mutation.removeprefix("unconfirmed-") + "_result"] = "unconfirmed"
+        changed["held-handoff-transfer.json"] = json.dumps(record).encode()
+    elif mutation == "cutoff-missing":
+        record = json.loads(changed["held-handoff-history.json"]); record["cutoff_at"] = None
+        changed["held-handoff-history.json"] = json.dumps(record).encode()
+    else:
+        updated = dict(authority)
+        if mutation == "root-holder": updated["held_handoff_run_id"] = updated["applied_data_run_id"]
+        elif mutation == "holder-source": updated["held_handoff_source_sha"] = "a" * 40
+        elif mutation == "successor-source": updated["current_source_sha"] = "b" * 40
+        else: updated["unknown"] = "value"
+        changed["resume-authority.env"] = "".join(f"{k}={v}\n" for k, v in updated.items()).encode()
+    changed["SHA256SUMS"] = "".join(
+        f"{hashlib.sha256(raw).hexdigest()}  {name}\n" for name, raw in sorted(changed.items())
+        if name != "SHA256SUMS").encode()
+    with contextlib.redirect_stderr(io.StringIO()):
+        try: consume(changed)
+        except SystemExit: pass
+        else: raise AssertionError(f"v3 consumer accepted {mutation}")
+print("held_handoff_real_producer_v3_consumers=PASS negative_cases=11")
+PY
 valid_images_file="$images_file"
 for mutation in missing-images tampered-images authority-hash conflicting-destination; do
   invalid_output="$work_dir/resume-packaging-$mutation/evidence"
@@ -2548,9 +2668,13 @@ SH
 cat >"$resume_fixture/infra/oci/scripts/live-data-maintenance-stan.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${1:-}" == "verify-quiesced" || "${1:-}" == "verify-held" ]]
+[[ "${1:-}" == "verify-quiesced" || "${1:-}" == "verify-held" || "${1:-}" == hold ]]
 [[ "${RESUME_BAD_FENCE:-false}" == false ]] || exit 1
-printf 'maintenance:verify-quiesced\n' >>"${RESUME_TEST_LOG:?}"
+if [[ "$1" == hold ]]; then
+  printf 'maintenance:hold\n' >>"${RESUME_TEST_LOG:?}"
+else
+  printf 'maintenance:verify-quiesced\n' >>"${RESUME_TEST_LOG:?}"
+fi
 SH
 
 cat >"$resume_fixture/infra/oci/scripts/validate-rollback-baseline-stan.sh" <<'SH'
@@ -2659,6 +2783,8 @@ run_resume_fixture() {
     BASELINE_RECOVERY_SOURCE_SHA=none \
     RESOLVED_APPLIED_DATA_RUN_ID=4007 \
     RESOLVED_APPLIED_SOURCE_SHA=1111111111111111111111111111111111111111 \
+    HELD_HANDOFF_RUN_ID="${RESUME_HELD_RUN_ID:-0}" \
+    HELD_HANDOFF_SOURCE_SHA="${RESUME_HELD_SOURCE_SHA:-none}" \
     BASELINE_RECOVERY_RUN_ID=0 \
     OCI_K8S_NAMESPACE=betstan-oci \
       bash "$resume_script"
@@ -2882,12 +3008,21 @@ case "$1" in
     [ "$EXPECTED_LOCK_UID" = fixture-original-uid ]
     [ "$EXPECTED_RESOURCE_VERSION" = 42 ]
     [ "$EXPECTED_FENCING_GENERATION" = 11 ]
-    [ "$EXPECTED_LEASE_UNTIL_EPOCH" = 2900 ]
+    [ "$EXPECTED_LEASE_UNTIL_EPOCH" = "$(jq -er '.data["lease-until-epoch"]' "$RESUME_LOCK_FIXTURE")" ]
     [ "$LOCK_TOKEN" = live-data-4008-1 ]
     [ "$OPERATION_ID" = live-data-apply-slip-index ]
     [ "$SOURCE_SHA" = 3333333333333333333333333333333333333333 ]
     [ "$EXPECTED_RESOURCE_VERSION" = "$(jq -er '.metadata.resourceVersion' "$RESUME_LOCK_FIXTURE")" ]
+    [ "$EXPECTED_LOCK_UID" = "$(jq -er '.metadata.uid' "$RESUME_LOCK_FIXTURE")" ]
+    [ "$EXPECTED_FENCING_GENERATION" = "$(jq -er '.data["fencing-generation"]' "$RESUME_LOCK_FIXTURE")" ]
+    [ "$(jq -er '.data.state' "$RESUME_LOCK_FIXTURE")" = active ]
     [ "${RESUME_LOCK_FAILURE:-}" != release ] || exit 1
+    if [ "${RESUME_LOCK_FAILURE:-}" = release-ambiguous ]; then
+      jq '.data.state="released" | .data["fencing-generation"]="12"' \
+        "$RESUME_LOCK_FIXTURE" >"$RESUME_LOCK_FIXTURE.next"
+      mv "$RESUME_LOCK_FIXTURE.next" "$RESUME_LOCK_FIXTURE"
+      exit 1
+    fi
     if [ "${RESUME_LOCK_FAILURE:-}" = skipped ]; then
       echo 'shared_mongo_lock=release status=SKIPPED reason=not-holder'
     else
@@ -2902,8 +3037,22 @@ case "$1" in
     [ "$LOCK_TOKEN" = live-data-901-1 ]
     [ "$SOURCE_SHA" = 2222222222222222222222222222222222222222 ]
     [ "${RESUME_LOCK_FAILURE:-}" != acquire ] || exit 1
+    if [ "${RESUME_LOCK_FAILURE:-}" = acquire-ambiguous ]; then
+      jq '.data.state="active" | .data.holder="live-data-901-1" |
+          .data["source-sha"]=("2"*40) | .data["fencing-generation"]="13"' \
+        "$RESUME_LOCK_FIXTURE" >"$RESUME_LOCK_FIXTURE.next"
+      mv "$RESUME_LOCK_FIXTURE.next" "$RESUME_LOCK_FIXTURE"
+      exit 1
+    fi
+    if [ "$1" = acquire-released ]; then
+      echo 'shared_mongo_lock=acquire-released status=PASS lease_until_epoch=20000 fencing_generation=13'
+    fi
     ;;
-  verify) ;;
+  verify) [ "${RESUME_LOCK_FAILURE:-}" != verify ] || exit 1 ;;
+  renew)
+    [ "$LOCK_TOKEN" = live-data-901-1 ]
+    [ "$SOURCE_SHA" = 2222222222222222222222222222222222222222 ]
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -2923,6 +3072,7 @@ PY
     cd "$resume_fixture"
     RESUME_TEST_LOG="$resume_log" RESUME_LOCK_FAILURE="$failure" \
     RESUME_LOCK_FIXTURE="$resume_fixture/lock.json" \
+    HELD_HANDOFF_RUN_ID=0 HELD_HANDOFF_SOURCE_SHA=none \
     RUNNER_TEMP="$resume_fixture" OCI_K8S_NAMESPACE=betstan-oci \
     SHARED_MONGO_LOCK_TOKEN=live-data-901-1 \
     SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
@@ -2953,6 +3103,7 @@ RUBY
   cd "$resume_fixture"
   RESUME_TEST_LOG="$resume_log" PREREQUISITE_RUN_ID=4008 \
   RESUME_SOURCE_SHA=3333333333333333333333333333333333333333 \
+  HELD_HANDOFF_RUN_ID=0 HELD_HANDOFF_SOURCE_SHA=none \
   FAILED_DEPLOY_RUN_ID=77 FAILED_ACTIVATION_RUN_ID=0 OCI_K8S_NAMESPACE=betstan-oci \
   SHARED_MONGO_LOCK_TOKEN=live-data-901-1 SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
   SHARED_MONGO_LOCK_LEASE_SECONDS=14400 SOURCE_SHA=2222222222222222222222222222222222222222 \
@@ -2962,6 +3113,141 @@ RUBY
   fail "retained successor did not transfer its immediate predecessor lock"
 unset RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
 echo "PASS pre-runtime ten-image baseline, Telemetry/fence drift, private snapshot and release/acquire boundaries"
+
+cp "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" \
+  "$resume_fixture/infra/oci/scripts/upstream_run_binding_stan.py"
+cat >"$resume_fixture/infra/azure/agents/production-run-exclusivity-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'exclusive\n' >>"${RESUME_TEST_LOG:?}"
+[[ "${RESUME_LOCK_FAILURE:-}" != exclusive ]]
+SH
+chmod 755 "$resume_fixture/infra/azure/agents/production-run-exclusivity-stan.sh"
+export RESUME_HELD_RUN_ID=4008
+export RESUME_HELD_SOURCE_SHA=3333333333333333333333333333333333333333
+export RESUME_PREREQUISITE_RUN_ID=4007
+export RESUME_PREREQUISITE_SOURCE_SHA=1111111111111111111111111111111111111111
+mkdir -p "$resume_fixture/artifacts/oci-live-data-rollout/evidence"
+ruby -ryaml - "$WORKFLOW" >"$resume_fixture/abort-step.sh" <<'RUBY'
+step = YAML.load_file(ARGV.fetch(0)).fetch("jobs").values.flat_map { |job| job.fetch("steps") }
+  .find { |value| value["id"] == "abort_handoff" }
+puts step.fetch("run")
+RUBY
+run_held_acquire() {
+  (
+    cd "$resume_fixture"
+    RESUME_TEST_LOG="$resume_log" RESUME_LOCK_FAILURE="${1:-$failure}" \
+    RESUME_LOCK_FIXTURE="$resume_fixture/lock.json" \
+    RUNNER_TEMP="$resume_fixture" OCI_K8S_NAMESPACE=betstan-oci \
+    HELD_HANDOFF_RUN_ID=4008 HELD_HANDOFF_SOURCE_SHA="$RESUME_HELD_SOURCE_SHA" \
+    PREREQUISITE_RUN_ID=4007 RESUME_SOURCE_SHA="$RESUME_PREREQUISITE_SOURCE_SHA" \
+    GITHUB_RUN_ID=901 SHARED_MONGO_LOCK_TOKEN=live-data-901-1 \
+    SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
+    SHARED_MONGO_LOCK_LEASE_SECONDS=14400 SOURCE_SHA=2222222222222222222222222222222222222222 \
+      bash "$resume_fixture/acquire-step.sh"
+  )
+}
+for lease in expired live; do
+  for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation; do
+    rm -f "$resume_fixture/pre-runtime-lock.json" \
+      "$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
+    python3 - "$resume_fixture/lock.json" "$lease" <<'PY'
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[1]); value = json.loads(path.read_text())
+start = 1000 if sys.argv[2] == "expired" else int(time.time()) - 20
+value["metadata"].update(uid="fixture-original-uid", resourceVersion="42")
+value["data"].update(
+    state="active", holder="live-data-4008-1",
+    **{"source-sha": "3" * 40, "acquired-at-epoch": str(start),
+       "lease-duration-seconds": "1800", "lease-until-epoch": str(start + 1800),
+       "fencing-generation": "11", "released-at-epoch": "0"})
+path.write_text(json.dumps(value))
+PY
+    reset_resume_fixture
+    cp "$resume_fixture/pre-runtime-images.tsv" "$resume_fixture/actual-images.tsv"
+    run_resume_fixture pre-runtime-hold
+    : >"$resume_log"
+    python3 - "$resume_fixture/lock.json" "$failure" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1]); value = json.loads(path.read_text())
+if sys.argv[2] == "drift": value["metadata"]["resourceVersion"] = "43"
+elif sys.argv[2] == "uid": value["metadata"]["uid"] = "replaced-uid"
+elif sys.argv[2] == "generation": value["data"]["fencing-generation"] = "12"
+path.write_text(json.dumps(value))
+PY
+    if run_held_acquire >"$resume_fixture/held-acquire.out" 2>&1; then
+      [[ "$failure" = none ]] || fail "held $lease transition accepted $failure"
+    else
+      [[ "$failure" != none ]] || fail "held $lease exact-owner transition failed"
+    fi
+    python3 - "$resume_fixture" "$failure" "$resume_log" <<'PY'
+import json, pathlib, sys
+root, failure, log = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
+events = log.read_text().splitlines()
+expected = ["exclusive"]
+if failure != "exclusive": expected.append("release")
+if failure in {"none", "acquire", "acquire-ambiguous", "verify"}: expected.append("acquire-released")
+if failure in {"none", "verify"}: expected.append("verify")
+assert events == expected, (failure, events)
+record = root / "artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
+if failure == "exclusive":
+    assert not record.exists()
+else:
+    value = json.loads(record.read_text())
+    assert value["held_handoff_run_id"] == "4008" and value["held_handoff_source_sha"] == "3" * 40
+    assert value["successor_run_id"] == "901" and value["successor_source_sha"] == "2" * 40
+    release = "confirmed" if "acquire-released" in events else "unconfirmed"
+    acquire = "confirmed" if "verify" in events else "unconfirmed" if "acquire-released" in events else "not-attempted"
+    verify = "confirmed" if failure == "none" else "unconfirmed" if failure == "verify" else "not-attempted"
+    assert (value["release_result"], value["acquire_result"], value["verify_result"]) == (release, acquire, verify)
+assert not any("restore" in event or event == "acquire" for event in events)
+lock = json.loads((root / "lock.json").read_text())["data"]
+if failure == "release-ambiguous":
+    assert lock["state"] == "released" and lock["fencing-generation"] == "12"
+if failure == "acquire-ambiguous":
+    assert lock["holder"] == "live-data-901-1" and lock["fencing-generation"] == "13"
+PY
+    if [[ "$failure" = none ]]; then
+      : >"$resume_log"
+      (
+        cd "$resume_fixture"
+        RESUME_TEST_LOG="$resume_log" OCI_K8S_NAMESPACE=betstan-oci \
+        SHARED_MONGO_LOCK_TOKEN=live-data-901-1 \
+        SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
+        SHARED_MONGO_LOCK_LEASE_SECONDS=14400 SOURCE_SHA=2222222222222222222222222222222222222222 \
+          bash "$resume_fixture/abort-step.sh"
+      )
+      [[ "$(cat "$resume_log")" = $'maintenance:hold\nmaintenance:verify-quiesced\nrenew\nverify' ]] ||
+        fail "post-acquisition work failure restored runtime or used the old owner"
+      [[ ! -e "$resume_fixture/artifacts/oci-live-data-rollout/evidence/SHA256SUMS" ]] ||
+        fail "failed work falsely sealed a deploy handoff"
+    fi
+    if [[ "$failure" != exclusive ]]; then
+      journal="$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
+      before_replay="$(sha256sum "$journal")"
+      : >"$resume_log"
+      if run_held_acquire none >"$resume_fixture/replay.out" 2>&1; then
+        fail "held transfer automatically replayed $failure"
+      fi
+      [[ "$(cat "$resume_log")" = exclusive && "$(sha256sum "$journal")" = "$before_replay" ]] ||
+        fail "held transfer replay crossed CAS or rewrote observed results"
+    fi
+  done
+done
+rm "$resume_fixture/pre-runtime-lock.json"
+python3 - "$resume_fixture/lock.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1]); value = json.loads(path.read_text())
+value["data"].update(holder="live-data-4007-1", **{"source-sha": "1" * 40})
+path.write_text(json.dumps(value))
+PY
+if run_resume_fixture pre-runtime-hold >"$resume_fixture/held-root.out" 2>&1; then
+  fail "held continuation substituted the original root owner"
+fi
+[[ ! -e "$resume_fixture/pre-runtime-lock.json" ]] ||
+  fail "root-owner rejection persisted transfer authority"
+unset RESUME_HELD_RUN_ID RESUME_HELD_SOURCE_SHA RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
+echo "held_handoff_workflow_transfer_contract=PASS cases=22 root_owner=REJECTED"
 
 for literal in \
   'validate_blocked_reschedule_report' \

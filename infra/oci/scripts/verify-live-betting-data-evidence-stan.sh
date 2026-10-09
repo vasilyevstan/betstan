@@ -93,7 +93,8 @@ python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_DISK_CHECKPOINT_RUN_ID" \
   "$EXPECTED_DISK_CHECKPOINT_SHA256" \
   "$EXPECTED_DISK_CHECKPOINT_DISPOSITION" \
-  "$RESUME_BASELINE_DIR" <<'PY'
+  "$RESUME_BASELINE_DIR" \
+  "$(dirname "${BASH_SOURCE[0]}")/upstream_run_binding_stan.py" <<'PY'
 import hashlib
 import json
 import re
@@ -311,6 +312,9 @@ if resume_authority_path.exists():
         "disk_checkpoint_sha256",
         "disk_checkpoint_disposition",
     }
+    resume_v3_keys = resume_v2_keys | {
+        "held_handoff_run_id", "held_handoff_source_sha", "held_handoff_evidence_sha256",
+    }
     resume_authority = read_env(resume_authority_path)
     resume_version = resume_authority.get("schema_version")
     if resume_version == "live-betting-data-resume-v1":
@@ -318,8 +322,10 @@ if resume_authority_path.exists():
             fail("historical resume authority key set is invalid")
         if schema_version == "live-betting-v6":
             fail("v6 data evidence requires resume authority v2")
-    elif resume_version == "live-betting-data-resume-v2":
-        if set(resume_authority) != resume_v2_keys:
+    elif resume_version in {"live-betting-data-resume-v2", "live-betting-data-resume-v3"}:
+        if set(resume_authority) != (
+            resume_v3_keys if resume_version == "live-betting-data-resume-v3" else resume_v2_keys
+        ):
             fail("current resume authority key set is invalid")
         if schema_version != "live-betting-v6":
             fail("resume authority v2 requires live-betting-v6 evidence")
@@ -327,7 +333,8 @@ if resume_authority_path.exists():
             if resume_authority[key] != provenance[key]:
                 fail(f"resume authority substituted {key}")
         if (
-            resume_authority["applied_source_sha"]
+            resume_version == "live-betting-data-resume-v2"
+            and resume_authority["applied_source_sha"]
             != resume_authority["checkpoint_source_sha"]
         ):
             fail("resume authority checkpoint source differs from original applied source")
@@ -356,6 +363,45 @@ if resume_authority_path.exists():
         fail("resume authority application change scope is invalid")
     if resume_authority["status"] != "PASS":
         fail("resume authority did not complete successfully")
+    if resume_version == "live-betting-data-resume-v3":
+        import importlib.util
+        if (
+            not re.fullmatch(r"[1-9][0-9]*", resume_authority["held_handoff_run_id"])
+            or not re.fullmatch(r"[0-9a-f]{40}", resume_authority["held_handoff_source_sha"])
+            or not re.fullmatch(r"[0-9a-f]{64}", resume_authority["held_handoff_evidence_sha256"])
+            or resume_authority["held_handoff_run_id"] in {
+                expected["workflow_run_id"], resume_authority["applied_data_run_id"],
+                resume_authority["failed_deploy_run_id"],
+            }
+            or resume_authority["resume_maintenance_mode"] != "pre-runtime-hold"
+        ):
+            fail("held-handoff authority has substituted role bindings")
+        images = root / "resume-images.tsv"
+        if not images.is_file() or images.is_symlink() or hashlib.sha256(
+            images.read_bytes()
+        ).hexdigest() != resume_authority["runtime_images_sha256"]:
+            fail("held-handoff authority requires its exact runtime image evidence")
+        for name in ("held-handoff-history.json", "held-handoff-transfer.json"):
+            if name not in actual_files:
+                fail("held-handoff authority is missing checksummed transition evidence")
+        spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[15])
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        transfer = json.loads((root / "held-handoff-transfer.json").read_bytes())
+        module.validate_held_handoff_transfer(
+            transfer, resume_authority,
+            {"id": int(expected["workflow_run_id"]), "head_sha": expected["source_sha"]},
+        )
+        history = json.loads((root / "held-handoff-history.json").read_bytes())
+        if (
+            history.get("schema_version") != "live-betting-held-handoff-history-v1"
+            or history.get("held_handoff_run_id") != resume_authority["held_handoff_run_id"]
+            or history.get("held_handoff_source_sha") != resume_authority["held_handoff_source_sha"]
+            or history.get("successor_run_id") != expected["workflow_run_id"]
+            or history.get("successor_source_sha") != expected["source_sha"]
+        ):
+            fail("held-handoff history substituted an authority role")
+        module.parse_timestamp(history.get("cutoff_at"), "held-handoff history cutoff")
     if resume_version == "live-betting-data-resume-v1":
         outcome = (
             resume_authority["failed_deploy_job_conclusion"],
@@ -383,7 +429,7 @@ if resume_authority_path.exists():
             fail("retained-hold resume authority has an invalid outcome tuple")
     elif mode == "pre-runtime-hold":
         if (
-            resume_version != "live-betting-data-resume-v2"
+            resume_version not in {"live-betting-data-resume-v2", "live-betting-data-resume-v3"}
             or outcome != ("failure", "skipped", "skipped", "skipped", "skipped")
             or failed_activation_run_id != "0"
         ):
