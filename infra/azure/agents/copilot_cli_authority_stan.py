@@ -3331,7 +3331,7 @@ def validate_preflight_read_observation(
         if not window[0] <= window[1] <= window[2]:
             fail("preflight-read run timestamps are incoherent")
         windows.append(window)
-    if windows[0] != windows[1]:
+    if windows[0][:2] != windows[1][:2]:
         fail("preflight-read latest run and first attempt disagree")
     jobs = attempts[0]["jobs"]
     if (
@@ -3353,7 +3353,7 @@ def validate_preflight_read_observation(
         fail("preflight-read rollout job or assigned runner identity mismatch")
     started = parse_utc(job.get("started_at"), "job start")
     completed = parse_utc(job.get("completed_at"), "job completion")
-    if not windows[0][1] <= started <= completed <= windows[0][2]:
+    if not all(window[1] <= started <= completed <= window[2] for window in windows):
         fail("preflight-read job timestamps are outside the failed run")
     steps = job.get("steps")
     if not isinstance(steps, list) or len(steps) != len(PREFLIGHT_READ_STEPS):
