@@ -410,7 +410,8 @@ consistent but externally substituted recovery evidence is insufficient.
 
 The upstream binding language remains declarative: it can select an expected
 head SHA, expected `success`, one fixed disk-checkpoint validator, or one of
-the three fixed failure-recovery profiles. It cannot carry arbitrary commands,
+the three fixed failure-recovery profiles, plus one purpose-specific
+successful-held-handoff continuation profile. It cannot carry arbitrary commands,
 modules, plugins, or job expressions. Dispatcher, approver, and workflows read
 the protected operation environment's authoritative `OCI_RUNTIME_MODE` again
 at each prerequisite-decay boundary before intent, claim, or approval.
@@ -460,6 +461,36 @@ deployment recovery uses the checksum-sealed intent written before lock renewal
 plus the post-rehold failure lineage. Failed-activation cleanup uses a separate
 exact recovery-authority artifact rather than treating the workflow's larger
 diagnostic evidence directory as that authority.
+
+The single `oci-live-data-continue-held-handoff` operation uses the existing
+data workflow, `apply-slip-index` phase and `oci-migration` environment.
+Hash-covered `held_handoff_run_id` and `held_handoff_source_sha` identify the
+actual successful held owner, separately from the original applied-data and
+failed-deployment rollback root. Original root inputs and historical request
+hashes retain their meanings; the successor uses corrected current-master
+authority. Eligible CLI-owned gates retain existing automatic approval.
+
+Before intent/approval and in workflow preflight, this operation admits only
+the reviewed historical producer's missing `resume-images.tsv`. Complete
+first-attempt success and held-work proof, safe inventory, full checksum
+coverage, provenance, schema, journal, reports and original root evidence remain
+mandatory. The recorded image hash must match the independently validated
+original build manifest; no historical artifact is reconstructed or made
+deployable. Complete bounded history must exclude intervening deployments or
+incompatible transitions up to an immutable successor cutoff bound to native
+creation/execution evidence. Later legitimate deployment cannot invalidate
+that interval; fresh current exclusivity remains mandatory.
+
+Physical admission uses the actual held owner, not the root tuple: a fresh
+baseline, verified fence, seven quiescent writers, exact images and supporting
+state, held checkpoint and fresh owner/source-bound lock snapshot are required.
+Strict snapshot-bound own release and released-only acquisition retain the
+same UID and exact released generation, even for an expired lease; expiry
+grants no authority. These two compare-and-swap transitions are not atomic.
+Partial or ambiguous failure retains maintenance, records confirmed ownership
+honestly and permits no blind replay, fallback or false successful handoff.
+Success requires real new `apply-slip-index` execution and complete validation
+under the successor lock, never skipping work because the prior phase succeeded.
 
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this
 operation-specific check at the actual selected fresh or imported baseline.
@@ -531,6 +562,19 @@ those generations are inspection and rollback evidence only; current
 successors and deployments require v6. The cleanup command still has no
 rollback phase, so release rollback continues to use the protected baseline,
 fence, lock, and recovery model described below.
+
+Successful-held-handoff successors emit `live-betting-data-resume-v3` alongside
+v6 evidence, distinguishing the original root, previous held owner and new
+successor. `held_handoff_evidence_sha256` binds the actual prior checksum-manifest
+bytes; ownership-transition and cutoff evidence join the new checksummed bundle.
+The producer copies the actual validated `IMAGE_PROVENANCE_FILE` bytes into
+`resume-images.tsv`, verifies their authority-bound hash and includes the file
+in `SHA256SUMS`. Normal deployment accepts only the new complete artifact and
+successor holder; existing v1/v2 semantics and strict missing-file rejection
+remain unchanged. Promote compatible v3 readers and writer together. After v3
+emission, rollback must retain v3, all historical profiles and endpoint-local
+chronology or use reviewed forward correction, never rewrite old proof.
+Frozen retirement profiles are not extended for this continuation.
 
 Fresh and released-runtime data paths complete static, checkpoint, predecessor,
 baseline, and read-only access validation, then perform a fresh public
