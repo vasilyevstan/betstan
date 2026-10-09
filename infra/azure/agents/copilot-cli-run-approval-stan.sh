@@ -446,12 +446,21 @@ revalidate_upstream_bindings() {
     fail "authority record has no subject SHA for binding revalidation"
   dispatch_inputs="$(jq -c '.inputs' <<<"$record_summary")"
 
+  local continuation_args=()
+  if [[ "$operation" = "oci-live-data-continue-held-handoff" ]]; then
+    [[ "$authority_mode" = dispatch-record &&
+       "$authority_run_id" = "$RUN_ID" &&
+       "$(jq -r '.runId' <<<"$record_summary")" = "$RUN_ID" ]] ||
+      fail "held-handoff exclusion requires this exact bound dispatch authority"
+    continuation_args=(--successor-run-id "$authority_run_id")
+  fi
   "$BINDING_VALIDATOR" validate-all \
     --repository "$repository" \
     --policy-json "$policy_json" \
     --subject-sha "$subject_sha" \
     --dispatch-inputs "$dispatch_inputs" \
-    --runtime-mode "$authoritative_mode" ||
+    --runtime-mode "$authoritative_mode" \
+    ${continuation_args[@]+"${continuation_args[@]}"} ||
     fail "upstream prerequisites are no longer valid; approval refused"
 }
 

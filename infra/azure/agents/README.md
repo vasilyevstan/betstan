@@ -369,6 +369,27 @@ one-use restrictions and global unresolved-operation fences remain distinct.
 Once v4 records exist, retain compatible readers or use a reviewed forward
 correction; do not rewrite records or delete history to permit a downgrade.
 
+`oci-live-data-continue-held-handoff` continues only the qualified historical
+successful held handoff whose otherwise complete evidence omitted its image
+manifest. Its fixed confirmation is `CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA`.
+The hash-covered `held_handoff_run_id` and `held_handoff_source_sha` identify the
+actual previous lock owner; original applied-data, failed-deployment, build and
+checkpoint inputs retain their root meanings. Other operations keep their existing
+input hashes and admit only exact neutral workflow defaults `0` / `none`.
+Admission validates the known producer, native work, original evidence and complete
+bounded production history. The successor seals an authenticated native cutoff;
+later deployments outside that interval do not invalidate it.
+
+Fresh physical admission precedes snapshot-bound release and `acquire-released`.
+Checksummed transition evidence distinguishes unconfirmed and confirmed results;
+an ambiguous response or partial transfer stops without replay or fallback
+acquisition, retaining maintenance. The successor executes the full data phase and
+emits complete v6 evidence with additive `live-betting-data-resume-v3` authority,
+binding the actual old checksum-manifest bytes and all three lineage roles.
+The incomplete predecessor remains inadmissible for ordinary deployment. After
+v3 emission, rollback must retain v3, earlier evidence capabilities, and the
+existing retirement profiles, or use a reviewed forward correction.
+
 `"$request" --retire-preflight-read-only-failure` is a separate retirement-only
 exception for `oci-live-data-resume-deploy`, not its released-runtime twin or
 other phases. The original unchanged request and bound prepared intent identify

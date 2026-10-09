@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "39" ]] || {
-  echo "expected 39 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "40" ]] || {
+  echo "expected 40 protected operations, got $operation_count" >&2
   exit 1
 }
 
@@ -145,7 +145,19 @@ policies.each do |policy|
         inert_disk_defaults.all? do |name, expected|
           inputs.fetch(name).fetch("default") == expected
         end
-      unless legacy_infrastructure
+      inert_held_defaults = {
+        "held_handoff_run_id" => "0",
+        "held_handoff_source_sha" => "none",
+      }
+      legacy_live_data =
+        workflow == "oci-live-data-rollout.yml" &&
+        operation != "oci-live-data-continue-held-handoff" &&
+        (actual_inputs - policy_inputs).sort == inert_held_defaults.keys.sort &&
+        inert_held_defaults.all? do |name, expected|
+          inputs.fetch(name).fetch("default") == expected &&
+            inputs.fetch(name).fetch("type") == "string"
+        end
+      unless legacy_infrastructure || legacy_live_data
         fail("#{operation} policy inputs differ from #{workflow}")
       end
     end
@@ -200,7 +212,9 @@ end
 live_data = policies.select do |entry|
   entry["workflow"] == "oci-live-data-rollout.yml"
 end.to_h { |entry| [entry.fetch("operation"), entry] }
-live_data.reject { |operation, _| operation.include?("-resume-") }.each do |operation, policy|
+live_data.reject { |operation, _|
+  operation.include?("-resume-") || operation == "oci-live-data-continue-held-handoff"
+}.each do |operation, policy|
   unless policy.fetch("inputTemplates").slice(
       "resume_source_sha", "checkpoint_source_sha"
     ) == {
@@ -210,7 +224,9 @@ live_data.reject { |operation, _| operation.include?("-resume-") }.each do |oper
     fail("#{operation} lost current-source templates")
   end
 end
-live_data.select { |operation, _| operation.include?("-resume-") }.each do |operation, policy|
+live_data.select { |operation, _|
+  operation.include?("-resume-") || operation == "oci-live-data-continue-held-handoff"
+}.each do |operation, policy|
   if policy.fetch("inputTemplates").key?("resume_source_sha") ||
       policy.fetch("inputTemplates").key?("checkpoint_source_sha")
     fail("#{operation} blocks hash-covered ancestor resume inputs")

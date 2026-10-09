@@ -66,6 +66,16 @@ on:
         required: true
         default: "0"
         type: string
+      held_handoff_run_id:
+        description: Exact successful held handoff to continue, or 0 for every other operation
+        required: true
+        default: "0"
+        type: string
+      held_handoff_source_sha:
+        description: Source of that successful held handoff, or none
+        required: true
+        default: none
+        type: string
       confirmation:
         description: Type the exact confirmation phrase for the selected phase
         required: true
@@ -100,6 +110,8 @@ jobs:
       FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}
       FAILED_ACTIVATION_RUN_ID: ${{ inputs.failed_activation_run_id }}
       FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}
+      HELD_HANDOFF_RUN_ID: ${{ inputs.held_handoff_run_id }}
+      HELD_HANDOFF_SOURCE_SHA: ${{ inputs.held_handoff_source_sha }}
       CONFIRMATION: ${{ inputs.confirmation }}
       DISPATCH_INPUTS: ${{ toJSON(inputs) }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
@@ -184,6 +196,16 @@ jobs:
           else
             [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]]
           fi
+          if [ "$CONFIRMATION" = "CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA" ]; then
+            [[ "$HELD_HANDOFF_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$HELD_HANDOFF_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [ "$PHASE" = "apply-slip-index" ]
+            [ "$FAILED_DEPLOY_RUN_ID" != "0" ]
+            [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
+          else
+            [ "$HELD_HANDOFF_RUN_ID" = "0" ]
+            [ "$HELD_HANDOFF_SOURCE_SHA" = "none" ]
+          fi
           case "$PHASE" in
             dry-run)
               [ "$CONFIRMATION" = "DRY RUN LIVE DATA EXACT SHA" ]
@@ -222,6 +244,8 @@ jobs:
                 protected_operation=oci-live-data-apply-slip-index
               else
                 case "$CONFIRMATION" in
+                  "CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA")
+                    protected_operation=oci-live-data-continue-held-handoff ;;
                   "RESUME APPLIED LIVE DATA EXACT SHA")
                     protected_operation=oci-live-data-resume-deploy ;;
                   "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA")
@@ -250,6 +274,13 @@ jobs:
             ./infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh \
               get "$protected_operation"
           )"
+          continuation_args=()
+          if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+            continuation_args=(
+              --successor-run-id "$GITHUB_RUN_ID"
+              --held-history-file artifacts/oci-live-data-rollout/evidence/held-handoff-history.json
+            )
+          fi
           ./infra/oci/scripts/upstream_run_binding_stan.py validate-all \
             --repository "$REPOSITORY" \
             --policy-json "$policy_json" \
@@ -257,7 +288,8 @@ jobs:
             --dispatch-inputs "$DISPATCH_INPUTS" \
             --runtime-mode "$OCI_RUNTIME_MODE" \
             --result-json "$RUNNER_TEMP/live-data-upstream-result.json" \
-            --baseline-dir artifacts/oci-data-baseline-before
+            --baseline-dir artifacts/oci-data-baseline-before \
+            "${continuation_args[@]}"
 
           validate_run() {
             local workflow_file="$1"
@@ -353,8 +385,10 @@ jobs:
               validate_run \
                 oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID" \
                 workflow_dispatch "$prerequisite_source_sha" failure
-              jq -er '
-                .failed_deploy_run_id |
+              result_binding=failed_deploy_run_id
+              [ "$HELD_HANDOFF_RUN_ID" = "0" ] || result_binding=held_handoff_run_id
+              jq -er --arg binding "$result_binding" '
+                .[$binding] |
                 select(type == "object") |
                 to_entries[] | "\(.key)=\(.value)"
               ' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"
@@ -739,8 +773,9 @@ jobs:
             set_output \
               resume_applied_source_sha \
               "$(resolution_value applied_source_sha)"
-            [ "$(resolution_value applied_source_sha)" = \
-              "$CHECKPOINT_SOURCE_SHA" ]
+            if [ "$HELD_HANDOFF_RUN_ID" = "0" ]; then
+              [ "$(resolution_value applied_source_sha)" = "$CHECKPOINT_SOURCE_SHA" ]
+            fi
             [ "$(resolution_value checkpoint_source_sha)" = \
               "$CHECKPOINT_SOURCE_SHA" ]
             [ "$(resolution_value disk_checkpoint_run_id)" = \
@@ -1075,9 +1110,15 @@ jobs:
 
           if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+            previous_holder_run="$PREREQUISITE_RUN_ID"
+            previous_holder_source="$RESUME_SOURCE_SHA"
+            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+              previous_holder_run="$HELD_HANDOFF_RUN_ID"
+              previous_holder_source="$HELD_HANDOFF_SOURCE_SHA"
+            fi
             python3 - "$RUNNER_TEMP/pre-runtime-lock.json" \
-              "$OCI_K8S_NAMESPACE" "$PREREQUISITE_RUN_ID" \
-              "$RESUME_SOURCE_SHA" <<'PY'
+              "$OCI_K8S_NAMESPACE" "$previous_holder_run" \
+              "$previous_holder_source" <<'PY'
           import json, os, re, subprocess, sys, time
           def require(value):
               if not value:
@@ -1109,12 +1150,16 @@ jobs:
           fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
           with os.fdopen(fd, "w") as output:
               json.dump(lock, output)
+              output.flush()
+              os.fsync(output.fileno())
           PY
           fi
 
           mkdir -p artifacts/oci-live-data-rollout/evidence
+          resume_schema=live-betting-data-resume-v2
+          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v3
           cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
-          schema_version=live-betting-data-resume-v2
+          schema_version=$resume_schema
           applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
           applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA
           failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
@@ -1135,6 +1180,18 @@ jobs:
           application_change_scope=github-infra-docs-only
           status=PASS
           EOF
+          if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+            held_evidence_sha="$(
+              jq -er '.held_handoff_run_id.held_handoff_evidence_sha256 |
+                select(type == "string" and test("^[0-9a-f]{64}$"))' \
+                "$RUNNER_TEMP/live-data-upstream-result.json"
+            )"
+            {
+              printf 'held_handoff_run_id=%s\n' "$HELD_HANDOFF_RUN_ID"
+              printf 'held_handoff_source_sha=%s\n' "$HELD_HANDOFF_SOURCE_SHA"
+              printf 'held_handoff_evidence_sha256=%s\n' "$held_evidence_sha"
+            } >>artifacts/oci-live-data-rollout/evidence/resume-authority.env
+          fi
 
       - name: Capture and validate pre-mutation rollback baseline
         env:
@@ -1212,14 +1269,37 @@ jobs:
 
       - name: Acquire database operation lock
         id: operation_lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EXCLUDE_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          record_transfer() {
+            [ "$HELD_HANDOFF_RUN_ID" != "0" ] || return 0
+            python3 - \
+              artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json \
+              "$RUNNER_TEMP/pre-runtime-lock.json" \
+              "$HELD_HANDOFF_RUN_ID" "$HELD_HANDOFF_SOURCE_SHA" \
+              "$GITHUB_RUN_ID" "$SOURCE_SHA" "$1" "$2" <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location(
+              "upstream_binding", "infra/oci/scripts/upstream_run_binding_stan.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.record_held_handoff_transfer(*sys.argv[1:])
+          PY
+          }
           if [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = "pre-runtime-hold" ]; then
             snapshot="$RUNNER_TEMP/pre-runtime-lock.json"
             [ -f "$snapshot" ] && [ ! -L "$snapshot" ]
             expected_uid="$(jq -er '.metadata.uid' "$snapshot")"
             observed_generation="$(jq -er '.data["fencing-generation"]' "$snapshot")"
             released_generation="$((observed_generation + 1))"
+            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+              ./infra/azure/agents/production-run-exclusivity-stan.sh
+              record_transfer release unconfirmed
+            fi
             release_result="$(
               NAMESPACE="$OCI_K8S_NAMESPACE" \
               LOCK_TOKEN="$(jq -er '.data.holder' "$snapshot")" \
@@ -1233,19 +1313,31 @@ jobs:
             )" || exit 1
             [[ "$release_result" == "shared_mongo_lock=release status=PASS "* ]] || exit 1
             [[ "$release_result" == *" strict_snapshot=true fencing_generation=$released_generation" ]] || exit 1
-            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            record_transfer release confirmed
+            record_transfer acquire unconfirmed
+            acquisition_result="$(
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
             OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
             SOURCE_SHA="$SOURCE_SHA" \
             LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
             EXPECTED_LOCK_UID="$expected_uid" \
             EXPECTED_FENCING_GENERATION="$released_generation" \
-              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire-released || exit 1
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire-released
+            )" || exit 1
+            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+              [[ "$acquisition_result" == "shared_mongo_lock=acquire-released status=PASS "* ]] || exit 1
+              [[ "$acquisition_result" == *" fencing_generation=$((released_generation + 1))" ]] || exit 1
+            fi
+            printf '%s\n' "$acquisition_result"
+            record_transfer acquire confirmed
+            record_transfer verify unconfirmed
             NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
             OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
             SOURCE_SHA="$SOURCE_SHA" \
               ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify || exit 1
+            record_transfer verify confirmed
             exit 0
           fi
           if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
@@ -1504,6 +1596,7 @@ jobs:
           path: |
             artifacts/oci-data-baseline-before
             artifacts/oci-data-baseline-after
+            ${{ inputs.held_handoff_run_id != '0' && format('{0}/pre-runtime-lock.json', runner.temp) || '' }}
           if-no-files-found: ignore
           retention-days: 30
 
