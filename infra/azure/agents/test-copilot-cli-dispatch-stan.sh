@@ -3012,10 +3012,19 @@ preflight_diagnostic_blobs = {
     **preflight_blobs,
     "infra/oci/scripts/upstream_run_binding_stan.py": "972562e235c3f3c7a6c08c88ecd97ec7bb582923",
 }
+preflight_archive_blobs = {
+    **preflight_diagnostic_blobs,
+    "infra/oci/scripts/upstream_run_binding_stan.py": "59dcc0ae622545e1172e2ae8fd11222cdbf2c8db",
+}
 assert a.PREFLIGHT_READ_BLOBS == preflight_blobs
 assert a.PREFLIGHT_READ_DIAGNOSTIC_BLOBS == preflight_diagnostic_blobs
-assert a.PREFLIGHT_READ_PROFILES == (preflight_blobs, preflight_diagnostic_blobs)
+assert a.PREFLIGHT_READ_ARCHIVE_BLOBS == preflight_archive_blobs
+assert a.PREFLIGHT_READ_PROFILES == (preflight_blobs, preflight_diagnostic_blobs, preflight_archive_blobs)
 assert {path for path in preflight_blobs if preflight_blobs[path] != preflight_diagnostic_blobs[path]} == {
+    "infra/oci/scripts/upstream_run_binding_stan.py",
+}
+assert {path for path in preflight_diagnostic_blobs
+        if preflight_diagnostic_blobs[path] != preflight_archive_blobs[path]} == {
     "infra/oci/scripts/upstream_run_binding_stan.py",
 }
 v4_directory, v4_run = case / "authority", before["runId"]
@@ -3039,7 +3048,7 @@ def issue_preflight_fixture(d, transport, run_id):
                      "run_id": run_id, "run_json": d / "issued-run.json"})
 
 
-def preflight_fixture(profile=preflight_diagnostic_blobs):
+def preflight_fixture(profile=preflight_archive_blobs):
     d = setup()
     options = local_prepare(d)
     snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
@@ -3126,7 +3135,7 @@ historical_capture_bytes = historical_capture.read_bytes()
 context = json.loads(invoke("preflight-read-context", {
     **cleanup_options(case), "policy_json": json.dumps(policy),
 }))
-assert context["closureProfile"] == preflight_diagnostic_blobs
+assert context["closureProfile"] == preflight_archive_blobs
 options, common = preflight_retire_options(case)
 error = invoke("retire-preflight-read-only-failure", options, ok=False)
 assert "dependency closure differs" in error
@@ -3180,6 +3189,16 @@ assert historical_capture.read_bytes() == historical_capture_bytes
 assert historical_archive.read_bytes() == archive_bytes
 
 profile_negatives = []
+for historical_profile in (preflight_blobs, preflight_diagnostic_blobs, preflight_archive_blobs):
+    for current_profile in (preflight_blobs, preflight_diagnostic_blobs, preflight_archive_blobs):
+        if historical_profile == current_profile:
+            continue
+        mixed = copy.deepcopy(historical_observation)
+        for side, profile in (("historical", historical_profile), ("current", current_profile)):
+            mixed["closure"][side] = {
+                path: {"local": sha, "github": sha} for path, sha in profile.items()
+            }
+        profile_negatives.append(mixed)
 diagnostic_files = {
     path: {"local": sha, "github": sha} for path, sha in preflight_diagnostic_blobs.items()
 }
@@ -3218,7 +3237,7 @@ for mutate in (
 write(historical_record_file, historical_record)
 assert historical_record_file.read_bytes() == original_bytes
 assert a.retired_bound_intent(case / "authority", historical_intent)
-print("preflight_read_original_v5_digest_spent_linkage_and_diagnostic_only_admission=PASS", flush=True)
+print("preflight_read_original_v5_digest_spent_linkage_and_archive_only_admission=PASS", flush=True)
 
 # Keep an independently encoded, equal-window diagnostic-profile v5 readable too.
 diagnostic_record = copy.deepcopy(historical_record)
@@ -3240,6 +3259,15 @@ assert historical_record_file.read_bytes() == diagnostic_bytes
 assert historical_archive.read_bytes() == archive_bytes
 write(historical_record_file, historical_record)
 assert historical_record_file.read_bytes() == original_bytes
+
+diagnostic_case, diagnostic_before, _ = preflight_fixture(preflight_diagnostic_blobs)
+options, common = preflight_retire_options(diagnostic_case)
+error = invoke("retire-preflight-read-only-failure", options, ok=False)
+assert "dependency closure differs" in error
+assert a.load_record(diagnostic_case / "authority", diagnostic_before["runId"]) == diagnostic_before
+invoke("release-lock", common)
+run(diagnostic_case, "--retire-preflight-read-only-failure", ok=False)
+assert a.load_record(diagnostic_case / "authority", diagnostic_before["runId"]) == diagnostic_before
 
 d, original, observation = preflight_fixture()
 observation["run"]["updated_at"] = "2026-01-01T00:00:50Z"
@@ -3427,6 +3455,12 @@ for mutate in (
 ):
     bad = copy.deepcopy(observation); mutate(bad); bad_observations.append(bad)
 for side in ("historical", "current"):
+    for old_profile in (preflight_blobs, preflight_diagnostic_blobs):
+        for origin in ("local", "github"):
+            bad = copy.deepcopy(observation)
+            bad["closure"][side]["infra/oci/scripts/upstream_run_binding_stan.py"][origin] = \
+                old_profile["infra/oci/scripts/upstream_run_binding_stan.py"]
+            bad_observations.append(bad)
     for path in preflight_blobs:
         for origin in ("local", "github"):
             bad = copy.deepcopy(observation); bad["closure"][side][path][origin] = "e" * 40

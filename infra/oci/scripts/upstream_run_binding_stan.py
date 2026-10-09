@@ -403,6 +403,8 @@ def gh_api_bytes(path):
         request_kind = "artifact-zip"
     elif re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/jobs/[1-9][0-9]*/logs", path):
         request_kind = "job-log"
+    elif re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*/attempts/1/logs", path):
+        request_kind = "attempt-log-zip"
     else:
         request_kind = "unrecognized"
     for attempt in range(1, ARTIFACT_DOWNLOAD_ATTEMPTS + 1):
@@ -752,12 +754,20 @@ def artifact_files(
     archive = gh_api_bytes(
         f"repos/{repository}/actions/artifacts/{artifact_id}/zip"
     )
+    return zip_files(archive, label, allowed_empty_suffixes=allowed_empty_suffixes)
+
+
+def zip_files(
+    archive, label, *, allowed_empty_suffixes=frozenset(), require_original_names=False,
+):
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             infos = bundle.infolist()
             files = {}
             total_size = 0
             for info in infos:
+                if require_original_names and info.orig_filename != info.filename:
+                    fail(f"{label} native log archive contains a modified entry name")
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == stat.S_IFLNK:
                     fail(f"{label} artifact contains a symlink")
@@ -1824,10 +1834,18 @@ def failed_deploy_native_inputs(repository, run_id, source_sha, label, *, resume
     end = parse_timestamp(step[0].get("completed_at"), label)
     if end < start:
         fail(f"{label} native provenance step chronology is invalid")
+    files = zip_files(
+        gh_api_bytes(f"repos/{repository}/actions/runs/{run_id}/attempts/1/logs"),
+        label, require_original_names=True,
+    )
+    matches = [
+        raw for name, raw in files.items()
+        if re.fullmatch(r"-?[0-9]+_" + re.escape(deploy["name"]) + r"\.txt", name)
+    ]
+    if len(matches) != 1:
+        fail(f"{label} native full-job log is absent or ambiguous")
     try:
-        raw = gh_api_bytes(
-            f"repos/{repository}/actions/jobs/{job_id}/logs"
-        ).decode("utf-8")
+        raw = matches[0].decode("utf-8")
     except UnicodeDecodeError:
         fail(f"{label} native log encoding is invalid")
     lines = []
