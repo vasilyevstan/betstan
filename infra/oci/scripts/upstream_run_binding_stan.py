@@ -2512,6 +2512,10 @@ def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=
         if history != result["heldHistory"]:
             fail("held-handoff successor history differs from its immutable native cutoff")
         validate_held_handoff_transfer(transfer, authority, current)
+        if authority["baseline_sha256"] != validate_checksum_manifest(
+            result["baselineFiles"], "held-handoff original baseline",
+        ):
+            fail("held-handoff successor substituted its authenticated original baseline")
         return authority["applied_data_run_id"], authority["applied_source_sha"]
     if authority["resume_maintenance_mode"] != "pre-runtime-hold":
         fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")

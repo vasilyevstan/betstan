@@ -876,6 +876,7 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
     }
     successor_files.update({
         "resume-authority.env": "".join(f"{k}={v}\n" for k, v in successor_authority.items()).encode(),
+        "provenance.env": "".join(f"{k}={v}\n" for k, v in successor_evidence.items()).encode(),
         "resume-images.tsv": held_images,
         "held-handoff-history.json": json.dumps(held_history).encode(),
         "held-handoff-transfer.json": json.dumps(transfer).encode(),
@@ -901,6 +902,37 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
         reject(consume_successor)
         held_history["cutoff_at"] = proof["cutoff_at"]
         assert consume_successor() == ("23", source)
+        def ordinary_successor():
+            return m.validate_live_predecessor_profile(
+                "example/repo",
+                {"workflow": "oci-live-data-rollout.yml", "input": "data_run_id",
+                 "artifactContent": {"equals": {"schema_version": "live-betting-v6", "phase": "apply-slip-index"}}},
+                source, "40", dispatch, "oke",
+            )
+        ordinary_successor()
+        original_successor_files = copy.deepcopy(successor_files)
+        original_baseline_sha = successor_evidence["baseline_sha256"]
+        substituted_baseline_sha = m.validate_checksum_manifest(
+            sealed("different-before", b"substituted before baseline"), "substituted baseline fixture")
+        assert substituted_baseline_sha != original_baseline_sha
+        successor_evidence["baseline_sha256"] = substituted_baseline_sha
+        successor_files["provenance.env"] = "".join(
+            f"{k}={v}\n" for k, v in successor_evidence.items()).encode()
+        successor_files["resume-authority.env"] = "".join(
+            f"{k}={v}\n" for k, v in
+            dict(successor_authority, baseline_sha256=substituted_baseline_sha).items()).encode()
+        successor_files["SHA256SUMS"] = "".join(
+            f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
+            for name, raw in sorted(successor_files.items()) if name != "SHA256SUMS").encode()
+        m.validate_checksum_manifest(successor_files, "resealed successor fixture")
+        assert m.parse_resume_authority(
+            successor_files, successor_evidence, "resealed successor fixture"
+        )["baseline_sha256"] == substituted_baseline_sha
+        reject(ordinary_successor)
+        successor_evidence["baseline_sha256"] = original_baseline_sha
+        successor_files = original_successor_files
+        ordinary_successor()
+        print("PASS v3 upstream rejects internally resealed original-baseline substitution")
 print("PASS sole historical omission eligible only for continuation; v3 native roles and immutable history")
 PY
 ok "pre-runtime strict inventory, native private tuple, and original before-baseline"
