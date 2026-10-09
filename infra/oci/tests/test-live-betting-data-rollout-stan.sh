@@ -793,6 +793,8 @@ job_sequence_summary() {
 
 pending_output="$work_dir/pending"
 run_phase dry-run pending 4001 "$pending_output"
+[[ ! -e "$pending_output/resume-images.tsv" ]] ||
+  fail "non-resume dry-run unexpectedly packaged resume images"
 [[ "$(job_sequence_summary)" == \
   "reschedule:dry-run backoffice-cleanup:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run index:dry-run" ]] ||
   fail "dry-run did not sequence reschedule, cleanup, compatibility, and index preflights"
@@ -2150,7 +2152,18 @@ fi
 original_applied_source=2222222222222222222222222222222222222222
 chained_baseline="$work_dir/chained-baseline"
 chained_baseline_sha="$(make_resume_baseline "$chained_baseline" 3999 0)"
-chained_output="$work_dir/chained"
+evidence_upload_path="$(
+  ruby -ryaml - "$WORKFLOW" <<'RUBY'
+steps = YAML.load_file(ARGV.fetch(0)).fetch("jobs").fetch("rollout").fetch("steps")
+producer = steps.find { |step| step["name"] == "Execute exact-digest live data phase" }
+upload = steps.find { |step| step["name"] == "Upload exact sanitized data evidence" }
+path = upload.fetch("with").fetch("path")
+abort "producer and upload evidence paths differ" unless producer.fetch("env").fetch("OUTPUT_DIR") == path
+puts path
+RUBY
+)"
+chained_output="$work_dir/chained/$evidence_upload_path"
+chained_images_sha="$(shasum -a 256 "$images_file" | awk '{print $1}')"
 mkdir -p "$chained_output"
 cat >"$chained_output/resume-authority.env" <<EOF
 schema_version=live-betting-data-resume-v2
@@ -2166,7 +2179,7 @@ rehold_step_conclusion=skipped
 failed_activation_run_id=0
 current_source_sha=$SOURCE_SHA
 baseline_sha256=$chained_baseline_sha
-runtime_images_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+runtime_images_sha256=$chained_images_sha
 checkpoint_source_sha=$original_applied_source
 disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
 disk_checkpoint_sha256=$DISK_CHECKPOINT_SHA256
@@ -2176,6 +2189,121 @@ status=PASS
 EOF
 run_phase apply-slip-index final 4008 "$chained_output" 0 none \
   "$chained_baseline_sha" "$original_applied_source"
+PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+  "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" \
+  "$chained_output" "$images_file" "$final_output" <<'PY'
+import contextlib
+import hashlib
+import importlib.util
+import io
+from pathlib import Path
+import sys
+import zipfile
+
+spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
+consumer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(consumer)
+root, images, normal = map(Path, sys.argv[2:])
+assert not images.is_relative_to(root)
+assert not (normal / "resume-images.tsv").exists()
+bundle_bytes = io.BytesIO()
+with zipfile.ZipFile(bundle_bytes, "w") as bundle:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            bundle.writestr(path.relative_to(root).as_posix(), path.read_bytes())
+files = consumer.zip_files(bundle_bytes.getvalue(), "producer upload")
+consumer.validate_checksum_manifest(files, "producer upload")
+predecessor = consumer.parse_env(files["provenance.env"], "producer provenance")
+authority = consumer.parse_resume_authority(files, predecessor, "producer upload")
+assert [name for name in files if name.split("/")[-1] == "resume-images.tsv"] == ["resume-images.tsv"]
+assert files["resume-images.tsv"] == images.read_bytes()
+digest = hashlib.sha256(files["resume-images.tsv"]).hexdigest()
+assert authority["runtime_images_sha256"] == digest
+assert files["SHA256SUMS"].decode().splitlines().count(f"{digest}  resume-images.tsv") == 1
+for mutation in ("missing-images", "tampered-images", "missing-manifest", "tampered-manifest",
+                 "checksum-omission", "authority-hash"):
+    changed = dict(files)
+    if mutation == "missing-images":
+        changed.pop("resume-images.tsv")
+    elif mutation == "tampered-images":
+        changed["resume-images.tsv"] += b"\n"
+    elif mutation == "missing-manifest":
+        changed.pop("SHA256SUMS")
+    elif mutation == "tampered-manifest":
+        changed["SHA256SUMS"] = b"0" * 64 + changed["SHA256SUMS"][64:]
+    elif mutation == "checksum-omission":
+        changed["SHA256SUMS"] = b"".join(
+            line for line in changed["SHA256SUMS"].splitlines(keepends=True)
+            if not line.endswith(b"  resume-images.tsv\n")
+        )
+    else:
+        changed["resume-authority.env"] = changed["resume-authority.env"].replace(
+            f"runtime_images_sha256={digest}".encode(), b"runtime_images_sha256=" + b"0" * 64,
+        )
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            consumer.validate_checksum_manifest(changed, "producer upload")
+            consumer.parse_resume_authority(changed, predecessor, "producer upload")
+        except SystemExit as error:
+            assert error.code == 1
+        else:
+            raise AssertionError(f"invalid producer artifact accepted: {mutation}")
+    if mutation in {"tampered-images", "authority-hash"}:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                consumer.parse_resume_authority(changed, predecessor, "producer upload")
+            except SystemExit as error:
+                assert error.code == 1
+            else:
+                raise AssertionError("resume authority accepted substituted image bytes")
+print("resume_producer_uploaded_artifact_contract=PASS")
+PY
+valid_images_file="$images_file"
+for mutation in missing-images tampered-images authority-hash conflicting-destination; do
+  invalid_output="$work_dir/resume-packaging-$mutation/evidence"
+  mkdir -p "$invalid_output"
+  cp "$chained_output/resume-authority.env" "$invalid_output/resume-authority.env"
+  expected_error="resume evidence image provenance does not match runtime_images_sha256"
+  case "$mutation" in
+    missing-images)
+      images_file="$work_dir/resume-packaging-$mutation/absent.tsv"
+      expected_error="IMAGE_PROVENANCE_FILE not found"
+      ;;
+    tampered-images)
+      images_file="$work_dir/resume-packaging-$mutation/images.tsv"
+      cp "$valid_images_file" "$images_file"
+      printf '\n' >>"$images_file"
+      ;;
+    authority-hash)
+      sed -i.bak \
+        "s/^runtime_images_sha256=$chained_images_sha$/runtime_images_sha256=$(printf '%064d' 0)/" \
+        "$invalid_output/resume-authority.env"
+      rm "$invalid_output/resume-authority.env.bak"
+      ;;
+    conflicting-destination)
+      printf 'conflicting bytes\n' >"$invalid_output/resume-images.tsv"
+      expected_error="resume evidence has a conflicting resume-images.tsv destination"
+      ;;
+  esac
+  authority_before="$(shasum -a 256 "$invalid_output/resume-authority.env" | awk '{print $1}')"
+  error_file="$work_dir/resume-packaging-$mutation.log"
+  if run_phase apply-slip-index final 4008 "$invalid_output" 0 none \
+    "$chained_baseline_sha" "$original_applied_source" 2>"$error_file"; then
+    fail "producer accepted invalid resume packaging: $mutation"
+  fi
+  grep -Fq "$expected_error" "$error_file" ||
+    fail "producer rejected $mutation for an unrelated reason"
+  [[ ! -e "$invalid_output/SHA256SUMS" ]] ||
+    fail "producer sealed invalid resume packaging: $mutation"
+  [[ "$(shasum -a 256 "$invalid_output/resume-authority.env" | awk '{print $1}')" == "$authority_before" ]] ||
+    fail "producer rewrote resume authority to fit image bytes"
+  if [[ "$mutation" == conflicting-destination ]]; then
+    [[ "$(cat "$invalid_output/resume-images.tsv")" == "conflicting bytes" ]] ||
+      fail "producer overwrote conflicting resume images"
+  fi
+  images_file="$valid_images_file"
+done
+echo "resume_producer_packaging_rejections=PASS cases=4"
 chained_resolution="$(
   EVIDENCE_DIR="$chained_output" \
   EXPECTED_SOURCE_SHA="$SOURCE_SHA" \

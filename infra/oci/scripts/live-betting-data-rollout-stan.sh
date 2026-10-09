@@ -1312,12 +1312,37 @@ run_backoffice_cleanup() {
 }
 
 write_evidence_manifest() {
-  python3 - "$OUTPUT_DIR" <<'PY'
+  python3 - "$OUTPUT_DIR" "$IMAGE_PROVENANCE_FILE" <<'PY'
 import hashlib
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+authority = root / "resume-authority.env"
+if authority.exists():
+    try:
+        expected = [
+            line.split("=", 1)[1] for line in authority.read_text(encoding="utf-8").splitlines()
+            if line.startswith("runtime_images_sha256=")
+        ]
+    except (OSError, UnicodeError):
+        raise SystemExit("resume evidence authority is unreadable")
+    try:
+        images = Path(sys.argv[2]).read_bytes()
+    except OSError:
+        raise SystemExit("resume evidence IMAGE_PROVENANCE_FILE is missing or unreadable")
+    if len(expected) != 1 or hashlib.sha256(images).hexdigest() != expected[0]:
+        raise SystemExit("resume evidence image provenance does not match runtime_images_sha256")
+    destination = root / "resume-images.tsv"
+    try:
+        if destination.exists() or destination.is_symlink():
+            if destination.is_symlink() or not destination.is_file() or destination.read_bytes() != images:
+                raise SystemExit("resume evidence has a conflicting resume-images.tsv destination")
+        else:
+            with destination.open("xb") as output:
+                output.write(images)
+    except OSError:
+        raise SystemExit("resume evidence cannot package resume-images.tsv")
 manifest = root / "SHA256SUMS"
 rows = []
 for path in sorted(root.rglob("*")):
