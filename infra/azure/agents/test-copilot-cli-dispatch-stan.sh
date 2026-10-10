@@ -1637,7 +1637,7 @@ provider = temporary / "transition-provider.py"
 # This provider has exactly one permitted mutation: the dispatcher's existing
 # captured workflow-run command. Every other unexpected call is a test failure.
 provider.write_text(r'''
-import base64, fcntl, hashlib, io, json, os, sys, zipfile
+import base64, fcntl, hashlib, io, json, os, subprocess, sys, zipfile
 from pathlib import Path
 d = Path(os.environ["TRANSITION_CASE"])
 lock = open(d / "provider.lock", "a")
@@ -1691,6 +1691,41 @@ def upstream_run(run_id, workflow_id, path, event, title, conclusion="success"):
         "created_at": f"2026-01-01T00:{run_id:02d}:00Z",
         "updated_at": f"2026-01-01T00:{run_id:02d}:30Z",
     }
+if args[0] == "upstream-boundary":
+    assert f.get("boundContext")
+    assert args[1] == "validate-all"
+    parsed = dict(zip(args[2::2], args[3::2]))
+    assert json.loads(parsed["--policy-json"])["operation"] == "oci-live-data-continue-held-handoff"
+    assert json.loads(parsed["--dispatch-inputs"]) == f["inputs"]
+    authority_file = d / "authority" / f'{f["newRun"]}.json'
+    successor = parsed.get("--successor-run-id")
+    with (d / "bound-context-calls").open("a") as calls:
+        calls.write(json.dumps({"successor": successor, "bound": authority_file.exists()}) + "\n")
+    if authority_file.exists():
+        record = json.loads(authority_file.read_text())
+        assert record["state"] == "claimed" and record["runId"] == f["newRun"]
+        assert successor == str(f["newRun"]), "post-bind prerequisite validation omitted the verified successor"
+    else:
+        assert successor is None, "preparation or pre-provider validation received successor context"
+    sys.exit()
+if args[0] == "authority-boundary":
+    assert f.get("boundContext") and args[1] in {"verify", "issue"}
+    if args[1] == "issue" and f.get("pauseIssue"):
+        print("fixture pause at the issue boundary", file=sys.stderr)
+        sys.exit(1)
+    if args[1] == "verify":
+        reads = int((d / "verify-count").read_text()) + 1 if (d / "verify-count").exists() else 1
+        save("verify-count", reads)
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    result = subprocess.run([os.environ["TRANSITION_HELPER"], *args[1:]], capture_output=True, text=True)
+    output_text = result.stdout
+    if args[1] == "verify" and result.returncode == 0 and reads == f.get("wrongSummaryRead"):
+        summary = json.loads(output_text)
+        summary["runId"] = f["newRun"] + 1
+        output_text = json.dumps(summary) + "\n"
+    sys.stdout.write(output_text)
+    sys.stderr.write(result.stderr)
+    sys.exit(result.returncode)
 if args[:2] == ["repo", "view"]:
     print(f["repository"]); sys.exit()
 if args[:2] == ["workflow", "run"]:
@@ -1985,7 +2020,7 @@ elif endpoint.startswith("actions/runs/"):
             if mutation == "other": run["status"] = "in_progress"
         elif run_id == f["newRun"]:
             run = identified({**f["runs"][0], "head_sha": f["master"], "status": "waiting",
-                              "display_title": f'oci-live-data dry-run {f["master"]}'}, run_id)
+                              "display_title": f'oci-live-data {f["inputs"]["phase"]} {f["master"]}'}, run_id)
         else:
             run = identified(f["runs"][0], run_id)
             if active:
@@ -2028,6 +2063,21 @@ provider_wrapper.write_text(
     '#!/usr/bin/env bash\nexec python3 "$TRANSITION_PROVIDER" "$@"\n'
 )
 provider_wrapper.chmod(0o700)
+bound_context_env = temporary / "bound-context.env"
+# Only the unrelated root-evidence collaborator is substituted. The real
+# dispatcher, policy, prepared seals, capture, claim, verification and issue run.
+# Portable native-history acceptance is exercised by the upstream suite itself.
+bound_context_env.write_text('''
+function __UPSTREAM__() { python3 "$TRANSITION_PROVIDER" upstream-boundary "$@"; }
+function __AUTHORITY__() {
+  case "$1" in
+    verify|issue) python3 "$TRANSITION_PROVIDER" authority-boundary "$@" ;;
+    *) command "__AUTHORITY__" "$@" ;;
+  esac
+}
+'''.replace("__UPSTREAM__", str(root / "infra/oci/scripts/upstream_run_binding_stan.py"))
+   .replace("__AUTHORITY__", str(helper)))
+bound_context_env.chmod(0o600)
 stub = r'''
 gh() { python3 "$TRANSITION_PROVIDER" "$@"; }
 git() {
@@ -2107,8 +2157,13 @@ def run(d, action, *, state="disabled_manually", drift="", at=1, capture="", ok=
            "COPILOT_CLI_AUTHORITY_DIR": str(d / "authority"),
            "COPILOT_CLI_MATERIALIZATION_ATTEMPTS": "2",
            "COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS": "0"}
+    fixture = json.loads((d / "fixture.json").read_text())
+    if fixture.get("boundContext"):
+        env.update(BASH_ENV=str(bound_context_env), TRANSITION_HELPER=str(helper),
+                   GITHUB_RUN_ID=str(fixture["newRun"] + 500), GITHUB_RUN_ATTEMPT="9")
+    actions = list(action) if isinstance(action, tuple) else [action]
     result = subprocess.run(["bash", "-c", stub, "fixture", str(dispatcher),
-                             str(d / "request.json"), action],
+                             str(d / "request.json"), *actions],
                             env=env, text=True, capture_output=True, timeout=60)
     if ok is not None:
         assert (result.returncode == 0) == ok, (action, drift, at, result.stdout, result.stderr)
@@ -2210,6 +2265,61 @@ for action in ("--dispatch-prepared", "--discard-prepared", "--prepare-disabled-
     run(d, action, state="active" if action == "--dispatch-prepared" else "disabled_manually", ok=False)
 assert (d / "dispatches").read_text() == "1", "post-CAS replay"
 run(d, "--resume-captured", state="active")
+
+saved_request = request
+continuation_policy = json.loads(subprocess.check_output([
+    policy_script, "get", "oci-live-data-continue-held-handoff",
+]))
+request = {
+    **copy.deepcopy(saved_request), "operation": continuation_policy["operation"],
+    "inputs": {
+        **saved_request["inputs"], **continuation_policy["fixedInputs"],
+        "prerequisite_run_id": "46", "failed_deploy_run_id": "47",
+        "held_handoff_run_id": "48", "held_handoff_source_sha": old,
+    },
+}
+for resume in ("", "--resume-captured", "--resume-run"):
+    d = setup()
+    fixture = json.loads((d / "fixture.json").read_text())
+    fixture.update(boundContext=True, pauseIssue=bool(resume))
+    write(d / "fixture.json", fixture)
+    prepared = prepare(d)
+    result = run(d, "--dispatch-prepared", state="active", ok=not bool(resume))
+    record_path = d / "authority" / f'{fixture["newRun"]}.json'
+    record = json.loads(record_path.read_text())
+    assert record["state"] == ("claimed" if resume else "issued")
+    assert intent(d)["state"] == "bound" and intent(d)["preparedSeal"] == prepared["preparedSeal"]
+    if resume:
+        if resume == "--resume-run":
+            run(d, (resume, str(fixture["newRun"] + 1)), state="active", ok=False)
+            assert json.loads(record_path.read_text())["state"] == "claimed"
+        fixture["pauseIssue"] = False
+        write(d / "fixture.json", fixture)
+        action = (resume, str(fixture["newRun"])) if resume == "--resume-run" else resume
+        result = run(d, action, state="active")
+    assert "authority_state=issued" in result.stdout
+    assert "job_gate_materialization=UNPROVEN" in result.stdout
+    assert json.loads(record_path.read_text())["state"] == "issued"
+    assert (d / "dispatches").read_text() == "1"
+    calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
+    assert any(not call["bound"] for call in calls) and any(call["bound"] for call in calls)
+    assert all(call["successor"] == (str(fixture["newRun"]) if call["bound"] else None)
+               for call in calls)
+    run(d, "--dispatch-prepared", state="active", ok=False)
+    assert (d / "dispatches").read_text() == "1"
+for wrong_read in (1, 2):
+    d = setup()
+    fixture = json.loads((d / "fixture.json").read_text())
+    fixture.update(boundContext=True, wrongSummaryRead=wrong_read)
+    write(d / "fixture.json", fixture)
+    prepare(d)
+    result = run(d, "--dispatch-prepared", state="active", ok=False)
+    assert "authority record does not match the bound materialization run" in result.stderr
+    assert json.loads((d / "authority" / f'{fixture["newRun"]}.json').read_text())["state"] == "claimed"
+    calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
+    assert all(not call["bound"] and call["successor"] is None for call in calls)
+request = saved_request
+print("bound_successor_prepared_materialization_and_both_resumes=PASS", flush=True)
 
 # Every boundary drift is tested at BOTH fresh checkpoints. Failures before CAS
 # retain prepared authority; cleanup is tested separately without fabricating a

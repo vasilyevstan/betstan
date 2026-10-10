@@ -115,6 +115,8 @@ spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 native_byte_reader = m.gh_api_bytes
+native_jobs_inventory = m.jobs_for_run
+native_artifacts_inventory = m.artifact_inventory
 source = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", "HEAD"], text=True).strip()
 blob = subprocess.check_output([
     "git", "-C", sys.argv[2], "show",
@@ -781,6 +783,240 @@ with patch.object(m, "gh_api", side_effect=ghost_api), \
         reject(ghost_history)
     assert ghost_history() == ghost_proof
 print("PASS real shared historical ghost proof, all three workflows, strict outer disabled boundary, fresh drift and complete ancestry")
+
+import os
+import tempfile
+
+cancelled_path = ".github/workflows/oci-live-data-rollout.yml"
+cancelled_run = {
+    "id": 90, "workflow_id": 4, "path": cancelled_path,
+    "head_sha": source, "head_branch": "master", "event": "workflow_dispatch",
+    "head_repository": {"full_name": "example/repo"}, "run_attempt": 1,
+    "status": "completed", "conclusion": "cancelled",
+    "display_title": f"oci-live-data apply-slip-index {source}",
+    "html_url": "https://github.com/example/repo/actions/runs/90",
+    "created_at": "2026-10-07T09:05:00Z", "run_started_at": "2026-10-07T09:05:00Z",
+    "updated_at": "2026-10-07T09:20:03Z",
+}
+cancelled_endpoint = "repos/example/repo/actions/runs/90"
+cancelled_workflow_endpoint = "repos/example/repo/actions/workflows/oci-live-data-rollout.yml"
+cancelled_source_endpoint = f"repos/example/repo/contents/{cancelled_path}?ref={source}"
+cancelled_job_endpoint = cancelled_endpoint + "/attempts/1/jobs?per_page=100"
+cancelled_artifact_endpoint = cancelled_endpoint + "/artifacts?per_page=100"
+cancelled_job = {
+    "id": 901, "run_id": 90, "run_attempt": 1, "head_sha": source,
+    "head_branch": "master", "name": "rollout", "status": "completed",
+    "conclusion": "cancelled", "steps": [], "runner_id": 0, "runner_name": "",
+    "created_at": "2026-10-07T09:06:00Z", "started_at": "2026-10-07T09:06:00Z",
+    "completed_at": "2026-10-07T09:20:00Z",
+}
+cancelled_original_api = {
+    cancelled_endpoint: cancelled_run,
+    cancelled_endpoint + "/attempts/1": {**cancelled_run, "updated_at": "2026-10-07T09:20:01Z"},
+    cancelled_workflow_endpoint: {"id": 4, "path": cancelled_path, "state": "active"},
+    cancelled_endpoint + "/pending_deployments": [],
+    cancelled_endpoint + "/approvals": [],
+    cancelled_source_endpoint: historical_response(cancelled_path, (Path(sys.argv[2]) / cancelled_path).read_bytes()),
+}
+cancelled_original_pages = {
+    cancelled_job_endpoint: [{"total_count": 1, "jobs": [cancelled_job]}],
+    cancelled_artifact_endpoint: [{"total_count": 0, "artifacts": []}],
+}
+cancelled_rows = [copy.deepcopy(cancelled_run)]
+cancelled_responses = copy.deepcopy(cancelled_original_api)
+cancelled_pages = copy.deepcopy(cancelled_original_pages)
+cancelled_reads = {}
+cancelled_failure = cancelled_drift = ""
+def cancelled_api(path):
+    if path == cancelled_failure:
+        raise SystemExit("fixture authenticated API failure")
+    if path not in cancelled_responses:
+        return history_api(path)
+    cancelled_reads[path] = cancelled_reads.get(path, 0) + 1
+    response = copy.deepcopy(cancelled_responses[path])
+    if path == cancelled_drift and cancelled_reads[path] % 2 == 0:
+        response["state"] = "disabled_manually"
+    return response
+def cancelled_page_api(path):
+    if path == cancelled_failure:
+        raise SystemExit("fixture authenticated pagination failure")
+    if path in cancelled_pages:
+        cancelled_reads[path] = cancelled_reads.get(path, 0) + 1
+        response = copy.deepcopy(cancelled_pages[path])
+        if path == cancelled_drift and cancelled_reads[path] % 2 == 0:
+            response[0]["jobs"][0]["id"] += 1
+        return response
+    response = copy.deepcopy(history_pages(path))
+    if "/workflows/oci-live-data-rollout.yml/runs?" in path:
+        response[0]["workflow_runs"].extend(copy.deepcopy(cancelled_rows))
+        response[0]["total_count"] += len(cancelled_rows)
+    return response
+def cancelled_history(successor_id="78"):
+    return m.held_handoff_history("example/repo", history_held, source, successor_id)
+def reset_cancelled():
+    global cancelled_rows, cancelled_responses, cancelled_pages, cancelled_failure, cancelled_drift
+    cancelled_rows = [copy.deepcopy(cancelled_run)]
+    cancelled_responses = copy.deepcopy(cancelled_original_api)
+    cancelled_pages = copy.deepcopy(cancelled_original_pages)
+    cancelled_failure = cancelled_drift = ""
+    cancelled_reads.clear()
+with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as isolated_home, \
+     patch.dict(os.environ, {"HOME": isolated_home, "COPILOT_CLI_AUTHORITY_DIR": isolated_home + "/absent"}), \
+     patch.object(m, "gh_api", side_effect=cancelled_api), \
+     patch.object(m, "gh_api_pages", side_effect=cancelled_page_api), \
+     patch.object(m, "jobs_for_run", side_effect=lambda repo, run, label:
+                  [cutoff_job] if run == "78" else native_jobs_inventory(repo, run, label)), \
+     patch.object(m, "artifact_inventory", native_artifacts_inventory):
+    cancelled_proof = cancelled_history()
+    assert cancelled_proof["workflow_counts"]["oci-live-data-rollout.yml"] == proof["workflow_counts"]["oci-live-data-rollout.yml"] + 1
+    assert all(cancelled_reads[path] == (3 if path == cancelled_workflow_endpoint else 2)
+               for path in (*cancelled_original_api, *cancelled_original_pages))
+    assert list(Path(isolated_home).iterdir()) == []  # no private retirement/authority record
+    for state in ("active", "disabled_manually"):
+        for runner_id, runner_name in ((0, ""), (None, None)):
+            reset_cancelled()
+            cancelled_responses[cancelled_workflow_endpoint]["state"] = state
+            job = cancelled_pages[cancelled_job_endpoint][0]["jobs"][0]
+            job.update(runner_id=runner_id, runner_name=runner_name)
+            assert cancelled_history() == cancelled_proof
+    reset_cancelled()
+    for state, conclusion in (("waiting", None), ("in_progress", None), ("completed", "success")):
+        successor.update(status=state, conclusion=conclusion)
+        cutoff_job["status"] = "in_progress" if state == "in_progress" else "completed"
+        result = cancelled_history()
+        assert result["workflow_counts"] == cancelled_proof["workflow_counts"]
+        assert bool(result["cutoff_at"]) == (state != "waiting")
+    successor.update(status="completed", conclusion="success")
+    cutoff_job["status"] = "completed"
+    for endpoint, fields in (
+        (cancelled_endpoint, tuple(cancelled_run)),
+        (cancelled_endpoint + "/attempts/1", tuple(cancelled_run)),
+        (cancelled_workflow_endpoint, ("id", "path", "state")),
+    ):
+        for field in fields:
+            reset_cancelled()
+            del cancelled_responses[endpoint][field]
+            reject(cancelled_history)
+    for field in cancelled_job:
+        reset_cancelled()
+        del cancelled_pages[cancelled_job_endpoint][0]["jobs"][0][field]
+        reject(cancelled_history)
+    for field, bad in (
+        ("id", 0), ("id", True), ("run_id", 91), ("run_attempt", 2), ("run_attempt", True),
+        ("head_sha", "e" * 40), ("head_branch", "other"), ("name", "other"),
+        ("status", "queued"), ("conclusion", "success"),
+        ("steps", [{"name": "Set up job", "conclusion": "skipped"}]), ("steps", None),
+        ("runner_id", 1), ("runner_id", False), ("runner_id", "0"),
+        ("runner_name", "assigned-runner"), ("runner_name", False),
+        ("created_at", "2026-10-07T09:04:00Z"),
+        ("started_at", "2026-10-07T09:21:00Z"),
+        ("completed_at", "2026-10-07T09:20:02Z"),
+    ):
+        reset_cancelled()
+        cancelled_pages[cancelled_job_endpoint][0]["jobs"][0][field] = bad
+        reject(cancelled_history)
+    for field, bad in (
+        ("id", 91), ("workflow_id", 99), ("path", ".github/workflows/oci-production-deploy.yml"),
+        ("head_sha", "e" * 40), ("head_branch", "other"), ("run_attempt", 2),
+        ("run_attempt", True), ("event", "push"), ("status", "waiting"),
+        ("conclusion", "failure"), ("display_title", f"oci-live-data dry-run {source}"),
+        ("head_repository", {"full_name": "foreign/repo"}),
+        ("created_at", "2026-10-07T09:06:00Z"),
+        ("run_started_at", "2026-10-07T09:04:00Z"),
+        ("updated_at", "2026-10-07T09:19:00Z"),
+    ):
+        for endpoint in (cancelled_endpoint, cancelled_endpoint + "/attempts/1"):
+            reset_cancelled()
+            cancelled_responses[endpoint][field] = bad
+            reject(cancelled_history)
+    for field, bad in (("run_attempt", 2), ("display_title", "unbound"), ("updated_at", "2026-10-07T09:21:00Z")):
+        reset_cancelled()
+        cancelled_rows[0][field] = bad
+        reject(cancelled_history)
+    for endpoint in (cancelled_job_endpoint, cancelled_artifact_endpoint):
+        key = "jobs" if endpoint == cancelled_job_endpoint else "artifacts"
+        for mutation in ("missing-list", "missing-total", "bad-total", "truncated", "extra", "duplicate-page"):
+            reset_cancelled()
+            page = cancelled_pages[endpoint][0]
+            if mutation == "missing-list": del page[key]
+            elif mutation == "missing-total": del page["total_count"]
+            elif mutation == "bad-total": page["total_count"] = False
+            elif mutation == "truncated": page["total_count"] += 1
+            elif mutation == "extra":
+                page[key].append(copy.deepcopy(cancelled_job) if key == "jobs" else {"id": 991})
+                page["total_count"] += 1
+            else:
+                page[key] = [copy.deepcopy(cancelled_job) if key == "jobs" else {"id": 991}]
+                page["total_count"] = 1
+                cancelled_pages[endpoint].append(copy.deepcopy(page))
+            reject(cancelled_history)
+    for endpoint in (cancelled_endpoint + "/pending_deployments", cancelled_endpoint + "/approvals"):
+        for bad in ([{"state": "approved"}], {}, None):
+            reset_cancelled()
+            cancelled_responses[endpoint] = bad
+            reject(cancelled_history)
+    for endpoint in (*cancelled_original_api, *cancelled_original_pages):
+        reset_cancelled()
+        cancelled_failure = endpoint
+        reject(cancelled_history)
+    for endpoint in (cancelled_workflow_endpoint, cancelled_job_endpoint):
+        reset_cancelled()
+        cancelled_drift = endpoint
+        reject(cancelled_history)
+    reset_cancelled()
+    cancelled_rows[0]["updated_at"] = "2026-10-07T10:00:01Z"
+    for endpoint in (cancelled_endpoint, cancelled_endpoint + "/attempts/1"):
+        cancelled_responses[endpoint]["updated_at"] = "2026-10-07T10:00:01Z"
+    reject(cancelled_history)
+    for old_guard, replacement in (
+        (b"    if: github.run_attempt == 1", b"    if: true"),
+        (b"group: oci-control-plane", b"group: unrelated"),
+        (b"name: oci-migration", b"name: unrelated"),
+        (shared_authority.CURRENT_MASTER_GUARD_LINES[0].encode(), b"# guard removed"),
+        (b"jobs:\n", b"jobs:\n  extra:\n    runs-on: ubuntu-latest\n"),
+    ):
+        reset_cancelled()
+        original_source = base64.b64decode(cancelled_original_api[cancelled_source_endpoint]["content"])
+        assert old_guard in original_source
+        cancelled_responses[cancelled_source_endpoint] = historical_response(
+            cancelled_path, original_source.replace(old_guard, replacement))
+        reject(cancelled_history)
+    reset_cancelled()
+    ancestor = "a" * 40
+    for run in (cancelled_rows[0], cancelled_responses[cancelled_endpoint],
+                cancelled_responses[cancelled_endpoint + "/attempts/1"]):
+        run.update(head_sha=ancestor, display_title=f"oci-live-data apply-slip-index {ancestor}")
+    cancelled_pages[cancelled_job_endpoint][0]["jobs"][0]["head_sha"] = ancestor
+    cancelled_responses[f"repos/example/repo/contents/{cancelled_path}?ref={ancestor}"] = cancelled_responses.pop(cancelled_source_endpoint)
+    compare_endpoint = f"repos/example/repo/compare/{ancestor}...{source}?per_page=100"
+    cancelled_pages[compare_endpoint] = copy.deepcopy(original_ghost_compares[compare_endpoint])
+    assert cancelled_history() == cancelled_proof
+    complete_compare = copy.deepcopy(cancelled_pages[compare_endpoint])
+    for mutation in ("truncated", "inconsistent", "duplicate", "wrong-head", "wrong-base",
+                     "diverged", "behind", "empty", "malformed", "bool-metadata"):
+        pages = copy.deepcopy(complete_compare)
+        if mutation == "truncated": pages.pop()
+        elif mutation == "inconsistent": pages[1]["total_commits"] += 1
+        elif mutation == "duplicate": pages[0]["commits"] = copy.deepcopy(pages[1]["commits"])
+        elif mutation == "wrong-head": pages[1]["commits"][0]["sha"] = "e" * 40
+        elif mutation == "wrong-base":
+            for page in pages: page["base_commit"] = {"sha": "e" * 40}
+        elif mutation == "diverged":
+            for page in pages: page["status"] = "diverged"
+        elif mutation == "behind":
+            for page in pages: page["behind_by"] = 1
+        elif mutation == "empty": pages.clear()
+        elif mutation == "malformed": pages[1]["commits"] = {}
+        else: pages[1]["behind_by"] = False
+        cancelled_pages[compare_endpoint] = pages
+        reject(cancelled_history)
+    cancelled_pages[compare_endpoint] = complete_compare
+    with patch.object(m.importlib.util, "spec_from_file_location", return_value=None):
+        reject(cancelled_history)
+    assert cancelled_history() == cancelled_proof
+    assert list(Path(isolated_home).iterdir()) == []
+print("PASS native cancelled no-execution history: two complete collections, isolated HOME, counted lifecycle and strict cutoff/source/runner/ancestry/drift negatives")
+
 for raw in (
     b"native log unavailable",
     log().replace(b"  DATA_RUN_ID: 23", b"  DATA_RUN_ID: 99"),

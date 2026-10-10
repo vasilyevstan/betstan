@@ -784,6 +784,7 @@ materialize_record() {
   local attempt
   local summary state version run_status
   local failure_summary failure_reason failure_evidence_sha256
+  local bound_successor_run_id=""
 
   summary="$(
     "$AUTHORITY_HELPER" verify \
@@ -797,6 +798,8 @@ materialize_record() {
       --workflow-blob-sha "$workflow_blob_sha"
   )"
   assert_resume_identity "$summary"
+  [[ "$(jq -r '.runId' <<<"$summary")" = "$run_id" ]] ||
+    fail "authority record does not match the bound materialization run"
   state="$(jq -r '.state' <<<"$summary")"
   version="$(jq -r '.version' <<<"$summary")"
   if [[ "$state" = "rejecting" ]]; then
@@ -839,6 +842,8 @@ materialize_record() {
           --workflow-blob-sha "$workflow_blob_sha"
       )"
       assert_resume_identity "$summary"
+      [[ "$(jq -r '.runId' <<<"$summary")" = "$run_id" ]] ||
+        fail "authority record does not match the bound materialization run"
       state="$(jq -r '.state' <<<"$summary")"
       version="$(jq -r '.version' <<<"$summary")"
       if [[ "$state" = "rejecting" ]]; then
@@ -848,6 +853,9 @@ materialize_record() {
       fi
       [[ "$state" = "claimed" ]] ||
         fail "authority changed from claimed before materialization"
+      if [[ "$operation" = "oci-live-data-continue-held-handoff" ]]; then
+        bound_successor_run_id="$run_id"
+      fi
       if ! gh api \
         "repos/$repository/actions/runs/$run_id" \
         >"$run_file" 2>>"$materialization_error"; then
@@ -868,7 +876,7 @@ materialize_record() {
       rm -f "$prerequisite_error_file"
       if ! (
         revalidate_control &&
-          validate_protected_prerequisites &&
+          validate_protected_prerequisites "$bound_successor_run_id" &&
           revalidate_control
       ) >"$prerequisite_error_file" 2>&1; then
         chmod 600 "$prerequisite_error_file"
@@ -977,6 +985,12 @@ validate_upstream_run_bindings() {
   # shared validator with the same policy bindings, so the two paths cannot
   # drift.
   local dispatch_inputs
+  local successor_args=()
+  if [[ "$operation" = "oci-live-data-continue-held-handoff" && -n "${1:-}" ]]; then
+    [[ "$1" =~ ^[1-9][0-9]*$ ]] ||
+      fail "bound successor run ID is invalid"
+    successor_args=(--successor-run-id "$1")
+  fi
   [[ -x "$UPSTREAM_BINDING_VALIDATOR" ]] ||
     fail "upstream run binding validator is unavailable"
   [[ "$(jq -r '.upstreamRunBindings | length' <<<"$policy_json")" != "0" ]] ||
@@ -989,6 +1003,7 @@ validate_upstream_run_bindings() {
     --policy-json "$policy_json" \
     --subject-sha "$subject_sha" \
     --dispatch-inputs "$dispatch_inputs" \
+    ${successor_args[@]+"${successor_args[@]}"} \
     --runtime-mode "$authoritative_runtime_mode" >/dev/null ||
     fail "upstream run bindings were rejected before any authority was issued"
 }
@@ -1118,7 +1133,7 @@ PY
 validate_protected_prerequisites() {
   validate_common_package_prerequisites
   validate_runtime_mode_binding
-  validate_upstream_run_bindings
+  validate_upstream_run_bindings "${1:-}"
 }
 
 revalidate_transition_target() {

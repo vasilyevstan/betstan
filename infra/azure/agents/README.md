@@ -379,6 +379,11 @@ input hashes and admit only exact neutral workflow defaults `0` / `none`.
 Admission validates the known producer, native work, original evidence and complete
 bounded production history. The successor seals an authenticated native cutoff;
 later deployments outside that interval do not invalidate it.
+Preparation and pre-dispatch checks have no successor exclusion. Only locked
+materialization of the freshly verified claimed record passes its exact bound run
+ID to prerequisite validation, including captured and explicit-run resume. An
+ambient run ID is not that context, and authority issuance is not approval or proof
+that the job has materialized.
 
 Native validation retains the authenticated profile's slots 1-37, 74 and 75.
 Older nonterminal records remain counted and untouched. Only records last updated
@@ -387,6 +392,16 @@ unmaterialized-run proof; age or queued status alone is insufficient. Historical
 validation may examine an active workflow without granting enablement, dispatch,
 approval or current exclusivity. Current serialized admission and the prepared
 lifecycle safeguards remain unchanged.
+
+An otherwise-blocking cancelled data run may remain counted without blocking
+history only after two matching complete native collections prove an exact
+first-attempt, guarded-source `apply-slip-index` run with one cancelled rollout,
+explicit empty steps and unassigned runner fields, and no pending gates, approvals
+or artifacts. Source identity/ancestry and endpoint-local chronology remain
+authenticated; terminalization after a successor's immutable cutoff cannot qualify.
+This portable no-execution proof needs no private authority directory and neither
+retires nor replays a local generation. Canonical cancellation and retirement keep
+their separate durable record and authorization requirements.
 
 Fresh physical admission precedes snapshot-bound release and `acquire-released`.
 Checksummed transition evidence distinguishes unconfirmed and confirmed results;
@@ -397,7 +412,8 @@ binding the actual old checksum-manifest bytes and all three lineage roles.
 The incomplete predecessor remains inadmissible for ordinary deployment. After
 v3 emission, rollback must retain correct native numbering, semantic pre-handoff
 history validation, v3, earlier evidence capabilities, and the existing retirement
-profiles, or use a reviewed forward correction.
+profiles. Once relied upon, bound-successor materialization and portable native
+no-execution history must also be retained, or use a reviewed forward correction.
 
 `"$request" --retire-preflight-read-only-failure` is a separate retirement-only
 exception for `oci-live-data-resume-deploy`, not its released-runtime twin or
