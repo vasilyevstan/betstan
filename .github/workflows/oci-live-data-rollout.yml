@@ -943,12 +943,6 @@ jobs:
               ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
               ;;
             retained-hold)
-              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-quiesced
-              NAMESPACE="$OCI_K8S_NAMESPACE" \
-              LOCK_TOKEN="live-data-${PREREQUISITE_RUN_ID}-1" \
-              OPERATION_ID="live-data-apply-slip-index" \
-              SOURCE_SHA="$RESUME_SOURCE_SHA" \
-                ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify
               ;;
             *)
               echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
@@ -1108,22 +1102,30 @@ jobs:
             fi
           done
 
-          if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; then
+          if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ] ||
+             [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
             previous_holder_run="$PREREQUISITE_RUN_ID"
             previous_holder_source="$RESUME_SOURCE_SHA"
-            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+            previous_lock_snapshot="$RUNNER_TEMP/pre-runtime-lock.json"
+            previous_lease_seconds=1800
+            if [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
+              previous_lock_snapshot="$RUNNER_TEMP/retained-lock.json"
+              previous_lease_seconds=10800
+            elif [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
               previous_holder_run="$HELD_HANDOFF_RUN_ID"
               previous_holder_source="$HELD_HANDOFF_SOURCE_SHA"
             fi
-            python3 - "$RUNNER_TEMP/pre-runtime-lock.json" \
+            python3 - "$previous_lock_snapshot" \
               "$OCI_K8S_NAMESPACE" "$previous_holder_run" \
-              "$previous_holder_source" <<'PY'
+              "$previous_holder_source" "$previous_lease_seconds" <<'PY'
           import json, os, re, subprocess, sys, time
           def require(value):
               if not value:
                   raise SystemExit("inherited lock snapshot is invalid")
-          path, namespace, predecessor_run, source = sys.argv[1:]
+          path, namespace, predecessor_run, source, duration = sys.argv[1:]
+          require(re.fullmatch(r"[1-9][0-9]*", predecessor_run))
+          require(re.fullmatch(r"[0-9a-f]{40}", source))
           result = subprocess.run(
               ["kubectl", "get", "configmap", "gaming-mongo-migration-lock",
                "-n", namespace, "-o", "json"], capture_output=True, check=True)
@@ -1142,7 +1144,7 @@ jobs:
                       "lease-until-epoch", "fencing-generation"):
               require(re.fullmatch(r"[1-9][0-9]*", data[key]))
               require(int(data[key]) < 9007199254740990)
-          require(int(data["lease-duration-seconds"]) == 1800)
+          require(int(data["lease-duration-seconds"]) == int(duration))
           require(int(data["acquired-at-epoch"]) <= (
               int(data["lease-until-epoch"]) - int(data["lease-duration-seconds"])
           ) <= int(time.time()))
@@ -1275,7 +1277,15 @@ jobs:
           EXCLUDE_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          resume_mode="${{ steps.provenance_request.outputs.resume_maintenance_mode }}"
+          retained_transfer=false
+          if [ "$resume_mode" = "retained-hold" ] &&
+             [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
+             [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
+            retained_transfer=true
+          fi
           record_transfer() {
+            [ "$resume_mode" = "pre-runtime-hold" ] || return 0
             [ "$HELD_HANDOFF_RUN_ID" != "0" ] || return 0
             python3 - \
               artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json \
@@ -1290,17 +1300,26 @@ jobs:
           module.record_held_handoff_transfer(*sys.argv[1:])
           PY
           }
-          if [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = "pre-runtime-hold" ]; then
+          if [ "$resume_mode" = "pre-runtime-hold" ] || [ "$retained_transfer" = true ]; then
             snapshot="$RUNNER_TEMP/pre-runtime-lock.json"
+            strict_transfer=false
+            if [ "$retained_transfer" = true ]; then
+              snapshot="$RUNNER_TEMP/retained-lock.json"
+              strict_transfer=true
+            elif [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+              strict_transfer=true
+            fi
             [ -f "$snapshot" ] && [ ! -L "$snapshot" ]
             expected_uid="$(jq -er '.metadata.uid' "$snapshot")"
             observed_generation="$(jq -er '.data["fencing-generation"]' "$snapshot")"
             released_generation="$((observed_generation + 1))"
-            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+            if [ "$strict_transfer" = true ]; then
               ./infra/azure/agents/production-run-exclusivity-stan.sh
               record_transfer release unconfirmed
             fi
-            release_result="$(
+            [ "$retained_transfer" != true ] ||
+              echo "retained_lock_transfer=release status=UNCONFIRMED"
+            if ! release_result="$(
               NAMESPACE="$OCI_K8S_NAMESPACE" \
               LOCK_TOKEN="$(jq -er '.data.holder' "$snapshot")" \
               OPERATION_ID="$(jq -er '.data["operation-id"]' "$snapshot")" \
@@ -1309,13 +1328,22 @@ jobs:
               EXPECTED_RESOURCE_VERSION="$(jq -er '.metadata.resourceVersion' "$snapshot")" \
               EXPECTED_FENCING_GENERATION="$observed_generation" \
               EXPECTED_LEASE_UNTIL_EPOCH="$(jq -er '.data["lease-until-epoch"]' "$snapshot")" \
-                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release
-            )" || exit 1
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release 2>&1
+            )"; then
+              printf '%s\n' "$release_result"
+              exit 1
+            fi
+            printf '%s\n' "$release_result"
             [[ "$release_result" == "shared_mongo_lock=release status=PASS "* ]] || exit 1
             [[ "$release_result" == *" strict_snapshot=true fencing_generation=$released_generation" ]] || exit 1
+            if [ "$strict_transfer" = true ]; then
+              [[ "$release_result" != *$'\n'* ]] || exit 1
+            fi
             record_transfer release confirmed
             record_transfer acquire unconfirmed
-            acquisition_result="$(
+            [ "$retained_transfer" != true ] ||
+              echo "retained_lock_transfer=release status=CONFIRMED acquire=UNCONFIRMED"
+            if ! acquisition_result="$(
               NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
             OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
@@ -1323,31 +1351,40 @@ jobs:
             LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
             EXPECTED_LOCK_UID="$expected_uid" \
             EXPECTED_FENCING_GENERATION="$released_generation" \
-                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire-released
-            )" || exit 1
-            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
-              [[ "$acquisition_result" == "shared_mongo_lock=acquire-released status=PASS "* ]] || exit 1
-              [[ "$acquisition_result" == *" fencing_generation=$((released_generation + 1))" ]] || exit 1
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire-released 2>&1
+            )"; then
+              printf '%s\n' "$acquisition_result"
+              exit 1
             fi
             printf '%s\n' "$acquisition_result"
+            if [ "$strict_transfer" = true ]; then
+              [[ "$acquisition_result" == "shared_mongo_lock=acquire-released status=PASS "* ]] || exit 1
+              [[ "$acquisition_result" == *" fencing_generation=$((released_generation + 1))" ]] || exit 1
+              [[ "$acquisition_result" != *$'\n'* ]] || exit 1
+            fi
             record_transfer acquire confirmed
             record_transfer verify unconfirmed
-            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            [ "$retained_transfer" != true ] ||
+              echo "retained_lock_transfer=acquire status=CONFIRMED verify=UNCONFIRMED"
+            if ! verification_result="$(
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
             OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
             SOURCE_SHA="$SOURCE_SHA" \
-              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify || exit 1
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify 2>&1
+            )"; then
+              printf '%s\n' "$verification_result"
+              exit 1
+            fi
+            printf '%s\n' "$verification_result"
+            if [ "$strict_transfer" = true ]; then
+              [[ "$verification_result" == "shared_mongo_lock=verify status=PASS "* ]] || exit 1
+              [[ "$verification_result" != *$'\n'* ]] || exit 1
+            fi
             record_transfer verify confirmed
+            [ "$retained_transfer" != true ] ||
+              echo "retained_lock_transfer=verify status=CONFIRMED"
             exit 0
-          fi
-          if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
-             [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
-             [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = "retained-hold" ]; then
-            NAMESPACE="$OCI_K8S_NAMESPACE" \
-            LOCK_TOKEN="live-data-${PREREQUISITE_RUN_ID}-1" \
-            OPERATION_ID="live-data-apply-slip-index" \
-            SOURCE_SHA="$RESUME_SOURCE_SHA" \
-              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh release
           fi
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
@@ -1597,6 +1634,7 @@ jobs:
             artifacts/oci-data-baseline-before
             artifacts/oci-data-baseline-after
             ${{ inputs.held_handoff_run_id != '0' && format('{0}/pre-runtime-lock.json', runner.temp) || '' }}
+            ${{ steps.provenance_request.outputs.resume_maintenance_mode == 'retained-hold' && format('{0}/retained-lock.json', runner.temp) || '' }}
           if-no-files-found: ignore
           retention-days: 30
 
