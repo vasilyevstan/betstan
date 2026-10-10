@@ -1638,6 +1638,8 @@ def validate_failed_deploy_artifacts(
             repository, failed_run, failed_source, f"{label} retained failure",
             expected_step_conclusion="success",
         )
+        if native["confirmation"] != "DEPLOY OCI EXACT SHA":
+            fail(f"{label} retained failure native confirmation differs")
         expected_request = {key: native[key] for key in (
             "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
             "disk_checkpoint_run_id", "baseline_recovery_run_id",

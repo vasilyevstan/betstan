@@ -5023,6 +5023,7 @@ for run, name, values, timestamp, key, bad in (
     (43, "rollout", resume, "2025-12-31T23:01:30Z", "confirmation", "DEPLOY OCI EXACT SHA"),
     (626, "deploy", failed, "2025-12-31T22:25:30Z", "data_run_id", "42"),
     (626, "deploy", failed, "2025-12-31T22:25:30Z", "build_run_id", "99"),
+    (626, "deploy", failed, "2025-12-31T22:25:30Z", "confirmation", "RESUME APPLIED LIVE DATA EXACT SHA"),
 ):
     member = path(f"{prefix}/actions/runs/{run}/attempts/1/logs")
     original = member.read_bytes()
