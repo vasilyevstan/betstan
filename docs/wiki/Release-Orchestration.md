@@ -434,7 +434,7 @@ snapshot-bound own release and exact released-only acquisition. Ambiguity or
 conflict stops with maintenance retained, without generic expired-lock reclaim,
 expired-lock renewal, replay, force release, or writer restoration. This is an
 additive mode within the existing operation, not a new workflow; existing
-schema keys and post-runtime cases remain unchanged. Rollout and rollback
+schema keys and post-runtime classifications remain unchanged. Rollout and rollback
 require compatible control readers; older readers reject unsupported lineage
 rather than relabeling evidence. A post-runtime retained hold still requires
 successful maintenance re-entry and accepts only lock/fence release results
@@ -462,7 +462,39 @@ complete, checksum manifests and baseline capture identity must match, and the
 complete predecessor-v6, deployment, build, infrastructure, checkpoint, and
 activation tuples must resolve without substitution. Post-runtime retained-hold
 deployment recovery uses the checksum-sealed intent written before lock renewal
-plus the post-rehold failure lineage. Failed-activation cleanup uses a separate
+plus the post-rehold failure lineage.
+
+Post-runtime retained-owner admission derives the old owner from the
+authenticated immediate predecessor, not the rollback root or whichever holder
+is observed. Auth and Client must retain exact candidate images and serving-pod
+digests; each quiesced writer must match its candidate or its own baseline.
+After those checks, a late `verify-held` confirms configured and live ingress
+fencing and all seven quiescent writers immediately before a fresh ownership
+snapshot. Matching live and expired old leases use this same snapshot path,
+with exact lock identity, UID, resource version, fencing generation, holder,
+operation, source, acquisition and deadline metadata bound to the 10,800-second
+retained lease contract. Expiry alone grants no authority. Pre-runtime and
+fresh-handoff leases remain 1,800 seconds; the new-operation lease remains
+14,400 seconds.
+
+Held-checkpoint validation, both 70-percent byte guards and fresh production
+exclusivity precede mutation. Confirmed snapshot-bound own release advances
+generation `g` to `g+1`; released-only acquisition must retain the same UID and
+exact released generation, assign the new authorized owner/current control
+source, and confirm `g+2` followed by ordinary live-lease verification. These are
+two non-atomic compare-and-swap operations. Conflict, missing acknowledgement,
+ambiguous generation or failed final verification stops recovery without new
+data execution or a fresh handoff; an unacknowledged mutation may already have
+changed ownership. Partial transitions require the existing deployment-safety
+owner's exact-state assessment, not generic acquisition, retry, compensating
+mutation, expired renewal or writer restoration. The snapshot is conditionally
+preserved in protected baseline evidence, not a successful-held-handoff journal
+or new authority schema. A fresh complete v6 handoff still requires real data
+execution. Rollback must retain compatible ownership-snapshot and exact-generation
+transfer behavior; expired-lease rejection or generic reclaim is not a recovery
+strategy.
+
+Failed-activation cleanup uses a separate
 exact recovery-authority artifact rather than treating the workflow's larger
 diagnostic evidence directory as that authority.
 
