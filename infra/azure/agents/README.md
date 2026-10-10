@@ -380,6 +380,14 @@ Admission validates the known producer, native work, original evidence and compl
 bounded production history. The successor seals an authenticated native cutoff;
 later deployments outside that interval do not invalidate it.
 
+Native validation retains the authenticated profile's slots 1-37, 74 and 75.
+Older nonterminal records remain counted and untouched. Only records last updated
+strictly before held-handoff creation may pass the existing complete semantic
+unmaterialized-run proof; age or queued status alone is insufficient. Historical
+validation may examine an active workflow without granting enablement, dispatch,
+approval or current exclusivity. Current serialized admission and the prepared
+lifecycle safeguards remain unchanged.
+
 Fresh physical admission precedes snapshot-bound release and `acquire-released`.
 Checksummed transition evidence distinguishes unconfirmed and confirmed results;
 an ambiguous response or partial transfer stops without replay or fallback
@@ -387,8 +395,9 @@ acquisition, retaining maintenance. The successor executes the full data phase a
 emits complete v6 evidence with additive `live-betting-data-resume-v3` authority,
 binding the actual old checksum-manifest bytes and all three lineage roles.
 The incomplete predecessor remains inadmissible for ordinary deployment. After
-v3 emission, rollback must retain v3, earlier evidence capabilities, and the
-existing retirement profiles, or use a reviewed forward correction.
+v3 emission, rollback must retain correct native numbering, semantic pre-handoff
+history validation, v3, earlier evidence capabilities, and the existing retirement
+profiles, or use a reviewed forward correction.
 
 `"$request" --retire-preflight-read-only-failure` is a separate retirement-only
 exception for `oci-live-data-resume-deploy`, not its released-runtime twin or

@@ -16,6 +16,7 @@ the two paths cannot drift.
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import io
 import ipaddress
 import json
@@ -2099,7 +2100,7 @@ def validate_held_handoff_native(
         "Revalidate exact release disk checkpoint before lock mutation",
         "Close ephemeral OCI Bastion access",
     })
-    for number, step in enumerate(job["steps"], 1):
+    for number, step in zip((*range(1, 38), 74, 75), job["steps"]):
         if (
             type(step.get("number")) is not int or step["number"] != number
             or step.get("status") != "completed"
@@ -2132,6 +2133,7 @@ def validate_held_handoff_native(
 
 
 def held_handoff_history(repository, held, subject_sha, successor_run_id=""):
+    authority = None
     policy = subprocess.run(
         ["git", "show", f"{subject_sha}:infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"],
         capture_output=True, text=True, check=False,
@@ -2238,7 +2240,105 @@ def held_handoff_history(repository, held, subject_sha, successor_run_id=""):
             if updated >= lower:
                 fail("an intervening protected production transition excludes this held handoff")
             if row.get("status") != "completed":
-                fail("an unresolved historical production run excludes this held handoff")
+                if authority is None:
+                    try:
+                        specification = importlib.util.spec_from_file_location(
+                            "held_handoff_authority",
+                            Path(__file__).resolve().parents[2]
+                            / "azure/agents/copilot_cli_authority_stan.py",
+                        )
+                        if specification is None or specification.loader is None:
+                            fail("held-handoff shared unmaterialized validator is unavailable")
+                        authority = importlib.util.module_from_spec(specification)
+                        specification.loader.exec_module(authority)
+                    except (OSError, ImportError, SyntaxError):
+                        fail("held-handoff shared unmaterialized validator is unavailable")
+                    if (
+                        not isinstance(getattr(authority, "UNMATERIALIZED_WORKFLOWS", None), dict)
+                        or not callable(getattr(authority, "validate_unmaterialized_run_evidence", None))
+                    ):
+                        fail("held-handoff shared unmaterialized validator is unavailable")
+                label = f"held-handoff historical run {row['id']} ({workflow})"
+                if row["path"] not in authority.UNMATERIALIZED_WORKFLOWS:
+                    fail(f"{label} is an unresolved non-allowlisted production run")
+                identity_keys = (
+                    "id", "workflow_id", "path", "head_sha", "head_branch",
+                    "event", "run_attempt", "status", "conclusion", "display_title",
+                    "created_at", "run_started_at", "updated_at", "html_url",
+                )
+                if (
+                    any(key not in row for key in identity_keys)
+                    or type(row["workflow_id"]) is not int or row["workflow_id"] < 1
+                    or not isinstance(row["head_sha"], str)
+                    or FULL_SHA.fullmatch(row["head_sha"]) is None
+                ):
+                    fail(f"{label} inventory cannot bind unmaterialized evidence")
+                run_endpoint = f"repos/{repository}/actions/runs/{row['id']}"
+                native = gh_api(run_endpoint)
+                workflow_metadata = gh_api(
+                    f"repos/{repository}/actions/workflows/{row['workflow_id']}"
+                )
+                jobs = gh_api(run_endpoint + "/jobs?filter=all&per_page=100")
+                pending = gh_api(run_endpoint + "/pending_deployments")
+                approvals = gh_api(run_endpoint + "/approvals")
+                artifacts = gh_api(run_endpoint + "/artifacts?per_page=100")
+                historical = gh_api(
+                    f"repos/{repository}/contents/{row['path']}?ref={row['head_sha']}"
+                )
+                compare_pages = gh_api_pages(
+                    f"repos/{repository}/compare/{row['head_sha']}...{subject_sha}?per_page=100"
+                )
+                compare_metadata, commits = None, []
+                compare_keys = (
+                    "status", "ahead_by", "behind_by", "total_commits",
+                    "base_commit", "merge_base_commit",
+                )
+                for page in compare_pages:
+                    if (
+                        not isinstance(page, dict)
+                        or any(key not in page for key in compare_keys)
+                        or not isinstance(page.get("commits"), list) or not page["commits"]
+                    ):
+                        fail(f"{label} ancestry pagination is malformed")
+                    metadata = {key: page[key] for key in compare_keys[:4]}
+                    for key in compare_keys[4:]:
+                        if not isinstance(page[key], dict):
+                            fail(f"{label} ancestry pagination is malformed")
+                        metadata[key] = {"sha": page[key].get("sha")}
+                    if compare_metadata is None:
+                        compare_metadata = metadata
+                    elif any(
+                        type(metadata[key]) is not type(compare_metadata[key])
+                        or metadata[key] != compare_metadata[key] for key in compare_keys
+                    ):
+                        fail(f"{label} ancestry pagination is inconsistent")
+                    commits.extend(page["commits"])
+                if compare_metadata is None:
+                    fail(f"{label} ancestry pagination is empty")
+                for observed in (native, gh_api(run_endpoint)):
+                    if (
+                        not isinstance(observed, dict)
+                        or any(
+                            key not in observed or type(observed[key]) is not type(row[key])
+                            or observed[key] != row[key] for key in identity_keys
+                        )
+                        or not isinstance(observed.get("head_repository"), dict)
+                        or observed["head_repository"].get("full_name") != repository
+                    ):
+                        fail(f"{label} native details drifted from the complete inventory")
+                try:
+                    authority.validate_unmaterialized_run_evidence(
+                        run=native, workflow=workflow_metadata, jobs=jobs, pending=pending,
+                        approvals=approvals, artifacts=artifacts,
+                        compare={**compare_metadata, "commits": commits},
+                        historical_workflow=historical, repository=repository,
+                        current_master=subject_sha, now_epoch=int(time.time()),
+                        minimum_age_seconds=600, expected_run_id=row["id"],
+                        expected_workflow_id=row["workflow_id"], expected_path=row["path"],
+                        expected_head_sha=row["head_sha"], require_disabled_workflow=False,
+                    )
+                except SystemExit:
+                    fail(f"{label} is not an authenticated unmaterialized run")
         if workflow == "oci-live-data-rollout.yml":
             required_ids = {held["id"]}
             if successor_run_id:

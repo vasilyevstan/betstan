@@ -374,6 +374,9 @@ held_steps = [{
 } for number, name in enumerate([
     "Set up job", *held_names, "Post Checkout approved current master commit", "Complete job",
 ], 1)]
+held_steps[-2]["number"] = 74
+held_steps[-1]["number"] = 75
+assert [step["number"] for step in held_steps] == [*range(1, 38), 74, 75]
 held_original = [{
     "id": 1234, "run_id": 77, "name": "rollout", "status": "completed",
     "conclusion": "success", "steps": held_steps,
@@ -395,14 +398,32 @@ with patch.object(m, "require_fixed_run", return_value=held_metadata), \
         patch.object(m, "gh_api", side_effect=held_blob), \
         patch.object(m, "gh_api_bytes", return_value=log_archive(log(values, env_names), ("0_rollout.txt",))):
     assert held_native() == held_metadata
+    assert held_jobs == held_original
     for index in range(len(held_steps)):
         held_jobs = copy.deepcopy(held_original)
         step = held_jobs[0]["steps"][index]
         step["conclusion"] = "success" if step["conclusion"] == "skipped" else "skipped"
         reject(held_native)
-    for mutation in ("missing", "duplicate", "unknown", "job", "run", "number", "time", "failure"):
+    for index, wrong in (
+        (0, True), (0, "1"), (0, 0), (0, -1), (1, 1), (36, 38),
+        (37, 38), (38, 39), (37, 73), (37, 75), (38, 74), (38, 76),
+        (37, "74"), (37, 0), (37, -74), (37, None), (38, 75.0),
+    ):
+        held_jobs = copy.deepcopy(held_original)
+        held_jobs[0]["steps"][index]["number"] = wrong
+        reject(held_native)
+    for cleanup_numbers in ((38, 39), (75, 74), (74, 74), (75, 75)):
+        held_jobs = copy.deepcopy(held_original)
+        held_jobs[0]["steps"][-2]["number"], held_jobs[0]["steps"][-1]["number"] = cleanup_numbers
+        reject(held_native)
+    for mutation in ("missing", "missing-post", "missing-number", "order",
+                     "duplicate", "unknown", "job", "run", "number", "time", "failure"):
         held_jobs = copy.deepcopy(held_original)
         if mutation == "missing": held_jobs[0]["steps"].pop()
+        elif mutation == "missing-post": held_jobs[0]["steps"].pop(-2)
+        elif mutation == "missing-number": held_jobs[0]["steps"][-2].pop("number")
+        elif mutation == "order":
+            held_jobs[0]["steps"][-2:] = reversed(held_jobs[0]["steps"][-2:])
         elif mutation == "duplicate": held_jobs[0]["steps"].append(copy.deepcopy(held_steps[1]))
         elif mutation == "unknown": held_jobs[0]["steps"][1]["name"] = "Untrusted operation"
         elif mutation == "job": held_jobs.append(copy.deepcopy(held_jobs[0]))
@@ -421,7 +442,7 @@ with patch.object(m, "require_fixed_run", return_value=held_metadata), \
         with patch.object(m, "gh_api", side_effect=lambda endpoint:
                           {"sha": "0" * 40} if changed in endpoint else held_blob(endpoint)):
             reject(held_native)
-print("PASS fixed successful held producer, complete native outcomes, and original root tuple")
+print("PASS fixed successful held producer, exact native slots 1..37/74/75, complete outcomes, and original root tuple")
 history_held = {
     "id": 77, "head_sha": source, "created_at": "2026-10-07T08:00:00Z",
     "updated_at": "2026-10-07T09:00:00Z",
@@ -527,6 +548,239 @@ with patch.object(m, "gh_api", side_effect=history_api), \
     reject(lambda: m.held_handoff_history("example/repo", history_held, source, "78"))
     cutoff_job["run_id"] = 78
 print("PASS complete bounded held history, immutable cutoff, later deployment and unrelated exclusions")
+import base64
+from pathlib import Path
+
+authority_spec = importlib.util.spec_from_file_location(
+    "history_shared_authority", Path(sys.argv[2]) / "infra/azure/agents/copilot_cli_authority_stan.py")
+shared_authority = importlib.util.module_from_spec(authority_spec)
+authority_spec.loader.exec_module(shared_authority)
+assert set(shared_authority.UNMATERIALIZED_WORKFLOWS) == {
+    ".github/workflows/oci-live-data-rollout.yml",
+    ".github/workflows/oci-live-betting-activate.yml",
+    ".github/workflows/oci-capacity-acquire.yml",
+}
+assert set(shared_authority.PREPARED_TRANSITION_WORKFLOWS) == {
+    "oci-live-data-rollout.yml", "oci-live-betting-activate.yml",
+}
+ghost_rows, ghost_responses, ghost_compares = [], {}, {}
+def historical_response(path, raw):
+    return {
+        "path": path, "type": "file", "encoding": "base64", "size": len(raw),
+        "sha": hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest(),
+        "content": base64.b64encode(raw).decode(),
+    }
+for offset, workflow_name in enumerate((
+    "oci-live-data-rollout.yml", "oci-live-betting-activate.yml", "oci-capacity-acquire.yml",
+)):
+    run_id, workflow_id = 610 + offset, 710 + offset
+    path = ".github/workflows/" + workflow_name
+    old_sha = "abc"[offset] * 40
+    row = {
+        "id": run_id, "workflow_id": workflow_id, "path": path, "head_sha": old_sha,
+        "head_branch": "master", "head_repository": {"full_name": "example/repo"},
+        "event": "workflow_dispatch", "run_attempt": 1, "status": "queued", "conclusion": None,
+        "display_title": workflow_name.removesuffix(".yml"),
+        "created_at": "2026-10-07T07:00:00Z", "updated_at": "2026-10-07T07:00:00Z",
+        "run_started_at": "2026-10-07T07:00:00Z",
+        "html_url": f"https://github.com/example/repo/actions/runs/{run_id}",
+    }
+    ghost_rows.append(row)
+    endpoint = f"repos/example/repo/actions/runs/{run_id}"
+    ghost_responses.update({
+        endpoint: copy.deepcopy(row),
+        f"repos/example/repo/actions/workflows/{workflow_id}": {
+            "id": workflow_id, "path": path, "state": "disabled_manually",
+        },
+        endpoint + "/jobs?filter=all&per_page=100": {"total_count": 0, "jobs": []},
+        endpoint + "/pending_deployments": [],
+        endpoint + "/approvals": [],
+        endpoint + "/artifacts?per_page=100": {"total_count": 0, "artifacts": []},
+        f"repos/example/repo/contents/{path}?ref={old_sha}": historical_response(
+            path, (Path(sys.argv[2]) / path).read_bytes()),
+    })
+    compare = {
+        "status": "ahead", "ahead_by": 2, "behind_by": 0, "total_commits": 2,
+        "base_commit": {"sha": old_sha}, "merge_base_commit": {"sha": old_sha},
+    }
+    ghost_compares[f"repos/example/repo/compare/{old_sha}...{source}?per_page=100"] = [
+        {**compare, "commits": [{"sha": "d" * 40}]},
+        {**compare, "commits": [{"sha": source}]},
+    ]
+original_ghost_rows = copy.deepcopy(ghost_rows)
+original_ghost_responses = copy.deepcopy(ghost_responses)
+original_ghost_compares = copy.deepcopy(ghost_compares)
+ghost_reads, ghost_run_reads = [], {}
+ghost_api_failure, ghost_reread_drift = "", False
+def ghost_api(endpoint):
+    ghost_reads.append(endpoint)
+    if endpoint == ghost_api_failure:
+        m.fail("fresh historical provider evidence is unavailable")
+    if endpoint in ghost_responses:
+        response = copy.deepcopy(ghost_responses[endpoint])
+        if endpoint == "repos/example/repo/actions/runs/610":
+            ghost_run_reads[endpoint] = ghost_run_reads.get(endpoint, 0) + 1
+            if ghost_reread_drift and ghost_run_reads[endpoint] == 2:
+                response["updated_at"] = "2026-10-07T07:00:01Z"
+        return response
+    assert endpoint in {
+        "repos/example/repo/actions/runs/78",
+        "repos/example/repo/actions/runs/78/attempts/1",
+        "repos/example/repo/actions/workflows/oci-live-data-rollout.yml",
+    }, endpoint
+    return history_api(endpoint)
+def ghost_pages(endpoint):
+    ghost_reads.append(endpoint)
+    if endpoint == ghost_api_failure:
+        m.fail("fresh historical pagination is unavailable")
+    if "/compare/" in endpoint:
+        return copy.deepcopy(ghost_compares[endpoint])
+    pages = history_pages(endpoint)
+    name = endpoint.split("/workflows/", 1)[1].split("/", 1)[0]
+    extra = [copy.deepcopy(row) for row in ghost_rows if row["path"] == ".github/workflows/" + name]
+    pages[0]["workflow_runs"].extend(extra)
+    for page in pages:
+        page["total_count"] += len(extra)
+    return pages
+def ghost_history():
+    return m.held_handoff_history("example/repo", history_held, source, "78")
+history_now = int(m.parse_timestamp("2026-10-07T10:31:00Z", "fixture clock").timestamp())
+with patch.object(m, "gh_api", side_effect=ghost_api), \
+        patch.object(m, "gh_api_pages", side_effect=ghost_pages), \
+        patch.object(m, "jobs_for_run", return_value=[cutoff_job]), \
+        patch.object(m, "time", wraps=m.time) as history_clock:
+    history_clock.time.return_value = history_now
+    ghost_proof = ghost_history()
+    for row in ghost_rows:
+        name = row["path"].split("/")[-1]
+        assert ghost_proof["workflow_counts"][name] == proof["workflow_counts"][name] + 1
+        assert ghost_reads.count(f"repos/example/repo/actions/runs/{row['id']}") == 2
+        ghost_responses[f"repos/example/repo/actions/workflows/{row['workflow_id']}"]["state"] = "active"
+    assert ghost_history() == ghost_proof
+    assert all("..."+source+"?per_page=100" in endpoint for endpoint in ghost_reads if "/compare/" in endpoint)
+    assert not any("/git/ref/" in endpoint for endpoint in ghost_reads)
+    for row in ghost_rows:
+        endpoint = f"repos/example/repo/actions/runs/{row['id']}"
+        compare_pages = ghost_compares[f"repos/example/repo/compare/{row['head_sha']}...{source}?per_page=100"]
+        evidence = {
+            "run": ghost_responses[endpoint],
+            "workflow": ghost_responses[f"repos/example/repo/actions/workflows/{row['workflow_id']}"],
+            "jobs": ghost_responses[endpoint + "/jobs?filter=all&per_page=100"],
+            "pending": ghost_responses[endpoint + "/pending_deployments"],
+            "approvals": ghost_responses[endpoint + "/approvals"],
+            "artifacts": ghost_responses[endpoint + "/artifacts?per_page=100"],
+            "compare": {**compare_pages[0], "commits": [page["commits"][0] for page in compare_pages]},
+            "historical_workflow": ghost_responses[
+                f"repos/example/repo/contents/{row['path']}?ref={row['head_sha']}"],
+            "repository": "example/repo", "current_master": source,
+            "now_epoch": history_now, "minimum_age_seconds": 600,
+            "expected_run_id": row["id"], "expected_workflow_id": row["workflow_id"],
+            "expected_path": row["path"], "expected_head_sha": row["head_sha"],
+            "require_disabled_workflow": True,
+        }
+        reject(lambda: shared_authority.validate_unmaterialized_run_evidence(**evidence))
+        evidence["workflow"] = {**evidence["workflow"], "state": "disabled_manually"}
+        assert shared_authority.validate_unmaterialized_run_evidence(**evidence)["runId"] == row["id"]
+    ghost_responses = copy.deepcopy(original_ghost_responses)
+    target = "repos/example/repo/actions/runs/610"
+    for field, bad in (
+        ("run_attempt", 2), ("run_attempt", True), ("status", "in_progress"),
+        ("conclusion", "success"), ("event", "push"),
+        ("display_title", f"oci-live-data apply-slip-index {'a' * 40}"),
+        ("run_started_at", "2026-10-07T07:00:01Z"),
+        ("updated_at", "2026-10-07T07:00:01Z"),
+        ("updated_at", "2026-10-07T08:00:00Z"),
+        ("updated_at", "2026-10-07T08:00:01Z"),
+    ):
+        ghost_rows = copy.deepcopy(original_ghost_rows)
+        ghost_responses = copy.deepcopy(original_ghost_responses)
+        ghost_rows[0][field] = bad
+        ghost_responses[target][field] = bad
+        ghost_reads.clear()
+        reject(ghost_history)
+        if field == "updated_at" and bad >= history_held["created_at"]:
+            assert target not in ghost_reads
+    ghost_rows = copy.deepcopy(original_ghost_rows)
+    for suffix, bad in (
+        ("/jobs?filter=all&per_page=100", {"total_count": 1, "jobs": [{"id": 1}]}),
+        ("/jobs?filter=all&per_page=100", {"total_count": 1, "jobs": []}),
+        ("/pending_deployments", [{"environment": {"name": "oci-migration"}}]),
+        ("/approvals", [{"state": "approved"}]),
+        ("/artifacts?per_page=100", {"total_count": 1, "artifacts": [{"id": 1}]}),
+        ("/artifacts?per_page=100", {"total_count": False, "artifacts": []}),
+    ):
+        ghost_responses = copy.deepcopy(original_ghost_responses)
+        ghost_responses[target + suffix] = bad
+        reject(ghost_history)
+    for field, bad in (
+        ("id", 999), ("workflow_id", 999), ("path", ".github/workflows/other.yml"),
+        ("head_sha", "e" * 40), ("head_branch", "other"),
+        ("event", "push"), ("run_attempt", 2), ("status", "waiting"),
+        ("conclusion", "success"), ("display_title", "substituted"),
+        ("created_at", "2026-10-07T06:00:00Z"),
+        ("run_started_at", "2026-10-07T06:00:00Z"),
+        ("updated_at", "2026-10-07T06:00:00Z"),
+        ("html_url", "https://github.com/example/repo/actions/runs/999"),
+        ("head_repository", {"full_name": "foreign/repo"}),
+    ):
+        ghost_responses = copy.deepcopy(original_ghost_responses)
+        ghost_responses[target][field] = bad
+        reject(ghost_history)
+    ghost_responses = copy.deepcopy(original_ghost_responses)
+    ghost_run_reads.clear()
+    ghost_reread_drift = True
+    reject(ghost_history)
+    ghost_reread_drift = False
+    for endpoint in [*original_ghost_responses, *original_ghost_compares]:
+        ghost_api_failure = endpoint
+        reject(ghost_history)
+    ghost_api_failure = ""
+    history_clock.time.return_value = int(m.parse_timestamp("2026-10-07T07:09:59Z", "age fixture").timestamp())
+    reject(ghost_history)
+    history_clock.time.return_value = history_now
+    historical_endpoint = f"repos/example/repo/contents/.github/workflows/oci-live-data-rollout.yml?ref={'a' * 40}"
+    original_source = base64.b64decode(original_ghost_responses[historical_endpoint]["content"])
+    for old, new in (
+        (shared_authority.CURRENT_MASTER_GUARD_LINES[0].encode(), b"# exact source guard removed"),
+        (b"group: oci-control-plane", b"group: unrelated-control-plane"),
+        (b"name: oci-migration", b"name: unrelated-environment"),
+        (b"./infra/oci/scripts/live-betting-data-rollout-stan.sh", b"./unrelated-producer.sh"),
+    ):
+        assert old in original_source
+        ghost_responses = copy.deepcopy(original_ghost_responses)
+        ghost_responses[historical_endpoint] = historical_response(
+            ".github/workflows/oci-live-data-rollout.yml", original_source.replace(old, new))
+        reject(ghost_history)
+    ghost_responses = copy.deepcopy(original_ghost_responses)
+    compare_endpoint = f"repos/example/repo/compare/{'a' * 40}...{source}?per_page=100"
+    for mutation in ("truncated", "inconsistent", "duplicate", "wrong-head", "wrong-base",
+                     "diverged", "behind", "empty", "malformed", "bool-metadata"):
+        ghost_compares = copy.deepcopy(original_ghost_compares)
+        pages = ghost_compares[compare_endpoint]
+        if mutation == "truncated": pages.pop()
+        elif mutation == "inconsistent": pages[1]["total_commits"] = 3
+        elif mutation == "duplicate": pages[0]["commits"] = copy.deepcopy(pages[1]["commits"])
+        elif mutation == "wrong-head": pages[1]["commits"][0]["sha"] = "e" * 40
+        elif mutation == "wrong-base":
+            for page in pages: page["base_commit"] = {"sha": "e" * 40}
+        elif mutation == "diverged":
+            for page in pages: page["status"] = "diverged"
+        elif mutation == "behind":
+            for page in pages: page["behind_by"] = 1
+        elif mutation == "empty": pages.clear()
+        elif mutation == "malformed": pages[1]["commits"] = {}
+        else: pages[1]["behind_by"] = False
+        reject(ghost_history)
+    ghost_compares = copy.deepcopy(original_ghost_compares)
+    with patch.object(m.importlib.util, "spec_from_file_location", return_value=None):
+        reject(ghost_history)
+        ghost_rows = []
+        assert ghost_history() == proof
+    ghost_rows = copy.deepcopy(original_ghost_rows)
+    with patch.object(m.importlib.util, "spec_from_file_location", side_effect=ImportError):
+        reject(ghost_history)
+    assert ghost_history() == ghost_proof
+print("PASS real shared historical ghost proof, all three workflows, strict outer disabled boundary, fresh drift and complete ancestry")
 for raw in (
     b"native log unavailable",
     log().replace(b"  DATA_RUN_ID: 23", b"  DATA_RUN_ID: 99"),

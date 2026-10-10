@@ -474,12 +474,23 @@ Before intent/approval and in workflow preflight, this operation admits only
 the reviewed historical producer's missing `resume-images.tsv`. Complete
 first-attempt success and held-work proof, safe inventory, full checksum
 coverage, provenance, schema, journal, reports and original root evidence remain
-mandatory. The recorded image hash must match the independently validated
+mandatory. The native step sequence retains slots 1–37, 74 and 75 without
+renumbering. The recorded image hash must match the independently validated
 original build manifest; no historical artifact is reconstructed or made
 deployable. Complete bounded history must exclude intervening deployments or
 incompatible transitions up to an immutable successor cutoff bound to native
 creation/execution evidence. Later legitimate deployment cannot invalidate
 that interval; fresh current exclusivity remains mandatory.
+
+Older nonterminal records remain counted and untouched. Only records last
+updated strictly before the held handoff's creation may use the existing
+unmaterialized-run proof from the trusted current checkout: fresh complete
+native identity, a never-transitioned queued first attempt, empty jobs, pending
+gates, approvals and artifacts, strict ancestry and historical workflow guards.
+Neither queued status nor the required minimum age alone is authority. This
+history-only proof may validate an active workflow; it neither enables the
+workflow nor grants dispatch, approval or current exclusivity. Current serialized
+admission and disabled-workflow safeguards remain independent and unchanged.
 
 Physical admission uses the actual held owner, not the root tuple: a fresh
 baseline, verified fence, seven quiescent writers, exact images and supporting
@@ -572,8 +583,10 @@ The producer copies the actual validated `IMAGE_PROVENANCE_FILE` bytes into
 in `SHA256SUMS`. Normal deployment accepts only the new complete artifact and
 successor holder; existing v1/v2 semantics and strict missing-file rejection
 remain unchanged. Promote compatible v3 readers and writer together. After v3
-emission, rollback must retain v3, all historical profiles and endpoint-local
-chronology or use reviewed forward correction, never rewrite old proof.
+emission, rollback must retain v3, exact native cleanup-slot numbering and
+semantic pre-handoff history validation, alongside all historical profiles and
+endpoint-local chronology. Otherwise use reviewed forward correction, never
+rewrite old proof.
 Frozen retirement profiles are not extended for this continuation.
 
 Fresh and released-runtime data paths complete static, checkpoint, predecessor,
