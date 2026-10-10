@@ -2662,6 +2662,31 @@ if [[ "${1:-}" == get && "${2:-}" == configmap ]]; then
   cat "${RESUME_LOCK_FIXTURE:?}"
   exit 0
 fi
+if [[ "$*" == "replace -f -" ]]; then
+  python3 -c '
+import json, os
+from pathlib import Path
+state = Path(os.environ["RESUME_LOCK_FIXTURE"])
+writes = Path(os.environ["RESUME_LOCK_WRITES"])
+attempts = Path(os.environ["RESUME_LOCK_REPLACES"])
+count = int(attempts.read_text()) + 1 if attempts.exists() else 1
+attempts.write_text(str(count))
+current = json.loads(state.read_text())
+replacement = json.load(__import__("sys").stdin)
+if os.environ.get("RESUME_CAS_CONFLICT_STAGE") == str(count):
+    current["metadata"]["resourceVersion"] = str(int(current["metadata"]["resourceVersion"]) + 1)
+    state.write_text(json.dumps(current))
+if replacement["metadata"]["resourceVersion"] != current["metadata"]["resourceVersion"]:
+    raise SystemExit("fixture resourceVersion conflict")
+if replacement["metadata"]["uid"] != current["metadata"]["uid"]:
+    raise SystemExit("fixture UID conflict")
+replacement["metadata"]["resourceVersion"] = str(int(current["metadata"]["resourceVersion"]) + 1)
+state.write_text(json.dumps(replacement))
+with writes.open("a") as output:
+    output.write(replacement["data"]["state"] + "\n")
+'
+  exit 0
+fi
 exit 1
 SH
 
@@ -2669,18 +2694,16 @@ cat >"$resume_fixture/infra/oci/scripts/live-data-maintenance-stan.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == "verify-quiesced" || "${1:-}" == "verify-held" || "${1:-}" == hold ]]
-[[ "${RESUME_BAD_FENCE:-false}" == false ]] || exit 1
-if [[ "$1" == hold ]]; then
-  printf 'maintenance:hold\n' >>"${RESUME_TEST_LOG:?}"
-else
-  printf 'maintenance:verify-quiesced\n' >>"${RESUME_TEST_LOG:?}"
-fi
+printf 'maintenance:%s\n' "$1" >>"${RESUME_TEST_LOG:?}"
+[[ "$1" != verify-held || "${RESUME_BAD_FENCE:-false}" == false ]] || exit 1
+[[ "${RESUME_BAD_WRITERS:-false}" == false ]] || exit 1
 SH
 
 cat >"$resume_fixture/infra/oci/scripts/validate-rollback-baseline-stan.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'validate-baseline\n' >>"${RESUME_TEST_LOG:?}"
+[[ "${RESUME_BAD_BASELINE:-false}" == false ]] || exit 1
 cp \
   "${BASELINE_DIR:?}/live-images-template.tsv" \
   "$BASELINE_DIR/live-images.tsv"
@@ -2738,6 +2761,7 @@ printf 'baseline_sha256=%s\n' "$resume_baseline_sha" \
 reset_resume_fixture() {
   rm -f \
     "$resume_fixture/artifacts/oci-data-baseline-before/live-images.tsv" \
+    "$resume_fixture/retained-lock.json" \
     "$resume_log"
   cp "$resume_fixture/candidate-images.tsv" "$resume_fixture/actual-images.tsv"
   cp \
@@ -2791,6 +2815,18 @@ run_resume_fixture() {
   )
 }
 
+python3 - "$resume_fixture/lock.json" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "kind": "ConfigMap", "apiVersion": "v1",
+    "metadata": {"name": "gaming-mongo-migration-lock", "namespace": "betstan-oci",
+                 "uid": "fixture-original-uid", "resourceVersion": "42"},
+    "data": {"state": "active", "holder": "live-data-4007-1",
+             "operation-id": "live-data-apply-slip-index", "source-sha": "1" * 40,
+             "acquired-at-epoch": "1000", "lease-duration-seconds": "10800",
+             "lease-until-epoch": "11800", "fencing-generation": "11", "released-at-epoch": "0"},
+}))
+PY
 reset_resume_fixture
 for service in bet gamemaster resulting; do
   set_resume_image "$service" "$resume_fixture/baseline-images.tsv"
@@ -2804,11 +2840,11 @@ from pathlib import Path
 events = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
 required = [
     "validate-baseline",
-    "maintenance:verify-quiesced",
     "deployment:auth",
     "deployment:slip",
     "rollout:auth",
     "rollout:client",
+    "maintenance:verify-held",
 ]
 positions = []
 for event in required:
@@ -2816,7 +2852,7 @@ for event in required:
         raise SystemExit(f"resume fixture expected exactly one event: {event}")
     positions.append(events.index(event))
 if positions != sorted(positions):
-    raise SystemExit("resume validation, quiescence, image, and readiness order changed")
+    raise SystemExit("resume baseline, images, readiness, and held-fence order changed")
 rollouts = [event for event in events if event.startswith("rollout:")]
 if rollouts != ["rollout:auth", "rollout:client"]:
     raise SystemExit(
@@ -2988,7 +3024,6 @@ PY
   run_resume_fixture pre-runtime-hold
 done
 reset_resume_fixture
-run_resume_fixture retained-hold
 cp "$resume_fixture/pre-runtime-images.tsv" "$resume_fixture/actual-images.tsv"
 
 ruby -ryaml - "$WORKFLOW" >"$resume_fixture/acquire-step.sh" <<'RUBY'
@@ -3003,6 +3038,38 @@ cat >"$resume_fixture/infra/azure/agents/shared-mongo-operation-lock-stan.sh" <<
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$1" >>"${RESUME_TEST_LOG:?}"
+if [[ -n "${RESUME_LOCK_ARGS:-}" ]]; then
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "${LOCK_TOKEN:-}" "${OPERATION_ID:-}" "${SOURCE_SHA:-}" \
+    "${LOCK_LEASE_SECONDS:-}" "${EXPECTED_LOCK_UID:-}" "${EXPECTED_RESOURCE_VERSION:-}" \
+    "${EXPECTED_FENCING_GENERATION:-}" "${EXPECTED_LEASE_UNTIL_EPOCH:-}" >>"$RESUME_LOCK_ARGS"
+fi
+if [[ -n "${RESUME_REAL_LOCK_HELPER:-}" ]]; then
+  case "${RESUME_ACK_FAILURE:-}:$1" in
+    release-skipped:release|acquire-skipped:acquire-released)
+      printf 'shared_mongo_lock=%s status=SKIPPED reason=fixture\n' "$1"
+      exit 0 ;;
+    verify-failure:verify)
+      echo 'shared_mongo_lock=verify status=FAIL reason=fixture'
+      exit 1 ;;
+  esac
+  if ! result="$("$RESUME_REAL_LOCK_HELPER" "$@" 2>&1)"; then
+    printf '%s\n' "$result"
+    exit 1
+  fi
+  case "${RESUME_ACK_FAILURE:-}:$1" in
+    release-missing:release|acquire-missing:acquire-released|verify-missing:verify) exit 0 ;;
+    release-wrong-generation:release|acquire-wrong-generation:acquire-released)
+      printf '%s\n' "${result%fencing_generation=*}fencing_generation=99" ;;
+    release-duplicate:release|acquire-duplicate:acquire-released|verify-duplicate:verify)
+      printf '%s\n%s\n' "$result" "$result" ;;
+    release-ambiguous:release|acquire-ambiguous:acquire-released)
+      printf '%s\n' "$result"
+      exit 1 ;;
+    *) printf '%s\n' "$result" ;;
+  esac
+  exit 0
+fi
 case "$1" in
   release)
     [ "$EXPECTED_LOCK_UID" = fixture-original-uid ]
@@ -3033,6 +3100,7 @@ case "$1" in
     if [ "$1" = acquire-released ]; then
       [ "$EXPECTED_LOCK_UID" = fixture-original-uid ]
       [ "$EXPECTED_FENCING_GENERATION" = 12 ]
+      [ -z "${EXPECTED_RESOURCE_VERSION:-}${EXPECTED_LEASE_UNTIL_EPOCH:-}" ]
     fi
     [ "$LOCK_TOKEN" = live-data-901-1 ]
     [ "$SOURCE_SHA" = 2222222222222222222222222222222222222222 ]
@@ -3048,7 +3116,10 @@ case "$1" in
       echo 'shared_mongo_lock=acquire-released status=PASS lease_until_epoch=20000 fencing_generation=13'
     fi
     ;;
-  verify) [ "${RESUME_LOCK_FAILURE:-}" != verify ] || exit 1 ;;
+  verify)
+    [ "${RESUME_LOCK_FAILURE:-}" != verify ] || exit 1
+    echo 'shared_mongo_lock=verify status=PASS lease_until_epoch=20000 fencing_generation=13'
+    ;;
   renew)
     [ "$LOCK_TOKEN" = live-data-901-1 ]
     [ "$SOURCE_SHA" = 2222222222222222222222222222222222222222 ]
@@ -3098,19 +3169,6 @@ step = YAML.load_file(ARGV.fetch(0)).fetch("jobs").values.flat_map { |j| j.fetch
 puts step.fetch("run")
   .gsub("${{ steps.provenance_request.outputs.resume_maintenance_mode }}", "retained-hold")
 RUBY
-: >"$resume_log"
-(
-  cd "$resume_fixture"
-  RESUME_TEST_LOG="$resume_log" PREREQUISITE_RUN_ID=4008 \
-  RESUME_SOURCE_SHA=3333333333333333333333333333333333333333 \
-  HELD_HANDOFF_RUN_ID=0 HELD_HANDOFF_SOURCE_SHA=none \
-  FAILED_DEPLOY_RUN_ID=77 FAILED_ACTIVATION_RUN_ID=0 OCI_K8S_NAMESPACE=betstan-oci \
-  SHARED_MONGO_LOCK_TOKEN=live-data-901-1 SHARED_MONGO_LOCK_OPERATION=live-data-apply-slip-index \
-  SHARED_MONGO_LOCK_LEASE_SECONDS=14400 SOURCE_SHA=2222222222222222222222222222222222222222 \
-    bash "$resume_fixture/retained-acquire-step.sh"
-)
-[ "$(cat "$resume_log")" = $'lock:release\nacquire' ] ||
-  fail "retained successor did not transfer its immediate predecessor lock"
 unset RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
 echo "PASS pre-runtime ten-image baseline, Telemetry/fence drift, private snapshot and release/acquire boundaries"
 
@@ -3217,7 +3275,7 @@ PY
         SHARED_MONGO_LOCK_LEASE_SECONDS=14400 SOURCE_SHA=2222222222222222222222222222222222222222 \
           bash "$resume_fixture/abort-step.sh"
       )
-      [[ "$(cat "$resume_log")" = $'maintenance:hold\nmaintenance:verify-quiesced\nrenew\nverify' ]] ||
+      [[ "$(cat "$resume_log")" = $'maintenance:hold\nmaintenance:verify-held\nrenew\nverify' ]] ||
         fail "post-acquisition work failure restored runtime or used the old owner"
       [[ ! -e "$resume_fixture/artifacts/oci-live-data-rollout/evidence/SHA256SUMS" ]] ||
         fail "failed work falsely sealed a deploy handoff"
@@ -3248,6 +3306,209 @@ fi
   fail "root-owner rejection persisted transfer authority"
 unset RESUME_HELD_RUN_ID RESUME_HELD_SOURCE_SHA RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
 echo "held_handoff_workflow_transfer_contract=PASS cases=22 root_owner=REJECTED"
+
+ruby -ryaml -rjson - "$WORKFLOW" "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" \
+  >"$resume_fixture/retained-workflow.json" <<'RUBY'
+data = YAML.load_file(ARGV[0]).fetch("jobs").fetch("rollout")
+deploy = YAML.load_file(ARGV[1]).fetch("jobs").fetch("deploy")
+abort "retained deployment lease contract changed" unless deploy.fetch("env").fetch("SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS") == "10800"
+steps = data.fetch("steps")
+checkpoint = steps.find { |step| step["name"] == "Revalidate exact release disk checkpoint before lock mutation" }
+upload = steps.find { |step| step["name"] == "Upload protected rollout baselines" }.fetch("with").fetch("path")
+abort "retained snapshot upload is not independent of held-handoff inputs" unless upload.lines.any? { |line|
+  line.include?("resume_maintenance_mode == 'retained-hold'") &&
+    line.include?("/retained-lock.json") && !line.include?("held_handoff_run_id")
+}
+puts JSON.generate({"checkpoint" => checkpoint.fetch("run")})
+RUBY
+cat >"$resume_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" = revalidate && "$REVALIDATION_PROFILE" = held ]]
+[[ "$SOURCE_SHA" = 1111111111111111111111111111111111111111 ]]
+[[ "$CONTROL_SHA" = "$SOURCE_SHA" && "$GHCR_BUILD_RUN_ID" = 42 && "$DISK_CHECKPOINT_RUN_ID" = 45 ]]
+printf 'checkpoint:held\n' >>"${RESUME_TEST_LOG:?}"
+case "${RESUME_CHECKPOINT_FAILURE:-}" in
+  checkpoint|root-disk|mongo-disk) echo "fixture held checkpoint rejection" >&2; exit 1 ;;
+esac
+SH
+chmod 755 "$resume_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh"
+
+python3 - "$resume_fixture" "$ROOT_DIR/infra/azure/agents/shared-mongo-operation-lock-stan.sh" <<'PY'
+import copy
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+
+root, helper = map(Path, sys.argv[1:])
+checkpoint = json.loads((root / "retained-workflow.json").read_text())["checkpoint"]
+base_lock = {
+    "kind": "ConfigMap", "apiVersion": "v1",
+    "metadata": {"name": "gaming-mongo-migration-lock", "namespace": "betstan-oci",
+                 "uid": "fixture-original-uid", "resourceVersion": "42"},
+    "data": {"state": "active", "holder": "live-data-4008-1", "source-sha": "3" * 40,
+             "operation-id": "live-data-apply-slip-index", "acquired-at-epoch": "1000",
+             "lease-duration-seconds": "10800", "lease-until-epoch": "11800",
+             "fencing-generation": "11", "released-at-epoch": "0"},
+}
+snapshot = root / "retained-lock.json"
+lock_path = root / "lock.json"
+events_path, writes_path, args_path = (root / name for name in ("order.log", "lock-writes", "lock-args"))
+journal = root / "artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
+sealed = root / "artifacts/oci-live-data-rollout/evidence/SHA256SUMS"
+cases = []
+for lease in ("expired", "live"):
+    cases.append((lease, "success", None))
+for field, value in (
+    ("kind", "Secret"), ("apiVersion", "v2"),
+    ("metadata.namespace", "other"), ("metadata.name", "other"),
+    ("metadata.uid", ""), ("metadata.resourceVersion", "0"),
+    ("data.state", "released"), ("data.holder", "foreign"),
+    ("data.holder", "live-data-4007-1"), ("data.holder", "live-data-901-1"),
+    ("data.source-sha", "1" * 40), ("data.source-sha", "2" * 40),
+    ("data.operation-id", "other"), ("data.lease-duration-seconds", "1800"),
+    ("data.lease-duration-seconds", "14400"), ("data.lease-until-epoch", "10799"),
+    ("data.acquired-at-epoch", "0"), ("data.fencing-generation", "0"),
+    ("data.released-at-epoch", "1"),
+):
+    cases.append(("expired", "invalid-snapshot", (field, value)))
+for section in ("metadata", "data"):
+    for field in base_lock[section]:
+        cases.append(("expired", "missing-field", (f"{section}.{field}", None)))
+for failure in (
+    "missing-lock", "fence", "writers", "baseline", "image", "writer-image", "support-pod",
+    "checkpoint", "root-disk", "mongo-disk", "exclusive",
+    "uid-drift", "rv-drift", "generation-drift", "deadline-drift",
+    "release-cas", "acquire-cas", "release-skipped", "release-missing", "release-duplicate",
+    "release-wrong-generation", "release-ambiguous", "acquire-skipped", "acquire-missing",
+    "acquire-duplicate", "acquire-wrong-generation", "acquire-ambiguous",
+    "verify-failure", "verify-missing", "verify-duplicate",
+):
+    cases.append(("expired", failure, None))
+
+for lease, failure, mutation in cases:
+    for path in (snapshot, root / "pre-runtime-lock.json", events_path, writes_path, args_path,
+                 root / "lock-replaces", journal, sealed):
+        path.unlink(missing_ok=True)
+    value = copy.deepcopy(base_lock)
+    if lease == "live":
+        start = int(time.time()) - 20
+        value["data"].update({"acquired-at-epoch": str(start), "lease-until-epoch": str(start + 10800)})
+    if mutation:
+        parts = mutation[0].split(".")
+        target = value if len(parts) == 1 else value[parts[0]]
+        if failure == "missing-field": del target[parts[-1]]
+        else: target[parts[-1]] = mutation[1]
+    lock_path.write_text(json.dumps(value))
+    if failure == "missing-lock": lock_path.unlink()
+    (root / "actual-images.tsv").write_bytes((root / "candidate-images.tsv").read_bytes())
+    (root / "artifacts/oci-data-baseline-before/live-images-template.tsv").write_bytes(
+        (root / "baseline-good.tsv").read_bytes())
+    if failure in {"image", "writer-image"}:
+        service = "auth" if failure == "image" else "bet"
+        rows = (root / "actual-images.tsv").read_text().splitlines()
+        rows = [f"{service}\tfixture@sha256:{'f' * 64}" if row.startswith(service + "\t") else row for row in rows]
+        (root / "actual-images.tsv").write_text("\n".join(rows) + "\n")
+    env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+        RUNNER_TEMP=str(root), RESUME_TEST_LOG=str(events_path),
+        RESUME_ACTUAL_IMAGES=str(root / "actual-images.tsv"),
+        RESUME_IMAGES=str(root / "artifacts/oci-live-data-rollout/resume-images.tsv"),
+        RESUME_LOCK_FIXTURE=str(lock_path), RESUME_LOCK_WRITES=str(writes_path),
+        RESUME_LOCK_REPLACES=str(root / "lock-replaces"), RESUME_LOCK_ARGS=str(args_path),
+        RESUME_REAL_LOCK_HELPER=str(helper), PREREQUISITE_RUN_ID="4008", RESUME_SOURCE_SHA="3" * 40,
+        RESUME_MAINTENANCE_MODE="retained-hold", RESOLVED_APPLIED_DATA_RUN_ID="4007",
+        RESOLVED_APPLIED_SOURCE_SHA="1" * 40, HELD_HANDOFF_RUN_ID="0", HELD_HANDOFF_SOURCE_SHA="none",
+        BASELINE_RECOVERY_RUN_ID="0", BASELINE_RECOVERY_SOURCE_SHA="none",
+        FAILED_DEPLOY_RUN_ID="77", FAILED_ACTIVATION_RUN_ID="0", OCI_K8S_NAMESPACE="betstan-oci",
+        GITHUB_RUN_ID="901", SOURCE_SHA="2" * 40, CHECKPOINT_SOURCE_SHA="1" * 40,
+        BUILD_RUN_ID="42", DISK_CHECKPOINT_RUN_ID="45",
+        SHARED_MONGO_LOCK_TOKEN="live-data-901-1", SHARED_MONGO_LOCK_OPERATION="live-data-apply-slip-index",
+        SHARED_MONGO_LOCK_LEASE_SECONDS="14400", RESUME_ACK_FAILURE=failure,
+        RESUME_LOCK_FAILURE="exclusive" if failure == "exclusive" else "",
+        RESUME_BAD_FENCE="true" if failure == "fence" else "false",
+        RESUME_BAD_WRITERS="true" if failure == "writers" else "false",
+        RESUME_BAD_BASELINE="true" if failure == "baseline" else "false",
+        RESUME_BAD_POD="client" if failure == "support-pod" else "",
+        RESUME_CHECKPOINT_FAILURE=failure,
+        RESUME_CAS_CONFLICT_STAGE={"release-cas": "1", "acquire-cas": "2"}.get(failure, ""))
+    def run(argv, **kwargs):
+        return subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True, timeout=20, **kwargs)
+    admission = run(["bash", str(root / "resume-step.sh")])
+    early = failure in {"invalid-snapshot", "missing-field", "missing-lock", "fence",
+                        "writers", "baseline", "image", "writer-image", "support-pod"}
+    if early:
+        assert admission.returncode != 0, (failure, mutation)
+        assert not snapshot.exists() and not writes_path.exists() and not args_path.exists()
+        assert not journal.exists() and not sealed.exists()
+        continue
+    assert admission.returncode == 0, (lease, failure, admission.stdout, admission.stderr)
+    assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+    assert json.loads(snapshot.read_text()) == value
+    events = events_path.read_text().splitlines()
+    assert events.count("maintenance:verify-held") == 1 and "maintenance:verify-quiesced" not in events
+    assert events.index("rollout:client") < events.index("maintenance:verify-held")
+    checked = run(["bash", "-euo", "pipefail", "-c", checkpoint])
+    if failure in {"checkpoint", "root-disk", "mongo-disk"}:
+        assert checked.returncode != 0 and snapshot.exists()
+        assert not writes_path.exists() and not args_path.exists() and not journal.exists() and not sealed.exists()
+        continue
+    assert checked.returncode == 0, checked.stderr
+    drift = {"uid-drift": ("metadata", "uid", "recreated-uid"),
+             "rv-drift": ("metadata", "resourceVersion", "43"),
+             "generation-drift": ("data", "fencing-generation", "12"),
+             "deadline-drift": ("data", "lease-until-epoch", str(int(value["data"]["lease-until-epoch"]) + 1))}
+    if failure in drift:
+        section, field, changed = drift[failure]
+        observed = copy.deepcopy(value); observed[section][field] = changed
+        lock_path.write_text(json.dumps(observed))
+    result = run(["bash", str(root / "retained-acquire-step.sh")])
+    assert (result.returncode == 0) == (failure == "success"), (lease, failure, result.stdout, result.stderr)
+    assert not journal.exists() and not sealed.exists()
+    arguments = [line.split("\t") for line in args_path.read_text().splitlines()] if args_path.exists() else []
+    actions = [row[0] for row in arguments]
+    assert not any(action in {"acquire", "renew", "force-release"} for action in actions)
+    assert all(actions.count(action) == 1 for action in actions), (failure, actions)
+    events = events_path.read_text().splitlines()
+    assert events.index("checkpoint:held") < events.index("exclusive")
+    if arguments:
+        assert arguments[0] == ["release", "live-data-4008-1", "live-data-apply-slip-index", "3" * 40,
+                                "", "fixture-original-uid", "42", "11", value["data"]["lease-until-epoch"]]
+        assert events.index("exclusive") < events.index("release")
+    if "acquire-released" in actions:
+        assert arguments[1] == ["acquire-released", "live-data-901-1", "live-data-apply-slip-index", "2" * 40,
+                                "14400", "fixture-original-uid", "", "12", ""]
+    if "verify" in actions:
+        assert arguments[2][:4] == ["verify", "live-data-901-1", "live-data-apply-slip-index", "2" * 40]
+    writes = writes_path.read_text().splitlines() if writes_path.exists() else []
+    if failure == "success":
+        assert actions == ["release", "acquire-released", "verify"] and writes == ["released", "active"]
+        current = json.loads(lock_path.read_text())
+        assert current["metadata"]["uid"] == value["metadata"]["uid"]
+        assert current["data"]["holder"] == "live-data-901-1"
+        assert current["data"]["source-sha"] == "2" * 40
+        assert current["data"]["fencing-generation"] == "13" and current["data"]["lease-duration-seconds"] == "14400"
+        assert int(current["data"]["lease-until-epoch"]) > time.time()
+    elif failure in {"exclusive", "uid-drift", "rv-drift", "generation-drift", "deadline-drift", "release-cas", "release-skipped"}:
+        assert writes == [] and "acquire-released" not in actions
+    elif failure.startswith("release-"):
+        assert writes == ["released"] and "acquire-released" not in actions
+    elif failure in {"acquire-cas", "acquire-skipped"}:
+        assert writes == ["released"] and "verify" not in actions
+    elif failure.startswith("acquire-"):
+        assert writes == ["released", "active"] and "verify" not in actions
+    else:
+        assert failure.startswith("verify-") and writes == ["released", "active"]
+    if failure.endswith("-cas"):
+        assert "resourceVersion conflict" in result.stdout + result.stderr
+    if failure.endswith("-ambiguous"):
+        assert "status=PASS" in result.stdout and "status=UNCONFIRMED" in result.stdout
+    assert json.loads(snapshot.read_text()) == value, "observed snapshot was re-baselined after drift"
+print(f"retained_owner_workflow_real_lock_contract=PASS cases={len(cases)} live_and_expired_lease=10800 old_pre_runtime_lease=1800")
+PY
 
 for literal in \
   'validate_blocked_reschedule_report' \
@@ -3300,7 +3561,6 @@ for literal in \
   'shared-mongo-operation-lock-stan.sh verify' \
   'live-data-maintenance-stan.sh enter' \
   'live-data-maintenance-stan.sh verify-held' \
-  'live-data-maintenance-stan.sh verify-quiesced' \
   'live-data-maintenance-stan.sh hold' \
   'baseline-capture-stan.sh' \
   'Capture and validate pre-mutation rollback baseline' \
@@ -3642,7 +3902,6 @@ require_order(
         'case "$RESUME_MAINTENANCE_MODE" in',
         "released-runtime)",
         "retained-hold)",
-        "live-data-maintenance-stan.sh verify-quiesced",
         'for service in "${services[@]}"; do',
         'case "$service" in',
         "auth|client)",
@@ -3652,9 +3911,16 @@ require_order(
         'for service in "${supporting_services[@]}"; do',
         "kubectl rollout status",
         "Resume supporting pod image mismatch",
+        'previous_holder_run="$PREREQUISITE_RUN_ID"',
+        'previous_lock_snapshot="$RUNNER_TEMP/retained-lock.json"',
+        "previous_lease_seconds=10800",
     ],
     "failed-deploy resume",
 )
+if resume.rindex("live-data-maintenance-stan.sh verify-held") < resume.index(
+    "Resume supporting pod image mismatch"
+):
+    raise SystemExit("retained held-fence verification precedes supporting pod validation")
 if "Resume pod image mismatch" in resume:
     raise SystemExit("failed-deploy resume still requires pods for quiesced writers")
 if resume.count("backoffice|bet|event|gamemaster|moderation|resulting|slip)") != 1:

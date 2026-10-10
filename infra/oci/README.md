@@ -427,8 +427,26 @@ concurrent retirement fixture isolation without masking failed suites.
    baseline, and read-only access work, then make public checkpoint
    revalidation the final read-only action before acquiring the shared Mongo
    operation lock. A retained-hold resume validates its fixed failure
-   profile, inherited fence and lock, and held checkpoint before new lock
-   action. Held collection uses only raw bytes, root/Mongo mount and
+   profile, candidate Auth/Client serving pods and each writer's candidate or
+   own validated baseline image. It then verifies the configured and live
+   ingress fence plus all seven quiesced writers and captures a private,
+   fresh ownership snapshot of the immediate successful predecessor's
+   10800-second deployment lease. Matching live and expired leases use this
+   same path; expiry itself grants no authority. The separately preserved
+   retained snapshot binds namespace/name, UID/resourceVersion, owner,
+   operation/source, acquisition/lease metadata and fencing generation.
+   After held checkpoint revalidation, both 70-percent byte guards and fresh
+   production exclusivity, strict own release at generation `g` must confirm
+   `g+1`; released-only acquisition of the same UID must confirm `g+2`,
+   the new authorized owner/current source and the unchanged 14400-second
+   lease. Ordinary new-owner live verification must also pass before data work.
+   These are two CAS operations, not an atomic transfer. Missing acknowledgement
+   may follow an applied mutation: stop without generic acquisition, retry,
+   restoration or a fresh handoff, and obtain the existing deployment-safety
+   owner's exact-state assessment. Rollback must retain this guarded path,
+   not restore expired-lease rejection or generic reclaim. Pre-runtime's
+   1800-second snapshot and the fresh final-data 1800-second handoff are unchanged.
+   Held collection uses only raw bytes, root/Mongo mount and
    node/runtime identity, and immutable candidate/rollback residency; it calls
    no HTTP, RabbitMQ/rabbitmqctl, queues, pods, Deployments, or mutable
    workload-health checks. Public revalidation derives rollback residency from
