@@ -139,4 +139,114 @@ assert_contains "$RUN_STDERR" 'NO_GO deploy_validation_reason=all bounded attemp
 assert_contains "$RUN_OUTPUT_DIR/attempt-1/service-ops.txt" 'fixture-oci-service-ops'
 assert_contains "$RUN_OUTPUT_DIR/attempt-1/node-logs.txt" 'fixture-oci-node-logs'
 
+ruby -ryaml -rjson - "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" \
+  >"$WORK_DIR/health-step.json" <<'RUBY'
+workflow = YAML.load_file(ARGV.fetch(0))
+job = workflow.fetch("jobs").fetch("deploy")
+steps = job.fetch("steps").select { |step| step["name"] == "Run protected OCI cluster validation loop" }
+abort("expected exactly one protected health step") unless steps.length == 1
+step = steps.fetch(0)
+abort("protected health entrypoint changed") unless step.fetch("run") == "./infra/oci/agents/deploy-validation-loop-stan.sh"
+puts JSON.generate((workflow["env"] || {}).merge(job.fetch("env")).merge(step.fetch("env")))
+RUBY
+
+python3 - "$ROOT_DIR" "$WORK_DIR" "$ORIGINAL_PATH" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+root, work = map(Path, sys.argv[1:3])
+mapping = json.loads((work / "health-step.json").read_text())
+control, checkpoint = "c" * 40, "a" * 40
+bin_dir = work / "health-bin"
+bin_dir.mkdir()
+# Stop at the first provider read AFTER the real health provenance checks.
+# This is not healthy-cluster evidence and never uses OCI_HEALTH_FIXTURE_FILE.
+stubs = {
+    "oci": '''#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "--version" ]]; then
+  printf '%s\\n' "$OCI_CLI_VERSION"
+  exit 0
+fi
+[[ "$*" == "compute instance get --instance-id fixture-instance" ]] || exit 74
+printf '%s\\n' "$OCI_EXPECTED_SOURCE_SHA" "$EXPECTED_OPERATION_LOCK_SOURCE_SHA" "$SOURCE_SHA" >"$PREFLIGHT_CALL_LOG"
+exit 73
+''',
+    "kubectl": "#!/usr/bin/env bash\nexit 74\n",
+}
+for name, contents in stubs.items():
+    path = bin_dir / name
+    path.write_text(contents)
+    path.chmod(0o700)
+infra = work / "health-infrastructure.env"
+infra.write_text(
+    f"source_sha={checkpoint}\nruntime_mode=k3s\n"
+    "compartment_ocid=fixture-compartment\nnamespace=betstan-oci\n"
+    "ingress_ipv4=203.0.113.10\npublic_host=betstan.xyz\ncanonical_host=betstan.xyz\n"
+    "redirect_host=www.betstan.xyz\ndiagnostic_host=203.0.113.10.nip.io\nlb_ocid=fixture-lb\n"
+    "node_shape=VM.Standard.A1.Flex\nnode_ocpus=2\nnode_memory_gb=12\nmongo_volume_gb=50\n"
+    "lb_min_mbps=10\nlb_max_mbps=10\nexpected_monthly_cost=0\n"
+    "instance_ocid=fixture-instance\nk3s_node_name=fixture-node\n"
+    f"instance_fingerprint={hashlib.sha256(b'fixture-instance').hexdigest()}\n"
+)
+
+for scenario in ("checkpoint", "old-mapping", "missing", "substituted", "malformed", "equal-source"):
+    actual = dict(mapping)
+    approved = checkpoint if scenario == "equal-source" else control
+    if scenario == "old-mapping":
+        actual["OCI_EXPECTED_SOURCE_SHA"] = "${{ env.SOURCE_SHA }}"
+    elif scenario == "missing":
+        actual.pop("OCI_EXPECTED_SOURCE_SHA", None)
+    elif scenario == "substituted":
+        actual["OCI_EXPECTED_SOURCE_SHA"] = "b" * 40
+    elif scenario == "malformed":
+        actual["OCI_EXPECTED_SOURCE_SHA"] = "not-a-sha"
+    inputs = {"approved_sha": approved, "checkpoint_source_sha": checkpoint}
+
+    def resolve(value):
+        def expression(match):
+            context, name = match.group(1).split(".", 1)
+            return inputs[name] if context == "inputs" else resolve(actual[name])
+        return re.sub(r"\$\{\{\s*((?:inputs|env)\.[A-Za-z_]+)\s*\}\}", expression, value)
+
+    log = work / f"health-{scenario}.calls"
+    env = {
+        "PATH": str(bin_dir) + ":" + sys.argv[3], "HOME": str(work),
+        "TMPDIR": str(work), "OCI_CLI_VERSION": mapping["OCI_CLI_VERSION"], "OCI_RUNTIME_MODE": "k3s",
+        "OCI_MEMORY_MAX_PERCENT": "70", "OCI_DISK_MAX_PERCENT": "70",
+        "OCI_PUBLIC_URL": "https://betstan.xyz", "OCI_REDIRECT_URL": "https://www.betstan.xyz",
+        "OCI_DIAGNOSTIC_URL": "https://203.0.113.10.nip.io",
+        "INFRA_PROVENANCE_FILE": str(infra),
+        "IMAGE_PROVENANCE_FILE": str(work / "success.images.tsv"),
+        "OUTPUT_DIR": str(work / f"health-{scenario}"), "PREFLIGHT_CALL_LOG": str(log),
+    }
+    for key in ("SOURCE_SHA", "CHECKPOINT_SOURCE_SHA", "OCI_EXPECTED_SOURCE_SHA",
+                "EXPECTED_OPERATION_LOCK_SOURCE_SHA", "OCI_PUBLIC_CHECKS_ALREADY_PASSED",
+                "OCI_E2E_ALREADY_PASSED", "OCI_EXPECT_HTTP_MUTATION_FENCE"):
+        if key in actual:
+            env[key] = resolve(actual[key])
+    assert env["SOURCE_SHA"] == env["EXPECTED_OPERATION_LOCK_SOURCE_SHA"] == approved
+    assert env["CHECKPOINT_SOURCE_SHA"] == checkpoint
+    assert "OCI_HEALTH_FIXTURE_FILE" not in env
+    result = subprocess.run(
+        [str(root / "infra/oci/agents/health-check-stan.sh")],
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+    if scenario in {"checkpoint", "equal-source"}:
+        assert result.returncode == 73, (scenario, result.returncode, result.stderr)
+        assert log.read_text().splitlines() == [checkpoint, approved, approved]
+    else:
+        message = {
+            "missing": "required environment variable is missing: OCI_EXPECTED_SOURCE_SHA",
+            "malformed": "OCI_EXPECTED_SOURCE_SHA must be a full lowercase commit SHA",
+        }.get(scenario, "health source SHA differs from infrastructure provenance")
+        assert result.returncode == 1 and message in result.stderr, (scenario, result.stderr)
+        assert not log.exists(), f"{scenario} reached provider access before source admission"
+    print(f"health_source_preflight=PASS scenario={scenario}")
+PY
+
 echo 'oci_deploy_validation_loop_tests=PASS scenarios=2'
