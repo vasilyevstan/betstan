@@ -469,6 +469,11 @@ actual successful held owner, separately from the original applied-data and
 failed-deployment rollback root. Original root inputs and historical request
 hashes retain their meanings; the successor uses corrected current-master
 authority. Eligible CLI-owned gates retain existing automatic approval.
+Only this operation passes the exact verified bound successor into post-bind
+upstream revalidation during materialization, on fresh dispatch and both resume
+paths. Preparation and pre-call validation exclude no successor; the shared
+reader reauthenticates that exact native run. Neither ambient caller identity
+nor an earlier cancelled run can substitute for the bound own run.
 
 Before intent/approval and in workflow preflight, this operation admits only
 the reviewed historical producer's missing `resume-images.tsv`. Complete
@@ -491,6 +496,23 @@ Neither queued status nor the required minimum age alone is authority. This
 history-only proof may validate an active workflow; it neither enables the
 workflow nor grants dispatch, approval or current exclusivity. Current serialized
 admission and disabled-workflow safeguards remain independent and unchanged.
+
+A separate history-only case admits an otherwise blocking post-held terminal
+`apply-slip-index` data run only when two complete authenticated native
+collections agree without drift on non-execution. Exact repository, workflow,
+source, `master` branch and phase title, source-workflow guards and content hash,
+and complete ancestry proof are mandatory. Both latest-run and attempt-one
+records must show a completed, cancelled first attempt. The complete job
+inventory must contain exactly one cancelled `rollout` job with a positive
+native identity, an explicitly unassigned runner and explicitly empty steps;
+pending gates, approvals and artifacts must also be empty with complete
+inventories. Endpoint-local chronology must hold, with no terminalization after
+an established immutable successor cutoff. The row remains counted and
+untouched; other post-held transitions still block. This portable proof
+establishes only native non-execution, not request ownership, inputs or canonical
+retirement, and requires no private dispatcher authority records. It grants no
+current exclusivity, approval, adoption or lease authority. The older pre-held
+unmaterialized-run classifier remains unchanged.
 
 Physical admission uses the actual held owner, not the root tuple: a fresh
 baseline, verified fence, seven quiescent writers, exact images and supporting
@@ -585,8 +607,10 @@ successor holder; existing v1/v2 semantics and strict missing-file rejection
 remain unchanged. Promote compatible v3 readers and writer together. After v3
 emission, rollback must retain v3, exact native cleanup-slot numbering and
 semantic pre-handoff history validation, alongside all historical profiles and
-endpoint-local chronology. Otherwise use reviewed forward correction, never
-rewrite old proof.
+endpoint-local chronology. Once a continuation depends on bound own-run context
+or portable native non-execution history, rollback must also retain both
+capabilities. Otherwise use reviewed forward correction, never rewrite old
+proof.
 Frozen retirement profiles are not extended for this continuation.
 
 Fresh and released-runtime data paths complete static, checkpoint, predecessor,

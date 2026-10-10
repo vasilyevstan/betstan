@@ -2134,6 +2134,162 @@ def validate_held_handoff_native(
 
 def held_handoff_history(repository, held, subject_sha, successor_run_id=""):
     authority = None
+
+    def validate_cancelled_unstarted(row):
+        nonlocal authority
+        label = f"held-handoff cancelled run {row['id']}"
+        path = ".github/workflows/oci-live-data-rollout.yml"
+        if (
+            row.get("path") != path or row.get("status") != "completed"
+            or row.get("conclusion") != "cancelled"
+            or type(row.get("workflow_id")) is not int or row["workflow_id"] < 1
+            or not isinstance(row.get("head_sha"), str)
+            or FULL_SHA.fullmatch(row["head_sha"]) is None
+        ):
+            fail(f"{label} is not a candidate for native no-execution history")
+        if authority is None:
+            try:
+                specification = importlib.util.spec_from_file_location(
+                    "held_handoff_authority",
+                    Path(__file__).resolve().parents[2]
+                    / "azure/agents/copilot_cli_authority_stan.py",
+                )
+                if specification is None or specification.loader is None:
+                    fail(f"{label} shared source validator is unavailable")
+                authority = importlib.util.module_from_spec(specification)
+                specification.loader.exec_module(authority)
+            except (OSError, ImportError, SyntaxError):
+                fail(f"{label} shared source validator is unavailable")
+        expected = {
+            "id": row["id"], "workflow_id": row["workflow_id"], "path": path,
+            "head_sha": row["head_sha"], "head_branch": "master",
+            "event": "workflow_dispatch", "run_attempt": 1,
+            "status": "completed", "conclusion": "cancelled",
+            "display_title": f"oci-live-data apply-slip-index {row['head_sha']}",
+            "html_url": f"https://github.com/{repository}/actions/runs/{row['id']}",
+        }
+        endpoint = f"repos/{repository}/actions/runs/{row['id']}"
+        observations = []
+        for _ in range(2):
+            latest = gh_api(endpoint)
+            first = gh_api(endpoint + "/attempts/1")
+            workflow_metadata = gh_api(
+                f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml"
+            )
+            if (
+                not isinstance(workflow_metadata, dict)
+                or type(workflow_metadata.get("id")) is not int
+                or workflow_metadata["id"] != row["workflow_id"]
+                or workflow_metadata.get("path") != path
+                or workflow_metadata.get("state") not in {"active", "disabled_manually"}
+            ):
+                fail(f"{label} workflow identity is invalid")
+            windows = []
+            for run in (latest, first):
+                if (
+                    not isinstance(run, dict)
+                    or any(type(run.get(key)) is not type(value) or run.get(key) != value
+                           for key, value in expected.items())
+                    or not isinstance(run.get("head_repository"), dict)
+                    or run["head_repository"].get("full_name") != repository
+                ):
+                    fail(f"{label} is not an exact cancelled first attempt")
+                window = tuple(parse_timestamp(run.get(key), label) for key in (
+                    "created_at", "run_started_at", "updated_at",
+                ))
+                if not window[0] <= window[1] <= window[2]:
+                    fail(f"{label} endpoint chronology is invalid")
+                if cutoff is not None and window[2] > cutoff:
+                    fail(f"{label} terminalized after the immutable successor cutoff")
+                windows.append(window)
+            if windows[0][:2] != windows[1][:2]:
+                fail(f"{label} latest and first-attempt start windows disagree")
+            if any(
+                key not in row or type(row[key]) is not type(latest[key])
+                or row[key] != latest[key]
+                for key in (*expected, "created_at", "run_started_at", "updated_at")
+            ):
+                fail(f"{label} native details differ from the complete inventory")
+            jobs = jobs_for_run(repository, str(row["id"]), label)
+            if len(jobs) != 1:
+                fail(f"{label} must have exactly one cancelled rollout job")
+            job = exact_job(jobs, "rollout", label)
+            job_expected = {
+                "run_id": row["id"], "run_attempt": 1, "head_sha": row["head_sha"],
+                "head_branch": "master", "status": "completed", "conclusion": "cancelled",
+            }
+            if (
+                type(job.get("id")) is not int or job["id"] < 1
+                or any(type(job.get(key)) is not type(value) or job.get(key) != value
+                       for key, value in job_expected.items())
+                or job["steps"] != []
+                or "runner_id" not in job or "runner_name" not in job
+                or not (job["runner_id"] is None
+                        or type(job["runner_id"]) is int and job["runner_id"] == 0)
+                or job["runner_name"] not in (None, "")
+            ):
+                fail(f"{label} has assigned, executed, or ambiguous job evidence")
+            job_times = tuple(parse_timestamp(job.get(key), label) for key in (
+                "created_at", "started_at", "completed_at",
+            ))
+            if not all(window[1] <= job_times[0] <= job_times[1] <= job_times[2] <= window[2]
+                       for window in windows):
+                fail(f"{label} job is outside an authenticated endpoint window")
+            pending = gh_api(endpoint + "/pending_deployments")
+            approvals = gh_api(endpoint + "/approvals")
+            artifacts = artifact_inventory(repository, str(row["id"]), label)
+            if pending != [] or approvals != [] or artifacts:
+                fail(f"{label} has pending, approved, or artifact evidence")
+            historical = gh_api(
+                f"repos/{repository}/contents/{path}?ref={row['head_sha']}"
+            )
+            try:
+                _, source_blob = authority.validate_historical_unmaterialized_workflow(
+                    path, historical, blob_sha="c3c9332f4b23b55de6c32ae2183b89478f97884f",
+                )
+            except (AttributeError, SystemExit):
+                fail(f"{label} historical workflow is not the guarded source profile")
+            compare = None
+            if row["head_sha"] != subject_sha:
+                pages = gh_api_pages(
+                    f"repos/{repository}/compare/{row['head_sha']}...{subject_sha}?per_page=100"
+                )
+                metadata, commits = None, []
+                keys = ("status", "ahead_by", "behind_by", "total_commits",
+                        "base_commit", "merge_base_commit")
+                for page in pages:
+                    if (
+                        not isinstance(page, dict) or any(key not in page for key in keys)
+                        or not isinstance(page.get("commits"), list) or not page["commits"]
+                    ):
+                        fail(f"{label} ancestry pagination is malformed")
+                    current = {key: page[key] for key in keys[:4]}
+                    for key in keys[4:]:
+                        if not isinstance(page[key], dict):
+                            fail(f"{label} ancestry pagination is malformed")
+                        current[key] = {"sha": page[key].get("sha")}
+                    if metadata is None:
+                        metadata = current
+                    elif any(type(current[key]) is not type(metadata[key])
+                             or current[key] != metadata[key] for key in keys):
+                        fail(f"{label} ancestry pagination changed")
+                    commits.extend(page["commits"])
+                if metadata is None:
+                    fail(f"{label} ancestry pagination is empty")
+                compare = {**metadata, "commits": commits}
+                try:
+                    authority.validate_strict_ancestor_compare(compare, row["head_sha"], subject_sha)
+                except (AttributeError, SystemExit):
+                    fail(f"{label} source is not a proven ancestor of the exact anchor")
+            observations.append({
+                "latest": {key: latest[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
+                "first": {key: first[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
+                "workflow": {key: workflow_metadata[key] for key in ("id", "path", "state")},
+                "job": job, "source_blob": source_blob, "compare": compare,
+            })
+        if observations[0] != observations[1]:
+            fail(f"{label} native no-execution evidence changed between complete collections")
+
     policy = subprocess.run(
         ["git", "show", f"{subject_sha}:infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"],
         capture_output=True, text=True, check=False,
@@ -2238,7 +2394,8 @@ def held_handoff_history(repository, held, subject_sha, successor_run_id=""):
             if row.get("head_branch") != "master":
                 continue
             if updated >= lower:
-                fail("an intervening protected production transition excludes this held handoff")
+                validate_cancelled_unstarted(row)
+                continue
             if row.get("status") != "completed":
                 if authority is None:
                     try:
