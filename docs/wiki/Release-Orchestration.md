@@ -463,6 +463,10 @@ complete predecessor-v6, deployment, build, infrastructure, checkpoint, and
 activation tuples must resolve without substitution. Post-runtime retained-hold
 deployment recovery uses the checksum-sealed intent written before lock renewal
 plus the post-rehold failure lineage.
+For released-runtime recovery after an authenticated
+`live-betting-data-resume-v2` retained-hold data resume, baseline capture identity
+follows the validated original applied-data root, while the immediate
+predecessor's evidence and ownership bindings remain distinct.
 
 Post-runtime retained-owner admission derives the old owner from the
 authenticated immediate predecessor, not the rollback root or whichever holder
@@ -677,6 +681,12 @@ fresh held revalidation repeats exact byte, mount, candidate, and rollback
 checks before release; one byte above 70 percent blocks release. The lock is
 released before the fence. Existing failure handling may re-establish the hold
 and reacquire the exact lock only on its bounded post-failure path.
+
+Public smoke validation requires a visible, accessible home-brand link named
+exactly `BetStan` (legacy text) or `BetStan home` (current image alternative
+text). This compatibility does not relax navigation, authentication or
+Backoffice checks, or the requirement that all required release validations
+pass.
 
 If an already-dispatched but unissued operation loses a prerequisite, its
 exact request and run remain serialized until bounded, reviewed recovery proves

@@ -1604,6 +1604,109 @@ def validate_failed_deploy_artifacts(
         root_run, root_source = validate_pre_runtime_resume_chain(
             repository, predecessor_run, runtime_mode, seen=seen
         )
+    elif (
+        not pre_runtime
+        and profile == "oci-failed-deploy-released-runtime-v1"
+        and predecessor_authority is not None
+        and predecessor_authority["schema_version"] == "live-betting-data-resume-v2"
+        and predecessor_authority["resume_maintenance_mode"] == "retained-hold"
+    ):
+        lineage_seen = set() if seen is None else set(seen)
+        if predecessor_run in lineage_seen or len(lineage_seen) >= 20:
+            fail("resume authority is cyclic or exceeds the lineage bound")
+        lineage_seen.add(predecessor_run)
+        failed_run = predecessor_authority["failed_deploy_run_id"]
+        failed = fixed_run_metadata(
+            repository, failed_run, "oci-production-deploy.yml", "failure",
+            f"{label} retained failure",
+        )
+        failed_source = failed["head_sha"]
+        if failed.get("display_title") != f"oci-deploy {failed_source}":
+            fail(f"{label} retained failure title differs")
+        validate_descendant_scope(failed_source, subject_sha)
+        retained_profile = "oci-failed-deploy-retained-hold-v1"
+        outcomes = validate_failed_deploy_jobs(
+            repository, failed_run, retained_profile, f"{label} retained failure"
+        )
+        if tuple(predecessor_authority[key] for key in (
+            "failed_deploy_job_conclusion", "public_validate_job_conclusion",
+            "lock_release_step_conclusion", "fence_release_step_conclusion",
+            "rehold_step_conclusion",
+        )) != ("failure", "skipped", *outcomes):
+            fail(f"{label} retained authority differs from native failure outcomes")
+        native = failed_deploy_native_inputs(
+            repository, failed_run, failed_source, f"{label} retained failure",
+            expected_step_conclusion="success",
+        )
+        expected_request = {key: native[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id",
+            "baseline_recovery_source_sha",
+        )}
+        if any(value != predecessor[key] for key, value in expected_request.items()):
+            fail(f"{label} retained failure substituted the original release tuple")
+        expected_request.update({
+            "approved_sha": subject_sha, "resume_source_sha": failed_source,
+            "prerequisite_run_id": native["data_run_id"],
+            "failed_deploy_run_id": failed_run, "phase": "apply-slip-index",
+            "failed_activation_run_id": "0", "failed_activation_user_id": "0",
+            "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA",
+        })
+        request = failed_deploy_native_inputs(
+            repository, predecessor_run, subject_sha, f"{label} retained resume",
+            resume_dispatch=True,
+        )
+        if request != expected_request:
+            fail(f"{label} retained resume substituted its native predecessor or failure")
+        root_run, root_source = validate_pre_runtime_resume_chain(
+            repository, native["data_run_id"], runtime_mode, seen=lineage_seen
+        )
+        if (root_run, root_source) != (
+            predecessor_authority["applied_data_run_id"],
+            predecessor_authority["applied_source_sha"],
+        ):
+            fail(f"{label} retained resume substituted its original applied authority")
+        validate_descendant_scope(root_source, failed_source)
+        root = require_fixed_run(
+            repository, root_run, "oci-live-data-rollout.yml", "success",
+            root_source, f"oci-live-data apply-slip-index {root_source}",
+            f"{label} original data",
+        )
+        root_evidence, _ = parse_live_v6_artifact(
+            repository, root_run, f"{label} original data"
+        )
+        validate_live_v6_lineage(
+            root_evidence, checkpoint, dispatch_inputs, root_run, root_source,
+            "apply-slip-index", f"{label} original data",
+        )
+        if root_evidence["baseline_sha256"] != predecessor["baseline_sha256"]:
+            fail(f"{label} retained resume substituted its original baseline")
+        prior = require_fixed_run(
+            repository, native["data_run_id"], "oci-live-data-rollout.yml", "success",
+            failed_source, f"oci-live-data apply-slip-index {failed_source}",
+            f"{label} earlier data",
+        )
+        baseline_artifact = exact_artifact(
+            repository, failed_run, f"oci-production-baseline-{failed_run}-1",
+            f"{label} retained failure",
+        )
+        validate_failed_deploy_artifacts(
+            repository, failed_run, failed_source, baseline_artifact,
+            dict(native, prerequisite_run_id=native["data_run_id"]), runtime_mode,
+            retained_profile, *outcomes, f"{label} retained failure", seen=lineage_seen,
+        )
+        current = require_fixed_run(
+            repository, predecessor_run, "oci-live-data-rollout.yml", "success",
+            subject_sha, f"oci-live-data apply-slip-index {subject_sha}",
+            f"{label} retained resume",
+        )
+        for earlier, later in ((root, prior), (prior, failed), (failed, current)):
+            if earlier is root and root_run == native["data_run_id"]:
+                continue
+            if parse_timestamp(earlier.get("updated_at"), label) > parse_timestamp(
+                later.get("created_at"), label
+            ):
+                fail(f"{label} retained resume chronology differs")
     if pre_runtime:
         native = failed_deploy_native_inputs(repository, run_id, subject_sha, label)
         expected_native = {
@@ -1874,11 +1977,19 @@ def original_before_baseline(files, label):
     return selected
 
 
-def failed_deploy_native_inputs(repository, run_id, source_sha, label, *, resume_dispatch=False):
+def failed_deploy_native_inputs(
+    repository, run_id, source_sha, label, *, resume_dispatch=False,
+    expected_step_conclusion="failure",
+):
     """Read only runner-generated environment in the exact failed step log.
 
     Raw logs stay in captured process memory: never persist or echo them.
     """
+    if (
+        type(expected_step_conclusion) is not str
+        or expected_step_conclusion not in {"failure", "success"}
+    ):
+        fail(f"{label} native deployment step expectation is invalid")
     jobs = jobs_for_run(repository, run_id, label)
     deploy = exact_job(jobs, "rollout" if resume_dispatch else "deploy", label)
     job_id = deploy.get("id")
@@ -1894,7 +2005,9 @@ def failed_deploy_native_inputs(repository, run_id, source_sha, label, *, resume
     ]
     if len(step) != 1:
         fail(f"{label} native provenance step is ambiguous")
-    if step[0].get("conclusion") != ("success" if resume_dispatch else "failure"):
+    if step[0].get("conclusion") != (
+        "success" if resume_dispatch else expected_step_conclusion
+    ):
         fail(f"{label} native input step outcome differs")
     start = parse_timestamp(step[0].get("started_at"), label)
     end = parse_timestamp(step[0].get("completed_at"), label)

@@ -232,12 +232,41 @@ for resume_dispatch in (False, True):
             "started_at": "2026-10-07T09:09:15Z", "completed_at": "2026-10-07T09:09:17Z",
         }]
     raw = log(values, env_names)
-    def read_native():
+    def read_native(**kwargs):
         return m.failed_deploy_native_inputs(
-            "example/repo", "77", source, "fixture", resume_dispatch=resume_dispatch)
+            "example/repo", "77", source, "fixture",
+            resume_dispatch=resume_dispatch, **kwargs)
     with patch.object(m, "zip_files", return_value={f"0_{job_name}.txt": raw}):
         direct = read_native()
     assert direct == values
+    original_steps = copy.deepcopy(jobs[0]["steps"])
+    step_name = (
+        "Validate exact SHA phase and trusted upstream runs" if resume_dispatch
+        else "Verify immutable image and infrastructure provenance"
+    )
+    with patch.object(m, "gh_api_bytes", return_value=log_archive(raw, (f"0_{job_name}.txt",))):
+        step = next(item for item in jobs[0]["steps"] if item["name"] == step_name)
+        for expected in ("failure", "success"):
+            for conclusion in ("failure", "success", "skipped", None):
+                step["conclusion"] = conclusion
+                if conclusion == ("success" if resume_dispatch else expected):
+                    assert read_native(expected_step_conclusion=expected) == values
+                else:
+                    reject(lambda: read_native(expected_step_conclusion=expected))
+        step["conclusion"] = "success"
+        if resume_dispatch:
+            assert read_native() == values
+        else:
+            reject(read_native)
+        for unsupported in ("pending", "SUCCESS", None, True, []):
+            reject(lambda: read_native(expected_step_conclusion=unsupported))
+        for duplicate in (False, True):
+            jobs[0]["steps"] = (
+                original_steps + [copy.deepcopy(step)] if duplicate
+                else [item for item in original_steps if item["name"] != step_name]
+            )
+            reject(lambda: read_native(expected_step_conclusion="success"))
+    jobs[0]["steps"] = original_steps
     if resume_dispatch:
         defaults = {"held_handoff_run_id": "0", "held_handoff_source_sha": "none"}
         native_values = {**values, **defaults}
@@ -4788,6 +4817,262 @@ EOF2
     fail "$mode post-runtime fixture did not recover after rejected substitutions"
   ok "$mode post-runtime admission preserves original capture with executed deployment-intent producer"
 done
+
+earlier_source="$SUBJECT_SHA"
+printf '\n# Fixture released-runtime control descendant.\n' >>.github/workflows/oci-production-deploy.yml
+git add .github/workflows/oci-production-deploy.yml
+git commit --quiet -m "Record fixture released-runtime descendant" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+SUBJECT_SHA="$(git rev-parse HEAD)"
+prepare_pre_runtime_activation_chain
+write_profile_run 626 oci-production-deploy.yml "oci-deploy $earlier_source" \
+  7645 oci-production-baseline-626-1 "$earlier_source"
+write_profile_artifacts 626 false "$APPLIED_SOURCE_SHA" "$earlier_source"
+write_deploy_profile_jobs 626 failure skipped skipped skipped success
+write_profile_run 624 oci-production-deploy.yml "oci-deploy $SUBJECT_SHA" \
+  7645 oci-production-baseline-624-1
+write_profile_artifacts 624 false "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA"
+write_deploy_profile_jobs 624 success failure success success skipped
+PATH="$WORK/bin:$PATH" python3 -I - "$VALIDATOR" "$FIXTURE_DIR" "$WORK" \
+  "$REPO" "$APPLIED_SOURCE_SHA" "$earlier_source" "$SUBJECT_SHA" \
+  "$released_binding" "$(profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA")" <<'PY'
+import hashlib, io, json, pathlib, shutil, subprocess, sys, zipfile
+
+validator, fixtures, work, repo, root_source, earlier_source, current_source, binding, inputs = sys.argv[1:]
+base = pathlib.Path(work) / "profile-artifacts-623"
+historical = pathlib.Path(work) / "profile-artifacts-626"
+public = pathlib.Path(work) / "profile-artifacts-624"
+prefix = f"repos/{repo}"
+
+def path(endpoint):
+    return pathlib.Path(fixtures) / endpoint.translate(str.maketrans("/?=&", "____"))
+def read(endpoint):
+    return json.loads(path(endpoint).read_text())
+def write(endpoint, value):
+    path(endpoint).write_text(json.dumps(value))
+def env(directory, name):
+    return dict(line.split("=", 1) for line in (directory / name).read_text().splitlines())
+def write_env(directory, name, values):
+    (directory / name).write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+def seal(directory):
+    members = sorted(item for item in directory.rglob("*") if item.is_file() and item.name != "SHA256SUMS")
+    raw = "".join(f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.relative_to(directory).as_posix()}\n" for item in members)
+    (directory / "SHA256SUMS").write_text(raw)
+    return hashlib.sha256(raw.encode()).hexdigest()
+def pack(artifact, directory):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        for member in sorted(directory.rglob("*")):
+            if member.is_file():
+                bundle.writestr(member.relative_to(directory).as_posix(), member.read_bytes())
+    path(f"{prefix}/actions/artifacts/{artifact}/zip").write_bytes(output.getvalue())
+def native(run, name, values, timestamp):
+    lines = ["##[group]Run set -euo pipefail", "env:"]
+    lines += [f"  {'SOURCE_SHA' if key == 'approved_sha' else key.upper()}: {value}" for key, value in values.items()]
+    lines += ["  DISPATCH_INPUTS: " + json.dumps(values), "##[endgroup]"]
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        bundle.writestr(f"0_{name}.txt", "".join(f"{timestamp} {line}\n" for line in lines))
+    path(f"{prefix}/actions/runs/{run}/attempts/1/logs").write_bytes(output.getvalue())
+def run_valid(expected=True):
+    result = subprocess.run([
+        validator, "validate", "--repository", repo, "--binding", binding,
+        "--subject-sha", current_source, "--run-id", "624",
+        "--dispatch-inputs", inputs, "--runtime-mode", "oke",
+    ], capture_output=True, text=True)
+    if expected:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0, "substituted released-runtime lineage passed"
+        assert "upstream binding rejected:" in result.stderr, result.stderr
+
+earlier = base / "earlier-predecessor"
+shutil.copytree(base / "predecessor", earlier)
+values = env(earlier, "provenance.env")
+values.update(source_sha=earlier_source, workflow_run_id="49", completed_at="2025-12-31T22:10:00Z")
+write_env(earlier, "provenance.env", values)
+authority = env(earlier, "resume-authority.env")
+authority["current_source_sha"] = earlier_source
+write_env(earlier, "resume-authority.env", authority)
+earlier_sha = seal(earlier)
+current = base / "predecessor"
+values = env(current, "provenance.env")
+values["completed_at"] = "2025-12-31T23:10:00Z"
+write_env(current, "provenance.env", values)
+authority = env(current, "resume-authority.env")
+authority.update(failed_deploy_run_id="626", resume_maintenance_mode="retained-hold", rehold_step_conclusion="success")
+write_env(current, "resume-authority.env", authority)
+current_sha = seal(current)
+baseline_sha = hashlib.sha256((base / "baseline" / "SHA256SUMS").read_bytes()).hexdigest()
+for directory in (historical, public):
+    shutil.rmtree(directory / "baseline")
+    shutil.copytree(base / "baseline", directory / "baseline")
+intent = env(historical / "deployment-recovery", "deployment-intent.env")
+intent.update(data_run_id="49", data_evidence_sha256=earlier_sha,
+              baseline_sha256=baseline_sha, baseline_capture_run_id="42")
+write_env(historical / "deployment-recovery", "deployment-intent.env", intent)
+intent_sha = hashlib.sha256((historical / "deployment-recovery" / "deployment-intent.env").read_bytes()).hexdigest()
+(historical / "deployment-recovery" / "deployment-intent.sha256").write_text(f"{intent_sha}  deployment-intent.env\n")
+failure = env(historical / "deployment-recovery", "failure-lineage.env")
+failure["intent_sha256"] = intent_sha
+write_env(historical / "deployment-recovery", "failure-lineage.env", failure)
+seal(historical / "deployment-recovery")
+provenance = env(public / "failed-deployment", "provenance.txt")
+provenance["data_evidence_sha256"] = current_sha
+write_env(public / "failed-deployment", "provenance.txt", provenance)
+schema = env(public / "failed-deployment", "live-schema.env")
+schema["baseline_sha256"] = baseline_sha
+write_env(public / "failed-deployment", "live-schema.env", schema)
+for artifact, directory in (
+    (9818, earlier), (9814, current), (10326, historical / "baseline"),
+    (21626, historical / "deployment-recovery"), (10324, public / "baseline"),
+    (20624, public / "failed-deployment"),
+):
+    pack(artifact, directory)
+write(f"{prefix}/actions/runs/49/artifacts?per_page=100", {
+    "total_count": 1, "artifacts": [{"name": "oci-live-data-rollout-49-1",
+        "id": 9818, "expired": False, "size_in_bytes": 8192}]})
+for run, source, created, completed in (
+    (49, earlier_source, "22:00:00", "22:10:00"),
+    (43, current_source, "23:00:00", "23:10:00"),
+    (626, earlier_source, "22:20:00", "22:30:00"),
+):
+    metadata = read(f"{prefix}/actions/runs/{43 if run == 49 else run}")
+    metadata.update(id=run, head_sha=source, created_at=f"2025-12-31T{created}Z",
+                    updated_at=f"2025-12-31T{completed}Z")
+    if run != 626:
+        metadata.update(conclusion="success", display_title=f"oci-live-data apply-slip-index {source}")
+    for suffix in ("", "/attempts/1"):
+        write(f"{prefix}/actions/runs/{run}{suffix}", metadata)
+    jobs = read(f"{prefix}/actions/runs/{43 if run == 49 else run}/attempts/1/jobs?per_page=100")
+    job = jobs["jobs"][0]
+    job.update(id=run * 100, run_id=run)
+    step = {"name": "Verify immutable image and infrastructure provenance" if run == 626
+            else "Validate exact SHA phase and trusted upstream runs", "conclusion": "success",
+            "started_at": f"2025-12-31T{'22:25:00' if run == 626 else created}Z",
+            "completed_at": f"2025-12-31T{'22:26:00' if run == 626 else completed}Z"}
+    if run == 626:
+        job["steps"].append(step)
+    else:
+        job["steps"] = [step]
+    write(f"{prefix}/actions/runs/{run}/attempts/1/jobs?per_page=100", jobs)
+failed = {
+    "approved_sha": earlier_source, "build_run_id": "41", "infrastructure_run_id": "44",
+    "data_run_id": "49", "checkpoint_source_sha": root_source, "disk_checkpoint_run_id": "44",
+    "baseline_recovery_run_id": "0", "baseline_recovery_source_sha": "none",
+    "confirmation": "DEPLOY OCI EXACT SHA",
+}
+resume = {key: value for key, value in failed.items() if key != "data_run_id"}
+resume.update(approved_sha=current_source, resume_source_sha=earlier_source, phase="apply-slip-index",
+              prerequisite_run_id="49", failed_deploy_run_id="626", failed_activation_run_id="0",
+              failed_activation_user_id="0", confirmation="RESUME APPLIED LIVE DATA EXACT SHA")
+prior_resume = dict(resume, approved_sha=earlier_source, resume_source_sha=root_source,
+                    prerequisite_run_id="42", failed_deploy_run_id="610")
+native(626, "deploy", failed, "2025-12-31T22:25:30Z")
+native(43, "rollout", resume, "2025-12-31T23:01:30Z")
+native(49, "rollout", prior_resume, "2025-12-31T22:01:30Z")
+run_valid()
+print("PASS distinct root42/earlier49/retained626/resume43/released624 with actual native parser")
+
+def reject_env(directory, name, key, bad, artifact, refresh_current=False):
+    saved = {directory / name: (directory / name).read_bytes()}
+    if (directory / "SHA256SUMS").exists():
+        saved[directory / "SHA256SUMS"] = (directory / "SHA256SUMS").read_bytes()
+    archive = path(f"{prefix}/actions/artifacts/{artifact}/zip")
+    saved[archive] = archive.read_bytes()
+    if refresh_current:
+        for member in (public / "failed-deployment" / "provenance.txt",
+                       path(f"{prefix}/actions/artifacts/20624/zip")):
+            saved[member] = member.read_bytes()
+    try:
+        values = env(directory, name); values[key] = bad
+        write_env(directory, name, values)
+        if (directory / "SHA256SUMS").exists():
+            changed_sha = seal(directory)
+        pack(artifact, directory)
+        if refresh_current:
+            values = env(public / "failed-deployment", "provenance.txt")
+            values["data_evidence_sha256"] = changed_sha
+            write_env(public / "failed-deployment", "provenance.txt", values)
+            pack(20624, public / "failed-deployment")
+        run_valid(False)
+    finally:
+        for member, raw in saved.items():
+            member.write_bytes(raw)
+    print(f"PASS reject re-checksummed {name}:{key}")
+
+for key, bad in (
+    ("applied_data_run_id", "49"), ("applied_source_sha", earlier_source),
+    ("failed_deploy_run_id", "610"), ("resume_maintenance_mode", "released-runtime"),
+    ("lock_release_step_conclusion", "failure"),
+):
+    reject_env(current, "resume-authority.env", key, bad, 9814, True)
+for key, bad in (
+    ("source_sha", earlier_source), ("workflow_run_id", "49"), ("build_run_id", "99"),
+    ("infrastructure_run_id", "99"), ("checkpoint_source_sha", earlier_source),
+    ("disk_checkpoint_run_id", "99"), ("disk_checkpoint_sha256", "0" * 64),
+    ("disk_checkpoint_disposition", "READY_NO_RECLAIM"), ("baseline_sha256", "0" * 64),
+    ("baseline_recovery_run_id", "99"), ("baseline_recovery_source_sha", earlier_source),
+):
+    reject_env(base / "applied-predecessor", "provenance.env", key, bad, 9817)
+reject_env(public / "baseline", "baseline-provenance.env", "baseline_capture_run_id", "43", 10324)
+for run, name, values, timestamp, key, bad in (
+    (43, "rollout", resume, "2025-12-31T23:01:30Z", "prerequisite_run_id", "42"),
+    (43, "rollout", resume, "2025-12-31T23:01:30Z", "resume_source_sha", root_source),
+    (43, "rollout", resume, "2025-12-31T23:01:30Z", "failed_deploy_run_id", "610"),
+    (43, "rollout", resume, "2025-12-31T23:01:30Z", "confirmation", "DEPLOY OCI EXACT SHA"),
+    (626, "deploy", failed, "2025-12-31T22:25:30Z", "data_run_id", "42"),
+    (626, "deploy", failed, "2025-12-31T22:25:30Z", "build_run_id", "99"),
+):
+    member = path(f"{prefix}/actions/runs/{run}/attempts/1/logs")
+    original = member.read_bytes()
+    native(run, name, {**values, key: bad}, timestamp)
+    run_valid(False)
+    member.write_bytes(original)
+    print(f"PASS reject native {run}:{key}")
+for run, key, bad in (
+    (42, "head_sha", earlier_source), (42, "run_attempt", 2),
+    (42, "display_title", "substituted"), (42, "conclusion", "failure"),
+    (49, "head_sha", current_source), (49, "created_at", "2025-12-31T21:00:00Z"),
+    (626, "updated_at", "2025-12-31T23:01:00Z"),
+    (43, "created_at", "2025-12-31T22:20:00Z"),
+):
+    saved = {}
+    for suffix in ("", "/attempts/1"):
+        endpoint = f"{prefix}/actions/runs/{run}{suffix}"
+        saved[path(endpoint)] = path(endpoint).read_bytes()
+        metadata = read(endpoint); metadata[key] = bad; write(endpoint, metadata)
+    run_valid(False)
+    for member, raw in saved.items():
+        member.write_bytes(raw)
+    print(f"PASS reject native metadata {run}:{key}")
+for endpoint in (
+    f"{prefix}/actions/runs/626/attempts/1/logs",
+    f"{prefix}/actions/runs/43/attempts/1/logs",
+    f"{prefix}/actions/runs/42/artifacts?per_page=100",
+    f"{prefix}/actions/runs/626/artifacts?per_page=100",
+):
+    member = path(endpoint); original = member.read_bytes(); member.unlink()
+    run_valid(False)
+    member.write_bytes(original)
+sibling_source = subprocess.check_output([
+    "git", "commit-tree", current_source + "^{tree}", "-p", root_source,
+    "-m", "Record fixture non-ancestor",
+    "-m", "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>",
+], text=True).strip()
+saved = {}
+for suffix in ("", "/attempts/1"):
+    endpoint = f"{prefix}/actions/runs/626{suffix}"
+    saved[path(endpoint)] = path(endpoint).read_bytes()
+    metadata = read(endpoint)
+    metadata.update(head_sha=sibling_source, display_title=f"oci-deploy {sibling_source}")
+    write(endpoint, metadata)
+run_valid(False)
+for member, raw in saved.items():
+    member.write_bytes(raw)
+run_valid()
+PY
+ok "released recovery authenticates distinct retained lineage and rejects substituted root, tuple, outcome, chronology and missing evidence"
 SUBJECT_SHA="$saved_subject"
 APPLIED_SOURCE_SHA="$saved_applied"
 cd "$saved_directory"
