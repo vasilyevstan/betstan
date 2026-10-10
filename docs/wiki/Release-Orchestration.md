@@ -377,8 +377,12 @@ ancestor; a newly produced byte-equivalent build or infrastructure run is not
 interchangeable with the original.
 
 The deploy consumer uses the validated `CHECKPOINT_SOURCE_SHA` for infrastructure
-provenance and the live instance's source tag. Deployment, lock, and release
-provenance continue to use the current control `SOURCE_SHA`. Callers that omit
+provenance and the live instance's source tag. Protected deployment health also
+uses this authenticated infrastructure/image/checkpoint source as
+`OCI_EXPECTED_SOURCE_SHA`, including an accepted ancestor source, without
+changing exact health predicates or native, physical and disk checks.
+Deployment, lock, and release provenance continue to use the current approved
+control `SOURCE_SHA`; lock and fence checks remain unchanged. Callers that omit
 the checkpoint source retain the existing equal-source behavior.
 
 The journal extension adds one fixed cleanup category, its distinct protected

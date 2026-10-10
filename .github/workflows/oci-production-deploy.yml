@@ -675,7 +675,7 @@ jobs:
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           IMAGE_PROVENANCE_FILE: artifacts/oci-deploy/images.tsv
           OCI_RABBITMQ_BASELINE_FILE: artifacts/oci-deploy/rabbitmq-baseline.txt
-          OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          OCI_EXPECTED_SOURCE_SHA: ${{ env.CHECKPOINT_SOURCE_SHA }}
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
