@@ -257,13 +257,71 @@ grep -Fq "passwordInput.fill('')" \
 ! grep -Eq 'Date\.now\(\)|Math\.random\(\)' \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check still creates per-run user identities"
-grep -Fq "getByRole('link', { name: 'BetStan', exact: true })" \
+grep -Fq "getByRole('link', { name: /^BetStan(?: home)?$/ })" \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not use the accessible BetStan brand"
 if grep -Fq "locator('body')).toContainText('BetStan')" \
     "$OCI_DIR/agents/oci-live-smoke.spec.js"; then
   fail "OCI browser check still relies on image alt text appearing in body text"
 fi
+node - "$OCI_DIR/agents/oci-live-smoke.spec.js" <<'NODE'
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const assertions = source.split('\n').filter((line) => (
+  line.includes("await expect(page.getByRole('link'")
+));
+assert.equal(assertions.length, 1, 'Brand assertion must remain unique');
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const executeSource = new AsyncFunction('page', 'expect', assertions[0]);
+
+async function scenario(links) {
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(role, 'link');
+      assert.deepEqual(Object.keys(options), ['name']);
+      assert.ok(options.name instanceof RegExp);
+      assert.equal(options.name.flags, '');
+      return links.filter((link) => (
+        link.role === role && link.accessible !== false && options.name.test(link.name)
+      ));
+    },
+  };
+  const expect = (matches) => ({
+    toBeVisible: async () => {
+      assert.equal(matches.length, 1, 'Brand assertion must remain strict');
+      assert.notEqual(matches[0].visible, false);
+    },
+  });
+  await executeSource(page, expect);
+}
+
+async function main() {
+  for (const name of ['BetStan', 'BetStan home']) {
+    await scenario([{ role: 'link', name }]);
+  }
+  for (const name of [
+    'Other BetStan', 'BetStan away', 'BetStan home extra', 'betstan',
+    'Betstan home', 'BetStan ',
+  ]) {
+    await assert.rejects(scenario([{ role: 'link', name }]));
+  }
+  for (const links of [
+    [],
+    [{ role: 'text', name: 'BetStan' }],
+    [{ role: 'link', name: 'BetStan', visible: false }],
+    [{ role: 'link', name: 'BetStan home', accessible: false }],
+    [{ role: 'link', name: 'BetStan' }, { role: 'link', name: 'BetStan home' }],
+  ]) {
+    await assert.rejects(scenario(links));
+  }
+}
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+NODE
 acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
 node - "$acceptance_spec" <<'NODE'
 const assert = require('node:assert/strict');

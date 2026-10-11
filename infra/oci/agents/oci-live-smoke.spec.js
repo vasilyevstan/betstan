@@ -41,7 +41,7 @@ test('OCI reusable-user login and navigation journey', async ({ page }) => {
   expect((await resolvedUser.json()).currentUser).toBeTruthy();
 
   await page.goto('/', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('link', { name: 'BetStan', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: /^BetStan(?: home)?$/ })).toBeVisible();
   await expect(page.getByTitle('Log out')).toBeVisible();
 
   await page.getByTitle('My bets').click();
