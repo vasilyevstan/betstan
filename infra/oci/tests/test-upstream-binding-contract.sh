@@ -3928,6 +3928,25 @@ for mutation in none job resolve cleanup dark provenance upload recovery-upload;
     [ "$mutation" != none ] ||
       fail "activation cleanup profile rejected its exact outcomes"
   fi
+  if [ "$mutation" = none ]; then
+    legacy_released_binding="$("$POLICY" get oci-live-data-resume-activation-released |
+      jq -c '.upstreamRunBindings[] | select(.input == "failed_activation_run_id")')"
+    PATH="$WORK/bin:$PATH" python3 -I - "$VALIDATOR" "$REPO" "$SUBJECT_SHA" \
+      "$legacy_released_binding" "$(profile_dispatch_inputs)" <<'PY'
+import importlib.util, json, sys
+validator, repository, source, binding, inputs = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("upstream_binding", validator)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+facts = m.validate_binding(repository, json.loads(binding), source, "613", json.loads(inputs), "oke")
+assert facts["resume"] == {
+    "released_activation_qualification": "cleanup-required",
+    "resume_maintenance_mode": "released-runtime",
+}
+assert "baselineFiles" not in facts
+PY
+    ok "released ObjectId delegates unchanged cleanup validation without pre-arm baseline authority"
+  fi
 done
 ok "activation cleanup profile binds every required job and step outcome"
 
@@ -5507,17 +5526,15 @@ result = subprocess.run([
     json.dumps(dict(dispatch, failed_activation_user_id="0123456789abcdef01234567")),
     "--runtime-mode", "oke", "--result-json", str(result_file), "--baseline-dir", str(restored),
 ], capture_output=True, text=True)
-assert result.returncode == 0, result.stderr
-assert json.loads(result_file.read_text()) == {"failed_activation_run_id": {
-    "released_activation_qualification": "cleanup-required", "resume_maintenance_mode": "released-runtime"}}
-assert not restored.exists()
+assert result.returncode != 0 and "failed deployment source lineage is invalid" in result.stderr, result.stderr
+assert not result_file.exists() and not restored.exists()
 for member, raw in saved.items():
     if raw is None:
         member.unlink(missing_ok=True)
     else:
         member.write_bytes(raw)
 pre_arm_valid()
-print("PASS released ObjectId delegates unchanged cleanup validation and never gains pre-arm baseline authority")
+print("PASS released ObjectId retains original cleanup source equality for distinct-root rejection")
 PY
 ok "released recovery authenticates distinct retained lineage and rejects substituted root, tuple, outcome, chronology and missing evidence"
 SUBJECT_SHA="$saved_subject"
