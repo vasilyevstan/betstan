@@ -288,8 +288,9 @@ Later revalidation distinguishes three contexts:
 - **Held:** remains stable-only, using sealed rollback references without
   public workload, queue or HTTP collection.
 - **Released-runtime:** is selected only for authenticated failed-deployment
-  recovery after runtime release, not activation cleanup or ordinary data
-  execution. It collects and validates the same strict public snapshot, not a
+  recovery after runtime release or reader-qualified released-activation
+  recovery, not ordinary data execution.
+  It collects and validates the same strict public snapshot, not a
   held snapshot, and requires all ten current service/image references,
   including Telemetry, to equal the already-bound, validated selected candidates.
 
