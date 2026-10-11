@@ -37,6 +37,18 @@ ok() {
   printf 'PASS %s\n' "$1"
 }
 
+# Keep the frozen source and ancestry fixtures offline in depth-one checkouts.
+historical_fixture="$ROOT_DIR/infra/oci/tests/fixtures/upstream-historical-source.pack"
+[[ "$(sha256sum "$historical_fixture" | awk '{print $1}')" = \
+  c117f905c92aedb4bf8b105889272cf9b149281908c911a7d1c58dfec53487fb ]] ||
+  fail "historical source fixture checksum differs"
+git init --quiet --initial-branch=upstream-fixture "$WORK/repository"
+git -C "$WORK/repository" unpack-objects -q <"$historical_fixture"
+printf '%s\n' \
+  1bf86112ba2458161e6039091b1aa6289fdfce1d \
+  daa5cffe56d008c948cc8654e903c4a48450c5a2 \
+  >"$WORK/repository/.git/shallow"
+
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib
 import importlib.util
@@ -96,7 +108,7 @@ for entries, allowed in (
 PY
 ok "partial-recovery empty failures scope"
 
-PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$ROOT_DIR" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$ROOT_DIR" "$WORK/repository" <<'PY'
 import contextlib
 import copy
 import hashlib
@@ -383,7 +395,7 @@ for resume_dispatch in (False, True):
 jobs = copy.deepcopy(original)
 print("PASS primary attempt-one archive mapping, direct parser equivalence, and bounded ZIP rejection")
 held_workflow = subprocess.check_output([
-    "git", "-C", sys.argv[2], "cat-file", "blob", "27a98e345050fefb799c706fde03d8f79e14ed6c",
+    "git", "-C", sys.argv[3], "cat-file", "blob", "27a98e345050fefb799c706fde03d8f79e14ed6c",
 ])
 assert hashlib.sha1(f"blob {len(held_workflow)}\0".encode() + held_workflow).hexdigest() == (
     "27a98e345050fefb799c706fde03d8f79e14ed6c")
@@ -4710,7 +4722,6 @@ PY
 saved_subject="$SUBJECT_SHA"
 saved_applied="$APPLIED_SOURCE_SHA"
 saved_directory="$PWD"
-git init --quiet --initial-branch=upstream-fixture "$WORK/repository"
 cd "$WORK/repository"
 git config user.name "Upstream Fixture"
 git config user.email "upstream-fixture@example.invalid"
@@ -4844,8 +4855,6 @@ done
 APPLIED_SOURCE_SHA=1bf86112ba2458161e6039091b1aa6289fdfce1d
 earlier_source=b437710af5f796114ab619260c26f47317771bdf
 SUBJECT_SHA=30101f783162b166c75e9d6adaf92fc647c5a6a6
-git fetch --quiet --no-tags "$ROOT_DIR" \
-  "$APPLIED_SOURCE_SHA" "$earlier_source" "$SUBJECT_SHA"
 prepare_pre_runtime_activation_chain
 write_profile_run 626 oci-production-deploy.yml "oci-deploy $earlier_source" \
   7645 oci-production-baseline-626-1 "$earlier_source"
@@ -4858,7 +4867,7 @@ write_deploy_profile_jobs 624 success failure success success skipped
 PATH="$WORK/bin:$PATH" python3 -I - "$VALIDATOR" "$FIXTURE_DIR" "$WORK" \
   "$REPO" "$APPLIED_SOURCE_SHA" "$earlier_source" "$SUBJECT_SHA" \
   "$released_binding" "$(profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA")" \
-  "$ROOT_DIR" "$("$POLICY" get oci-live-data-resume-activation-released)" <<'PY'
+  "$WORK/repository" "$("$POLICY" get oci-live-data-resume-activation-released)" <<'PY'
 import base64, copy, datetime as dt, hashlib, io, json, pathlib, re, shutil, subprocess, sys, zipfile
 
 validator, fixtures, work, repo, root_source, earlier_source, current_source, binding, inputs, checkout, policy_raw = sys.argv[1:]
