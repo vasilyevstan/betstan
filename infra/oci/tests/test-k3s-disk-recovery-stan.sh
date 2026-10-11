@@ -2254,7 +2254,8 @@ printf '%s\n' "$REVALIDATION_PROFILE" >"$PROFILE_CAPTURE"
 exit "${STUB_REVALIDATION_STATUS:-0}"
 SH
 chmod +x "$workflow_test/infra/oci/scripts/k3s-node-disk-recovery-stan.sh"
-while read -r failed_deploy failed_activation mode expected; do
+selector_cases=0
+while read -r failed_deploy failed_activation mode qualification expected; do
   profile_capture="$workflow_test/profile"
   lock_marker="$workflow_test/lock"
   rm -f "$profile_capture" "$lock_marker"
@@ -2262,29 +2263,38 @@ while read -r failed_deploy failed_activation mode expected; do
     cd "$workflow_test"
     FAILED_DEPLOY_RUN_ID="$failed_deploy" \
     FAILED_ACTIVATION_RUN_ID="$failed_activation" \
-    RESUME_MAINTENANCE_MODE="$mode" CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" \
+    RESUME_MAINTENANCE_MODE="$mode" RELEASED_ACTIVATION_QUALIFICATION="$qualification" \
+    CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" \
     BUILD_RUN_ID=300 DISK_CHECKPOINT_RUN_ID=700 \
     PROFILE_CAPTURE="$profile_capture" LOCK_MARKER="$lock_marker" \
       bash "$workflow_run"
   ) || fail "actual disk-revalidation workflow selector rejected $mode"
   [[ "$(cat "$profile_capture")" == "$expected" && -f "$lock_marker" ]] ||
     fail "actual workflow selected the wrong disk profile for $failed_deploy/$failed_activation/$mode"
+  selector_cases=$((selector_cases + 1))
 done <<'CASES'
-100 0 released-runtime released-runtime
-0 0 released-runtime public
-100 50 released-runtime public
-invalid 0 released-runtime public
-01 0 released-runtime public
-100 0 retained-hold held
-100 0 pre-runtime-hold held
-0 0 none public
-100 0 none public
+100 0 released-runtime none released-runtime
+0 0 released-runtime none public
+100 50 released-runtime none public
+invalid 0 released-runtime none public
+01 0 released-runtime none public
+100 0 retained-hold none held
+100 0 pre-runtime-hold none held
+0 0 none none public
+100 0 none none public
+100 50 released-runtime pre-arm-no-account released-runtime
+100 50 released-runtime cleanup-required released-runtime
+100 50 released-runtime pending public
+100 50 none pre-arm-no-account public
+100 01 released-runtime pre-arm-no-account public
+100 invalid released-runtime cleanup-required public
 CASES
 rm -f "$profile_capture" "$lock_marker"
 if (
   cd "$workflow_test"
   FAILED_DEPLOY_RUN_ID=100 FAILED_ACTIVATION_RUN_ID=0 \
-  RESUME_MAINTENANCE_MODE=released-runtime CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" \
+  RESUME_MAINTENANCE_MODE=released-runtime RELEASED_ACTIVATION_QUALIFICATION=none \
+  CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" \
   BUILD_RUN_ID=300 DISK_CHECKPOINT_RUN_ID=700 \
   PROFILE_CAPTURE="$profile_capture" LOCK_MARKER="$lock_marker" \
   STUB_REVALIDATION_STATUS=42 bash "$workflow_run"
@@ -2295,7 +2305,23 @@ else
 fi
 [[ "$(cat "$profile_capture")" == "released-runtime" && ! -e "$lock_marker" ]] ||
   fail "failed released revalidation continued toward lock acquisition"
-printf 'released_runtime_workflow_contract=PASS cases=10\n'
+selector_cases=$((selector_cases + 1))
+rm -f "$profile_capture" "$lock_marker"
+if (
+  cd "$workflow_test"
+  FAILED_DEPLOY_RUN_ID=100 FAILED_ACTIVATION_RUN_ID=50 \
+  RESUME_MAINTENANCE_MODE=released-runtime RELEASED_ACTIVATION_QUALIFICATION=pre-arm-no-account \
+  CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" BUILD_RUN_ID=300 DISK_CHECKPOINT_RUN_ID=700 \
+  PROFILE_CAPTURE="$profile_capture" LOCK_MARKER="$lock_marker" \
+  STUB_REVALIDATION_STATUS=42 bash "$workflow_run"
+); then
+  fail "qualified activation swallowed a failed released disk revalidation"
+else
+  [[ "$?" == 42 ]] || fail "qualified activation failed outside the disk boundary"
+fi
+[[ "$(cat "$profile_capture")" == "released-runtime" && ! -e "$lock_marker" ]] ||
+  fail "qualified failed disk revalidation reached mutation"
+printf 'released_runtime_workflow_contract=PASS cases=%s\n' "$((selector_cases + 1))"
 
 preload_wrapper_output="$work_dir/preload-wrapper-output.json"
 preload_wrapper_checkpoint="$work_dir/preload-wrapper-checkpoint.json"

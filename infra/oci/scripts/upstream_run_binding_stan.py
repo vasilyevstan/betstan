@@ -14,6 +14,8 @@ the two paths cannot drift.
 """
 
 import argparse
+import base64
+import binascii
 import datetime as dt
 import hashlib
 import importlib.util
@@ -50,6 +52,7 @@ RUN_PROFILES = {
     "oci-failed-deploy-retained-hold-v1",
     "oci-failed-deploy-released-runtime-v1",
     "oci-failed-activation-cleanup-v1",
+    "oci-failed-activation-released-resume-v1",
     "oci-successful-held-handoff-v1",
 }
 CURRENT_SERVICES = {
@@ -613,11 +616,21 @@ def validate_binding_shape(binding):
     if run_profile is not None and not held_profile:
         expected_workflow = (
             "oci-live-betting-activate.yml"
-            if run_profile == "oci-failed-activation-cleanup-v1"
+            if run_profile in {
+                "oci-failed-activation-cleanup-v1",
+                "oci-failed-activation-released-resume-v1",
+            }
             else "oci-production-deploy.yml"
         )
         if binding["workflow"] != expected_workflow:
             fail("binding runProfile does not match its fixed workflow")
+    if run_profile == "oci-failed-activation-released-resume-v1" and (
+        binding["input"] != "failed_activation_run_id"
+        or expected_head_input != "resume_source_sha"
+        or binding["artifactTemplate"] != "oci-live-activation-recovery-{run_id}-1"
+        or titles != {"workflow_dispatch": "oci-live-activate {subject_sha}"}
+    ):
+        fail("released activation profile has a substituted binding")
     if artifact_profile is not None and binding["workflow"] != "oci-infrastructure.yml":
         fail("release checkpoint validation is fixed to oci-infrastructure.yml")
     artifact_content = binding.get("artifactContent")
@@ -2949,6 +2962,371 @@ def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=
     return result["applied_data_run_id"], result["applied_source_sha"]
 
 
+def released_pre_arm_native_inputs(repository, run_id, source_sha, label):
+    """Qualify only the frozen historical read-only arming failure."""
+    metadata = require_fixed_run(
+        repository, run_id, "oci-live-betting-activate.yml", "failure",
+        source_sha, f"oci-live-activate {source_sha}", label,
+    )
+    commit = gh_api(f"repos/{repository}/git/commits/{source_sha}")
+    if (
+        not isinstance(commit, dict)
+        or commit.get("sha") != source_sha
+        or (commit.get("tree") or {}).get("sha")
+        != "bda7899f4ce0447ced6d7e119574f11fcdd8c8e4"
+    ):
+        fail(f"{label} historical executable tree differs")
+    workflow = None
+    for path, expected_blob in (
+        (".github/workflows/oci-live-betting-activate.yml",
+         "a0f58534cd782b2c8ebff5c60bbf9588fd3f6bb2"),
+        ("infra/oci/scripts/cash-back-acceptance-recovery-stan.js",
+         "d899119717f491f6b6cceba2dc0785a0047e944f"),
+        ("infra/oci/scripts/revalidate-live-activation-stan.sh",
+         "3fe95e7138132e58599f7e7862843f918c5f45d5"),
+    ):
+        observed = gh_api(f"repos/{repository}/contents/{path}?ref={source_sha}")
+        if (
+            not isinstance(observed, dict) or observed.get("sha") != expected_blob
+            or observed.get("type") != "file" or observed.get("encoding") != "base64"
+            or not isinstance(observed.get("content"), str)
+            or type(observed.get("size")) is not int
+            or not 0 < observed["size"] <= MAX_ARTIFACT_EVIDENCE_BYTES
+        ):
+            fail(f"{label} historical executable pin differs")
+        try:
+            blob = base64.b64decode(observed["content"].replace("\n", ""), validate=True)
+        except (binascii.Error, ValueError):
+            fail(f"{label} historical executable encoding is invalid")
+        if (
+            len(blob) != observed["size"]
+            or hashlib.sha1(f"blob {len(blob)}\0".encode() + blob).hexdigest() != expected_blob
+        ):
+            fail(f"{label} historical executable content differs")
+        if path.endswith(".yml"):
+            try:
+                workflow = blob.decode("utf-8")
+            except UnicodeDecodeError:
+                fail(f"{label} historical workflow encoding is invalid")
+    names = re.findall(r"(?m)^      - name: (.+)$", workflow)
+    expected_names = [
+        "Set up job", *names, "Post Install browser acceptance dependencies",
+        "Post Checkout exact current master", "Complete job",
+    ]
+    jobs = jobs_for_run(repository, run_id, label)
+    job = exact_job(jobs, "activate-and-validate", label)
+    if (
+        len(jobs) != 1 or type(job.get("id")) is not int or job["id"] < 1
+        or job.get("run_id") != int(run_id) or job.get("status") != "completed"
+        or job.get("conclusion") != "failure"
+        or [step.get("name") for step in job["steps"]] != expected_names
+        or [step.get("number") for step in job["steps"]]
+        != [*range(1, len(names) + 2), 93, 94, 95]
+    ):
+        fail(f"{label} frozen pre-arm job inventory differs")
+    arm_name = "Arm owner-bound activation abort"
+    boundary = expected_names.index(arm_name)
+    successes_after = {
+        "Reconcile protected cash-back worker interruption",
+        "Capture sanitized failure diagnostics", "Close ephemeral OCI Bastion access",
+        "Write final activation provenance", "Prepare activation recovery authority",
+        "Upload activation recovery authority", "Upload protected activation evidence",
+        "Remove isolated client state", "Post Checkout exact current master",
+        "Complete job",
+    }
+    skipped_before = {
+        "Verify OKE identity", "Authorize current OKE runner",
+        "Configure kubectl from exact OKE cluster",
+    }
+    created = parse_timestamp(metadata.get("created_at"), label)
+    completed = parse_timestamp(metadata.get("updated_at"), label)
+    for index, step in enumerate(job["steps"]):
+        expected = (
+            "failure" if index == boundary else
+            "success" if (index < boundary and step["name"] not in skipped_before)
+            or step["name"] in successes_after else "skipped"
+        )
+        if step.get("status") != "completed" or step.get("conclusion") != expected:
+            fail(f"{label} frozen pre-arm step outcome differs")
+        start = parse_timestamp(step.get("started_at"), label)
+        end = parse_timestamp(step.get("completed_at"), label)
+        if not created <= start <= end <= completed:
+            fail(f"{label} frozen pre-arm step chronology differs")
+    arm = job["steps"][boundary]
+    artifacts = artifact_inventory(repository, run_id, label)
+    if len(artifacts) != 2 or {item.get("name") for item in artifacts} != {
+        f"oci-live-activation-recovery-{run_id}-1",
+        f"oci-live-activation-{run_id}-1",
+    }:
+        fail(f"{label} frozen pre-arm artifact inventory differs")
+    start = parse_timestamp(arm["started_at"], label)
+    end = parse_timestamp(arm["completed_at"], label)
+    files = zip_files(
+        gh_api_bytes(f"repos/{repository}/actions/runs/{run_id}/attempts/1/logs"),
+        label, require_original_names=True,
+    )
+    matches = [
+        raw for name, raw in files.items()
+        if re.fullmatch(r"-?[0-9]+_activate-and-validate\.txt", name)
+    ]
+    if len(matches) != 1:
+        fail(f"{label} native full-job log is absent or ambiguous")
+    try:
+        raw = matches[0].decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{label} native arm log encoding is invalid")
+    interval = []
+    timestamp = None
+    for line in raw.splitlines():
+        match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\S+Z) (.*)", line)
+        if match:
+            timestamp = parse_timestamp(
+                re.sub(r"(\.\d{6})\d+(?=Z$)", r"\1", match[1]), label,
+            )
+        if timestamp is not None and start <= timestamp < end + dt.timedelta(seconds=1):
+            interval.append(re.sub(r"\x1b\[[0-9;]*m", "", match[2] if match else line))
+    marker = "##[group]Run node ./infra/oci/scripts/cash-back-acceptance-recovery-stan.js arm"
+    if interval.count(marker) != 1:
+        fail(f"{label} native arm command group is ambiguous")
+    begin = interval.index(marker)
+    group_ends = [
+        index for index in range(begin + 1, len(interval))
+        if interval[index] == "##[endgroup]"
+    ]
+    if not group_ends:
+        fail(f"{label} native arm environment is incomplete")
+    group_end = group_ends[0]
+    environment = interval[begin + 1:group_end]
+    if sum(line in {"env:", "  env:"} for line in environment) != 1 or any(
+        line.startswith("##[group]") for line in environment
+    ):
+        fail(f"{label} native arm environment is ambiguous")
+    output_end = next(
+        (index for index in range(group_end + 1, len(interval))
+         if interval[index].startswith("##[group]")),
+        len(interval),
+    )
+    if interval[group_end + 1:output_end] != [
+        "Protected cash-back source revalidation failed (1).",
+        "##[error]Process completed with exit code 1.",
+    ]:
+        fail(f"{label} native failure is not the frozen read-only prefix")
+    native = {}
+    for key, env_key in (
+        ("approved_sha", "SOURCE_SHA"), ("build_run_id", "BUILD_RUN_ID"),
+        ("infrastructure_run_id", "INFRASTRUCTURE_RUN_ID"),
+        ("deployment_run_id", "DEPLOYMENT_RUN_ID"),
+        ("checkpoint_source_sha", "CHECKPOINT_SOURCE_SHA"),
+        ("disk_checkpoint_run_id", "DISK_CHECKPOINT_RUN_ID"),
+        ("disk_checkpoint_sha256", "DISK_CHECKPOINT_SHA256"),
+        ("disk_checkpoint_disposition", "DISK_CHECKPOINT_DISPOSITION"),
+        ("confirmation", "CONFIRMATION"),
+    ):
+        values = [
+            line.removeprefix(f"  {env_key}: ") for line in environment
+            if line.startswith(f"  {env_key}: ")
+        ]
+        if len(values) != 1:
+            fail(f"{label} native arm binding {key} is absent or duplicated")
+        native[key] = values[0]
+    if (
+        native["approved_sha"] != source_sha
+        or native["confirmation"] != "ACTIVATE OCI LIVE BETTING"
+        or any(line.startswith((
+            "  DEPLOYMENT_PROVENANCE_FILE:", "  LIVE_SCHEMA_EVIDENCE_FILE:",
+        )) for line in environment)
+    ):
+        fail(f"{label} native arm source or frozen environment differs")
+    return native, metadata
+
+
+def validate_released_activation_pre_arm(
+    repository, run_id, source_sha, artifact, dispatch_inputs, runtime_mode, label,
+):
+    if (
+        dispatch_inputs.get("failed_activation_user_id") != "0"
+        or dispatch_inputs.get("confirmation") !=
+        "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA"
+        or dispatch_inputs.get("failed_activation_run_id") != run_id
+    ):
+        fail(f"{label} pre-arm qualification requires the exact released operation")
+    native, activation_metadata = released_pre_arm_native_inputs(
+        repository, run_id, source_sha, label,
+    )
+    checkpoint = parse_checkpoint_artifact(repository, dispatch_inputs, runtime_mode, label)
+    files = artifact_files(repository, artifact, label)
+    validate_checksum_manifest(files, label)
+    if exact_basename_set(files) != {"provenance.env", "SHA256SUMS"} or len(files) != 2:
+        fail(f"{label} frozen pre-arm recovery file set differs")
+    _, raw = unique_artifact_file(files, "provenance.env", label)
+    activation = parse_env(raw, label, ACTIVATION_PROVENANCE_KEYS)
+    expected = {
+        "source_sha": source_sha, "activation_run_id": run_id,
+        "activation_run_attempt": "1", "workflow_result": "failure",
+        "workflow_phase": "activation-incomplete", "activation_state": "unknown",
+        "live_kickoffs_enabled": "unknown", "activation_lease_until_epoch": "unknown",
+        "live_acceptance_user_id": "none", "final_control_file": "none",
+        "post_commit_status": "not-applicable", "revoke_runner_outcome": "skipped",
+        "close_bastion_outcome": "success",
+        "build_run_id": require_dispatch_run(dispatch_inputs, "build_run_id"),
+        "infrastructure_run_id": require_dispatch_run(dispatch_inputs, "infrastructure_run_id"),
+        "checkpoint_source_sha": checkpoint["sourceSha"],
+        "disk_checkpoint_run_id": checkpoint["producerRunId"],
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": checkpoint["disposition"],
+    }
+    expected.update({key: "none" for key in (
+        "activate_control_sha256", "acceptance_sha256", "accepted_sha256",
+        "commit_control_sha256", "failure_disable_sha256", "final_disable_sha256",
+        "final_control_sha256",
+    )})
+    expected.update({key: "skipped" for key in (
+        "accepted_outcome", "accepted_evidence_upload_outcome", "commit_preflight_outcome",
+        "commit_outcome", "failure_disable_outcome", "final_disable_outcome",
+    )})
+    for key, value in expected.items():
+        if activation[key] != value:
+            fail(f"{label} frozen pre-arm provenance {key} differs")
+    for key in (
+        "build_run_id", "infrastructure_run_id", "deployment_run_id",
+        "checkpoint_source_sha", "disk_checkpoint_run_id",
+        "disk_checkpoint_sha256", "disk_checkpoint_disposition",
+    ):
+        if native[key] != activation[key]:
+            fail(f"{label} native arm substituted {key}")
+    deployment_run = require_dispatch_run(activation, "deployment_run_id")
+    deployment_metadata = require_fixed_run(
+        repository, deployment_run, "oci-production-deploy.yml", "success",
+        source_sha, f"oci-deploy {source_sha}", label,
+    )
+    predecessor_run = require_dispatch_run(dispatch_inputs, "prerequisite_run_id")
+    predecessor, manifest_sha, predecessor_files = parse_live_v6_artifact(
+        repository, predecessor_run, label, include_files=True,
+    )
+    validate_live_v6_lineage(
+        predecessor, checkpoint, dispatch_inputs, predecessor_run, source_sha,
+        "apply-slip-index", label,
+    )
+    predecessor_metadata = require_fixed_run(
+        repository, predecessor_run, "oci-live-data-rollout.yml", "success",
+        source_sha, f"oci-live-data apply-slip-index {source_sha}", label,
+    )
+    parse_deployment_artifact(
+        repository, deployment_run, source_sha, dispatch_inputs, checkpoint,
+        predecessor, manifest_sha, runtime_mode, label,
+    )
+    deployment_inputs = failed_deploy_native_inputs(
+        repository, deployment_run, source_sha, label, expected_step_conclusion="success",
+    )
+    expected_deployment = {
+        key: dispatch_inputs[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id",
+            "baseline_recovery_source_sha",
+        )
+    }
+    expected_deployment.update({
+        "approved_sha": source_sha, "data_run_id": predecessor_run,
+        "confirmation": "DEPLOY OCI EXACT SHA",
+    })
+    if deployment_inputs != expected_deployment:
+        fail(f"{label} immediate deployment native inputs differ")
+    deployment_jobs = jobs_for_run(repository, deployment_run, label)
+    if (
+        len(deployment_jobs) != 2
+        or any(exact_job(deployment_jobs, name, label).get("conclusion") != "success"
+               for name in ("deploy", "public-validate"))
+    ):
+        fail(f"{label} immediate deployment is not wholly successful")
+    authority = parse_resume_authority(predecessor_files, predecessor, label)
+    failed_run = require_dispatch_run(dispatch_inputs, "failed_deploy_run_id")
+    if (
+        authority is None or authority["resume_maintenance_mode"] != "released-runtime"
+        or authority["failed_deploy_run_id"] != failed_run
+    ):
+        fail(f"{label} predecessor released authority differs")
+    failed_metadata = fixed_run_metadata(
+        repository, failed_run, "oci-production-deploy.yml", "failure", label,
+    )
+    failed_source = failed_metadata["head_sha"]
+    if failed_metadata.get("display_title") != f"oci-deploy {failed_source}":
+        fail(f"{label} historical failed-deployment title differs")
+    validate_descendant_scope(failed_source, source_sha)
+    failed_inputs = failed_deploy_native_inputs(
+        repository, failed_run, failed_source, label, expected_step_conclusion="success",
+    )
+    expected_resume = {
+        key: failed_inputs[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id",
+            "baseline_recovery_source_sha",
+        )
+    }
+    if any(expected_resume[key] != dispatch_inputs[key] for key in expected_resume):
+        fail(f"{label} historical deployment substituted the original release tuple")
+    expected_resume.update({
+        "approved_sha": source_sha, "resume_source_sha": failed_source,
+        "prerequisite_run_id": failed_inputs["data_run_id"],
+        "failed_deploy_run_id": failed_run, "phase": "apply-slip-index",
+        "failed_activation_run_id": "0", "failed_activation_user_id": "0",
+        "confirmation": "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA",
+    })
+    resume_inputs = failed_deploy_native_inputs(
+        repository, predecessor_run, source_sha, label, resume_dispatch=True,
+    )
+    if resume_inputs != expected_resume:
+        fail(f"{label} successful predecessor native resume request differs")
+    profile = "oci-failed-deploy-released-runtime-v1"
+    outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, label)
+    historical_dispatch = dict(failed_inputs, prerequisite_run_id=failed_inputs["data_run_id"])
+    historical_artifact = exact_artifact(
+        repository, failed_run, f"oci-production-baseline-{failed_run}-1", label,
+    )
+    _, earlier = validate_failed_deploy_artifacts(
+        repository, failed_run, failed_source, historical_artifact,
+        historical_dispatch, runtime_mode, profile, *outcomes, label,
+    )
+    baseline_files = artifact_files(repository, historical_artifact, label)
+    for key in (
+        "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+        "disk_checkpoint_run_id", "disk_checkpoint_sha256", "disk_checkpoint_disposition",
+        "baseline_sha256", "baseline_recovery_run_id", "baseline_recovery_source_sha",
+    ):
+        if predecessor[key] != earlier[key]:
+            fail(f"{label} resumed predecessor substituted {key}")
+    _, _, earlier_files = parse_live_v6_artifact(
+        repository, earlier["workflow_run_id"], label, include_files=True,
+    )
+    earlier_authority = parse_resume_authority(earlier_files, earlier, label)
+    if (
+        earlier_authority is None
+        or (authority["applied_data_run_id"], authority["applied_source_sha"])
+        != (earlier_authority["applied_data_run_id"], earlier_authority["applied_source_sha"])
+        or unique_artifact_file(predecessor_files, "resume-images.tsv", label)[1]
+        != unique_artifact_file(earlier_files, "resume-images.tsv", label)[1]
+    ):
+        fail(f"{label} resumed predecessor substituted its original root or selected bytes")
+    for prior, later in (
+        (failed_metadata, predecessor_metadata),
+        (predecessor_metadata, deployment_metadata),
+        (deployment_metadata, activation_metadata),
+    ):
+        if parse_timestamp(prior.get("updated_at"), label) > parse_timestamp(
+            later.get("created_at"), label,
+        ):
+            fail(f"{label} immediate released-activation chronology differs")
+    return {
+        "released_activation_qualification": "pre-arm-no-account",
+        "resume_maintenance_mode": "released-runtime",
+        "activation_deployment_run_id": deployment_run,
+        "applied_data_run_id": authority["applied_data_run_id"],
+        "applied_source_sha": authority["applied_source_sha"],
+        "baseline_run_id": failed_run,
+        "baseline_artifact_name": f"oci-production-baseline-{failed_run}-1",
+        "_baseline_files": baseline_files,
+    }
+
+
 def validate_failed_activation_artifacts(
     repository,
     run_id,
@@ -5028,6 +5406,34 @@ def validate_binding(
     artifact = exact_artifact(
         repository, run_id, artifact_name, binding["input"]
     )
+    if profile == "oci-failed-activation-released-resume-v1":
+        user = dispatch_inputs.get("failed_activation_user_id")
+        if user == "0":
+            result = validate_released_activation_pre_arm(
+                repository, run_id, expected_head_sha, artifact, dispatch_inputs,
+                runtime_mode, binding["input"],
+            )
+        else:
+            if not isinstance(user, str) or re.fullmatch(r"[0-9a-f]{24}", user) is None:
+                fail("released activation requires an ObjectId or qualified pre-arm sentinel")
+            load_artifact_content(
+                repository, binding, artifact, expected_head_sha, run_id, dispatch_inputs,
+            )
+            validate_run_profile(
+                repository, run_id, expected_head_sha, "oci-failed-activation-cleanup-v1",
+                binding["input"], artifact, dispatch_inputs, runtime_mode,
+            )
+            result = {
+                "released_activation_qualification": "cleanup-required",
+                "resume_maintenance_mode": "released-runtime",
+            }
+        facts = {
+            "artifactName": artifact_name, "createdAt": base.get("created_at"),
+            "completedAt": base.get("updated_at"), "resume": result,
+        }
+        if "_baseline_files" in result:
+            facts["baselineFiles"] = result.pop("_baseline_files")
+        return facts
     load_artifact_content(
         repository,
         binding,
@@ -5071,7 +5477,9 @@ def validate_binding(
         "createdAt": base.get("created_at"),
         "completedAt": base.get("updated_at"),
     }
-    if profile in RUN_PROFILES - {"oci-failed-activation-cleanup-v1"}:
+    if profile in {
+        "oci-failed-deploy-retained-hold-v1", "oci-failed-deploy-released-runtime-v1",
+    }:
         lock, fence, rehold = validate_failed_deploy_jobs(repository, run_id, profile, binding["input"])
         retained = profile == "oci-failed-deploy-retained-hold-v1"
         facts["resume"] = {
@@ -5162,7 +5570,23 @@ def command_validate_all(args):
                for binding in policy.get("upstreamRunBindings", [])):
             if policy.get("operation") != "oci-live-data-continue-held-handoff":
                 fail("successful held-handoff profile is restricted to its fixed operation")
+        if isinstance(policy, dict) and any(
+            binding.get("runProfile") == "oci-failed-activation-released-resume-v1"
+            for binding in policy.get("upstreamRunBindings", [])
+        ):
+            if policy.get("operation") != "oci-live-data-resume-activation-released":
+                fail("released activation profile is restricted to its fixed operation")
     bindings = resolve_bindings(args)
+    if any(
+        binding.get("runProfile") == "oci-failed-activation-released-resume-v1"
+        for binding in bindings if isinstance(binding, dict)
+    ) and (
+        args.manifest or not args.policy_json
+        or not isinstance(policy, dict)
+        or policy.get("operation") != "oci-live-data-resume-activation-released"
+        or policy.get("workflow") != "oci-live-data-rollout.yml"
+    ):
+        fail("released activation profile requires its fixed operation policy")
     for binding in bindings:
         validate_binding_shape(binding)
     binding_names = [binding["input"] for binding in bindings]
