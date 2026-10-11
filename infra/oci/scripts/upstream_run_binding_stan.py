@@ -3255,6 +3255,8 @@ def validate_released_activation_pre_arm(
     failed_inputs = failed_deploy_native_inputs(
         repository, failed_run, failed_source, label, expected_step_conclusion="success",
     )
+    if failed_inputs["confirmation"] != "DEPLOY OCI EXACT SHA":
+        fail(f"{label} historical failed-deployment confirmation differs")
     expected_resume = {
         key: failed_inputs[key] for key in (
             "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",

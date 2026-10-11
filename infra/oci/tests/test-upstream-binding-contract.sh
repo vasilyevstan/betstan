@@ -5445,6 +5445,8 @@ for run, values, name, timestamp, key, bad in (
     (50, release_inputs, "rollout", "2026-01-01T00:06:30Z", "failed_deploy_run_id", "626"),
     (51, dict(deployed_inputs, data_run_id="50"), "deploy", "2026-01-01T00:21:30Z", "data_run_id", "43"),
     (624, deployed_inputs, "deploy", "2026-01-01T00:00:30Z", "data_run_id", "42"),
+    (624, deployed_inputs, "deploy", "2026-01-01T00:00:30Z", "confirmation",
+     "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA"),
 ):
     member = path(f"{prefix}/actions/runs/{run}/attempts/1/logs")
     original = member.read_bytes()
