@@ -1330,6 +1330,186 @@ jq '{
   --producer-run-id 700 \
   --profile held >/dev/null
 
+released_runtime="$work_dir/released-runtime.json"
+released_checkpoint="$work_dir/released-checkpoint.json"
+python3 - "$HELPER" "$checkpoint_runtime" "$checkpoint_capacity" \
+  "$candidate_images" "$released_runtime" "$released_checkpoint" \
+  "$SOURCE_SHA" <<'PY'
+import copy
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+helper, runtime_path, capacity_path, candidates_path, current_path, checkpoint_path, source_sha = sys.argv[1:]
+work = Path(current_path).parent
+original = json.loads(Path(runtime_path).read_text())
+selected = copy.deepcopy(original["applicationImages"])
+original["applicationImages"] = []
+for index, item in enumerate(selected):
+    ref = "ghcr.io/vasilyevstan/betstan-images@sha256:" + f"{1000 + index:064x}"
+    original["applicationImages"].append({"service": item["service"], "imageRef": ref})
+    original["images"].append({
+        "id": "sha256:" + f"{2000 + index:064x}",
+        "repoTags": [],
+        "repoDigests": [ref],
+        "sizeBytes": 1000,
+        "pinned": False,
+    })
+original["kubernetesImageReferences"] = [
+    item["imageRef"] for item in original["applicationImages"]
+]
+assert len(selected) == len(original["applicationImages"]) == 10
+assert all(
+    before["service"] == after["service"] and before["imageRef"] != after["imageRef"]
+    for before, after in zip(original["applicationImages"], selected)
+)
+original_path = work / "released-original-runtime.json"
+original_path.write_text(json.dumps(original))
+diagnosis_path = work / "released-diagnosis.json"
+subprocess.run([
+    helper, "diagnose", "--runtime", str(original_path),
+    "--capacity", capacity_path, "--candidate-images", candidates_path,
+    "--source-sha", source_sha, "--infrastructure-run-id", "400",
+    "--ghcr-build-run-id", "300", "--workflow-run-id", "712",
+    "--output", str(diagnosis_path),
+], check=True, stdout=subprocess.DEVNULL)
+subprocess.run([
+    helper, "write-release-checkpoint", "--diagnosis", str(diagnosis_path),
+    "--runtime", str(original_path), "--capacity", capacity_path,
+    "--source-sha", source_sha, "--control-sha", source_sha,
+    "--producer-run-id", "712", "--output", checkpoint_path,
+], check=True, stdout=subprocess.DEVNULL)
+current = copy.deepcopy(original)
+current["applicationImages"] = selected
+current["kubernetesImageReferences"] = [item["imageRef"] for item in selected]
+Path(current_path).write_text(json.dumps(current))
+capacity = json.loads(Path(capacity_path).read_text())
+
+def revalidate(runtime, profile="released-runtime", measured=capacity, candidates=candidates_path):
+    runtime_file = work / "released-case-runtime.json"
+    capacity_file = work / "released-case-capacity.json"
+    runtime_file.write_text(json.dumps(runtime))
+    capacity_file.write_text(json.dumps(measured))
+    return subprocess.run([
+        helper, "revalidate-release-checkpoint", "--checkpoint", checkpoint_path,
+        "--runtime", str(runtime_file), "--capacity", str(capacity_file),
+        "--candidate-images", candidates, "--source-sha", source_sha,
+        "--producer-run-id", "712", "--profile", profile,
+    ], capture_output=True, text=True)
+
+public_original = revalidate(original, profile="public")
+assert public_original.returncode == 0, public_original.stderr
+public_current = revalidate(current, profile="public")
+assert public_current.returncode != 0 and \
+    "fresh rollback CRI residency differs from the release checkpoint" in public_current.stderr
+ready = revalidate(current)
+assert ready.returncode == 0, ready.stderr
+assert ready.stdout == (
+    "k3s_release_disk_checkpoint_revalidation=RELEASED-RUNTIME_READY "
+    "used_bytes=35000000000 capacity_bytes=50000000000\n"
+), ready.stdout
+held = {
+    "schemaVersion": "k3s-node-disk-held-runtime.v1",
+    "snapshotProfile": "held",
+    **{key: current[key] for key in ("applicationRepository", "root", "mongo", "images", "runtime")},
+}
+held_ready = revalidate(held, profile="held")
+assert held_ready.returncode == 0, held_ready.stderr
+
+cases = []
+def reject(name, mutation, reason):
+    value = copy.deepcopy(current)
+    mutation(value)
+    cases.append((name, value, capacity, candidates_path, reason))
+
+image_mismatch = "fresh released-runtime application images differ from selected candidates"
+reject("original-current-generation",
+       lambda value: value.update(applicationImages=original["applicationImages"]),
+       image_mismatch)
+reject("missing-service", lambda value: value["applicationImages"].pop(0),
+       "application image evidence is missing a rollback service")
+reject("duplicate-service",
+       lambda value: value["applicationImages"].append(copy.deepcopy(value["applicationImages"][0])),
+       "application image evidence is invalid")
+reject("substituted-service-image",
+       lambda value: value["applicationImages"][0].update(imageRef=selected[1]["imageRef"]),
+       image_mismatch)
+telemetry_index = next(index for index, item in enumerate(selected) if item["service"] == "telemetry")
+reject("missing-telemetry", lambda value: value["applicationImages"].pop(telemetry_index),
+       image_mismatch)
+reject("original-telemetry-generation",
+       lambda value: value["applicationImages"][telemetry_index].update(
+           imageRef=original["applicationImages"][telemetry_index]["imageRef"]),
+       image_mismatch)
+reject("missing-candidate-residency", lambda value: value["images"].pop(0),
+       "immutable CRI residency is not unique")
+reject("missing-original-residency", lambda value: value["images"].pop(10),
+       "immutable CRI residency is not unique")
+reject("ambiguous-original-residency",
+       lambda value: value["images"].append({
+           **value["images"][10], "id": "sha256:" + "f" * 64}),
+       "immutable CRI residency is not unique")
+reject("changed-candidate-resident-id",
+       lambda value: value["images"][0].update(id="sha256:" + "f" * 64),
+       "fresh candidate CRI residency differs from the release checkpoint")
+reject("changed-original-resident-id",
+       lambda value: value["images"][10].update(id="sha256:" + "f" * 64),
+       "fresh rollback CRI residency differs from the release checkpoint")
+reject("changed-original-resident-digest",
+       lambda value: value["images"][10].update(
+           repoDigests=["ghcr.io/vasilyevstan/betstan-images@sha256:" + "f" * 64]),
+       "immutable CRI residency is not unique")
+reject("unhealthy-workload", lambda value: value["workload"].update(unhealthyPodCount=1),
+       "workload baseline is unhealthy or malformed")
+reject("unhealthy-queue", lambda value: value["queue"].update(consumersHealthy=False),
+       "queue baseline is unhealthy or malformed")
+reject("unhealthy-public-read", lambda value: value["publicRead"][0].update(status=503),
+       "public read baseline is unhealthy or malformed")
+reject("missing-public-evidence", lambda value: value.pop("publicRead"),
+       "runtime snapshot has an unexpected schema")
+reject("node-drift", lambda value: value["runtime"].update(nodeName="different-node"),
+       "runtime and kubelet capacity evidence name different nodes")
+reject("root-mount-drift", lambda value: value["root"]["mount"].update(source="/dev/other-root"),
+       "fresh release checkpoint stable identity differs")
+reject("mongo-not-separate", lambda value: value["mongo"].update(separateFromRoot=False),
+       "Mongo data is not proven to use a separate filesystem")
+reject("raw-one-byte-over",
+       lambda value: value["root"]["df"].update(
+           usedBytes=35_000_000_001, availableBytes=14_999_999_999),
+       "fresh release checkpoint raw root byte threshold is exceeded")
+legacy = copy.deepcopy(current)
+legacy["schemaVersion"] = "k3s-node-disk-runtime.v1"
+del legacy["snapshotProfile"], legacy["applicationImages"]
+cases.append(("missing-v1-inventory", legacy, capacity, candidates_path,
+              "released-runtime revalidation requires application image evidence"))
+cases.append(("held-snapshot", held, capacity, candidates_path,
+              "runtime snapshot profile is invalid"))
+over_capacity = {
+    **capacity, "usedBytes": 35_000_000_001,
+    "availableBytes": 14_999_999_999, "withinLimit": False,
+}
+cases.append(("kubelet-one-byte-over", current, over_capacity, candidates_path,
+              "fresh release checkpoint kubelet byte threshold is exceeded"))
+drifted_capacity = {
+    **capacity, "capacityBytes": 50_000_000_001,
+    "availableBytes": 15_000_000_001,
+}
+cases.append(("capacity-drift", current, drifted_capacity, candidates_path,
+              "fresh release checkpoint filesystem capacity differs"))
+altered_candidates = work / "released-altered-candidates.tsv"
+rows = [row.split("\t") for row in Path(candidates_path).read_text().splitlines()]
+rows[0][4] = "sha256:" + "f" * 64
+altered_candidates.write_text("\n".join("\t".join(row) for row in rows) + "\n")
+cases.append(("altered-candidate-tuple", current, capacity, str(altered_candidates),
+              "fresh candidate image set differs from the release checkpoint"))
+for name, runtime, measured, candidates, reason in cases:
+    result = revalidate(runtime, measured=measured, candidates=candidates)
+    assert result.returncode != 0, f"released runtime accepted {name}"
+    assert reason in result.stderr, f"{name} failed outside its boundary: {result.stderr}"
+print(f"released_runtime_checkpoint_contract=PASS cases={len(cases) + 4}")
+PY
+
 raw_over_runtime="$work_dir/checkpoint-raw-over-runtime.json"
 jq '
   .root.df.usedBytes = 35000000001 |
@@ -2007,6 +2187,115 @@ PY
   [[ ! -s "$work_dir/remote.log" ]] ||
     fail "$workflow reached the node after its target SSH keys were removed"
 done
+
+released_access="$work_dir/released-runtime-access"
+produce_access_state "$released_access" true
+: >"$work_dir/remote.log"
+env "${common_env[@]}" \
+  SESSION_STATE_FILE="$released_access/session.env" \
+  STUB_CURRENT_RUNTIME="$released_runtime" \
+  STUB_CAPACITY_SUMMARY="$work_dir/access-capacity-summary.json" \
+  GITHUB_RUN_ID=710 CONTROL_SHA="$SOURCE_SHA" \
+  CHECKPOINT_FILE="$released_checkpoint" DISK_CHECKPOINT_RUN_ID=712 \
+  REVALIDATION_PROFILE=released-runtime \
+  "$ORCHESTRATOR" revalidate >"$released_access/revalidate.log" 2>&1 || {
+    cat "$released_access/revalidate.log" >&2
+    fail "released runtime cannot revalidate with the retained public access state"
+  }
+[[ "$(cut -f1 "$work_dir/remote.log")" == "snapshot" ]] ||
+  fail "released revalidation invoked held collection or a node mutation"
+grep -Fq 'k3s_release_disk_checkpoint_revalidation=RELEASED-RUNTIME_READY' \
+  "$released_access/revalidate.log" ||
+  fail "released revalidation did not emit its distinct ready verdict"
+: >"$work_dir/remote.log"
+if env "${common_env[@]}" \
+    SESSION_STATE_FILE="$released_access/session.env" \
+    STUB_CURRENT_RUNTIME="$work_dir/released-original-runtime.json" \
+    STUB_CAPACITY_SUMMARY="$work_dir/access-capacity-summary.json" \
+    GITHUB_RUN_ID=710 CONTROL_SHA="$SOURCE_SHA" \
+    CHECKPOINT_FILE="$released_checkpoint" DISK_CHECKPOINT_RUN_ID=712 \
+    REVALIDATION_PROFILE=released-runtime \
+    "$ORCHESTRATOR" revalidate >"$released_access/rejected.log" 2>&1; then
+  fail "released wrapper accepted a current generation other than selected candidates"
+fi
+grep -Fq 'fresh released-runtime application images differ from selected candidates' \
+  "$released_access/rejected.log" ||
+  fail "released wrapper did not propagate the current-image rejection"
+[[ "$(cut -f1 "$work_dir/remote.log")" == "snapshot" ]] ||
+  fail "rejected released revalidation retried or invoked a node mutation"
+
+workflow_test="$work_dir/revalidation-workflow"
+mkdir -p "$workflow_test/infra/oci/scripts"
+workflow_run="$workflow_test/revalidate.sh"
+python3 - "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" \
+  "$workflow_run" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+start = source.index("      - name: Revalidate exact release disk checkpoint before lock mutation")
+end = source.index("\n      - name:", start + 1)
+body = source[start:end].split("        run: |\n", 1)[1]
+lines = body.splitlines()
+assert all(not line or line.startswith("          ") for line in lines)
+Path(sys.argv[2]).write_text(
+    "\n".join(line[10:] for line in lines)
+    + '\nprintf "lock-reached\\n" >"$LOCK_MARKER"\n'
+)
+PY
+cat >"$workflow_test/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == 1 && "$1" == "revalidate" ]]
+[[ "$SOURCE_SHA" == "$CHECKPOINT_SOURCE_SHA" &&
+   "$CONTROL_SHA" == "$CHECKPOINT_SOURCE_SHA" &&
+   "$GHCR_BUILD_RUN_ID" == "$BUILD_RUN_ID" ]]
+printf '%s\n' "$REVALIDATION_PROFILE" >"$PROFILE_CAPTURE"
+exit "${STUB_REVALIDATION_STATUS:-0}"
+SH
+chmod +x "$workflow_test/infra/oci/scripts/k3s-node-disk-recovery-stan.sh"
+while read -r failed_deploy failed_activation mode expected; do
+  profile_capture="$workflow_test/profile"
+  lock_marker="$workflow_test/lock"
+  rm -f "$profile_capture" "$lock_marker"
+  (
+    cd "$workflow_test"
+    FAILED_DEPLOY_RUN_ID="$failed_deploy" \
+    FAILED_ACTIVATION_RUN_ID="$failed_activation" \
+    RESUME_MAINTENANCE_MODE="$mode" CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" \
+    BUILD_RUN_ID=300 DISK_CHECKPOINT_RUN_ID=700 \
+    PROFILE_CAPTURE="$profile_capture" LOCK_MARKER="$lock_marker" \
+      bash "$workflow_run"
+  ) || fail "actual disk-revalidation workflow selector rejected $mode"
+  [[ "$(cat "$profile_capture")" == "$expected" && -f "$lock_marker" ]] ||
+    fail "actual workflow selected the wrong disk profile for $failed_deploy/$failed_activation/$mode"
+done <<'CASES'
+100 0 released-runtime released-runtime
+0 0 released-runtime public
+100 50 released-runtime public
+invalid 0 released-runtime public
+01 0 released-runtime public
+100 0 retained-hold held
+100 0 pre-runtime-hold held
+0 0 none public
+100 0 none public
+CASES
+rm -f "$profile_capture" "$lock_marker"
+if (
+  cd "$workflow_test"
+  FAILED_DEPLOY_RUN_ID=100 FAILED_ACTIVATION_RUN_ID=0 \
+  RESUME_MAINTENANCE_MODE=released-runtime CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" \
+  BUILD_RUN_ID=300 DISK_CHECKPOINT_RUN_ID=700 \
+  PROFILE_CAPTURE="$profile_capture" LOCK_MARKER="$lock_marker" \
+  STUB_REVALIDATION_STATUS=42 bash "$workflow_run"
+); then
+  fail "actual workflow swallowed a failed released disk revalidation"
+else
+  [[ "$?" == 42 ]] || fail "workflow failed outside the intended disk-revalidation boundary"
+fi
+[[ "$(cat "$profile_capture")" == "released-runtime" && ! -e "$lock_marker" ]] ||
+  fail "failed released revalidation continued toward lock acquisition"
+printf 'released_runtime_workflow_contract=PASS cases=10\n'
 
 preload_wrapper_output="$work_dir/preload-wrapper-output.json"
 preload_wrapper_checkpoint="$work_dir/preload-wrapper-checkpoint.json"

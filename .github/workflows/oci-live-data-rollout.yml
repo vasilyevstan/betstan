@@ -1261,6 +1261,10 @@ jobs:
              { [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] ||
                [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ]; }; then
             profile=held
+          elif [[ "$FAILED_DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]] &&
+               [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
+               [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
+            profile=released-runtime
           fi
           SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           CONTROL_SHA="$CHECKPOINT_SOURCE_SHA" \
