@@ -16,6 +16,8 @@ CHECKPOINT_SOURCE_SHA="$SOURCE_SHA"
 DISK_CHECKPOINT_RUN_ID=3002
 DISK_CHECKPOINT_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 DISK_CHECKPOINT_DISPOSITION=READY_NO_RECLAIM
+export FAILED_ACTIVATION_RUN_ID=0 FAILED_ACTIVATION_USER_ID=0
+export RELEASED_ACTIVATION_QUALIFICATION=none
 
 "$ROOT_DIR/infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh" >/dev/null
 
@@ -111,6 +113,243 @@ if STUB_ROLE_RESULT='{"verified":true,"userCount":1,"role":"ADMIN"}' \
   run_demotion >/dev/null 2>&1; then
   fail "retained ADMIN role was accepted before Slip cleanup"
 fi
+
+ruby -ryaml -rjson - "$WORKFLOW" >"$work_dir/released-consumer.json" <<'RUBY'
+steps = YAML.load_file(ARGV.fetch(0)).fetch("jobs").fetch("rollout").fetch("steps")
+names = [
+  "Capture and validate pre-mutation rollback baseline",
+  "Verify reader-qualified released activation state",
+  "Acquire database operation lock",
+  "Demote and verify exact retained live-acceptance account",
+  "Delete exact orphaned live-acceptance slips",
+]
+selected = names.to_h do |name|
+  step = steps.find { |item| item["name"] == name }
+  abort "released consumer missing: #{name}" unless step
+  [name, step]
+end
+dark = selected.fetch(names[1])
+abort "released readiness is not pre-arm-only" unless dark.fetch("if") ==
+  "steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account'"
+abort "released readiness lost dark mode" unless dark.fetch("env").slice(
+  "MODE", "EXPECTED_LIVE_KICKOFFS_ENABLED", "IMAGE_PROVENANCE_FILE"
+) == {
+  "MODE" => "dark", "EXPECTED_LIVE_KICKOFFS_ENABLED" => "false",
+  "IMAGE_PROVENANCE_FILE" => "artifacts/oci-live-data-rollout/resume-images.tsv",
+}
+names.last(2).each do |name|
+  abort "cleanup exclusion widened" unless selected.fetch(name).fetch("if").split.join(" ") ==
+    "inputs.failed_activation_run_id != '0' && steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'"
+end
+puts JSON.generate(selected)
+RUBY
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$work_dir" "$ROOT_DIR" <<'PY'
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+parent, repository = map(Path, sys.argv[1:])
+steps = json.loads((parent / "released-consumer.json").read_text())
+root = parent / "released-consumer"
+for relative in ("bin", "infra/oci/agents", "infra/oci/scripts", "infra/azure/agents",
+                 "artifacts/oci-live-data-rollout/evidence", "artifacts/prerequisite",
+                 "artifacts/oci-data-baseline-before", "artifacts/oci-data-baseline-original"):
+    (root / relative).mkdir(parents=True, exist_ok=True)
+for relative in ("infra/oci/scripts/upstream_run_binding_stan.py",
+                 "infra/azure/agents/shared-mongo-operation-lock-stan.sh"):
+    shutil.copy2(repository / relative, root / relative)
+readiness = root / "infra/oci/agents/live-betting-readiness-stan.sh"
+readiness.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+[[ "$MODE" == dark && "$EXPECTED_LIVE_KICKOFFS_ENABLED" == false ]]
+echo readiness >>"$CONSUMER_EVENTS"
+[[ "${CONSUMER_FAILURE:-}" != readiness ]]
+""")
+readiness.chmod(0o755)
+provider = root / "bin/kubectl"
+provider.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ["CONSUMER_ROOT"])
+args = sys.argv[1:]
+if args[:3] == ["get", "deployment", "gaming-gamemaster-depl"]:
+    path = root / "gamemaster.json"
+elif args[:3] == ["get", "configmap", "gaming-mongo-migration-lock"]:
+    path = root / "lock.json"
+elif args == ["replace", "-f", "-"]:
+    next_value = json.load(sys.stdin)
+    current = json.loads((root / "lock.json").read_text())
+    if os.environ.get("CONSUMER_FAILURE") == "cas-conflict":
+        current["metadata"]["resourceVersion"] = "99"
+    if any(next_value["metadata"][key] != current["metadata"][key]
+           for key in ("uid", "resourceVersion")):
+        raise SystemExit("fixture API resourceVersion conflict")
+    next_value["metadata"]["resourceVersion"] = str(int(current["metadata"]["resourceVersion"]) + 1)
+    (root / "lock.json").write_text(json.dumps(next_value))
+    with (root / "writes").open("a") as output:
+        output.write(next_value["data"]["state"] + "\\n")
+    raise SystemExit(0)
+else:
+    raise SystemExit("unexpected fixture kubectl operation")
+if not path.exists():
+    raise SystemExit("fixture object absent")
+print(path.read_text())
+""")
+provider.chmod(0o755)
+qualifier = {
+    "released_activation_qualification": "pre-arm-no-account",
+    "resume_maintenance_mode": "released-runtime",
+    "activation_deployment_run_id": "7787", "applied_data_run_id": "4007",
+    "applied_source_sha": "1" * 40, "baseline_run_id": "7780",
+    "baseline_artifact_name": "oci-production-baseline-7780-1",
+}
+gamemaster = {
+    "kind": "Deployment", "apiVersion": "apps/v1",
+    "metadata": {"name": "gaming-gamemaster-depl", "namespace": "betstan-oci",
+                 "uid": "gamemaster-fixture", "generation": 7},
+    "spec": {"template": {"spec": {"containers": [{"name": "gaming-gamemaster",
+        "image": "fixture@sha256:" + "a" * 64,
+        "env": [{"name": "LIVE_KICKOFFS_ENABLED", "value": "false"}]}]}}},
+}
+lock = {
+    "kind": "ConfigMap", "apiVersion": "v1",
+    "metadata": {"name": "gaming-mongo-migration-lock", "namespace": "betstan-oci",
+                 "uid": "released-fixture", "resourceVersion": "42"},
+    "data": {"state": "released", "holder": "", "operation-id": "live-data-apply-slip-index",
+             "source-sha": "3" * 40, "lease-until-epoch": "0", "fencing-generation": "11",
+             "acquired-at-epoch": "1000", "lease-duration-seconds": "14400",
+             "released-at-epoch": "2000"},
+}
+fresh = dict(baseline_source_sha="3" * 40, baseline_deploy_run_id="7787",
+             baseline_capture_run_id="901", baseline_capture_run_attempt="1")
+original = root / "artifacts/oci-data-baseline-original"
+original_raw = b"baseline_capture_run_id=4007\nbaseline_capture_run_attempt=1\n"
+(original / "baseline-provenance.env").write_bytes(original_raw)
+original_manifest = f"{hashlib.sha256(original_raw).hexdigest()}  baseline-provenance.env\n".encode()
+(original / "SHA256SUMS").write_bytes(original_manifest)
+original_sha = hashlib.sha256(original_manifest).hexdigest()
+(root / "artifacts/prerequisite/provenance.env").write_text(f"baseline_sha256={original_sha}\n")
+base = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+    RUNNER_TEMP=str(root), CONSUMER_ROOT=str(root), CONSUMER_EVENTS=str(root / "events"),
+    RESUME_SOURCE_SHA="3" * 40, PREREQUISITE_RUN_ID="4008", FAILED_ACTIVATION_RUN_ID="7788",
+    FAILED_ACTIVATION_USER_ID="0", GITHUB_RUN_ID="901", OCI_K8S_NAMESPACE="betstan-oci",
+    SOURCE_SHA="2" * 40, FAILED_DEPLOY_RUN_ID="7780", HELD_HANDOFF_RUN_ID="0",
+    HELD_HANDOFF_SOURCE_SHA="none", SHARED_MONGO_LOCK_TOKEN="live-data-901-1",
+    SHARED_MONGO_LOCK_OPERATION="live-data-apply-slip-index",
+    SHARED_MONGO_LOCK_LEASE_SECONDS="14400", RELEASED_ACTIVATION_QUALIFICATION="pre-arm-no-account",
+    MODE="dark", EXPECTED_LIVE_KICKOFFS_ENABLED="false",
+    CONFIRMATION="RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA")
+physical = steps["Verify reader-qualified released activation state"]["run"]
+acquire = steps["Acquire database operation lock"]["run"].replace(
+    "${{ steps.provenance_request.outputs.resume_maintenance_mode }}", "released-runtime")
+def write_json(path, value):
+    path.write_text(json.dumps(value))
+def run(body, env):
+    return subprocess.run(["bash", "-euo", "pipefail", "-c", body],
+                          cwd=root, env=env, capture_output=True, text=True, timeout=20)
+cases = [("success", None)]
+cases += [(key, "qualifier") for key in ("missing", "wrong-mode", "cleanup-required", "extra-key")]
+cases += [(key, "flag") for key in ("enabled", "missing-flag", "duplicate-flag")]
+cases += [(value, "lease") for value in ("0", "1", str(int(time.time()) + 1000), "")]
+cases += [(key, "lock") for key in (
+    "missing-lock", "active", "holder", "source", "operation", "uid", "generation",
+    "lease", "release-epoch", "namespace", "wrong-kind")]
+cases += [(key, "baseline") for key in ("source", "deployment", "original-root", "original-digest")]
+cases += [(key, "drift") for key in (
+    "gamemaster-uid", "gamemaster-generation", "gamemaster-template",
+    "lock-uid", "lock-rv", "lock-generation", "lock-source", "lock-holder")]
+cases += [("readiness", None), ("cas-conflict", None)]
+for failure, area in cases:
+    env = dict(base, CONSUMER_FAILURE=failure)
+    q, g, l, b = copy.deepcopy(qualifier), copy.deepcopy(gamemaster), copy.deepcopy(lock), dict(fresh)
+    for name in ("writes", "events", "released-activation-lock.json",
+                 "released-activation-gamemaster.json"):
+        (root / name).unlink(missing_ok=True)
+    if area == "qualifier":
+        if failure == "missing": q = {}
+        elif failure == "wrong-mode": q["resume_maintenance_mode"] = "retained-hold"
+        elif failure == "cleanup-required": q["released_activation_qualification"] = "cleanup-required"
+        else: q["untrusted"] = "true"
+    elif area == "flag":
+        flags = g["spec"]["template"]["spec"]["containers"][0]["env"]
+        if failure == "enabled": flags[0]["value"] = "true"
+        elif failure == "missing-flag": flags.clear()
+        else: flags.append(dict(flags[0]))
+    elif area == "lease":
+        g["spec"]["template"]["spec"]["containers"][0]["env"].append(
+            {"name": "LIVE_KICKOFFS_LEASE_UNTIL_EPOCH", "value": failure})
+    elif area == "lock":
+        updates = {"active": ("state", "active"), "holder": ("holder", "foreign"),
+                   "source": ("source-sha", "1" * 40), "operation": ("operation-id", "cash-back-acceptance"),
+                   "generation": ("fencing-generation", "0"), "lease": ("lease-until-epoch", "9000"),
+                   "release-epoch": ("released-at-epoch", "0")}
+        if failure in updates: l["data"][updates[failure][0]] = updates[failure][1]
+        elif failure == "uid": l["metadata"]["uid"] = ""
+        elif failure == "namespace": l["metadata"]["namespace"] = "foreign"
+        elif failure == "wrong-kind": l["kind"] = "Secret"
+    elif area == "baseline":
+        if failure == "source": b["baseline_source_sha"] = "1" * 40
+        elif failure == "deployment": b["baseline_deploy_run_id"] = "7780"
+        elif failure == "original-root": b["baseline_capture_run_id"] = "4007"
+    write_json(root / "live-data-upstream-result.json", {"failed_activation_run_id": q})
+    write_json(root / "gamemaster.json", g)
+    write_json(root / "lock.json", l)
+    if failure == "missing-lock": (root / "lock.json").unlink()
+    (original / "SHA256SUMS").write_bytes(
+        original_manifest if failure != "original-digest" else original_manifest.replace(b"4007", b"4008") + b"x")
+    (root / "artifacts/oci-data-baseline-before/baseline-provenance.env").write_text(
+        "".join(f"{key}={value}\n" for key, value in b.items()))
+    result = run(physical, env)
+    if area in {"qualifier", "flag", "lease", "lock", "baseline"} or failure == "readiness":
+        assert result.returncode != 0, (failure, area, result.stderr)
+        assert not (root / "writes").exists()
+        continue
+    assert result.returncode == 0, (failure, result.stderr)
+    assert stat.S_IMODE((root / "released-activation-lock.json").stat().st_mode) == 0o600
+    if area == "drift":
+        if failure.startswith("gamemaster"):
+            field = failure.removeprefix("gamemaster-")
+            if field == "uid": g["metadata"]["uid"] = "replaced"
+            elif field == "generation": g["metadata"]["generation"] += 1
+            else: g["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] = "true"
+            write_json(root / "gamemaster.json", g)
+        else:
+            field = failure.removeprefix("lock-")
+            if field in {"uid", "rv"}: l["metadata"]["uid" if field == "uid" else "resourceVersion"] = "changed"
+            else: l["data"][{"generation": "fencing-generation", "source": "source-sha", "holder": "holder"}[field]] = "changed"
+            write_json(root / "lock.json", l)
+    result = run(acquire, env)
+    assert (result.returncode == 0) == (failure == "success"), (failure, result.stderr)
+    writes = (root / "writes").read_text().splitlines() if (root / "writes").exists() else []
+    if failure == "success":
+        assert writes == ["active"]
+        current = json.loads((root / "lock.json").read_text())
+        assert current["metadata"]["uid"] == lock["metadata"]["uid"]
+        assert current["data"]["holder"] == "live-data-901-1"
+        assert current["data"]["source-sha"] == "2" * 40
+        assert current["data"]["fencing-generation"] == "12"
+    else:
+        assert writes == [], failure
+for qualification in ("none", "cleanup-required", "invalid"):
+    env = dict(base, RELEASED_ACTIVATION_QUALIFICATION=qualification)
+    (root / "writes").unlink(missing_ok=True)
+    result = run(acquire, env)
+    assert result.returncode != 0 and not (root / "writes").exists(), (
+        qualification, result.returncode, result.stdout, result.stderr,
+        (root / "writes").read_text() if (root / "writes").exists() else "no writes")
+for name in ("Demote and verify exact retained live-acceptance account",
+             "Delete exact orphaned live-acceptance slips"):
+    result = run(steps[name]["run"], base)
+    assert result.returncode != 0 and not list(
+        (root / "artifacts/oci-live-data-rollout/evidence").iterdir()), name
+print(f"released_activation_consumer_contract=PASS physical_cases={len(cases)} missing_qualification_cases=3 sentinel_cleanup_rejections=2")
+PY
 
 write_manifest() {
   local directory="$1"
@@ -3852,7 +4091,6 @@ for literal in (
     "FAILED_ACTIVATION_RUN_ID: ${{ inputs.failed_activation_run_id }}",
     "FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}",
     "inputs.failed_deploy_run_id != '0' &&",
-    "if: inputs.failed_activation_run_id != '0'",
     "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID",
     "failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID",
 ):
@@ -3867,11 +4105,17 @@ if selection.index('if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then') > (
     selection.index('elif [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then')
 ):
     raise SystemExit("failed activation is still forced through failed-deploy selection")
-if (
-    'if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then\n'
-    "              printf 'resume_maintenance_mode=released-runtime"
-) not in selection:
-    raise SystemExit("failed activation does not establish released-runtime semantics")
+require_order(
+    selection[selection.index('if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then', selection.index('if [ "$PHASE" != "dry-run" ]; then')):],
+    [
+        '"$protected_operation" = "oci-live-data-resume-activation-released"',
+        ".failed_activation_run_id |",
+        '.released_activation_qualification == "pre-arm-no-account"',
+        '.released_activation_qualification == "cleanup-required"',
+        "printf 'resume_maintenance_mode=released-runtime",
+    ],
+    "reader-qualified released activation and ordinary cleanup semantics",
+)
 
 checkpoint_revalidation = data[
     data.index("- name: Revalidate exact release disk checkpoint before lock mutation"):

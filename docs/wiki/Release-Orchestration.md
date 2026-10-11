@@ -288,8 +288,9 @@ Later revalidation distinguishes three contexts:
 - **Held:** remains stable-only, using sealed rollback references without
   public workload, queue or HTTP collection.
 - **Released-runtime:** is selected only for authenticated failed-deployment
-  recovery after runtime release, not activation cleanup or ordinary data
-  execution. It collects and validates the same strict public snapshot, not a
+  recovery after runtime release or reader-qualified released-activation
+  recovery, not ordinary data execution.
+  It collects and validates the same strict public snapshot, not a
   held snapshot, and requires all ten current service/image references,
   including Telemetry, to equal the already-bound, validated selected candidates.
 
@@ -915,6 +916,12 @@ count override to make a mismatch pass.
 
 User-facing live behavior is activated separately from image deployment.
 
+`DEPLOYMENT_PROVENANCE_FILE` and `LIVE_SCHEMA_EVIDENCE_FILE` are the two
+shared evidence-path bindings inherited from activation job scope by direct
+source revalidation, nested arming/pause guards, acceptance and commit
+preflight. Strict shell defaults and fail-closed provenance checks are
+unchanged.
+
 1. Enable the feature under a bounded lease.
 2. Run the full browser and API acceptance journey.
 3. Create and complete synthetic events.
@@ -924,6 +931,39 @@ User-facing live behavior is activated separately from image deployment.
 7. On failure, disable the feature and restore the known safe state.
 
 This separates "the code is deployed" from "the feature is safe to expose."
+
+The existing `oci-live-data-resume-activation-released` operation adds one
+disjoint, frozen pre-arm/no-account reader qualification. It binds the complete
+authenticated historical tree and three executable blobs, exact scoped
+read-only failure evidence, and native skipped live, account, journey,
+acceptance and commit steps to the immediate successful-data, whole-success
+deployment and failed-activation chain. The checksum-bound original artifact
+retains its historical unknown/none values. Qualification uses the existing
+validation result, not a new authority artifact; spent authority is not
+rewritten or replayed.
+
+Account sentinel `0` is accepted only with that proof and means the exact
+attempt never reached account resolution, not global account absence or
+successful cleanup. Only qualified pre-arm recovery omits account demotion
+and orphan-slip cleanup, without manufacturing cleanup evidence. Ordinary
+ObjectId cleanup retains its original comparisons and cash-back acceptance
+lock handling.
+
+Historical non-mutation does not establish fresh physical admission. Before
+new mutation, the qualified path independently verifies protected
+exact-generation darkness, a false kickoff flag, an absent activation lease
+(not a zero or expired lease), and a legitimately released deployment-lineage
+lock with an empty holder. Pre-arm-only released acquisition is bound to that
+existing lock's UID and exact released generation for the new authorized owner;
+missing, foreign or drifted state grants no reclaim, adoption or fallback.
+
+This qualification also selects the unchanged released-runtime disk profile:
+strict public evidence, selected-image binding, original rollback CRI residency
+and both independent 70-percent byte limits. The historical rollback root and
+baseline remain distinct from fresh pre-mutation capture. Recovery still
+requires a new complete data handoff, deployment and full permanent activation.
+Policy, reader and consumers must ship together; older versions fail closed
+without fallback. No input, operation, schema, helper or artifact is added.
 
 Cash-back acceptance checks both source declarations against live Bet and
 Resulting deployments and serving pods. B must explicitly refuse new admission,

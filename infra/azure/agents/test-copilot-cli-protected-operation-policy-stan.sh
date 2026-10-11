@@ -233,8 +233,82 @@ live_data.select { |operation, _|
   end
 end
 
+ordinary_activation = live_data.fetch("oci-live-data-resume-activation")
+released_activation = live_data.fetch("oci-live-data-resume-activation-released")
+unless ordinary_activation.fetch("objectIdOrLiterals") == {
+    "failed_activation_user_id" => []
+  } && released_activation.fetch("objectIdOrLiterals") == {
+    "failed_activation_user_id" => ["0"]
+  }
+  fail("pre-arm sentinel is not restricted to released activation recovery")
+end
+ordinary_binding = ordinary_activation.fetch("upstreamRunBindings")
+  .find { |binding| binding["input"] == "failed_activation_run_id" }
+released_binding = released_activation.fetch("upstreamRunBindings")
+  .find { |binding| binding["input"] == "failed_activation_run_id" }
+unless ordinary_binding.fetch("runProfile") == "oci-failed-activation-cleanup-v1" &&
+    released_binding == ordinary_binding.merge(
+      "runProfile" => "oci-failed-activation-released-resume-v1"
+    ) && ordinary_binding.fetch("artifactContent").fetch("equals").slice(
+      "activation_state", "live_kickoffs_enabled", "live_acceptance_user_id"
+    ) == {
+      "activation_state" => "dark",
+      "live_kickoffs_enabled" => "false",
+      "live_acceptance_user_id" => "{input:failed_activation_user_id}"
+    }
+  fail("released activation profile weakened ordinary cleanup comparisons")
+end
+policies.reject { |policy| policy["operation"] == released_activation["operation"] }
+  .each do |policy|
+    if policy.fetch("upstreamRunBindings").any? do |binding|
+        binding["runProfile"] == "oci-failed-activation-released-resume-v1"
+      end
+      fail("released activation reader escaped its fixed operation")
+    end
+  end
+
 puts "protected_operation_policy=PASS operations=#{policies.length} workflows=#{by_workflow.length}"
 RUBY
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - \
+  "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" "$policy_file" <<'PY'
+import contextlib
+import copy
+import importlib.util
+import io
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("binding", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+policies = json.load(open(sys.argv[2], encoding="utf-8"))
+for policy in policies:
+    for binding in policy["upstreamRunBindings"]:
+        m.validate_binding_shape(binding)
+binding = next(
+    item for policy in policies
+    if policy["operation"] == "oci-live-data-resume-activation-released"
+    for item in policy["upstreamRunBindings"]
+    if item["input"] == "failed_activation_run_id"
+)
+for key, value in (
+    ("input", "failed_deploy_run_id"), ("workflow", "oci-production-deploy.yml"),
+    ("runProfile", "unregistered-profile"), ("expectedConclusion", "success"),
+    ("expectedHeadShaInput", "approved_sha"),
+    ("artifactTemplate", "oci-live-activation-recovery-999-1"),
+    ("titleTemplates", {"workflow_dispatch": "different title"}),
+):
+    candidate = copy.deepcopy(binding)
+    candidate[key] = value
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            m.validate_binding_shape(candidate)
+        except SystemExit:
+            continue
+    raise AssertionError(f"substituted released binding passed: {key}")
+print("released_activation_policy_shape=PASS negative_cases=7")
+PY
 
 if "$POLICY" get not-a-real-operation >"$tmp_dir/unknown.out" 2>&1; then
   echo "unknown operation unexpectedly passed" >&2

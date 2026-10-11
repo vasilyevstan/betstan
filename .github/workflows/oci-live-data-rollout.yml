@@ -193,6 +193,9 @@ jobs:
              "$FAILED_ACTIVATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           if [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
             [ "$FAILED_ACTIVATION_USER_ID" = "0" ]
+          elif [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA" ]; then
+            [[ "$FAILED_ACTIVATION_USER_ID" = "0" ||
+               "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]] || exit 1
           else
             [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]]
           fi
@@ -394,8 +397,17 @@ jobs:
               ' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"
             fi
             if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
-              printf 'resume_maintenance_mode=released-runtime\n' \
-                >> "$GITHUB_OUTPUT"
+              if [ "$protected_operation" = "oci-live-data-resume-activation-released" ]; then
+                jq -er '
+                  .failed_activation_run_id |
+                  select(type == "object" and
+                    (.released_activation_qualification == "pre-arm-no-account" or
+                     .released_activation_qualification == "cleanup-required")) |
+                  to_entries[] | "\(.key)=\(.value)"
+                ' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"
+              else
+                printf 'resume_maintenance_mode=released-runtime\n' >> "$GITHUB_OUTPUT"
+              fi
             fi
           fi
 
@@ -1205,7 +1217,15 @@ jobs:
           OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           SSE_REQUIREMENT: deployed-source
+          RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
         run: |
+          set -euo pipefail
+          if [ "$RELEASED_ACTIVATION_QUALIFICATION" = "pre-arm-no-account" ]; then
+            [ "$FAILED_ACTIVATION_USER_ID" = "0" ]
+            [ -f artifacts/oci-data-baseline-before/SHA256SUMS ]
+            [ ! -e artifacts/oci-data-baseline-original ]
+            mv artifacts/oci-data-baseline-before artifacts/oci-data-baseline-original
+          fi
           if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
              [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
             [ -f artifacts/oci-data-baseline-before/SHA256SUMS ]
@@ -1244,10 +1264,129 @@ jobs:
             "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
             >> "$GITHUB_ENV"
 
+      - name: Verify reader-qualified released activation state
+        if: steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account'
+        env:
+          MODE: dark
+          EXPECTED_LIVE_KICKOFFS_ENABLED: "false"
+          BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          SECONDARY_PUBLIC_URL: ${{ steps.provenance.outputs.redirect_url }}
+          DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          IMAGE_PROVENANCE_FILE: artifacts/oci-live-data-rollout/resume-images.tsv
+          OUTPUT_DIR: artifacts/oci-live-data-rollout/released-activation-readiness
+        run: |
+          set -euo pipefail
+          umask 077
+          ./infra/oci/agents/live-betting-readiness-stan.sh
+          kubectl get deployment gaming-gamemaster-depl -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$RUNNER_TEMP/released-activation-gamemaster.json"
+          kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$RUNNER_TEMP/released-activation-lock.json"
+          python3 - "$RUNNER_TEMP/live-data-upstream-result.json" \
+            "$RUNNER_TEMP/released-activation-gamemaster.json" \
+            "$RUNNER_TEMP/released-activation-lock.json" \
+            "$RESUME_SOURCE_SHA" "$PREREQUISITE_RUN_ID" "$FAILED_ACTIVATION_RUN_ID" \
+            "$GITHUB_RUN_ID" "$FAILED_ACTIVATION_USER_ID" "$OCI_K8S_NAMESPACE" <<'PY'
+          import importlib.util, json, re, sys, time
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location(
+              "upstream_binding", "infra/oci/scripts/upstream_run_binding_stan.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          result_path, deployment_path, lock_path, source, data_run, activation_run, run, user, namespace = sys.argv[1:]
+          result = json.loads(Path(result_path).read_bytes()).get("failed_activation_run_id")
+          def require(value, message):
+              if not value:
+                  module.fail(message)
+          require(isinstance(result, dict) and set(result) == {
+              "released_activation_qualification", "resume_maintenance_mode",
+              "activation_deployment_run_id", "applied_data_run_id", "applied_source_sha",
+              "baseline_run_id", "baseline_artifact_name"},
+              "released physical admission has an incomplete reader result")
+          require(all(isinstance(value, str) for value in result.values())
+                  and result["released_activation_qualification"] == "pre-arm-no-account"
+                  and result["resume_maintenance_mode"] == "released-runtime" and user == "0",
+                  "released physical admission lacks pre-arm qualification")
+          require(all(re.fullmatch(r"[1-9][0-9]*", value) for value in (
+                      activation_run, data_run, run, result["activation_deployment_run_id"],
+                      result["applied_data_run_id"], result["baseline_run_id"]))
+                  and re.fullmatch(r"[0-9a-f]{40}", source)
+                  and re.fullmatch(r"[0-9a-f]{40}", result["applied_source_sha"])
+                  and result["baseline_artifact_name"] ==
+                      f'oci-production-baseline-{result["baseline_run_id"]}-1',
+                  "released physical admission lacks failed activation")
+          baseline = module.parse_env(
+              Path("artifacts/oci-data-baseline-before/baseline-provenance.env").read_bytes(),
+              "fresh released baseline")
+          require(
+              baseline.get("baseline_source_sha") == source
+              and baseline.get("baseline_deploy_run_id") == result["activation_deployment_run_id"]
+              and baseline.get("baseline_capture_run_id") == run
+              and baseline.get("baseline_capture_run_attempt") == "1"
+              and run != result["applied_data_run_id"],
+              "fresh released baseline substituted the deployment or original root")
+          original = Path("artifacts/oci-data-baseline-original")
+          require(original.is_dir() and not original.is_symlink()
+                  and not any(path.is_symlink() for path in original.rglob("*")),
+                  "original rollback baseline is unavailable")
+          original_files = {
+              path.relative_to(original).as_posix(): path.read_bytes()
+              for path in original.rglob("*") if path.is_file()}
+          original_sha = module.validate_checksum_manifest(original_files, "original rollback baseline")
+          original_provenance = module.parse_env(
+              (original / "baseline-provenance.env").read_bytes(), "original rollback baseline")
+          predecessor = module.parse_env(
+              Path("artifacts/prerequisite/provenance.env").read_bytes(), "authenticated predecessor")
+          require(original_provenance.get("baseline_capture_run_id") == result["applied_data_run_id"]
+                  and original_sha == predecessor.get("baseline_sha256"),
+                  "fresh capture replaced the original applied rollback baseline")
+          deployment = json.loads(Path(deployment_path).read_bytes())
+          meta = deployment.get("metadata", {})
+          require(deployment.get("kind") == "Deployment" and deployment.get("apiVersion") == "apps/v1"
+                  and meta.get("name") == "gaming-gamemaster-depl"
+                  and meta.get("namespace") == namespace
+                  and isinstance(meta.get("uid"), str) and meta["uid"]
+                  and type(meta.get("generation")) is int and meta["generation"] > 0,
+                  "released gamemaster identity is unavailable")
+          containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+          containers = [item for item in containers if item.get("name") == "gaming-gamemaster"]
+          require(len(containers) == 1, "released gamemaster container is ambiguous")
+          env = containers[0].get("env", [])
+          flags = [item.get("value") for item in env if item.get("name") == "LIVE_KICKOFFS_ENABLED"]
+          require(flags == ["false"], "released gamemaster must explicitly remain dark")
+          require(not any(item.get("name") == "LIVE_KICKOFFS_LEASE_UNTIL_EPOCH" for item in env),
+                  "released gamemaster activation lease must be absent")
+          lock = json.loads(Path(lock_path).read_bytes())
+          meta, data = lock.get("metadata", {}), lock.get("data", {})
+          require(
+              lock.get("kind") == "ConfigMap" and lock.get("apiVersion") == "v1"
+              and meta.get("name") == "gaming-mongo-migration-lock"
+              and meta.get("namespace") == namespace
+              and all(isinstance(value, str) for value in [*data.values(), meta.get("uid"),
+                                                           meta.get("resourceVersion")])
+              and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", meta.get("uid", ""))
+              and re.fullmatch(r"[1-9][0-9]*", meta.get("resourceVersion", ""))
+              and data.get("state") == "released" and data.get("holder") == ""
+              and data.get("operation-id") == "live-data-apply-slip-index"
+              and data.get("source-sha") == source
+              and data.get("lease-until-epoch") == "0"
+              and re.fullmatch(r"[1-9][0-9]*", data.get("released-at-epoch", ""))
+              and re.fullmatch(r"[1-9][0-9]{0,15}", data.get("fencing-generation", ""))
+              and int(data["fencing-generation"]) < 9007199254740991,
+              "released lock is missing, foreign, active or malformed")
+          require(all(re.fullmatch(r"[1-9][0-9]{0,15}", data.get(key, "")) for key in (
+                      "acquired-at-epoch", "lease-duration-seconds", "released-at-epoch"))
+                  and 60 <= int(data["lease-duration-seconds"]) <= 86400
+                  and int(data["acquired-at-epoch"]) <= int(data["released-at-epoch"]) <= int(time.time()),
+                  "released lock lacks legitimate release chronology")
+          PY
+
       - name: Revalidate exact release disk checkpoint before lock mutation
         if: env.OCI_RUNTIME_MODE == 'k3s'
         env:
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
+          RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
           SESSION_STATE_FILE: artifacts/oci-live-data-rollout/k3s-access.env
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           CANDIDATE_IMAGES_FILE: artifacts/oci-live-data-rollout/images.tsv
@@ -1265,6 +1404,11 @@ jobs:
                [ "$FAILED_ACTIVATION_RUN_ID" = "0" ] &&
                [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
             profile=released-runtime
+          elif [[ "$FAILED_ACTIVATION_RUN_ID" =~ ^[1-9][0-9]*$ ]] &&
+               { [ "$RELEASED_ACTIVATION_QUALIFICATION" = "pre-arm-no-account" ] ||
+                 [ "$RELEASED_ACTIVATION_QUALIFICATION" = "cleanup-required" ]; } &&
+               [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
+            profile=released-runtime
           fi
           SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           CONTROL_SHA="$CHECKPOINT_SOURCE_SHA" \
@@ -1279,8 +1423,79 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EXCLUDE_RUN_ID: ${{ github.run_id }}
+          RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
         run: |
           set -euo pipefail
+          RELEASED_ACTIVATION_QUALIFICATION="${RELEASED_ACTIVATION_QUALIFICATION:-none}"
+          if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ] &&
+             [ "${CONFIRMATION:-}" = "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA" ]; then
+            case "$RELEASED_ACTIVATION_QUALIFICATION" in
+              pre-arm-no-account) [ "$FAILED_ACTIVATION_USER_ID" = "0" ] || exit 1 ;;
+              cleanup-required) [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]] || exit 1 ;;
+              *) echo "released activation reader qualification is required" >&2; exit 1 ;;
+            esac
+          elif [ "$FAILED_ACTIVATION_RUN_ID" != "0" ] &&
+               [ "$FAILED_ACTIVATION_USER_ID" = "0" ]; then
+            echo "pre-arm sentinel requires the qualified released operation" >&2
+            exit 1
+          fi
+          if [ "$RELEASED_ACTIVATION_QUALIFICATION" = "pre-arm-no-account" ]; then
+            umask 077
+            [ "$FAILED_ACTIVATION_USER_ID" = "0" ]
+            snapshot="$RUNNER_TEMP/released-activation-lock.json"
+            [ -f "$snapshot" ] && [ ! -L "$snapshot" ]
+            generation="$RUNNER_TEMP/released-activation-gamemaster.json"
+            [ -f "$generation" ] && [ ! -L "$generation" ]
+            kubectl get deployment gaming-gamemaster-depl -n "$OCI_K8S_NAMESPACE" -o json \
+              >"$RUNNER_TEMP/released-activation-gamemaster-current.json"
+            jq -es '
+              length == 2 and .[0].metadata.uid == .[1].metadata.uid and
+              .[0].metadata.generation == .[1].metadata.generation and
+              .[0].spec.template == .[1].spec.template
+            ' "$generation" "$RUNNER_TEMP/released-activation-gamemaster-current.json" \
+              >/dev/null || { echo "released generation changed before acquisition" >&2; exit 1; }
+            kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json \
+              >"$RUNNER_TEMP/released-activation-lock-current.json"
+            jq -es '
+              length == 2 and .[0].metadata.uid == .[1].metadata.uid and
+              .[0].metadata.resourceVersion == .[1].metadata.resourceVersion and
+              .[0].data == .[1].data
+            ' "$snapshot" "$RUNNER_TEMP/released-activation-lock-current.json" \
+              >/dev/null || { echo "released lock changed before acquisition" >&2; exit 1; }
+            expected_uid="$(jq -er '.metadata.uid' "$snapshot")"
+            expected_generation="$(jq -er '.data["fencing-generation"]' "$snapshot")"
+            if ! acquisition_result="$(
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$SOURCE_SHA" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
+            EXPECTED_LOCK_UID="$expected_uid" \
+            EXPECTED_FENCING_GENERATION="$expected_generation" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire-released
+            )"; then
+              printf '%s\n' "$acquisition_result"
+              exit 1
+            fi
+            printf '%s\n' "$acquisition_result"
+            [[ "$acquisition_result" == "shared_mongo_lock=acquire-released status=PASS "* &&
+               "$acquisition_result" == *" fencing_generation=$((expected_generation + 1))" &&
+               "$acquisition_result" != *$'\n'* ]] || exit 1
+            if ! verification_result="$(
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
+            )"; then
+              printf '%s\n' "$verification_result"
+              exit 1
+            fi
+            printf '%s\n' "$verification_result"
+            [[ "$verification_result" == "shared_mongo_lock=verify status=PASS "* &&
+               "$verification_result" != *$'\n'* ]] || exit 1
+            exit 0
+          fi
           resume_mode="${{ steps.provenance_request.outputs.resume_maintenance_mode }}"
           retained_transfer=false
           if [ "$resume_mode" = "retained-hold" ] &&
@@ -1419,9 +1634,12 @@ jobs:
           fi
 
       - name: Demote and verify exact retained live-acceptance account
-        if: inputs.failed_activation_run_id != '0'
+        if: >-
+          inputs.failed_activation_run_id != '0' &&
+          steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'
         run: |
           set -euo pipefail
+          [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]]
           kubectl exec -n "$OCI_K8S_NAMESPACE" \
             deployment/gaming-auth-depl \
             -c gaming-auth -- \
@@ -1499,10 +1717,13 @@ jobs:
           trap - EXIT
 
       - name: Delete exact orphaned live-acceptance slips
-        if: inputs.failed_activation_run_id != '0'
+        if: >-
+          inputs.failed_activation_run_id != '0' &&
+          steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'
         env:
           OUTPUT_FILE: artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-cleanup.json
         run: |
+          [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]] || exit 1
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:$FAILED_ACTIVATION_RUN_ID:$FAILED_ACTIVATION_USER_ID" \
           EXPECTED_AUTH_USER_COUNT=1 \

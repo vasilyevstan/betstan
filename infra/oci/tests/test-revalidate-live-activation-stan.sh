@@ -127,6 +127,138 @@ run_revalidation() {
 
 run_revalidation >/dev/null
 
+ruby -ryaml -rjson - "$WORKFLOW" >"$WORK_DIR/caller-environments.json" <<'RUBY'
+job = YAML.load_file(ARGV.fetch(0)).fetch("jobs").fetch("activate-and-validate")
+names = [
+  "Revalidate current master before live mutation",
+  "Arm owner-bound activation abort",
+  "Exercise complete production live journey",
+  "Revalidate release head before acceptance",
+  "Revalidate release head before permanent activation",
+]
+paths = %w[DEPLOYMENT_PROVENANCE_FILE LIVE_SCHEMA_EVIDENCE_FILE]
+expected = {
+  "DEPLOYMENT_PROVENANCE_FILE" => "artifacts/deploy/provenance.txt",
+  "LIVE_SCHEMA_EVIDENCE_FILE" => "artifacts/deploy/live-schema.env",
+}
+abort "job evidence paths differ" unless job.fetch("env").slice(*paths) == expected
+callers = names.to_h do |name|
+  step = job.fetch("steps").find { |item| item["name"] == name }
+  abort "caller missing: #{name}" unless step
+  local = step.fetch("env", {})
+  abort "step still overrides moved evidence paths" if local.keys.any? { |key| paths.include?(key) }
+  [name, job.fetch("env").merge(local).slice(*paths)]
+end
+puts JSON.generate(callers)
+RUBY
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$WORK_DIR" "$SCRIPT" \
+  "$ROOT_DIR/infra/oci/scripts/cash-back-acceptance-recovery-stan.js" "$SOURCE_SHA" <<'PY'
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+root, guard, recovery, source = sys.argv[1:]
+root = Path(root)
+work = root / "workflow-callers"
+evidence = work / "artifacts/deploy"
+evidence.mkdir(parents=True)
+callers = json.loads((root / "caller-environments.json").read_text())
+base = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+    SOURCE_SHA=source, BUILD_RUN_ID="101", INFRASTRUCTURE_RUN_ID="102",
+    DEPLOYMENT_RUN_ID="103", CHECKPOINT_SOURCE_SHA=source,
+    DISK_CHECKPOINT_RUN_ID="105", DISK_CHECKPOINT_SHA256="c" * 64,
+    DISK_CHECKPOINT_DISPOSITION="READY_NO_RECLAIM",
+    REPOSITORY="example/repo", GITHUB_REF_NAME="master", GITHUB_RUN_ATTEMPT="1",
+    GITHUB_RUN_ID="104", STUB_HEAD_SHA=source, STUB_MASTER_SHA=source,
+    STUB_RUN_SHA=source, STUB_CHECKPOINT_SHA=source, STUB_CHECKPOINT_RUN_SHA=source,
+    STUB_RUN_ATTEMPT="1", STUB_DIFF_PATH="")
+for key in ("DEPLOYMENT_PROVENANCE_FILE", "LIVE_SCHEMA_EVIDENCE_FILE",
+            "CASH_BACK_ACCEPTANCE_EVIDENCE_FILE"):
+    base.pop(key, None)
+def restore():
+    for path in evidence.iterdir():
+        path.unlink()
+    shutil.copyfile(root / "deployment.env", evidence / "provenance.txt")
+    shutil.copyfile(root / "live-schema.env", evidence / "live-schema.env")
+def run(env, argv=None):
+    return subprocess.run(argv or [guard], cwd=work, env=env,
+                          capture_output=True, text=True, timeout=20)
+negative = 0
+for name, inherited in callers.items():
+    restore()
+    env = dict(base, **inherited)
+    result = run(env)
+    assert result.returncode == 0, (name, result.stderr)
+    for key in inherited:
+        for case in ("omitted", "empty", "missing", "symlink", "mismatch"):
+            restore()
+            changed = dict(env)
+            if case == "omitted":
+                del changed[key]
+            elif case == "empty":
+                changed[key] = ""
+            elif case == "missing":
+                changed[key] += ".absent"
+            elif case == "symlink":
+                target = work / inherited[key]
+                original = target.read_bytes()
+                target.unlink()
+                backing = evidence / "regular-backing"
+                backing.write_bytes(original)
+                target.symlink_to(backing)
+            else:
+                target = work / inherited[key]
+                target.write_text(target.read_text().replace("source_sha=" + source,
+                                                            "source_sha=" + "b" * 40))
+            assert run(changed).returncode != 0, (name, key, case)
+            negative += 1
+    restore()
+    assert run(dict(env, STUB_MASTER_SHA="b" * 40)).returncode != 0, name
+    negative += 1
+
+probe = root / "bin/kubectl"
+probe.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+[[ " $* " == *" get deployment gaming-resulting-depl "* ]]
+echo read >>"$KUBE_PROBE_LOG"
+if [[ "$(wc -l <"$KUBE_PROBE_LOG" | tr -d ' ')" == "1" ]]; then
+  echo '{"metadata":{"annotations":{}}}'
+else
+  exit 7
+fi
+""")
+probe.chmod(0o755)
+for action, caller, expected in (
+    ("arm", "Arm owner-bound activation abort", "deployment read failed (7)"),
+    ("pause", "Exercise complete production live journey",
+     "Interruption requires unused pre-activation abort authority"),
+):
+    restore()
+    log = root / "kube-probe.log"
+    log.unlink(missing_ok=True)
+    env = dict(base, **callers[caller], GITHUB_ACTIONS="true",
+        GITHUB_WORKFLOW="oci-live-betting-activate", GITHUB_SHA=source,
+        OCI_K8S_NAMESPACE="fixture", RUNNER_TEMP=str(work), OUTPUT_DIR=str(work / "output"),
+        KUBE_PROBE_LOG=str(log), PROBE_ACTION=action)
+    argv = ["node", "-e",
+        "try { require(process.argv[1]).recovery(process.env.OUTPUT_DIR)[process.env.PROBE_ACTION]();"
+        " process.exitCode=2; } catch (e) { console.error(e.message); process.exitCode=1; }",
+        recovery]
+    result = run(env, argv)
+    assert result.returncode == 1 and expected in result.stderr, (action, result.stderr)
+    assert "source revalidation failed" not in result.stderr
+    assert not (work / "cash-back-interruption-104-1.json").exists()
+    log.unlink(missing_ok=True)
+    result = run(dict(env, DEPLOYMENT_PROVENANCE_FILE=""), argv)
+    assert result.returncode == 1 and "source revalidation failed (1)" in result.stderr
+    assert len(log.read_text().splitlines()) == 1 if log.exists() else action == "pause"
+    assert not (work / "cash-back-interruption-104-1.json").exists()
+print(f"workflow_evidence_inheritance=PASS callers={len(callers)} negative_cases={negative} nested_guards=2")
+PY
+
 ANCESTOR_SHA="dddddddddddddddddddddddddddddddddddddddd"
 sed "s/checkpoint_source_sha=$SOURCE_SHA/checkpoint_source_sha=$ANCESTOR_SHA/" \
   "$WORK_DIR/deployment.env" >"$WORK_DIR/deployment-ancestor.env"

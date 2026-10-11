@@ -1476,7 +1476,7 @@ POLICIES = {
         patterns={
             "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
         },
-        object_id_or_literals={"failed_activation_user_id": []},
+        object_id_or_literals={"failed_activation_user_id": ["0"]},
         subject_input="approved_sha",
         subject_relation="current",
         upstream_run_bindings=[
@@ -1493,6 +1493,7 @@ POLICIES = {
             },
             {
                 **FAILED_ACTIVATION_BINDING,
+                "runProfile": "oci-failed-activation-released-resume-v1",
                 "afterInput": "prerequisite_run_id",
             },
         ],
