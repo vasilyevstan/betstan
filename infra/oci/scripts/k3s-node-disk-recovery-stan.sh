@@ -369,8 +369,9 @@ capture_capacity "$capacity_before" ||
 
 if [[ "$ACTION" == "revalidate" ]]; then
   [[ "$REVALIDATION_PROFILE" == "public" ||
-     "$REVALIDATION_PROFILE" == "held" ]] ||
-    fail "REVALIDATION_PROFILE must be public or held"
+     "$REVALIDATION_PROFILE" == "held" ||
+     "$REVALIDATION_PROFILE" == "released-runtime" ]] ||
+    fail "REVALIDATION_PROFILE must be public, held, or released-runtime"
   [[ "$DISK_CHECKPOINT_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
     fail "DISK_CHECKPOINT_RUN_ID is invalid"
   [[ -n "$CHECKPOINT_FILE" && -f "$CHECKPOINT_FILE" &&

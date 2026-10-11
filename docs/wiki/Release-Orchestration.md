@@ -279,10 +279,33 @@ residency. The existing finalization phase therefore finalizes infrastructure
 before preloading those public immutable references through the authority-bound
 native k3s CRI path, and runs aggregate diagnosis only after preload completes.
 Neither registry verification nor successful preload is release authority:
-checkpoint creation still requires the aggregate public-state contract, while
-later revalidation applies its selected public or held profile. Candidate and
-rollback CRI residency, lineage, identity, checksums, and kubelet checks remain
-mandatory at their applicable boundaries.
+checkpoint creation still requires the aggregate public-state contract.
+Later revalidation distinguishes three contexts:
+
+- **Public (default):** derives rollback references from the currently deployed
+  generation under full public-snapshot validation; generation drift still
+  blocks revalidation.
+- **Held:** remains stable-only, using sealed rollback references without
+  public workload, queue or HTTP collection.
+- **Released-runtime:** is selected only for authenticated failed-deployment
+  recovery after runtime release, not activation cleanup or ordinary data
+  execution. It collects and validates the same strict public snapshot, not a
+  held snapshot, and requires all ten current service/image references,
+  including Telemetry, to equal the already-bound, validated selected candidates.
+
+Released-runtime recomputes candidate and original rollback residency from the
+same fresh CRI evidence, using the original sealed rollback references; both
+must exactly match their sealed collections, including resident IDs and
+repository digests. Original checkpoint and baseline bytes, the Telemetry
+restoration capsule, and the source/build/infrastructure tuple remain unchanged.
+Missing original rollback residency remains a physical blocker; revalidation
+does not pull, recreate or waive it. Candidate and rollback residency, lineage,
+identity, checksums and kubelet checks remain mandatory at their applicable
+boundaries.
+
+The data workflow, wrapper and validator must ship at the same accepted source.
+Older helpers reject the new profile without fallback; reversion restores the
+old fail-closed limitation rather than granting release authority.
 
 Protected k3s live-data and deployment windows retain the existing target SSH
 key and known-host material until their read-only node disk revalidation is
@@ -292,10 +315,12 @@ after API forwarding is established. This caller-specific retention leaves
 strict SSH checks, bounded sessions, disk thresholds, physical locks, immutable
 source/checksum binding, and the normal release and rollback flow unchanged.
 
-Checkpoint creation and each public or held revalidation independently require
-fresh kubelet node-filesystem and raw-root byte measurements to satisfy
-`usedBytes * 100 <= capacityBytes * 70`. Equality passes; one byte over the
-limit withholds eligibility. The separate governed diagnosis path remains
+Checkpoint creation and all three revalidation contexts require independent,
+fresh kubelet node-filesystem and raw-root byte measurements, each satisfying
+`usedBytes * 100 <= capacityBytes * 70`. Equality passes; one byte over either
+limit withholds eligibility. Revalidation also retains stable node/root/Mongo
+identity, exact capacity equality and fresh filesystem cross-checks.
+The separate governed diagnosis path remains
 available over the limit. During standalone finalization, candidate-verification
 or candidacy-preload failure stops further preload work and removes candidate
 and checkpoint evidence, while otherwise-valid finalized infrastructure

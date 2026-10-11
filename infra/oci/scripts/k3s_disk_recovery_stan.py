@@ -2005,7 +2005,9 @@ def revalidate_release_checkpoint(args):
         fail("release checkpoint producer run differs during revalidation")
     runtime = load_json(args.runtime, "fresh release runtime snapshot")
     capacity = load_json(args.capacity, "fresh release kubelet capacity")
-    validate_runtime(runtime, args.profile)
+    validate_runtime(
+        runtime, "public" if args.profile == "released-runtime" else args.profile
+    )
     validate_capacity(capacity)
     crosscheck_filesystem(runtime, capacity)
     if capacity["withinLimit"] is not True:
@@ -2027,6 +2029,17 @@ def revalidate_release_checkpoint(args):
     ]
     if sealed_candidates != candidates:
         fail("fresh candidate image set differs from the release checkpoint")
+    if args.profile == "released-runtime":
+        if "applicationImages" not in runtime:
+            fail("released-runtime revalidation requires application image evidence")
+        selected_images = [
+            {"service": item["service"], "imageRef": item["imageRef"]}
+            for item in candidates
+        ]
+        if sorted(
+            runtime["applicationImages"], key=lambda item: item["service"]
+        ) != selected_images:
+            fail("fresh released-runtime application images differ from selected candidates")
     if capacity["capacityBytes"] != checkpoint["root"]["capacityBytes"]:
         fail("fresh release checkpoint filesystem capacity differs")
     if checkpoint_stable_identity(runtime, capacity) != checkpoint["stableIdentity"]:
@@ -2240,7 +2253,7 @@ def main():
     revalidate_checkpoint.add_argument("--source-sha", required=True)
     revalidate_checkpoint.add_argument("--producer-run-id", required=True)
     revalidate_checkpoint.add_argument(
-        "--profile", required=True, choices=("public", "held")
+        "--profile", required=True, choices=("public", "held", "released-runtime")
     )
     revalidate_checkpoint.set_defaults(handler=revalidate_release_checkpoint)
 
