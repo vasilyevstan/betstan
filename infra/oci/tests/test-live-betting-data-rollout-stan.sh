@@ -135,7 +135,7 @@ abort "released readiness lost dark mode" unless dark.fetch("env").slice(
   "MODE", "EXPECTED_LIVE_KICKOFFS_ENABLED", "IMAGE_PROVENANCE_FILE"
 ) == {
   "MODE" => "dark", "EXPECTED_LIVE_KICKOFFS_ENABLED" => "false",
-  "IMAGE_PROVENANCE_FILE" => "artifacts/oci-live-data-rollout/resume-images.tsv",
+  "IMAGE_PROVENANCE_FILE" => "artifacts/oci-live-data-rollout/images.tsv",
 }
 names.last(2).each do |name|
   abort "cleanup exclusion widened" unless selected.fetch(name).fetch("if").split.join(" ") ==
@@ -169,10 +169,31 @@ readiness = root / "infra/oci/agents/live-betting-readiness-stan.sh"
 readiness.write_text("""#!/usr/bin/env bash
 set -euo pipefail
 [[ "$MODE" == dark && "$EXPECTED_LIVE_KICKOFFS_ENABLED" == false ]]
+[[ -f "$IMAGE_PROVENANCE_FILE" ]] || {
+  echo "IMAGE_PROVENANCE_FILE is required" >&2
+  exit 1
+}
+cmp -s "$IMAGE_PROVENANCE_FILE" "$CONSUMER_MANIFEST" || {
+  echo "image provenance differs from verified fixture" >&2
+  exit 1
+}
 echo readiness >>"$CONSUMER_EVENTS"
 [[ "${CONSUMER_FAILURE:-}" != readiness ]]
 """)
 readiness.chmod(0o755)
+image_repository = "ghcr.io/vasilyevstan/betstan-images"
+image_rows = []
+for service in ("auth", "backoffice", "bet", "client", "event", "gamemaster",
+                "moderation", "resulting", "slip", "telemetry"):
+    digest = "sha256:" + hashlib.sha256(service.encode()).hexdigest()
+    platform_digest = "sha256:" + hashlib.sha256((service + "-arm64").encode()).hexdigest()
+    image_rows.append("\t".join(
+        (service, image_repository, f"{image_repository}@{digest}", digest, platform_digest)))
+image_bytes = ("\n".join(image_rows) + "\n").encode()
+canonical_images = root / "artifacts/oci-live-data-rollout/images.tsv"
+resume_images = root / "artifacts/oci-live-data-rollout/resume-images.tsv"
+expected_images = root / "expected-images.tsv"
+expected_images.write_bytes(image_bytes)
 provider = root / "bin/kubectl"
 provider.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -237,14 +258,17 @@ original_sha = hashlib.sha256(original_manifest).hexdigest()
 (root / "artifacts/prerequisite/provenance.env").write_text(f"baseline_sha256={original_sha}\n")
 base = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
     RUNNER_TEMP=str(root), CONSUMER_ROOT=str(root), CONSUMER_EVENTS=str(root / "events"),
+    CONSUMER_MANIFEST=str(expected_images),
     RESUME_SOURCE_SHA="3" * 40, PREREQUISITE_RUN_ID="4008", FAILED_ACTIVATION_RUN_ID="7788",
     FAILED_ACTIVATION_USER_ID="0", GITHUB_RUN_ID="901", OCI_K8S_NAMESPACE="betstan-oci",
     SOURCE_SHA="2" * 40, FAILED_DEPLOY_RUN_ID="7780", HELD_HANDOFF_RUN_ID="0",
     HELD_HANDOFF_SOURCE_SHA="none", SHARED_MONGO_LOCK_TOKEN="live-data-901-1",
     SHARED_MONGO_LOCK_OPERATION="live-data-apply-slip-index",
     SHARED_MONGO_LOCK_LEASE_SECONDS="14400", RELEASED_ACTIVATION_QUALIFICATION="pre-arm-no-account",
-    MODE="dark", EXPECTED_LIVE_KICKOFFS_ENABLED="false",
     CONFIRMATION="RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA")
+readiness_env = steps["Verify reader-qualified released activation state"]["env"]
+base.update({key: readiness_env[key] for key in (
+    "MODE", "EXPECTED_LIVE_KICKOFFS_ENABLED", "IMAGE_PROVENANCE_FILE")})
 physical = steps["Verify reader-qualified released activation state"]["run"]
 acquire = steps["Acquire database operation lock"]["run"].replace(
     "${{ steps.provenance_request.outputs.resume_maintenance_mode }}", "released-runtime")
@@ -265,8 +289,18 @@ cases += [(key, "drift") for key in (
     "gamemaster-uid", "gamemaster-generation", "gamemaster-template",
     "lock-uid", "lock-rv", "lock-generation", "lock-source", "lock-holder")]
 cases += [("readiness", None), ("cas-conflict", None)]
+cases += [("old-alias", "manifest"), ("missing-canonical", "manifest")]
 for failure, area in cases:
     env = dict(base, CONSUMER_FAILURE=failure)
+    canonical_images.write_bytes(image_bytes)
+    resume_images.unlink(missing_ok=True)
+    assert not resume_images.exists()
+    if area == "manifest":
+        if failure == "old-alias":
+            env["IMAGE_PROVENANCE_FILE"] = str(resume_images.relative_to(root))
+        else:
+            canonical_images.unlink()
+            resume_images.write_bytes(image_bytes)
     q, g, l, b = copy.deepcopy(qualifier), copy.deepcopy(gamemaster), copy.deepcopy(lock), dict(fresh)
     for name in ("writes", "events", "released-activation-lock.json",
                  "released-activation-gamemaster.json"):
@@ -306,9 +340,14 @@ for failure, area in cases:
     (root / "artifacts/oci-data-baseline-before/baseline-provenance.env").write_text(
         "".join(f"{key}={value}\n" for key, value in b.items()))
     result = run(physical, env)
-    if area in {"qualifier", "flag", "lease", "lock", "baseline"} or failure == "readiness":
+    if area in {"qualifier", "flag", "lease", "lock", "baseline", "manifest"} or failure == "readiness":
         assert result.returncode != 0, (failure, area, result.stderr)
         assert not (root / "writes").exists()
+        if area == "manifest":
+            assert "IMAGE_PROVENANCE_FILE is required" in result.stderr, (failure, result.stderr)
+            assert not (root / "events").exists()
+            assert not (root / "released-activation-lock.json").exists()
+            assert not (root / "released-activation-gamemaster.json").exists()
         continue
     assert result.returncode == 0, (failure, result.stderr)
     assert stat.S_IMODE((root / "released-activation-lock.json").stat().st_mode) == 0o600

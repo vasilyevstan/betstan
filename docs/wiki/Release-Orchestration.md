@@ -941,6 +941,7 @@ deployment and failed-activation chain. The checksum-bound original artifact
 retains its historical unknown/none values. Qualification uses the existing
 validation result, not a new authority artifact; spent authority is not
 rewritten or replayed.
+Qualified pre-arm readiness consumes the canonical image manifest already validated against the bound original build and release checkpoint, rather than a manifest produced only by failed-deployment recovery.
 
 Account sentinel `0` is accepted only with that proof and means the exact
 attempt never reached account resolution, not global account absence or

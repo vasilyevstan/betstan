@@ -1273,7 +1273,7 @@ jobs:
           SECONDARY_PUBLIC_URL: ${{ steps.provenance.outputs.redirect_url }}
           DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
-          IMAGE_PROVENANCE_FILE: artifacts/oci-live-data-rollout/resume-images.tsv
+          IMAGE_PROVENANCE_FILE: artifacts/oci-live-data-rollout/images.tsv
           OUTPUT_DIR: artifacts/oci-live-data-rollout/released-activation-readiness
         run: |
           set -euo pipefail
