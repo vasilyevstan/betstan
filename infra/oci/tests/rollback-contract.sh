@@ -2272,26 +2272,11 @@ printf 'current_ten_capture_validation_and_fenced_restore=PASS\n'
 
 preparation_root="$WORK_DIR/final-handoff-preparation"
 mkdir -p "$preparation_root"
-python3 - "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" \
-  "$preparation_root/prepare-step.sh" <<'PY'
-import sys
-from pathlib import Path
-
-workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
-step = workflow[
-    workflow.index("- name: Capture and validate pre-mutation rollback baseline"):
-    workflow.index(
-        "- name: Revalidate exact release disk checkpoint before lock mutation"
-    )
-]
-body = step.split("        run: |\n", 1)[1]
-lines = []
-for line in body.splitlines():
-    if line.strip() and not line.startswith("          "):
-        raise SystemExit("baseline preparation shell indentation is invalid")
-    lines.append(line[10:] if line.strip() else "")
-Path(sys.argv[2]).write_text("\n".join(lines) + "\n", encoding="utf-8")
-PY
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" \
+  >"$preparation_root/prepare-step.sh" <<'RUBY'
+puts YAML.load_file(ARGV[0]).fetch("jobs").fetch("rollout").fetch("steps")
+  .find { |step| step["name"] == "Capture and validate pre-mutation rollback baseline" }.fetch("run")
+RUBY
 
 run_preparation() {
   local name="$1" baseline="$2" phase="$3" failed_deploy="$4"
@@ -2335,6 +2320,7 @@ SH
       GITHUB_ENV="$case_dir/github.env" OCI_K8S_NAMESPACE=betstan-oci \
       SOURCE_SHA="$CURRENT_MASTER_SHA" PHASE="$phase" \
       FAILED_DEPLOY_RUN_ID="$failed_deploy" FAILED_ACTIVATION_RUN_ID=0 \
+      RELEASED_ACTIVATION_QUALIFICATION=none \
       BASELINE_RECOVERY_RUN_ID="$recovery" \
       BASELINE_RECOVERY_SOURCE_SHA="$recovery_source" \
       EXPECTED_SOURCE_SHA=stale-source EXPECTED_NAMESPACE=stale-namespace \

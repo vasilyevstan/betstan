@@ -45,6 +45,8 @@ jobs:
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      DEPLOYMENT_PROVENANCE_FILE: artifacts/deploy/provenance.txt
+      LIVE_SCHEMA_EVIDENCE_FILE: artifacts/deploy/live-schema.env
       CONFIRMATION: ${{ inputs.confirmation }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
@@ -503,8 +505,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          DEPLOYMENT_PROVENANCE_FILE: artifacts/deploy/provenance.txt
-          LIVE_SCHEMA_EVIDENCE_FILE: artifacts/deploy/live-schema.env
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
       - name: Arm owner-bound activation abort

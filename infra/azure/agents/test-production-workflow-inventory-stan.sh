@@ -1465,8 +1465,8 @@ changes = {
         "--baseline-dir artifacts/unverified-baseline",
     ),
     "published-file": (
-        '\' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"',
-        '\' "$RUNNER_TEMP/unbound-result.json" >> "$GITHUB_OUTPUT"',
+        '\n              \' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"',
+        '\n              \' "$RUNNER_TEMP/unbound-result.json" >> "$GITHUB_OUTPUT"',
     ),
     "published-selector": (
         "                .[$binding] |",
