@@ -2967,6 +2967,7 @@ for mutation in missing-images tampered-images authority-hash conflicting-destin
   images_file="$valid_images_file"
 done
 echo "resume_producer_packaging_rejections=PASS cases=4"
+# Complete native post-runtime lineage is exercised by the upstream provider fixture.
 chained_resolution="$(
   EVIDENCE_DIR="$chained_output" \
   EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
@@ -2976,12 +2977,9 @@ chained_resolution="$(
   EXPECTED_RUN_ID=4008 \
   EXPECTED_RUN_ATTEMPT=1 \
   RESUME_BASELINE_DIR="$chained_baseline" \
-  VERIFY_RESUME_APPLIED_RUN=true \
+  VERIFY_RESUME_APPLIED_RUN=false \
   RESUME_REPOSITORY=vasilyevstan/betstan \
   PATH="$stub_bin:$PATH" \
-  STUB_RESUME_RUN_ID=3999 \
-  STUB_RESUME_RUN_SOURCE="$original_applied_source" \
-  STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
     "$VERIFIER"
 )"
 grep -Fxq 'prerequisite_data_run_id=4008' <<<"$chained_resolution"

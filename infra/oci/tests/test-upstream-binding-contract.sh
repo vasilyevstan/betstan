@@ -5702,6 +5702,7 @@ producer_body = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]
 producer_body = producer_body[producer_body.index("mkdir -p artifacts/oci-live-data-rollout/evidence"):
                               producer_body.index('if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then',
                                                   producer_body.index("resume_schema="))]
+producer_template = producer_body
 consumer_body = next(step["run"] for step in workflow_json[1]["jobs"]["deploy"]["steps"]
                      if step.get("name") == "Verify immutable image and infrastructure provenance")
 consumer_body = consumer_body[consumer_body.index("EVIDENCE_DIR=artifacts/data \\\n"):]
@@ -5721,7 +5722,7 @@ shutil.copytree(before, fresh / "oci-data-baseline-after")
 images = latest / "resume-images.tsv"
 assert len(images.read_text().splitlines()) == 10
 
-def produce(run, source, authority="none"):
+def produce(run, source, authority="none", baseline=fresh_sha):
     directory = base / f"real-data-{run}"
     request = base / f"real-data-{run}-request.json"
     request.write_text(json.dumps({
@@ -5730,7 +5731,7 @@ def produce(run, source, authority="none"):
         "disk_checkpoint_sha256": activation["disk_checkpoint_sha256"],
         "disk_checkpoint_disposition": "NOT_APPLICABLE", "images_file": str(images),
         "output_dir": str(directory), "workflow_run_id": str(run),
-        "baseline_sha256": fresh_sha, "authority_file": str(authority),
+        "baseline_sha256": baseline, "authority_file": str(authority),
     }))
     result = subprocess.run([
         "bash", str(root / "infra/oci/tests/test-live-betting-data-rollout-stan.sh"),
@@ -5973,6 +5974,140 @@ history["workflow_runs"].append(late); history["total_count"] += 1
 write(endpoint, history); consume(False); member.write_bytes(original)
 consume()
 print("PASS native-enabled capture/digest/source substitutions, both root relabellings, unknown wire key, disabled/missing/unqualified native proof and late supersession reject")
+
+def install_consumer(evidence, baseline, run, source=control_source):
+    shutil.rmtree(consumer_dir / "artifacts/data")
+    shutil.rmtree(consumer_dir / "artifacts/oci-baseline")
+    shutil.copytree(evidence, consumer_dir / "artifacts/data")
+    shutil.copytree(baseline, consumer_dir / "artifacts/oci-baseline")
+    consumer_env.update(DATA_RUN_ID=str(run), SOURCE_SHA=source)
+
+# Keep the unchanged legacy capture/root equality under the complete native proof.
+legacy_data = produce(50, current_source, latest / "resume-authority.env", baseline_sha)
+pack(9850, legacy_data)
+values = env(deployed, "provenance.txt")
+values["data_evidence_sha256"] = hashlib.sha256((legacy_data / "SHA256SUMS").read_bytes()).hexdigest()
+write_env(deployed, "provenance.txt", values); pack(9851, deployed)
+install_consumer(legacy_data, public / "baseline", 50, current_source)
+consume()
+print("PASS complete native legacy released-runtime consumer retains capture42/root42 equality")
+
+for mode, failed_run, resumed_run, template_run in (
+    ("retained-hold", 57, 58, 626),
+    ("released-runtime", 59, 60, 624),
+):
+    retained = mode == "retained-hold"
+    post_request = dict(request, approved_sha=control_source, resume_source_sha=control_source,
+        prerequisite_run_id="55", failed_deploy_run_id=str(failed_run),
+        confirmation="RESUME APPLIED LIVE DATA EXACT SHA" if retained else
+            "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA")
+    failed_metadata = read(f"{prefix}/actions/runs/624")
+    failed_metadata.update(id=failed_run, head_sha=control_source,
+        display_title=f"oci-deploy {control_source}",
+        created_at="2026-01-01T02:00:00Z", updated_at="2026-01-01T02:10:00Z")
+    for suffix in ("", "/attempts/1"):
+        write(f"{prefix}/actions/runs/{failed_run}{suffix}", failed_metadata)
+    jobs = read(f"{prefix}/actions/runs/{template_run}/attempts/1/jobs?per_page=100")
+    for index, job in enumerate(jobs["jobs"]):
+        job.update(id=failed_run * 100 + index, run_id=failed_run, status="completed")
+        for step in job["steps"]:
+            if step["name"] == "Verify immutable image and infrastructure provenance":
+                step.update(started_at="2026-01-01T02:01:00Z", completed_at="2026-01-01T02:02:00Z")
+    write(f"{prefix}/actions/runs/{failed_run}/attempts/1/jobs?per_page=100", jobs)
+    native(failed_run, "deploy", dict(deployed_inputs, approved_sha=control_source, data_run_id="55"),
+           "2026-01-01T02:01:30Z")
+    post_artifacts = [publish(failed_run, 20000 + failed_run,
+                             f"oci-production-baseline-{failed_run}-1", before)]
+    post = base / f"post-runtime-{failed_run}"
+    if retained:
+        shutil.copytree(historical / "deployment-recovery", post)
+        values = env(post, "deployment-intent.env")
+        values.update(source_sha=control_source, deployment_run_id=str(failed_run),
+                      data_run_id="55", baseline_capture_run_id="53",
+                      baseline_sha256=fresh_sha,
+                      data_evidence_sha256=hashlib.sha256((successor / "SHA256SUMS").read_bytes()).hexdigest())
+        write_env(post, "deployment-intent.env", values)
+        intent_sha = hashlib.sha256((post / "deployment-intent.env").read_bytes()).hexdigest()
+        (post / "deployment-intent.sha256").write_text(f"{intent_sha}  deployment-intent.env\n")
+        values = env(post, "failure-lineage.env")
+        values.update(source_sha=control_source, deployment_run_id=str(failed_run), intent_sha256=intent_sha)
+        write_env(post, "failure-lineage.env", values); seal(post)
+        name = f"oci-deploy-recovery-authority-{failed_run}-1"
+    else:
+        shutil.copytree(public / "failed-deployment", post)
+        values = env(post, "provenance.txt")
+        values.update(source_sha=control_source, deployment_run_id=str(failed_run), data_run_id="55",
+                      data_evidence_sha256=hashlib.sha256((successor / "SHA256SUMS").read_bytes()).hexdigest())
+        write_env(post, "provenance.txt", values)
+        values = env(post, "live-schema.env")
+        values.update(source_sha=control_source, data_run_id="55", baseline_sha256=fresh_sha)
+        write_env(post, "live-schema.env", values)
+        name = f"oci-deploy-provenance-{failed_run}-1"
+    post_artifacts.append(publish(failed_run, 30000 + failed_run, name, post))
+    write(f"{prefix}/actions/runs/{failed_run}/artifacts?per_page=100",
+          {"total_count": len(post_artifacts), "artifacts": post_artifacts})
+    selected_binding = (next(item for item in resume_policy["upstreamRunBindings"]
+                             if item["input"] == "failed_deploy_run_id") if retained else json.loads(binding))
+    post_policy = dict(resume_policy, upstreamRunBindings=[
+        selected_binding if item["input"] == "failed_deploy_run_id" else item
+        for item in resume_policy["upstreamRunBindings"]])
+    post_result = base / f"post-runtime-{resumed_run}-result.json"
+    result = subprocess.run([
+        validator, "validate-all", "--repository", repo, "--policy-json", json.dumps(post_policy),
+        "--subject-sha", control_source,
+        "--dispatch-inputs", json.dumps(post_request), "--runtime-mode", "oke",
+        "--result-json", str(post_result),
+    ], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    post_qualification = json.loads(post_result.read_text())["failed_deploy_run_id"]
+    assert post_qualification["resume_maintenance_mode"] == mode
+    post_expressions = dict(expressions, **{
+        f"steps.provenance_request.outputs.{key}": post_qualification[key] for key in (
+            "failed_deploy_job_conclusion", "public_validate_job_conclusion",
+            "lock_release_step_conclusion", "fence_release_step_conclusion", "rehold_step_conclusion")})
+    body = re.sub(r"\$\{\{\s*([^{}]+?)\s*\}\}",
+                  lambda match: post_expressions[match.group(1)], producer_template)
+    post_env = dict(producer_env, FAILED_DEPLOY_RUN_ID=str(failed_run), RESUME_MAINTENANCE_MODE=mode)
+    result = subprocess.run(["bash", "-euc", body], cwd=producer_dir,
+                            env=post_env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    resumed = produce(resumed_run, control_source, authority_file)
+    write(f"{prefix}/actions/runs/{resumed_run}/artifacts?per_page=100", {
+        "total_count": 1, "artifacts": [publish(resumed_run, 40000 + resumed_run,
+                                               f"oci-live-data-rollout-{resumed_run}-1", resumed)]})
+    resumed_metadata = read(f"{prefix}/actions/runs/55")
+    resumed_metadata.update(id=resumed_run, created_at="2026-01-01T02:20:00Z",
+                            updated_at="2026-01-01T02:30:00Z")
+    for suffix in ("", "/attempts/1"):
+        write(f"{prefix}/actions/runs/{resumed_run}{suffix}", resumed_metadata)
+    jobs = read(f"{prefix}/actions/runs/55/attempts/1/jobs?per_page=100")
+    job = jobs["jobs"][0]
+    job.update(id=resumed_run * 100, run_id=resumed_run, started_at="2026-01-01T02:21:00Z")
+    job["steps"][0].update(started_at="2026-01-01T02:22:00Z", completed_at="2026-01-01T02:23:00Z")
+    write(f"{prefix}/actions/runs/{resumed_run}/attempts/1/jobs?per_page=100", jobs)
+    native(resumed_run, "rollout", post_request, "2026-01-01T02:22:30Z")
+    install_consumer(resumed, before, resumed_run)
+    consume()
+    original = log_file.read_bytes(); log_file.unlink(); consume(False); log_file.write_bytes(original)
+    directory = consumer_dir / "artifacts/data"
+    saved = {item: item.read_bytes() for item in directory.rglob("*") if item.is_file()}
+    values = env(directory, "resume-authority.env"); values["applied_data_run_id"] = "53"
+    write_env(directory, "resume-authority.env", values); seal(directory); consume(False)
+    for member, raw in saved.items():
+        member.write_bytes(raw)
+    baseline = consumer_dir / "artifacts/oci-baseline"
+    saved.update({baseline / name: (baseline / name).read_bytes()
+                  for name in ("baseline-provenance.env", "SHA256SUMS")})
+    values = env(baseline, "baseline-provenance.env"); values["baseline_capture_run_id"] = "42"
+    write_env(baseline, "baseline-provenance.env", values); substituted_sha = seal(baseline)
+    for name in ("provenance.env", "schema.env", "resume-authority.env"):
+        values = env(directory, name); values["baseline_sha256"] = substituted_sha
+        write_env(directory, name, values)
+    seal(directory); consume(False)
+    for member, raw in saved.items():
+        member.write_bytes(raw)
+    consume()
+    print(f"PASS real {mode} authority/evidence -> native-enabled deployment preserves capture53/root42 and rejects root/capture substitution or missing frozen proof")
 PY
 ok "released recovery authenticates distinct retained lineage and rejects substituted root, tuple, outcome, chronology and missing evidence"
 SUBJECT_SHA="$saved_subject"

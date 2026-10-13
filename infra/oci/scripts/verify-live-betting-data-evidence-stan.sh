@@ -477,7 +477,6 @@ if resume_baseline_dir:
     expected_capture_run_id = resolved_applied_data_run_id
     if (
         sys.argv[16] == "true" and resume_authority_path.exists()
-        and resume_authority["resume_maintenance_mode"] == "pre-runtime-hold"
     ):
         import importlib.util
         spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[15])
@@ -491,7 +490,7 @@ if resume_baseline_dir:
             native["applied_data_run_id"] != resolved_applied_data_run_id
             or native["applied_source_sha"] != resolved_applied_source_sha
         ):
-            fail("native pre-runtime lineage differs from the local evidence")
+            fail("native resume lineage differs from the local evidence")
         expected_capture_run_id = native["baseline_capture_run_id"]
         if expected_capture_run_id != resolved_applied_data_run_id:
             baseline_files = {

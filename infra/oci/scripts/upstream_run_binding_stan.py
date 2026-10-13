@@ -1600,6 +1600,7 @@ def validate_failed_deploy_artifacts(
     *,
     pre_runtime=False,
     seen=None,
+    include_capture=False,
 ):
     checkpoint = parse_checkpoint_artifact(
         repository, dispatch_inputs, runtime_mode, f"{label} checkpoint"
@@ -1871,6 +1872,14 @@ def validate_failed_deploy_artifacts(
             runtime_mode,
             f"{label} deployment",
         )
+    if include_capture:
+        return {
+            "applied_data_run_id": root_run, "applied_source_sha": root_source,
+            "baseline_capture_run_id": baseline["baseline_capture_run_id"],
+            "baseline_capture_source_sha": baseline["baseline_source_sha"],
+            "baseline_capture_deploy_run_id": baseline["baseline_deploy_run_id"],
+            "baseline_sha256": baseline_manifest_sha256,
+        }
     return checkpoint, predecessor
 
 
@@ -3141,7 +3150,82 @@ def validate_pre_runtime_resume_chain(
             )
         )
     if authority["resume_maintenance_mode"] != "pre-runtime-hold":
-        fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
+        if not include_capture:
+            fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
+        failed_run = authority["failed_deploy_run_id"]
+        metadata = fixed_run_metadata(
+            repository, failed_run, "oci-production-deploy.yml", "failure",
+            "post-runtime resume failed deployment",
+        )
+        source_sha = metadata["head_sha"]
+        if metadata.get("display_title") != f"oci-deploy {source_sha}":
+            fail("post-runtime failed deployment title differs")
+        validate_descendant_scope(source_sha, evidence["source_sha"])
+        retained = authority["resume_maintenance_mode"] == "retained-hold"
+        profile = (
+            "oci-failed-deploy-retained-hold-v1" if retained
+            else "oci-failed-deploy-released-runtime-v1"
+        )
+        outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, "post-runtime resume")
+        if tuple(authority[key] for key in (
+            "failed_deploy_job_conclusion", "public_validate_job_conclusion",
+            "lock_release_step_conclusion", "fence_release_step_conclusion", "rehold_step_conclusion",
+        )) != ("failure" if retained else "success", "skipped" if retained else "failure", *outcomes):
+            fail("post-runtime authority differs from its native failure outcomes")
+        native = failed_deploy_native_inputs(
+            repository, failed_run, source_sha, "post-runtime resume failed deployment",
+            expected_step_conclusion="success",
+        )
+        if native["confirmation"] != "DEPLOY OCI EXACT SHA":
+            fail("post-runtime failed deployment confirmation differs")
+        request = failed_deploy_native_inputs(
+            repository, run_id, evidence["source_sha"], "post-runtime resume request",
+            resume_dispatch=True,
+        )
+        expected_request = {key: native[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id", "baseline_recovery_source_sha",
+        )}
+        expected_request.update({
+            "approved_sha": evidence["source_sha"], "resume_source_sha": source_sha,
+            "prerequisite_run_id": native["data_run_id"], "failed_deploy_run_id": failed_run,
+            "phase": "apply-slip-index", "failed_activation_run_id": "0",
+            "failed_activation_user_id": "0",
+            "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA" if retained else
+                "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA",
+        })
+        if request != expected_request:
+            fail("post-runtime resume substituted its native predecessor or release tuple")
+        artifact = exact_artifact(
+            repository, failed_run, f"oci-production-baseline-{failed_run}-1", "post-runtime resume",
+        )
+        result = validate_failed_deploy_artifacts(
+            repository, failed_run, source_sha, artifact, request, runtime_mode,
+            profile, *outcomes, "post-runtime resume", seen=seen, include_capture=True,
+        )
+        prior, _ = parse_live_v6_artifact(repository, native["data_run_id"], "post-runtime predecessor")
+        for key in LIVE_V6_KEYS - {"source_sha", "workflow_run_id", "completed_at"}:
+            if evidence[key] != prior[key]:
+                fail(f"post-runtime resume substituted {key}")
+        if any(authority[key] != result[key] for key in ("applied_data_run_id", "applied_source_sha")):
+            fail("post-runtime resume substituted its ancestral applied root")
+        previous = require_fixed_run(
+            repository, native["data_run_id"], "oci-live-data-rollout.yml", "success",
+            source_sha, f"oci-live-data apply-slip-index {source_sha}", "post-runtime predecessor",
+        )
+        current = require_fixed_run(
+            repository, run_id, "oci-live-data-rollout.yml", "success",
+            evidence["source_sha"], f"oci-live-data apply-slip-index {evidence['source_sha']}",
+            "post-runtime resume",
+        )
+        if (
+            parse_timestamp(previous.get("updated_at"), "post-runtime predecessor")
+                > parse_timestamp(metadata.get("created_at"), "post-runtime failure")
+            or parse_timestamp(metadata.get("updated_at"), "post-runtime failure")
+                > parse_timestamp(current.get("created_at"), "post-runtime resume")
+        ):
+            fail("post-runtime resume chronology differs")
+        return result
     failed_run = authority["failed_deploy_run_id"]
     metadata = fixed_run_metadata(
         repository, failed_run, "oci-production-deploy.yml", "failure",
