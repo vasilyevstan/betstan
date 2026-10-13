@@ -569,11 +569,16 @@ actual successful held owner, separately from the original applied-data and
 failed-deployment rollback root. Original root inputs and historical request
 hashes retain their meanings; the successor uses corrected current-master
 authority. Eligible CLI-owned gates retain existing automatic approval.
-Only this operation passes the exact verified bound successor into post-bind
-upstream revalidation during materialization, on fresh dispatch and both resume
-paths. Preparation and pre-call validation exclude no successor; the shared
-reader reauthenticates that exact native run. Neither ambient caller identity
-nor an earlier cancelled run can substitute for the bound own run.
+This operation and the qualified expired-handoff path within
+`oci-live-data-resume-deploy` pass the exact verified bound successor into
+post-bind upstream revalidation during fresh materialization and both resume
+paths, bound approval, and runtime preflight. Preparation and pre-call validation
+exclude no successor; the shared reader reauthenticates that exact native run
+and its preflight cutoff. Neither ambient caller identity nor an earlier
+cancelled run can substitute for the bound own run. Earlier cancelled attempts
+remain in complete history and require their separate, double-observed native
+no-execution proof against a frozen reviewed workflow source. These caller and
+source-profile capabilities ship together; rollback retains them or fails closed.
 
 Before intent/approval and in workflow preflight, this operation admits only
 the reviewed historical producer's missing `resume-images.tsv`. Complete

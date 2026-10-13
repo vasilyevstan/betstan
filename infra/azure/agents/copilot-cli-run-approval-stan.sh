@@ -447,7 +447,8 @@ revalidate_upstream_bindings() {
   dispatch_inputs="$(jq -c '.inputs' <<<"$record_summary")"
 
   local continuation_args=()
-  if [[ "$operation" = "oci-live-data-continue-held-handoff" ]]; then
+  if [[ "$operation" = "oci-live-data-continue-held-handoff" ||
+    "$operation" = "oci-live-data-resume-deploy" ]]; then
     [[ "$authority_mode" = dispatch-record &&
        "$authority_run_id" = "$RUN_ID" &&
        "$(jq -r '.runId' <<<"$record_summary")" = "$RUN_ID" ]] ||

@@ -2595,9 +2595,15 @@ def held_handoff_history(
             historical = gh_api(
                 f"repos/{repository}/contents/{path}?ref={row['head_sha']}"
             )
+            source_pin = historical.get("sha") if isinstance(historical, dict) else None
+            if source_pin not in (
+                "c3c9332f4b23b55de6c32ae2183b89478f97884f",
+                "472896760221c61ef517d656b0ef102d7344f2c9",
+            ):
+                fail(f"{label} historical workflow is not the guarded source profile")
             try:
                 _, source_blob = authority.validate_historical_unmaterialized_workflow(
-                    path, historical, blob_sha="c3c9332f4b23b55de6c32ae2183b89478f97884f",
+                    path, historical, blob_sha=source_pin,
                 )
             except (AttributeError, SystemExit):
                 fail(f"{label} historical workflow is not the guarded source profile")

@@ -283,6 +283,8 @@ jobs:
               --successor-run-id "$GITHUB_RUN_ID"
               --held-history-file artifacts/oci-live-data-rollout/evidence/held-handoff-history.json
             )
+          elif [ "$protected_operation" = "oci-live-data-resume-deploy" ]; then
+            continuation_args=(--successor-run-id "$GITHUB_RUN_ID")
           fi
           ./infra/oci/scripts/upstream_run_binding_stan.py validate-all \
             --repository "$REPOSITORY" \
@@ -292,7 +294,7 @@ jobs:
             --runtime-mode "$OCI_RUNTIME_MODE" \
             --result-json "$RUNNER_TEMP/live-data-upstream-result.json" \
             --baseline-dir artifacts/oci-data-baseline-before \
-            "${continuation_args[@]}"
+            ${continuation_args[@]+"${continuation_args[@]}"}
 
           validate_run() {
             local workflow_file="$1"
