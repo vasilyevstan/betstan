@@ -502,8 +502,9 @@ deployment recovery uses the checksum-sealed intent written before lock renewal
 plus the post-rehold failure lineage.
 For released-runtime recovery after an authenticated
 `live-betting-data-resume-v2` retained-hold data resume, baseline capture identity
-follows the validated original applied-data root, while the immediate
-predecessor's evidence and ownership bindings remain distinct.
+follows the validated original applied-data root unless full native validation
+authenticates a capture inherited from a qualified expired-handoff ancestor;
+the immediate predecessor's evidence and ownership bindings remain distinct.
 
 The expired-handoff case reuses the existing `live-betting-data-resume-v2`
 before-takeover envelope; every consumer rederives the full native
