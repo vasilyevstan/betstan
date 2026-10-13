@@ -957,6 +957,9 @@ exact-generation darkness, a false kickoff flag, an absent activation lease
 lock with an empty holder. Pre-arm-only released acquisition is bound to that
 existing lock's UID and exact released generation for the new authorized owner;
 missing, foreign or drifted state grants no reclaim, adoption or fallback.
+For this released-lock proof, lease duration and deadline must be exactly `0`,
+while acquisition and release timestamps remain positive and bounded, with
+acquisition no later than release and release no later than the current time.
 
 This qualification also selects the unchanged released-runtime disk profile:
 strict public evidence, selected-image binding, original rollback CRI residency
