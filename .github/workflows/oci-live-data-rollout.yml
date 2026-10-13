@@ -906,11 +906,25 @@ jobs:
         env:
           RESUME_SOURCE_SHA: ${{ inputs.resume_source_sha }}
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
+          NO_TAKEOVER_HANDOFF_QUALIFICATION: ${{ steps.provenance_request.outputs.no_takeover_handoff_qualification || 'none' }}
+          BASELINE_CAPTURE_RUN_ID: ${{ steps.provenance_request.outputs.baseline_capture_run_id }}
+          BASELINE_CAPTURE_SOURCE_SHA: ${{ steps.provenance_request.outputs.baseline_capture_source_sha }}
           BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
-          RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance.outputs.resume_applied_data_run_id }}
-          RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance.outputs.resume_applied_source_sha }}
+          RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance_request.outputs.applied_data_run_id || steps.provenance.outputs.resume_applied_data_run_id }}
+          RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance_request.outputs.applied_source_sha || steps.provenance.outputs.resume_applied_source_sha }}
         run: |
           set -euo pipefail
+          NO_TAKEOVER_HANDOFF_QUALIFICATION="${NO_TAKEOVER_HANDOFF_QUALIFICATION:-none}"
+          case "$NO_TAKEOVER_HANDOFF_QUALIFICATION" in
+            none) ;;
+            expired-own-handoff)
+              [ "$RESUME_MAINTENANCE_MODE" = pre-runtime-hold ]
+              [ "$FAILED_ACTIVATION_RUN_ID" = 0 ] && [ "$HELD_HANDOFF_RUN_ID" = 0 ]
+              [ "$BASELINE_CAPTURE_RUN_ID" = "$PREREQUISITE_RUN_ID" ]
+              [[ "$BASELINE_CAPTURE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              ;;
+            *) echo "unsupported native no-takeover qualification" >&2; exit 1 ;;
+          esac
           resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
           prior_evidence=artifacts/prerequisite/provenance.env
           baseline_dir=artifacts/oci-data-baseline-before
@@ -940,6 +954,8 @@ jobs:
           if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
             expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"
             expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+          elif [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ]; then
+            expected_baseline_source_sha="$BASELINE_CAPTURE_SOURCE_SHA"
           fi
           BASELINE_DIR="$baseline_dir" \
           EXPECTED_SOURCE_SHA="$expected_baseline_source_sha" \
@@ -1130,12 +1146,14 @@ jobs:
             fi
             python3 - "$previous_lock_snapshot" \
               "$OCI_K8S_NAMESPACE" "$previous_holder_run" \
-              "$previous_holder_source" "$previous_lease_seconds" <<'PY'
+              "$previous_holder_source" "$previous_lease_seconds" \
+              "$NO_TAKEOVER_HANDOFF_QUALIFICATION" "$baseline_dir" <<'PY'
           import json, os, re, subprocess, sys, time
+          from pathlib import Path
           def require(value):
               if not value:
                   raise SystemExit("inherited lock snapshot is invalid")
-          path, namespace, predecessor_run, source, duration = sys.argv[1:]
+          path, namespace, predecessor_run, source, duration, qualification, baseline_dir = sys.argv[1:]
           require(re.fullmatch(r"[1-9][0-9]*", predecessor_run))
           require(re.fullmatch(r"[0-9a-f]{40}", source))
           result = subprocess.run(
@@ -1161,6 +1179,78 @@ jobs:
               int(data["lease-until-epoch"]) - int(data["lease-duration-seconds"])
           ) <= int(time.time()))
           require(data.get("released-at-epoch") == "0")
+          if qualification == "expired-own-handoff":
+              require(duration == "1800" and int(data["lease-until-epoch"]) < int(time.time()))
+              services = {"auth", "bet", "backoffice", "client", "event", "gamemaster",
+                          "moderation", "resulting", "slip", "telemetry"}
+              supporting = {"auth", "client", "telemetry"}
+              baseline = Path(baseline_dir)
+              images = [line.split("\t") for line in (baseline / "images.tsv").read_text().splitlines()]
+              desired = [line.split("\t") for line in (baseline / "deployments.tsv").read_text().splitlines()]
+              require(len(images) == len(desired) == 10)
+              require(all(len(row) == 5 for row in images))
+              require(all(len(row) == 6 for row in desired))
+              require({row[0] for row in images} == {row[0] for row in desired} == services)
+              images = {row[0]: row for row in images}
+              desired = {row[0]: row[3] for row in desired}
+              deployments = json.loads(subprocess.run(
+                  ["kubectl", "get", "deployment", *[f"gaming-{service}-depl"
+                   for service in sorted(services)], "-n", namespace, "-o", "json"],
+                  capture_output=True, check=True).stdout)
+              items = deployments.get("items", [])
+              require(len(items) == 10)
+              require({item.get("metadata", {}).get("name") for item in items}
+                      == {f"gaming-{service}-depl" for service in services})
+              for item in items:
+                  meta, spec, status = item.get("metadata", {}), item.get("spec", {}), item.get("status", {})
+                  service = meta["name"].removeprefix("gaming-").removesuffix("-depl")
+                  require(item.get("kind") == "Deployment" and item.get("apiVersion") == "apps/v1")
+                  require(meta.get("namespace") == namespace
+                          and isinstance(meta.get("uid"), str) and meta["uid"]
+                          and type(meta.get("generation")) is int and meta["generation"] > 0)
+                  require(type(status.get("observedGeneration")) is int
+                          and status["observedGeneration"] == meta["generation"])
+                  require(re.fullmatch(r"[1-9][0-9]*", desired[service]))
+                  replicas = int(desired[service]) if service in supporting else 0
+                  require(type(spec.get("replicas")) is int and spec["replicas"] == replicas)
+                  require(all(type(status.get(key, 0)) is int and status.get(key, 0) == replicas
+                              for key in ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas")))
+                  containers = [container for container in spec.get("template", {}).get("spec", {}).get("containers", [])
+                                if container.get("name") == f"gaming-{service}"]
+                  require(len(containers) == 1 and containers[0].get("image") == images[service][2])
+                  if service == "gamemaster":
+                      env = containers[0].get("env", [])
+                      flags = [entry for entry in env if entry.get("name") == "LIVE_KICKOFFS_ENABLED"]
+                      require(len(flags) == 1 and flags[0].get("value") == "false"
+                              and "valueFrom" not in flags[0])
+                      require(not any(entry.get("name") == "LIVE_KICKOFFS_LEASE_UNTIL_EPOCH" for entry in env))
+              pods = json.loads(subprocess.run(
+                  ["kubectl", "get", "pods", "-n", namespace, "-o", "json"],
+                  capture_output=True, check=True).stdout)
+              require(isinstance(pods.get("items"), list))
+              for service in services:
+                  selected = [pod for pod in pods["items"]
+                              if pod.get("metadata", {}).get("labels", {}).get("app") == f"gaming-{service}"]
+                  require(len(selected) == (int(desired[service]) if service in supporting else 0))
+                  for pod in selected:
+                      meta, status = pod.get("metadata", {}), pod.get("status", {})
+                      require(isinstance(meta.get("uid"), str) and meta["uid"]
+                              and meta.get("namespace") == namespace and meta.get("deletionTimestamp") is None
+                              and status.get("phase") == "Running")
+                      require(len([condition for condition in status.get("conditions", [])
+                                   if condition.get("type") == "Ready" and condition.get("status") == "True"]) == 1)
+                      containers = [container for container in status.get("containerStatuses", [])
+                                    if container.get("name") == f"gaming-{service}"]
+                      require(len(containers) == 1 and containers[0].get("ready") is True)
+                      require(isinstance(containers[0].get("imageID"), str)
+                              and any(containers[0]["imageID"].endswith("@" + digest)
+                                      for digest in images[service][3:5]))
+              runtime_path = str(Path(path).with_name("expired-handoff-runtime.json"))
+              fd = os.open(runtime_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(fd, "w") as output:
+                  json.dump({"deployments": deployments, "pods": pods}, output)
+                  output.flush()
+                  os.fsync(output.fileno())
           fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
           with os.fdopen(fd, "w") as output:
               json.dump(lock, output)
@@ -1424,9 +1514,19 @@ jobs:
           REPO: ${{ github.repository }}
           EXCLUDE_RUN_ID: ${{ github.run_id }}
           RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
+          NO_TAKEOVER_HANDOFF_QUALIFICATION: ${{ steps.provenance_request.outputs.no_takeover_handoff_qualification || 'none' }}
         run: |
           set -euo pipefail
           RELEASED_ACTIVATION_QUALIFICATION="${RELEASED_ACTIVATION_QUALIFICATION:-none}"
+          NO_TAKEOVER_HANDOFF_QUALIFICATION="${NO_TAKEOVER_HANDOFF_QUALIFICATION:-none}"
+          case "$NO_TAKEOVER_HANDOFF_QUALIFICATION" in
+            none) ;;
+            expired-own-handoff)
+              [ "${{ steps.provenance_request.outputs.resume_maintenance_mode }}" = pre-runtime-hold ]
+              [ "$FAILED_ACTIVATION_RUN_ID" = 0 ] && [ "$HELD_HANDOFF_RUN_ID" = 0 ]
+              ;;
+            *) echo "unsupported native no-takeover qualification" >&2; exit 1 ;;
+          esac
           if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ] &&
              [ "${CONFIRMATION:-}" = "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA" ]; then
             case "$RELEASED_ACTIVATION_QUALIFICATION" in
@@ -1525,7 +1625,8 @@ jobs:
             if [ "$retained_transfer" = true ]; then
               snapshot="$RUNNER_TEMP/retained-lock.json"
               strict_transfer=true
-            elif [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+            elif [ "$HELD_HANDOFF_RUN_ID" != "0" ] ||
+                 [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ]; then
               strict_transfer=true
             fi
             [ -f "$snapshot" ] && [ ! -L "$snapshot" ]
@@ -1535,6 +1636,52 @@ jobs:
             if [ "$strict_transfer" = true ]; then
               ./infra/azure/agents/production-run-exclusivity-stan.sh
               record_transfer release unconfirmed
+            fi
+            if [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ]; then
+              runtime="$RUNNER_TEMP/expired-handoff-runtime.json"
+              [ -f "$runtime" ] && [ ! -L "$runtime" ]
+              services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
+              deployments=()
+              for service in "${services[@]}"; do deployments+=("gaming-${service}-depl"); done
+              kubectl get deployment "${deployments[@]}" -n "$OCI_K8S_NAMESPACE" -o json \
+                >"$RUNNER_TEMP/expired-handoff-deployments-current.json"
+              kubectl get pods -n "$OCI_K8S_NAMESPACE" -o json \
+                >"$RUNNER_TEMP/expired-handoff-pods-current.json"
+              jq -en --slurpfile before "$runtime" \
+                --slurpfile deployments "$RUNNER_TEMP/expired-handoff-deployments-current.json" \
+                --slurpfile pods "$RUNNER_TEMP/expired-handoff-pods-current.json" '
+                def deployments($list):
+                  [$list.items[] | {kind, apiVersion, name: .metadata.name,
+                    namespace: .metadata.namespace, uid: .metadata.uid,
+                    generation: .metadata.generation, spec,
+                    status: {observedGeneration: .status.observedGeneration,
+                      replicas: (.status.replicas // 0), updatedReplicas: (.status.updatedReplicas // 0),
+                      readyReplicas: (.status.readyReplicas // 0), availableReplicas: (.status.availableReplicas // 0)}}]
+                  | sort_by(.name);
+                def pods($list):
+                  [$list.items[] | select(.metadata.labels.app |
+                    IN("gaming-auth", "gaming-bet", "gaming-backoffice", "gaming-client",
+                      "gaming-event", "gaming-gamemaster", "gaming-moderation", "gaming-resulting",
+                      "gaming-slip", "gaming-telemetry")) |
+                    {name: .metadata.name, namespace: .metadata.namespace, uid: .metadata.uid,
+                     deletionTimestamp: .metadata.deletionTimestamp, ownerReferences: .metadata.ownerReferences,
+                     spec, phase: .status.phase, conditions: .status.conditions,
+                     containerStatuses: .status.containerStatuses}] | sort_by(.uid);
+                ($before | length) == 1 and ($deployments | length) == 1 and ($pods | length) == 1 and
+                ($deployments[0].items | length) == 10 and
+                deployments($before[0].deployments) == deployments($deployments[0]) and
+                pods($before[0].pods) == pods($pods[0])
+              ' >/dev/null || { echo "expired-handoff workload changed before release" >&2; exit 1; }
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+              kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json \
+                >"$RUNNER_TEMP/expired-handoff-lock-current.json"
+              jq -es '
+                length == 2 and .[0].metadata.uid == .[1].metadata.uid and
+                .[0].metadata.resourceVersion == .[1].metadata.resourceVersion and
+                .[0].data == .[1].data and
+                (.[1].data["lease-until-epoch"] | tonumber) < now
+              ' "$snapshot" "$RUNNER_TEMP/expired-handoff-lock-current.json" \
+                >/dev/null || { echo "expired own lock changed before release" >&2; exit 1; }
             fi
             [ "$retained_transfer" != true ] ||
               echo "retained_lock_transfer=release status=UNCONFIRMED"
@@ -1559,6 +1706,22 @@ jobs:
               [[ "$release_result" != *$'\n'* ]] || exit 1
             fi
             record_transfer release confirmed
+            if [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ]; then
+              kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json |
+                jq -e --arg uid "$expected_uid" --arg namespace "$OCI_K8S_NAMESPACE" \
+                  --arg source "$(jq -er '.data["source-sha"]' "$snapshot")" \
+                  --arg generation "$released_generation" '
+                  .kind == "ConfigMap" and .apiVersion == "v1" and
+                  .metadata.name == "gaming-mongo-migration-lock" and .metadata.namespace == $namespace and
+                  .metadata.uid == $uid and (.metadata.resourceVersion | test("^[1-9][0-9]*$")) and
+                  .data.state == "released" and .data.holder == "" and
+                  .data["operation-id"] == "live-data-apply-slip-index" and .data["source-sha"] == $source and
+                  .data["fencing-generation"] == $generation and
+                  .data["lease-duration-seconds"] == "0" and .data["lease-until-epoch"] == "0" and
+                  (.data["released-at-epoch"] | test("^[1-9][0-9]*$")) and
+                  (.data["released-at-epoch"] | tonumber) <= now
+                ' >/dev/null || { echo "expired handoff did not confirm canonical release" >&2; exit 1; }
+            fi
             record_transfer acquire unconfirmed
             [ "$retained_transfer" != true ] ||
               echo "retained_lock_transfer=release status=CONFIRMED acquire=UNCONFIRMED"
@@ -1601,6 +1764,24 @@ jobs:
               [[ "$verification_result" != *$'\n'* ]] || exit 1
             fi
             record_transfer verify confirmed
+            if [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ]; then
+              [ "$SHARED_MONGO_LOCK_LEASE_SECONDS" = 14400 ]
+              kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json |
+                jq -e --arg uid "$expected_uid" --arg holder "$SHARED_MONGO_LOCK_TOKEN" \
+                  --arg namespace "$OCI_K8S_NAMESPACE" --arg source "$SOURCE_SHA" \
+                  --arg generation "$((released_generation + 1))" '
+                  .kind == "ConfigMap" and .apiVersion == "v1" and
+                  .metadata.name == "gaming-mongo-migration-lock" and .metadata.namespace == $namespace and
+                  .metadata.uid == $uid and (.metadata.resourceVersion | test("^[1-9][0-9]*$")) and
+                  .data.state == "active" and .data.holder == $holder and
+                  .data["operation-id"] == "live-data-apply-slip-index" and .data["source-sha"] == $source and
+                  .data["fencing-generation"] == $generation and .data["lease-duration-seconds"] == "14400" and
+                  .data["released-at-epoch"] == "0" and
+                  (.data["lease-until-epoch"] | tonumber) > now and
+                  (.data["acquired-at-epoch"] | tonumber) <= now and
+                  ((.data["lease-until-epoch"] | tonumber) - (.data["acquired-at-epoch"] | tonumber)) == 14400
+                ' >/dev/null || { echo "expired handoff did not confirm the new operation lease" >&2; exit 1; }
+            fi
             [ "$retained_transfer" != true ] ||
               echo "retained_lock_transfer=verify status=CONFIRMED"
             exit 0

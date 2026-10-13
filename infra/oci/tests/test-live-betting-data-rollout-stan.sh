@@ -143,6 +143,205 @@ names.last(2).each do |name|
 end
 puts JSON.generate(selected)
 RUBY
+ruby -ryaml -rjson - "$WORKFLOW" >"$work_dir/expired-consumer.json" <<'RUBY'
+steps = YAML.load_file(ARGV.fetch(0)).fetch("jobs").fetch("rollout").fetch("steps")
+names = ["Verify exact failed-deploy resume state", "Acquire database operation lock"]
+puts JSON.generate(names.to_h { |name| [name, steps.find { |step| step["name"] == name }.fetch("run")] })
+RUBY
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$work_dir" "$ROOT_DIR" <<'PY'
+import copy, hashlib, json, os, re, shutil, stat, subprocess, sys, time
+from pathlib import Path
+
+parent, repository = map(Path, sys.argv[1:])
+root = parent / "expired-consumer"
+for name in ("bin", "infra/oci/scripts", "infra/azure/agents",
+             "artifacts/oci-data-baseline-before", "artifacts/prerequisite",
+             "artifacts/oci-live-data-rollout/evidence"):
+    (root / name).mkdir(parents=True, exist_ok=True)
+shutil.copy2(repository / "infra/azure/agents/shared-mongo-operation-lock-stan.sh",
+             root / "infra/azure/agents/shared-mongo-operation-lock-stan.sh")
+services = ("auth", "backoffice", "bet", "client", "event", "gamemaster",
+            "moderation", "resulting", "slip", "telemetry")
+supporting = {"auth", "client", "telemetry"}
+images, deployments, pods = [], [], []
+for index, service in enumerate(services, 1):
+    digest = f"sha256:{index:064x}"
+    ref = f"ghcr.io/vasilyevstan/betstan-images@{digest}"
+    images.append("\t".join((service, ref.split("@")[0], ref, digest, digest)))
+    desired = 1 if service in supporting else 0
+    container = {"name": f"gaming-{service}", "image": ref}
+    if service == "gamemaster":
+        container["env"] = [{"name": "LIVE_KICKOFFS_ENABLED", "value": "false"}]
+    deployments.append({
+        "kind": "Deployment", "apiVersion": "apps/v1",
+        "metadata": {"name": f"gaming-{service}-depl", "namespace": "betstan-oci",
+                     "uid": f"{service}-uid", "generation": 7},
+        "spec": {"replicas": desired, "template": {"spec": {"containers": [container]}}},
+        "status": dict(observedGeneration=7, replicas=desired, updatedReplicas=desired,
+                       readyReplicas=desired, availableReplicas=desired),
+    })
+    if service in supporting:
+        pods.append({"metadata": {"name": service + "-pod", "namespace": "betstan-oci",
+                                  "uid": service + "-pod-uid", "labels": {"app": f"gaming-{service}"}},
+                     "spec": {"containers": [container]},
+                     "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                                "containerStatuses": [{"name": f"gaming-{service}", "ready": True,
+                                                       "imageID": "fixture@" + digest}]}})
+baseline = root / "artifacts/oci-data-baseline-before"
+(baseline / "images.tsv").write_text("\n".join(images) + "\n")
+(baseline / "deployments.tsv").write_text("".join(
+    f"{service}\tfixture\t7\t1\t1\t1\n" for service in services))
+(baseline / "SHA256SUMS").write_text("fixture baseline manifest\n")
+baseline_sha = hashlib.sha256((baseline / "SHA256SUMS").read_bytes()).hexdigest()
+(root / "artifacts/prerequisite/provenance.env").write_text(f"baseline_sha256={baseline_sha}\n")
+(root / "artifacts/oci-live-data-rollout/resume-images.tsv").write_text("\n".join(images[:-1]) + "\n")
+lock = {
+    "kind": "ConfigMap", "apiVersion": "v1",
+    "metadata": {"name": "gaming-mongo-migration-lock", "namespace": "betstan-oci",
+                 "uid": "own-expired-uid", "resourceVersion": "42"},
+    "data": {"state": "active", "holder": "live-data-53-1", "operation-id": "live-data-apply-slip-index",
+             "source-sha": "3" * 40, "acquired-at-epoch": "1000", "lease-duration-seconds": "1800",
+             "lease-until-epoch": "2900", "released-at-epoch": "0", "fencing-generation": "11"},
+}
+provider = root / "bin/kubectl"
+provider.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+r = pathlib.Path(os.environ["EXPIRED_ROOT"]); a = sys.argv[1:]
+if a[:2] == ["get", "configmap"]:
+    print((r / "lock.json").read_text())
+elif a[:2] == ["get", "deployment"]:
+    items = json.loads((r / "deployments.json").read_text())["items"]
+    selected = [v for v in items if v["metadata"]["name"] in a]
+    if len(selected) > 1: print(json.dumps({"items": selected}))
+    elif a[-1] == "json": print(json.dumps(selected[0]))
+    else: print(selected[0]["spec"]["template"]["spec"]["containers"][0]["image"])
+elif a[:2] == ["get", "pods"]:
+    v = json.loads((r / "pods.json").read_text())
+    selector = next((x for x in a if x.startswith("app=")), None)
+    if selector: v["items"] = [p for p in v["items"] if p["metadata"]["labels"]["app"] == selector[4:]]
+    print(json.dumps(v))
+elif a[:2] == ["rollout", "status"]: pass
+elif a == ["replace", "-f", "-"]:
+    replacement = json.load(sys.stdin); current = json.loads((r / "lock.json").read_text())
+    count = int((r / "replaces").read_text()) + 1 if (r / "replaces").exists() else 1
+    (r / "replaces").write_text(str(count))
+    if os.environ.get("EXPIRED_CAS_FAILURE") == str(count): current["metadata"]["resourceVersion"] = "99"
+    if any(replacement["metadata"][k] != current["metadata"][k] for k in ("uid", "resourceVersion")):
+        raise SystemExit("fixture CAS conflict")
+    replacement["metadata"]["resourceVersion"] = str(int(current["metadata"]["resourceVersion"]) + 1)
+    if replacement["data"]["state"] == "released" and os.environ.get("EXPIRED_BAD_RELEASE") == "true":
+        replacement["data"]["lease-duration-seconds"] = "1800"
+    (r / "lock.json").write_text(json.dumps(replacement))
+    with (r / "writes").open("a") as output: output.write(replacement["data"]["state"] + "\\n")
+else: raise SystemExit("unexpected physical fixture call")
+""")
+provider.chmod(0o755)
+for name, body in (
+    ("bin/git", "exit 0"),
+    ("infra/oci/scripts/validate-rollback-baseline-stan.sh", "exit 0"),
+    ("infra/oci/scripts/live-data-maintenance-stan.sh", '[ "${EXPIRED_BAD_FENCE:-false}" = false ]'),
+    ("infra/azure/agents/production-run-exclusivity-stan.sh", '[ "${EXPIRED_BAD_EXCLUSIVITY:-false}" = false ]'),
+):
+    path = root / name
+    path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body + "\n")
+    path.chmod(0o755)
+bodies = json.loads((parent / "expired-consumer.json").read_text())
+outputs = dict(resume_maintenance_mode="pre-runtime-hold", failed_deploy_job_conclusion="failure",
+               public_validate_job_conclusion="skipped", lock_release_step_conclusion="skipped",
+               fence_release_step_conclusion="skipped", rehold_step_conclusion="skipped",
+               disk_checkpoint_sha256="c" * 64, disk_checkpoint_disposition="NOT_APPLICABLE")
+def substitute(body):
+    return re.sub(r"\$\{\{ steps\.(?:provenance_request|provenance)\.outputs\.([a-z0-9_]+) \}\}",
+                  lambda match: outputs[match[1]], body)
+physical, acquire = [substitute(bodies[name]) for name in (
+    "Verify exact failed-deploy resume state", "Acquire database operation lock")]
+base = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+    EXPIRED_ROOT=str(root), RUNNER_TEMP=str(root), OCI_K8S_NAMESPACE="betstan-oci",
+    NO_TAKEOVER_HANDOFF_QUALIFICATION="expired-own-handoff", RESUME_MAINTENANCE_MODE="pre-runtime-hold",
+    BASELINE_CAPTURE_RUN_ID="53", BASELINE_CAPTURE_SOURCE_SHA="1" * 40,
+    BASELINE_RECOVERY_RUN_ID="0", BASELINE_RECOVERY_SOURCE_SHA="none",
+    RESOLVED_APPLIED_DATA_RUN_ID="42", RESOLVED_APPLIED_SOURCE_SHA="1" * 40,
+    PREREQUISITE_RUN_ID="53", RESUME_SOURCE_SHA="3" * 40, SOURCE_SHA="2" * 40,
+    FAILED_DEPLOY_RUN_ID="54", FAILED_ACTIVATION_RUN_ID="0", FAILED_ACTIVATION_USER_ID="0",
+    HELD_HANDOFF_RUN_ID="0", HELD_HANDOFF_SOURCE_SHA="none", GITHUB_RUN_ID="55",
+    CHECKPOINT_SOURCE_SHA="1" * 40, DISK_CHECKPOINT_RUN_ID="44",
+    SHARED_MONGO_LOCK_TOKEN="live-data-55-1", SHARED_MONGO_LOCK_OPERATION="live-data-apply-slip-index",
+    SHARED_MONGO_LOCK_LEASE_SECONDS="14400")
+def run(body, env):
+    return subprocess.run(["bash", "-euo", "pipefail", "-c", body],
+                          cwd=root, env=env, capture_output=True, text=True, timeout=30)
+cases = ("success", "enabled", "missing-flag", "duplicate-flag", "lease-zero", "lease-empty",
+         "generation", "writer", "support-pod", "images", "foreign-owner", "foreign-source",
+         "not-expired", "duration", "fence", "exclusivity", "workload-drift", "pod-drift",
+         "lock-rv", "release-cas", "acquire-cas", "positive-released-duration")
+for failure in cases:
+    env = dict(base)
+    d, p, l = copy.deepcopy(deployments), copy.deepcopy(pods), copy.deepcopy(lock)
+    for name in ("pre-runtime-lock.json", "expired-handoff-runtime.json", "writes", "replaces"):
+        (root / name).unlink(missing_ok=True)
+    gm = next(item for item in d if item["metadata"]["name"] == "gaming-gamemaster-depl")
+    flags = gm["spec"]["template"]["spec"]["containers"][0]["env"]
+    if failure == "enabled": flags[0]["value"] = "true"
+    elif failure == "missing-flag": flags.clear()
+    elif failure == "duplicate-flag": flags.append(dict(flags[0]))
+    elif failure.startswith("lease-"): flags.append({"name": "LIVE_KICKOFFS_LEASE_UNTIL_EPOCH",
+                                                     "value": "0" if failure == "lease-zero" else ""})
+    elif failure == "generation": gm["status"]["observedGeneration"] = 6
+    elif failure == "writer": gm["spec"]["replicas"] = 1
+    elif failure == "support-pod": p[0]["status"]["containerStatuses"][0]["ready"] = False
+    elif failure == "images": gm["spec"]["template"]["spec"]["containers"][0]["image"] = "foreign"
+    elif failure == "foreign-owner": l["data"]["holder"] = "live-data-42-1"
+    elif failure == "foreign-source": l["data"]["source-sha"] = "1" * 40
+    elif failure == "not-expired":
+        start = int(time.time()) - 1
+        l["data"].update({"acquired-at-epoch": str(start), "lease-until-epoch": str(start + 1800)})
+    elif failure == "duration": l["data"]["lease-duration-seconds"] = "14400"
+    elif failure == "fence": env["EXPIRED_BAD_FENCE"] = "true"
+    for path, value in ((root / "deployments.json", {"items": d}),
+                        (root / "pods.json", {"items": p}), (root / "lock.json", l)):
+        path.write_text(json.dumps(value))
+    result = run(physical, env)
+    after_snapshot = {"success", "exclusivity", "workload-drift", "pod-drift", "lock-rv",
+                      "release-cas", "acquire-cas", "positive-released-duration"}
+    if failure not in after_snapshot:
+        assert result.returncode != 0, failure
+        assert not (root / "writes").exists(), failure
+        continue
+    assert result.returncode == 0, (failure, result.stderr)
+    assert stat.S_IMODE((root / "pre-runtime-lock.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((root / "expired-handoff-runtime.json").stat().st_mode) == 0o600
+    authority = dict(line.split("=", 1) for line in
+                     (root / "artifacts/oci-live-data-rollout/evidence/resume-authority.env").read_text().splitlines())
+    assert authority["schema_version"] == "live-betting-data-resume-v2"
+    assert authority["applied_data_run_id"] == "42" and authority["applied_source_sha"] == "1" * 40
+    assert "no_takeover_handoff_qualification" not in authority
+    if failure == "exclusivity": env["EXPIRED_BAD_EXCLUSIVITY"] = "true"
+    elif failure == "workload-drift":
+        d[0]["metadata"]["generation"] += 1
+        (root / "deployments.json").write_text(json.dumps({"items": d}))
+    elif failure == "pod-drift":
+        p[0]["metadata"]["uid"] = "replacement-pod"
+        (root / "pods.json").write_text(json.dumps({"items": p}))
+    elif failure == "lock-rv":
+        l["metadata"]["resourceVersion"] = "43"
+        (root / "lock.json").write_text(json.dumps(l))
+    elif failure in {"release-cas", "acquire-cas"}:
+        env["EXPIRED_CAS_FAILURE"] = "1" if failure == "release-cas" else "2"
+    elif failure == "positive-released-duration": env["EXPIRED_BAD_RELEASE"] = "true"
+    result = run(acquire, env)
+    writes = (root / "writes").read_text().splitlines() if (root / "writes").exists() else []
+    expected = ["released", "active"] if failure == "success" else (
+        ["released"] if failure in {"acquire-cas", "positive-released-duration"} else [])
+    assert writes == expected, (failure, writes, result.stderr)
+    assert (result.returncode == 0) == (failure == "success"), (failure, result.stderr)
+    if failure == "success":
+        current = json.loads((root / "lock.json").read_text())
+        assert current["metadata"]["uid"] == l["metadata"]["uid"]
+        assert current["data"]["holder"] == "live-data-55-1"
+        assert current["data"]["lease-duration-seconds"] == "14400"
+        assert current["data"]["fencing-generation"] == "13"
+print(f"PASS frozen expired-handoff physical consumer, truthful v2 producer and canonical strict CAS cases={len(cases)}")
+PY
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$work_dir" "$ROOT_DIR" <<'PY'
 import copy
 import hashlib
@@ -1108,6 +1307,27 @@ run_phase() {
   OPERATION_LOCK_HANDOFF="$lock_handoff" \
     "$RUNNER" >/dev/null
 }
+
+if [[ -n "${PRODUCER_FIXTURE_REQUEST:-}" ]]; then
+  SOURCE_SHA="$(jq -er '.source_sha' "$PRODUCER_FIXTURE_REQUEST")"
+  BUILD_RUN_ID="$(jq -er '.build_run_id' "$PRODUCER_FIXTURE_REQUEST")"
+  INFRASTRUCTURE_RUN_ID="$(jq -er '.infrastructure_run_id' "$PRODUCER_FIXTURE_REQUEST")"
+  CHECKPOINT_SOURCE_SHA="$(jq -er '.checkpoint_source_sha' "$PRODUCER_FIXTURE_REQUEST")"
+  DISK_CHECKPOINT_RUN_ID="$(jq -er '.disk_checkpoint_run_id' "$PRODUCER_FIXTURE_REQUEST")"
+  DISK_CHECKPOINT_SHA256="$(jq -er '.disk_checkpoint_sha256' "$PRODUCER_FIXTURE_REQUEST")"
+  DISK_CHECKPOINT_DISPOSITION="$(jq -er '.disk_checkpoint_disposition' "$PRODUCER_FIXTURE_REQUEST")"
+  images_file="$(jq -er '.images_file' "$PRODUCER_FIXTURE_REQUEST")"
+  output="$(jq -er '.output_dir' "$PRODUCER_FIXTURE_REQUEST")"
+  run_id="$(jq -er '.workflow_run_id' "$PRODUCER_FIXTURE_REQUEST")"
+  baseline_sha="$(jq -er '.baseline_sha256' "$PRODUCER_FIXTURE_REQUEST")"
+  mkdir -p "$output"
+  authority="$(jq -er '.authority_file' "$PRODUCER_FIXTURE_REQUEST")"
+  if [[ "$authority" != none ]]; then
+    cp "$authority" "$output/resume-authority.env"
+  fi
+  run_phase apply-slip-index final "$run_id" "$output" 0 none "$baseline_sha"
+  exit 0
+fi
 
 job_sequence_summary() {
   awk -F '\t' '$1 == "job" { print $3 ":" $4 }' "$stub_state/sequence.tsv" |
@@ -3927,8 +4147,8 @@ for literal in \
   'RESUME_REPOSITORY="$REPOSITORY"' \
   'resume_applied_data_run_id' \
   'resume_applied_source_sha' \
-  'RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance.outputs.resume_applied_data_run_id }}' \
-  'RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance.outputs.resume_applied_source_sha }}' \
+  'RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance_request.outputs.applied_data_run_id || steps.provenance.outputs.resume_applied_data_run_id }}' \
+  'RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance_request.outputs.applied_source_sha || steps.provenance.outputs.resume_applied_source_sha }}' \
   'applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID' \
   'applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA' \
   'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"' \
