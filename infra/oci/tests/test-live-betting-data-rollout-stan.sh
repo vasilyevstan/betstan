@@ -241,11 +241,12 @@ gamemaster = {
 lock = {
     "kind": "ConfigMap", "apiVersion": "v1",
     "metadata": {"name": "gaming-mongo-migration-lock", "namespace": "betstan-oci",
-                 "uid": "released-fixture", "resourceVersion": "42"},
-    "data": {"state": "released", "holder": "", "operation-id": "live-data-apply-slip-index",
-             "source-sha": "3" * 40, "lease-until-epoch": "0", "fencing-generation": "11",
+                 "uid": "released-fixture", "resourceVersion": "41"},
+    "data": {"state": "active", "holder": "live-data-4008-1",
+             "operation-id": "live-data-apply-slip-index",
+             "source-sha": "3" * 40, "lease-until-epoch": "15400", "fencing-generation": "10",
              "acquired-at-epoch": "1000", "lease-duration-seconds": "14400",
-             "released-at-epoch": "2000"},
+             "released-at-epoch": "0"},
 }
 fresh = dict(baseline_source_sha="3" * 40, baseline_deploy_run_id="7787",
              baseline_capture_run_id="901", baseline_capture_run_attempt="1")
@@ -277,6 +278,41 @@ def write_json(path, value):
 def run(body, env):
     return subprocess.run(["bash", "-euo", "pipefail", "-c", body],
                           cwd=root, env=env, capture_output=True, text=True, timeout=20)
+write_json(root / "lock.json", lock)
+producer_env = dict(base, CONSUMER_FAILURE="canonical-release",
+    NAMESPACE=base["OCI_K8S_NAMESPACE"], LOCK_TOKEN=lock["data"]["holder"],
+    OPERATION_ID=lock["data"]["operation-id"], SOURCE_SHA=lock["data"]["source-sha"],
+    NOW_EPOCH="2000")
+result = run("./infra/azure/agents/shared-mongo-operation-lock-stan.sh release", producer_env)
+assert result.returncode == 0, result.stderr
+assert result.stdout == "shared_mongo_lock=release status=PASS released_at_epoch=2000\n"
+assert (root / "writes").read_text().splitlines() == ["released"]
+released = json.loads((root / "lock.json").read_text())
+assert released["metadata"]["uid"] == lock["metadata"]["uid"]
+assert int(released["metadata"]["resourceVersion"]) == int(lock["metadata"]["resourceVersion"]) + 1
+assert released["data"] == dict(lock["data"], state="released", holder="",
+    **{"lease-duration-seconds": "0", "lease-until-epoch": "0",
+       "released-at-epoch": "2000", "fencing-generation": "11"})
+lock = released
+duration_failures = {
+    "duration-missing": None, "duration-null": None, "duration-empty": "",
+    "duration-padded": "00", "duration-negative": "-1", "duration-active": "14400",
+    "duration-numeric": 0, "duration-boolean": False,
+}
+timestamp_failures = {
+    "acquired-missing": ("acquired-at-epoch", None),
+    "acquired-zero": ("acquired-at-epoch", "0"),
+    "acquired-malformed": ("acquired-at-epoch", "1000.0"),
+    "acquired-overbound": ("acquired-at-epoch", "1" * 17),
+    "acquired-null": ("acquired-at-epoch", None),
+    "acquired-future": ("acquired-at-epoch", str(int(time.time()) + 1000)),
+    "released-missing": ("released-at-epoch", None),
+    "released-malformed": ("released-at-epoch", "2000.0"),
+    "released-overbound": ("released-at-epoch", "1" * 17),
+    "released-null": ("released-at-epoch", None),
+    "released-future": ("released-at-epoch", str(int(time.time()) + 1000)),
+    "released-before-acquired": ("released-at-epoch", "999"),
+}
 cases = [("success", None)]
 cases += [(key, "qualifier") for key in ("missing", "wrong-mode", "cleanup-required", "extra-key")]
 cases += [(key, "flag") for key in ("enabled", "missing-flag", "duplicate-flag")]
@@ -284,6 +320,8 @@ cases += [(value, "lease") for value in ("0", "1", str(int(time.time()) + 1000),
 cases += [(key, "lock") for key in (
     "missing-lock", "active", "holder", "source", "operation", "uid", "generation",
     "lease", "release-epoch", "namespace", "wrong-kind")]
+cases += [(key, "duration") for key in duration_failures]
+cases += [(key, "timestamp") for key in timestamp_failures]
 cases += [(key, "baseline") for key in ("source", "deployment", "original-root", "original-digest")]
 cases += [(key, "drift") for key in (
     "gamemaster-uid", "gamemaster-generation", "gamemaster-template",
@@ -327,6 +365,13 @@ for failure, area in cases:
         elif failure == "uid": l["metadata"]["uid"] = ""
         elif failure == "namespace": l["metadata"]["namespace"] = "foreign"
         elif failure == "wrong-kind": l["kind"] = "Secret"
+    elif area == "duration":
+        if failure == "duration-missing": del l["data"]["lease-duration-seconds"]
+        else: l["data"]["lease-duration-seconds"] = duration_failures[failure]
+    elif area == "timestamp":
+        key, value = timestamp_failures[failure]
+        if failure.endswith("-missing"): del l["data"][key]
+        else: l["data"][key] = value
     elif area == "baseline":
         if failure == "source": b["baseline_source_sha"] = "1" * 40
         elif failure == "deployment": b["baseline_deploy_run_id"] = "7780"
@@ -340,7 +385,7 @@ for failure, area in cases:
     (root / "artifacts/oci-data-baseline-before/baseline-provenance.env").write_text(
         "".join(f"{key}={value}\n" for key, value in b.items()))
     result = run(physical, env)
-    if area in {"qualifier", "flag", "lease", "lock", "baseline", "manifest"} or failure == "readiness":
+    if area in {"qualifier", "flag", "lease", "lock", "duration", "timestamp", "baseline", "manifest"} or failure == "readiness":
         assert result.returncode != 0, (failure, area, result.stderr)
         assert not (root / "writes").exists()
         if area == "manifest":
@@ -387,7 +432,7 @@ for name in ("Demote and verify exact retained live-acceptance account",
     result = run(steps[name]["run"], base)
     assert result.returncode != 0 and not list(
         (root / "artifacts/oci-live-data-rollout/evidence").iterdir()), name
-print(f"released_activation_consumer_contract=PASS physical_cases={len(cases)} missing_qualification_cases=3 sentinel_cleanup_rejections=2")
+print(f"released_activation_consumer_contract=PASS canonical_release_producer=PASS physical_cases={len(cases)} missing_qualification_cases=3 sentinel_cleanup_rejections=2")
 PY
 
 write_manifest() {

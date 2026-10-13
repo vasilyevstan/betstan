@@ -1376,8 +1376,8 @@ jobs:
               and int(data["fencing-generation"]) < 9007199254740991,
               "released lock is missing, foreign, active or malformed")
           require(all(re.fullmatch(r"[1-9][0-9]{0,15}", data.get(key, "")) for key in (
-                      "acquired-at-epoch", "lease-duration-seconds", "released-at-epoch"))
-                  and 60 <= int(data["lease-duration-seconds"]) <= 86400
+                      "acquired-at-epoch", "released-at-epoch"))
+                  and data.get("lease-duration-seconds") == "0"
                   and int(data["acquired-at-epoch"]) <= int(data["released-at-epoch"]) <= int(time.time()),
                   "released lock lacks legitimate release chronology")
           PY
