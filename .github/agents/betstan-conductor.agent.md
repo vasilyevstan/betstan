@@ -257,6 +257,18 @@ accepted by the next owner.
   have completed a dependency. Continue only the remaining authorized
   transition; do not replay data, infrastructure, deployment, or recovery work
   from a stale summary. Keep the existing operation owner and observer.
+- During data execution, prepare the exact receiving deployment plan as
+  non-issuable. Finalize it only after actual whole success, complete
+  authenticated artifacts, and readiness; reuse accepted evidence and retain
+  the same owner. Route terminal data, materialized approval gates, and native
+  receiving-job transitions immediately through the existing canonical path.
+- Track the physical handoff deadline, not artifact timestamps. Dispatch and
+  approval do not transfer ownership; receiving verification and valid-owner
+  renewal must finish before expiry. Missing deadline evidence never resets
+  the clock or extends the 1800-second handoff. An expired successful handoff
+  requires separately qualified recovery, not renewal, adoption, or replay.
+  Keep its physical holder, failed receiver, current baseline capture, and
+  ancestral applied root separately authenticated through every consumer.
 - On every notification, status request, conductor restart, or checkpoint,
   reconcile the whole active registry: inspect due exact references, classify
   changed state, recover lost observation, route actionable gates, hand off
