@@ -170,13 +170,13 @@ read_pr_head_sha() {
   json="$(
     gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid
   )" || fail "unable to read PR head metadata"
-  python3 - "$json" <<'PY'
+  python3 - 3<<<"$json" <<'PY'
 import json
 import re
 import sys
 
 try:
-    payload = json.loads(sys.argv[1])
+    payload = json.load(open(3, encoding="utf-8"))
 except json.JSONDecodeError as exc:
     raise SystemExit(f"PR head metadata response was not valid JSON: {exc}") from exc
 
@@ -194,7 +194,7 @@ resolve_pr_head_tree_sha() {
   json="$(
     gh api "repos/$REPO/git/commits/$commit_sha"
   )" || fail "unable to resolve PR head commit $commit_sha"
-  python3 - "$commit_sha" "$json" <<'PY'
+  python3 - "$commit_sha" 3<<<"$json" <<'PY'
 import json
 import re
 import sys
@@ -202,7 +202,7 @@ import sys
 commit_sha = sys.argv[1]
 
 try:
-    payload = json.loads(sys.argv[2])
+    payload = json.load(open(3, encoding="utf-8"))
 except json.JSONDecodeError as exc:
     raise SystemExit(f"PR head commit response was not valid JSON: {exc}") from exc
 
@@ -232,7 +232,7 @@ list_pr_workflow_paths() {
   json="$(
     gh api "repos/$REPO/git/trees/$tree_sha?recursive=1"
   )" || fail "unable to enumerate workflows for PR head tree $tree_sha"
-  python3 - "$tree_sha" "$json" <<'PY' | validate_workflow_repo_path_stream "PR workflow tree response"
+  python3 - "$tree_sha" 3<<<"$json" <<'PY' | validate_workflow_repo_path_stream "PR workflow tree response"
 import json
 import sys
 import urllib.parse
@@ -240,7 +240,7 @@ import urllib.parse
 tree_sha = sys.argv[1]
 
 try:
-    payload = json.loads(sys.argv[2])
+    payload = json.load(open(3, encoding="utf-8"))
 except json.JSONDecodeError as exc:
     raise SystemExit(f"PR workflow tree response was not valid JSON: {exc}") from exc
 
@@ -288,7 +288,7 @@ download_pr_workflow_file() {
   json="$(
     gh api "repos/$REPO/contents/$encoded_path?ref=$commit_sha"
   )" || fail "unable to fetch workflow $path from PR head $commit_sha"
-  python3 - "$path" "$output" "$json" <<'PY'
+  python3 - "$path" "$output" 3<<<"$json" <<'PY'
 import base64
 import json
 import re
@@ -322,7 +322,7 @@ def require_safe_workflow_path(label: str, value: str) -> str:
     return value
 
 try:
-    payload = json.loads(sys.argv[3])
+    payload = json.load(open(3, encoding="utf-8"))
 except json.JSONDecodeError as exc:
     raise SystemExit(f"workflow contents response for {requested_path} was not valid JSON: {exc}") from exc
 
