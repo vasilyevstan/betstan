@@ -70,6 +70,17 @@ MAX_ARTIFACT_EVIDENCE_BYTES = 1024 * 1024
 ARTIFACT_DOWNLOAD_ATTEMPTS = 3
 ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS = 120
 ARTIFACT_DOWNLOAD_BACKOFF_SECONDS = (1, 2)
+EXPIRED_HANDOFF_TREE = "03381913c7ba16a9c9faf8699740e892564a6628"
+EXPIRED_HANDOFF_CLOSURE = {
+    ".github/workflows/oci-production-deploy.yml":
+        "b0cf0e993396032f526bbf3304989b3de57a4e0a",
+    "infra/oci/scripts/live-data-maintenance-stan.sh":
+        "7de9fee1d1f08323b04ef44ce8f58066f88e12ae",
+    "infra/oci/scripts/shared-mongo-operation-lock-stan.sh":
+        "6b00d8f38ae2adf7c700c1da1509134631298a31",
+    "infra/azure/agents/shared-mongo-operation-lock-stan.sh":
+        "1bcf7a3a922ad80b83a9170bfaaef3dcf1b2dc63",
+}
 LIVE_V6_KEYS = {
     "schema_version",
     "source_sha",
@@ -1589,6 +1600,7 @@ def validate_failed_deploy_artifacts(
     *,
     pre_runtime=False,
     seen=None,
+    include_capture=False,
 ):
     checkpoint = parse_checkpoint_artifact(
         repository, dispatch_inputs, runtime_mode, f"{label} checkpoint"
@@ -1608,15 +1620,17 @@ def validate_failed_deploy_artifacts(
     )
 
     root_run, root_source = predecessor_run, subject_sha
+    capture = {"baseline_capture_run_id": root_run}
     predecessor_authority = parse_resume_authority(
         predecessor_files, predecessor, f"{label} predecessor"
     )
     if predecessor_authority is not None and (
         predecessor_authority["resume_maintenance_mode"] == "pre-runtime-hold"
     ):
-        root_run, root_source = validate_pre_runtime_resume_chain(
-            repository, predecessor_run, runtime_mode, seen=seen
+        capture = validate_pre_runtime_resume_chain(
+            repository, predecessor_run, runtime_mode, seen=seen, include_capture=True,
         )
+        root_run, root_source = capture["applied_data_run_id"], capture["applied_source_sha"]
     elif (
         not pre_runtime
         and profile == "oci-failed-deploy-released-runtime-v1"
@@ -1673,9 +1687,11 @@ def validate_failed_deploy_artifacts(
         )
         if request != expected_request:
             fail(f"{label} retained resume substituted its native predecessor or failure")
-        root_run, root_source = validate_pre_runtime_resume_chain(
-            repository, native["data_run_id"], runtime_mode, seen=lineage_seen
+        capture = validate_pre_runtime_resume_chain(
+            repository, native["data_run_id"], runtime_mode, seen=lineage_seen,
+            include_capture=True,
         )
+        root_run, root_source = capture["applied_data_run_id"], capture["applied_source_sha"]
         if (root_run, root_source) != (
             predecessor_authority["applied_data_run_id"],
             predecessor_authority["applied_source_sha"],
@@ -1694,7 +1710,8 @@ def validate_failed_deploy_artifacts(
             root_evidence, checkpoint, dispatch_inputs, root_run, root_source,
             "apply-slip-index", f"{label} original data",
         )
-        if root_evidence["baseline_sha256"] != predecessor["baseline_sha256"]:
+        expected_baseline_sha = capture.get("baseline_sha256", root_evidence["baseline_sha256"])
+        if expected_baseline_sha != predecessor["baseline_sha256"]:
             fail(f"{label} retained resume substituted its original baseline")
         prior = require_fixed_run(
             repository, native["data_run_id"], "oci-live-data-rollout.yml", "success",
@@ -1774,8 +1791,9 @@ def validate_failed_deploy_artifacts(
             predecessor_authority["resume_maintenance_mode"] != "pre-runtime-hold"
         ):
             fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
+        baseline_run = capture["baseline_capture_run_id"]
         artifact = exact_artifact(
-            repository, root_run, f"oci-live-data-baselines-{root_run}-1", label
+            repository, baseline_run, f"oci-live-data-baselines-{baseline_run}-1", label
         )
         baseline_files = original_before_baseline(
             artifact_files(repository, artifact, label), label
@@ -1794,20 +1812,33 @@ def validate_failed_deploy_artifacts(
         BASELINE_PROVENANCE_KEYS,
     )
     if (
-        baseline["baseline_capture_run_id"] != root_run
+        baseline["baseline_capture_run_id"] != capture["baseline_capture_run_id"]
         or baseline["baseline_capture_run_attempt"] != "1"
         or baseline["registry_provider"] != "ghcr"
         or baseline["registry_host"] != "ghcr.io"
         or baseline["registry_repository"] != APPLICATION_REPOSITORY
         or baseline["registry_public_anonymous"] != "true"
         or baseline_manifest_sha256 != predecessor["baseline_sha256"]
+        or any(
+            baseline[key] != capture[result_key]
+            for key, result_key in (
+                ("baseline_source_sha", "baseline_capture_source_sha"),
+                ("baseline_deploy_run_id", "baseline_capture_deploy_run_id"),
+            )
+            if result_key in capture
+        )
     ):
         fail(f"{label} rollback baseline does not match its predecessor capture")
     if pre_runtime:
         return {
             "resume_maintenance_mode": "pre-runtime-hold",
-            "baseline_run_id": root_run,
-            "baseline_artifact_name": f"oci-live-data-baselines-{root_run}-1",
+            "baseline_run_id": capture["baseline_capture_run_id"],
+            "baseline_artifact_name":
+                f"oci-live-data-baselines-{capture['baseline_capture_run_id']}-1",
+            **{key: capture[key] for key in (
+                "baseline_capture_run_id", "baseline_capture_source_sha",
+                "baseline_capture_deploy_run_id", "baseline_sha256",
+            ) if key in capture},
             "applied_data_run_id": root_run,
             "applied_source_sha": root_source,
             "_baseline_files": baseline_files,
@@ -1827,7 +1858,7 @@ def validate_failed_deploy_artifacts(
             fence_outcome,
             rehold_outcome,
             f"{label} recovery authority",
-            baseline_capture_run_id=root_run,
+            baseline_capture_run_id=capture["baseline_capture_run_id"],
         )
     else:
         parse_deployment_artifact(
@@ -1841,6 +1872,14 @@ def validate_failed_deploy_artifacts(
             runtime_mode,
             f"{label} deployment",
         )
+    if include_capture:
+        return {
+            "applied_data_run_id": root_run, "applied_source_sha": root_source,
+            "baseline_capture_run_id": baseline["baseline_capture_run_id"],
+            "baseline_capture_source_sha": baseline["baseline_source_sha"],
+            "baseline_capture_deploy_run_id": baseline["baseline_deploy_run_id"],
+            "baseline_sha256": baseline_manifest_sha256,
+        }
     return checkpoint, predecessor
 
 
@@ -1992,9 +2031,25 @@ def original_before_baseline(files, label):
     return selected
 
 
+def native_step_log_lines(raw, step, label):
+    start = parse_timestamp(step.get("started_at"), label)
+    end = parse_timestamp(step.get("completed_at"), label)
+    if end < start:
+        fail(f"{label} native step chronology is invalid")
+    lines = []
+    timestamp = None
+    for line in raw.splitlines():
+        match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\S+Z) (.*)", line)
+        if match:
+            timestamp = re.sub(r"(\.\d{6})\d+(?=Z$)", r"\1", match[1])
+        if timestamp and start <= parse_timestamp(timestamp, label) < end + dt.timedelta(seconds=1):
+            lines.append(re.sub(r"\x1b\[[0-9;]*m", "", match[2] if match else line))
+    return lines
+
+
 def failed_deploy_native_inputs(
     repository, run_id, source_sha, label, *, resume_dispatch=False,
-    expected_step_conclusion="failure",
+    expected_step_conclusion="failure", prove_expired_handoff=False,
 ):
     """Read only runner-generated environment in the exact failed step log.
 
@@ -2003,6 +2058,10 @@ def failed_deploy_native_inputs(
     if (
         type(expected_step_conclusion) is not str
         or expected_step_conclusion not in {"failure", "success"}
+        or type(prove_expired_handoff) is not bool
+        or prove_expired_handoff and (
+            resume_dispatch or expected_step_conclusion != "success"
+        )
     ):
         fail(f"{label} native deployment step expectation is invalid")
     jobs = jobs_for_run(repository, run_id, label)
@@ -2024,10 +2083,6 @@ def failed_deploy_native_inputs(
         "success" if resume_dispatch else expected_step_conclusion
     ):
         fail(f"{label} native input step outcome differs")
-    start = parse_timestamp(step[0].get("started_at"), label)
-    end = parse_timestamp(step[0].get("completed_at"), label)
-    if end < start:
-        fail(f"{label} native provenance step chronology is invalid")
     files = zip_files(
         gh_api_bytes(f"repos/{repository}/actions/runs/{run_id}/attempts/1/logs"),
         label, require_original_names=True,
@@ -2042,14 +2097,7 @@ def failed_deploy_native_inputs(
         raw = matches[0].decode("utf-8")
     except UnicodeDecodeError:
         fail(f"{label} native log encoding is invalid")
-    lines = []
-    timestamp = None
-    for line in raw.splitlines():
-        match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\S+Z) (.*)", line)
-        if match:
-            timestamp = re.sub(r"(\.\d{6})\d+(?=Z$)", r"\1", match[1])
-        if timestamp and start <= parse_timestamp(timestamp, label) < end + dt.timedelta(seconds=1):
-            lines.append(match[2] if match else line)
+    lines = native_step_log_lines(raw, step[0], label)
     blocks = []
     current = None
     in_step_group = False
@@ -2127,7 +2175,166 @@ def failed_deploy_native_inputs(
     ):
         require_dispatch_run(inputs, key)
     require_dispatch_sha(inputs, "checkpoint_source_sha")
+    if prove_expired_handoff:
+        handoff = [
+            item for item in deploy["steps"]
+            if item.get("name") == "Verify transferred database lock and maintenance fence"
+        ]
+        if len(handoff) != 1 or handoff[0].get("conclusion") != "failure":
+            fail(f"{label} native expired-handoff step is ambiguous")
+        execution = []
+        in_group = False
+        for line in native_step_log_lines(raw, handoff[0], label):
+            if line.startswith("##[group]"):
+                in_group = True
+            elif line == "##[endgroup]":
+                in_group = False
+            elif not in_group and line.startswith((
+                "live_data_maintenance=", "shared_mongo_lock=",
+            )):
+                execution.append(line)
+        if execution != [
+            "live_data_maintenance=verify-held status=PASS http_mutation_fence=true writers_quiesced=true",
+            "shared_mongo_lock=verify status=FAIL reason=active database operation lock has expired",
+        ]:
+            fail(f"{label} native execution does not prove a read-only expired own handoff")
     return normalized
+
+
+def expired_handoff_native_inputs(repository, run_id, runtime_mode, label):
+    jobs = jobs_for_run(repository, run_id, label)
+    deploy = exact_job(jobs, "deploy", label)
+    handoff = [
+        step for step in deploy["steps"]
+        if step.get("name") == "Verify transferred database lock and maintenance fence"
+    ]
+    if not any(step.get("conclusion") == "failure" for step in handoff):
+        return None
+    if len(handoff) != 1:
+        fail(f"{label} expired-handoff native failure boundary is ambiguous")
+    metadata = fixed_run_metadata(
+        repository, run_id, "oci-production-deploy.yml", "failure", label,
+    )
+    source = metadata["head_sha"]
+    if metadata.get("display_title") != f"oci-deploy {source}":
+        fail(f"{label} expired-handoff native title differs")
+    commit = gh_api(f"repos/{repository}/git/commits/{source}")
+    if (
+        not isinstance(commit, dict) or commit.get("sha") != source
+        or not isinstance(commit.get("tree"), dict)
+        or commit["tree"].get("sha") != EXPIRED_HANDOFF_TREE
+    ):
+        fail(f"{label} expired-handoff historical executable tree differs")
+    for path, blob in EXPIRED_HANDOFF_CLOSURE.items():
+        observed = gh_api(f"repos/{repository}/contents/{path}?ref={source}")
+        if not isinstance(observed, dict) or observed.get("sha") != blob:
+            fail(f"{label} expired-handoff historical executable closure differs")
+    names = (
+        "Set up job",
+        "Initialize isolated OCI paths",
+        "Checkout approved master commit",
+        "Validate exact SHA and trusted upstream runs",
+        "Download exact OCI image provenance",
+        "Download exact OCI infrastructure provenance",
+        "Download exact live data readiness evidence",
+        "Download exact release disk checkpoint",
+        "Download exact pre-mutation rollback baseline",
+        "Verify immutable image and infrastructure provenance",
+        "Install pinned OCI CLI",
+        "Verify OKE identity",
+        "Verify k3s identity",
+        "Reconcile expired and authorize current runner IPv4",
+        "Configure kubectl from exact cluster OCID",
+        "Open ephemeral OCI Bastion access to k3s",
+        "Verify transferred database lock and maintenance fence",
+        "Validate executable pre-deploy rollback baseline",
+        "Upload protected OCI rollback baseline",
+        "Revalidate held release disk checkpoint before lock renewal",
+        "Write checksum-bound deployment recovery intent",
+        "Renew exact transferred database lock",
+        "Deploy immutable images sequentially",
+        "Bind schema evidence to deployment provenance",
+        "Run protected OCI cluster validation loop",
+        "Revalidate held release disk checkpoint after protected health",
+        "Release transferred lock after protected validation",
+        "Release live data maintenance fence",
+        "Re-enter maintenance after an incomplete deployment",
+        "Finalize deployment recovery authority",
+        "Upload deployment recovery authority",
+        "Upload sanitized live readiness evidence",
+        "Capture sanitized deployment diagnostics",
+        "Upload sanitized diagnostics on failure",
+        "Upload exact deployment provenance",
+        "Revoke exact runner rule",
+        "Close ephemeral OCI Bastion access",
+        "Remove isolated OCI client state",
+        "Post Checkout approved master commit",
+        "Complete job",
+    )
+    successful = {
+        "Set up job", "Initialize isolated OCI paths", "Checkout approved master commit",
+        "Validate exact SHA and trusted upstream runs", "Download exact OCI image provenance",
+        "Download exact OCI infrastructure provenance", "Download exact live data readiness evidence",
+        "Download exact release disk checkpoint", "Download exact pre-mutation rollback baseline",
+        "Verify immutable image and infrastructure provenance", "Install pinned OCI CLI",
+        "Upload sanitized live readiness evidence", "Remove isolated OCI client state",
+        "Post Checkout approved master commit", "Complete job",
+    }
+    if runtime_mode == "k3s":
+        successful.update({
+            "Verify k3s identity", "Open ephemeral OCI Bastion access to k3s",
+            "Close ephemeral OCI Bastion access",
+        })
+    elif runtime_mode == "oke":
+        successful.update({
+            "Verify OKE identity", "Reconcile expired and authorize current runner IPv4",
+            "Configure kubectl from exact cluster OCID", "Revoke exact runner rule",
+        })
+    else:
+        fail(f"{label} expired-handoff runtime mode is unsupported")
+    public = exact_job(jobs, "public-validate", label)
+    created = parse_timestamp(metadata.get("created_at"), label)
+    updated = parse_timestamp(metadata.get("updated_at"), label)
+    started = parse_timestamp(deploy.get("started_at"), label)
+    completed = parse_timestamp(deploy.get("completed_at"), label)
+    if (
+        len(jobs) != 2
+        or any(type(job.get("id")) is not int or job["id"] < 1
+               or job.get("run_id") != int(run_id) for job in jobs)
+        or deploy.get("status") != "completed" or deploy.get("conclusion") != "failure"
+        or public.get("status") != "completed" or public.get("conclusion") != "skipped"
+        or public["steps"] != []
+        or not created <= started <= completed <= updated
+        or not completed <= parse_timestamp(public.get("started_at"), label)
+            <= parse_timestamp(public.get("completed_at"), label) <= updated
+        or [item.get("name") for item in deploy["steps"]] != list(names)
+        or [item.get("number") for item in deploy["steps"]] != [*range(1, 39), 76, 77]
+    ):
+        fail(f"{label} expired-handoff native job inventory or chronology differs")
+    previous_end = started
+    for step in deploy["steps"]:
+        expected = (
+            "failure" if step["name"] == "Verify transferred database lock and maintenance fence"
+            else "success" if step["name"] in successful else "skipped"
+        )
+        step_started = parse_timestamp(step.get("started_at"), label)
+        step_completed = parse_timestamp(step.get("completed_at"), label)
+        if (
+            type(step.get("number")) is not int or step.get("status") != "completed"
+            or step.get("conclusion") != expected
+            or not previous_end <= step_started <= step_completed <= completed
+        ):
+            fail(f"{label} expired-handoff ordered native step outcome differs")
+        previous_end = step_completed
+    if artifact_inventory(repository, run_id, label):
+        fail(f"{label} read-only expired receiver must have zero artifacts")
+    native = failed_deploy_native_inputs(
+        repository, run_id, source, label,
+        expected_step_conclusion="success", prove_expired_handoff=True,
+    )
+    if native["confirmation"] != "DEPLOY OCI EXACT SHA":
+        fail(f"{label} expired receiver native confirmation differs")
+    return native, metadata
 
 
 def validate_held_handoff_native(
@@ -2260,8 +2467,25 @@ def validate_held_handoff_native(
     return metadata
 
 
-def held_handoff_history(repository, held, subject_sha, successor_run_id=""):
+def held_handoff_history(
+    repository, held, subject_sha, successor_run_id="", *,
+    expired_receiver_run_id="", runtime_mode=None,
+):
     authority = None
+    expired_receiver = None
+    if expired_receiver_run_id:
+        qualified = expired_handoff_native_inputs(
+            repository, expired_receiver_run_id, runtime_mode, "expired-handoff history",
+        )
+        if qualified is None or qualified[0]["data_run_id"] != str(held["id"]):
+            fail("expired-handoff history substituted its authenticated physical owner")
+        expired_receiver = qualified[1]
+        if (
+            expired_receiver["head_sha"] != held["head_sha"]
+            or parse_timestamp(held.get("updated_at"), "expired handoff")
+                > parse_timestamp(expired_receiver.get("created_at"), "expired receiver")
+        ):
+            fail("expired-handoff history substituted its receiver or chronology")
 
     def validate_cancelled_unstarted(row):
         nonlocal authority
@@ -2518,6 +2742,16 @@ def held_handoff_history(repository, held, subject_sha, successor_run_id=""):
             if row["id"] in {held["id"], int(successor_run_id or "0")}:
                 if workflow != "oci-live-data-rollout.yml":
                     fail("held-handoff historical owner is bound to another workflow")
+                continue
+            if expired_receiver is not None and row["id"] == expired_receiver["id"]:
+                if workflow != "oci-production-deploy.yml" or any(
+                    row.get(key) != expired_receiver.get(key) for key in (
+                        "id", "workflow_id", "path", "head_sha", "head_branch", "event",
+                        "run_attempt", "status", "conclusion", "display_title",
+                        "created_at", "updated_at",
+                    )
+                ):
+                    fail("expired-handoff historical receiver identity changed")
                 continue
             if row.get("head_branch") != "master":
                 continue
@@ -2839,7 +3073,9 @@ def validate_held_handoff_artifact(
     }
 
 
-def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=None):
+def validate_pre_runtime_resume_chain(
+    repository, run_id, runtime_mode, *, seen=None, include_capture=False,
+):
     seen = set() if seen is None else set(seen)
     if run_id in seen or len(seen) >= 20:
         fail("resume authority is cyclic or exceeds the lineage bound")
@@ -2849,7 +3085,11 @@ def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=
     )
     authority = parse_resume_authority(files, evidence, "resume predecessor")
     if authority is None:
-        return run_id, evidence["source_sha"]
+        return (
+            {"applied_data_run_id": run_id, "applied_source_sha": evidence["source_sha"],
+             "baseline_capture_run_id": run_id}
+            if include_capture else (run_id, evidence["source_sha"])
+        )
     if authority["schema_version"] == "live-betting-data-resume-v3":
         current = require_fixed_run(
             repository, run_id, "oci-live-data-rollout.yml", "success", evidence["source_sha"],
@@ -2901,9 +3141,91 @@ def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=
             result["baselineFiles"], "held-handoff original baseline",
         ):
             fail("held-handoff successor substituted its authenticated original baseline")
-        return authority["applied_data_run_id"], authority["applied_source_sha"]
+        return (
+            {"applied_data_run_id": authority["applied_data_run_id"],
+             "applied_source_sha": authority["applied_source_sha"],
+             "baseline_capture_run_id": authority["applied_data_run_id"]}
+            if include_capture else (
+                authority["applied_data_run_id"], authority["applied_source_sha"],
+            )
+        )
     if authority["resume_maintenance_mode"] != "pre-runtime-hold":
-        fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
+        if not include_capture:
+            fail("pre-runtime hold cannot substitute a post-runtime recovery lineage")
+        failed_run = authority["failed_deploy_run_id"]
+        metadata = fixed_run_metadata(
+            repository, failed_run, "oci-production-deploy.yml", "failure",
+            "post-runtime resume failed deployment",
+        )
+        source_sha = metadata["head_sha"]
+        if metadata.get("display_title") != f"oci-deploy {source_sha}":
+            fail("post-runtime failed deployment title differs")
+        validate_descendant_scope(source_sha, evidence["source_sha"])
+        retained = authority["resume_maintenance_mode"] == "retained-hold"
+        profile = (
+            "oci-failed-deploy-retained-hold-v1" if retained
+            else "oci-failed-deploy-released-runtime-v1"
+        )
+        outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, "post-runtime resume")
+        if tuple(authority[key] for key in (
+            "failed_deploy_job_conclusion", "public_validate_job_conclusion",
+            "lock_release_step_conclusion", "fence_release_step_conclusion", "rehold_step_conclusion",
+        )) != ("failure" if retained else "success", "skipped" if retained else "failure", *outcomes):
+            fail("post-runtime authority differs from its native failure outcomes")
+        native = failed_deploy_native_inputs(
+            repository, failed_run, source_sha, "post-runtime resume failed deployment",
+            expected_step_conclusion="success",
+        )
+        if native["confirmation"] != "DEPLOY OCI EXACT SHA":
+            fail("post-runtime failed deployment confirmation differs")
+        request = failed_deploy_native_inputs(
+            repository, run_id, evidence["source_sha"], "post-runtime resume request",
+            resume_dispatch=True,
+        )
+        expected_request = {key: native[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id", "baseline_recovery_source_sha",
+        )}
+        expected_request.update({
+            "approved_sha": evidence["source_sha"], "resume_source_sha": source_sha,
+            "prerequisite_run_id": native["data_run_id"], "failed_deploy_run_id": failed_run,
+            "phase": "apply-slip-index", "failed_activation_run_id": "0",
+            "failed_activation_user_id": "0",
+            "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA" if retained else
+                "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA",
+        })
+        if request != expected_request:
+            fail("post-runtime resume substituted its native predecessor or release tuple")
+        artifact = exact_artifact(
+            repository, failed_run, f"oci-production-baseline-{failed_run}-1", "post-runtime resume",
+        )
+        result = validate_failed_deploy_artifacts(
+            repository, failed_run, source_sha, artifact, request, runtime_mode,
+            profile, *outcomes, "post-runtime resume", seen=seen, include_capture=True,
+        )
+        prior, _ = parse_live_v6_artifact(repository, native["data_run_id"], "post-runtime predecessor")
+        for key in LIVE_V6_KEYS - {"source_sha", "workflow_run_id", "completed_at"}:
+            if evidence[key] != prior[key]:
+                fail(f"post-runtime resume substituted {key}")
+        if any(authority[key] != result[key] for key in ("applied_data_run_id", "applied_source_sha")):
+            fail("post-runtime resume substituted its ancestral applied root")
+        previous = require_fixed_run(
+            repository, native["data_run_id"], "oci-live-data-rollout.yml", "success",
+            source_sha, f"oci-live-data apply-slip-index {source_sha}", "post-runtime predecessor",
+        )
+        current = require_fixed_run(
+            repository, run_id, "oci-live-data-rollout.yml", "success",
+            evidence["source_sha"], f"oci-live-data apply-slip-index {evidence['source_sha']}",
+            "post-runtime resume",
+        )
+        if (
+            parse_timestamp(previous.get("updated_at"), "post-runtime predecessor")
+                > parse_timestamp(metadata.get("created_at"), "post-runtime failure")
+            or parse_timestamp(metadata.get("updated_at"), "post-runtime failure")
+                > parse_timestamp(current.get("created_at"), "post-runtime resume")
+        ):
+            fail("post-runtime resume chronology differs")
+        return result
     failed_run = authority["failed_deploy_run_id"]
     metadata = fixed_run_metadata(
         repository, failed_run, "oci-production-deploy.yml", "failure",
@@ -2912,6 +3234,64 @@ def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=
     source_sha = metadata["head_sha"]
     validate_descendant_scope(source_sha, evidence["source_sha"])
     profile = "oci-failed-deploy-retained-hold-v1"
+    native_qualification = expired_handoff_native_inputs(
+        repository, failed_run, runtime_mode, "resume expired receiver",
+    )
+    if native_qualification is not None:
+        native, _ = native_qualification
+        request = failed_deploy_native_inputs(
+            repository, run_id, evidence["source_sha"], "expired-handoff resume request",
+            resume_dispatch=True,
+        )
+        expected_request = {
+            key: native[key] for key in (
+                "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+                "disk_checkpoint_run_id", "baseline_recovery_run_id",
+                "baseline_recovery_source_sha",
+            )
+        }
+        expected_request.update({
+            "approved_sha": evidence["source_sha"], "resume_source_sha": source_sha,
+            "prerequisite_run_id": native["data_run_id"], "failed_deploy_run_id": failed_run,
+            "phase": "apply-slip-index", "failed_activation_run_id": "0",
+            "failed_activation_user_id": "0", "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA",
+        })
+        if request != expected_request:
+            fail("expired-handoff resume substituted its native receiver or physical owner")
+        result = validate_expired_handoff_resume(
+            repository, failed_run, source_sha, request, runtime_mode,
+            "resume expired receiver", successor_run_id=run_id,
+        )
+        prior, _ = parse_live_v6_artifact(
+            repository, native["data_run_id"], "expired-handoff predecessor",
+        )
+        for key in LIVE_V6_KEYS - {"source_sha", "workflow_run_id", "completed_at"}:
+            if evidence[key] != prior[key]:
+                fail(f"expired-handoff resume substituted {key}")
+        if any(
+            authority[key] != result[key]
+            for key in ("applied_data_run_id", "applied_source_sha")
+        ):
+            fail("expired-handoff resume substituted its ancestral applied root")
+        current = require_fixed_run(
+            repository, run_id, "oci-live-data-rollout.yml", "success",
+            evidence["source_sha"], f"oci-live-data apply-slip-index {evidence['source_sha']}",
+            "expired-handoff resume",
+        )
+        if parse_timestamp(metadata.get("updated_at"), "expired receiver") > parse_timestamp(
+            current.get("created_at"), "expired-handoff resume",
+        ):
+            fail("expired-handoff resume predates its failed receiver")
+        return (
+            {key: result[key] for key in (
+                "applied_data_run_id", "applied_source_sha", "baseline_capture_run_id",
+                "baseline_capture_source_sha", "baseline_capture_deploy_run_id",
+                "baseline_sha256", "no_takeover_handoff_qualification",
+            )}
+            if include_capture else (
+                result["applied_data_run_id"], result["applied_source_sha"],
+            )
+        )
     outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, "resume")
     if outcomes != ("skipped", "skipped", "skipped"):
         fail("pre-runtime resume authority relabels another failed-deploy profile")
@@ -2959,7 +3339,18 @@ def validate_pre_runtime_resume_chain(repository, run_id, runtime_mode, *, seen=
         current.get("created_at"), "resume"
     ):
         fail("pre-runtime resume predates the failed deployment")
-    return result["applied_data_run_id"], result["applied_source_sha"]
+    return (
+        {"applied_data_run_id": result["applied_data_run_id"],
+         "applied_source_sha": result["applied_source_sha"],
+         "baseline_capture_run_id":
+             result.get("baseline_capture_run_id", result["applied_data_run_id"]),
+         **{key: result[key] for key in (
+             "baseline_capture_source_sha", "baseline_capture_deploy_run_id", "baseline_sha256",
+         ) if key in result}}
+        if include_capture else (
+            result["applied_data_run_id"], result["applied_source_sha"],
+        )
+    )
 
 
 def released_pre_arm_native_inputs(repository, run_id, source_sha, label):
@@ -3325,6 +3716,123 @@ def validate_released_activation_pre_arm(
         "applied_source_sha": authority["applied_source_sha"],
         "baseline_run_id": failed_run,
         "baseline_artifact_name": f"oci-production-baseline-{failed_run}-1",
+        "_baseline_files": baseline_files,
+    }
+
+
+def validate_expired_handoff_resume(
+    repository, run_id, subject_sha, dispatch_inputs, runtime_mode, label, *,
+    successor_run_id="",
+):
+    qualified = expired_handoff_native_inputs(repository, run_id, runtime_mode, label)
+    if qualified is None:
+        return None
+    native, failed = qualified
+    predecessor_run = require_dispatch_run(dispatch_inputs, "prerequisite_run_id")
+    expected_native = {
+        key: dispatch_inputs[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id",
+            "baseline_recovery_source_sha",
+        )
+    }
+    expected_native.update({
+        "approved_sha": subject_sha, "data_run_id": predecessor_run,
+        "confirmation": "DEPLOY OCI EXACT SHA",
+    })
+    if (
+        native != expected_native or failed["head_sha"] != subject_sha
+        or dispatch_inputs.get("confirmation") != "RESUME APPLIED LIVE DATA EXACT SHA"
+        or dispatch_inputs.get("failed_deploy_run_id") != run_id
+        or dispatch_inputs.get("failed_activation_run_id") != "0"
+        or dispatch_inputs.get("failed_activation_user_id") != "0"
+        or dispatch_inputs.get("phase") != "apply-slip-index"
+    ):
+        fail(f"{label} expired receiver substituted its native release tuple")
+    checkpoint = parse_checkpoint_artifact(repository, dispatch_inputs, runtime_mode, label)
+    predecessor, _, files = parse_live_v6_artifact(
+        repository, predecessor_run, label, include_files=True,
+    )
+    validate_live_v6_lineage(
+        predecessor, checkpoint, dispatch_inputs, predecessor_run, subject_sha,
+        "apply-slip-index", label,
+    )
+    held = require_fixed_run(
+        repository, predecessor_run, "oci-live-data-rollout.yml", "success", subject_sha,
+        f"oci-live-data apply-slip-index {subject_sha}", label,
+    )
+    request = failed_deploy_native_inputs(
+        repository, predecessor_run, subject_sha, label, resume_dispatch=True,
+    )
+    if (
+        request.get("approved_sha") != subject_sha or request.get("phase") != "apply-slip-index"
+        or request.get("confirmation") !=
+            "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA"
+        or request.get("failed_activation_user_id") != "0"
+        or any(request.get(key) != dispatch_inputs[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id", "baseline_recovery_source_sha",
+        ))
+        or parse_resume_authority(files, predecessor, label) is not None
+    ):
+        fail(f"{label} expired holder does not preserve its released-activation history")
+    activation_run = require_dispatch_run(request, "failed_activation_run_id")
+    activation_source = require_dispatch_sha(request, "resume_source_sha")
+    validate_descendant_scope(activation_source, subject_sha)
+    activation_artifact = exact_artifact(
+        repository, activation_run, f"oci-live-activation-recovery-{activation_run}-1", label,
+    )
+    ancestry = validate_released_activation_pre_arm(
+        repository, activation_run, activation_source, activation_artifact, request,
+        runtime_mode, label,
+    )
+    activation = require_fixed_run(
+        repository, activation_run, "oci-live-betting-activate.yml", "failure",
+        activation_source, f"oci-live-activate {activation_source}", label,
+    )
+    if (
+        parse_timestamp(activation.get("updated_at"), label)
+            > parse_timestamp(held.get("created_at"), label)
+        or parse_timestamp(held.get("updated_at"), label)
+            > parse_timestamp(failed.get("created_at"), label)
+    ):
+        fail(f"{label} expired-handoff predecessor chronology differs")
+    validate_held_handoff_reports(files, predecessor)
+    artifact_name = f"oci-live-data-baselines-{predecessor_run}-1"
+    artifact = exact_artifact(repository, predecessor_run, artifact_name, label)
+    baseline_files = original_before_baseline(artifact_files(repository, artifact, label), label)
+    baseline_sha = validate_checksum_manifest(baseline_files, label)
+    _, raw = unique_artifact_file(baseline_files, "baseline-provenance.env", label)
+    baseline = parse_env(raw, label, BASELINE_PROVENANCE_KEYS)
+    if (
+        baseline_sha != predecessor["baseline_sha256"]
+        or baseline["baseline_capture_run_id"] != predecessor_run
+        or baseline["baseline_capture_run_attempt"] != "1"
+        or baseline["baseline_source_sha"] != activation_source
+        or baseline["baseline_deploy_run_id"] != ancestry["activation_deployment_run_id"]
+        or baseline["baseline_deploy_run_attempt"] != "1"
+        or baseline["registry_provider"] != "ghcr"
+        or baseline["registry_host"] != "ghcr.io"
+        or baseline["registry_repository"] != APPLICATION_REPOSITORY
+        or baseline["registry_public_anonymous"] != "true"
+    ):
+        fail(f"{label} expired holder substituted its authenticated current capture")
+    control = require_dispatch_sha(dispatch_inputs, "approved_sha")
+    validate_descendant_scope(subject_sha, control)
+    held_handoff_history(
+        repository, held, control, successor_run_id,
+        expired_receiver_run_id=run_id, runtime_mode=runtime_mode,
+    )
+    return {
+        "resume_maintenance_mode": "pre-runtime-hold",
+        "no_takeover_handoff_qualification": "expired-own-handoff",
+        "baseline_run_id": predecessor_run, "baseline_artifact_name": artifact_name,
+        "baseline_capture_run_id": predecessor_run,
+        "baseline_capture_source_sha": baseline["baseline_source_sha"],
+        "baseline_capture_deploy_run_id": baseline["baseline_deploy_run_id"],
+        "baseline_sha256": baseline_sha,
+        "applied_data_run_id": ancestry["applied_data_run_id"],
+        "applied_source_sha": ancestry["applied_source_sha"],
         "_baseline_files": baseline_files,
     }
 
@@ -5388,6 +5896,24 @@ def validate_binding(
             runtime_mode, binding["input"], successor_run_id=successor_run_id,
         )
     if profile == "oci-failed-deploy-retained-hold-v1":
+        result = validate_expired_handoff_resume(
+            repository, run_id, expected_head_sha, dispatch_inputs, runtime_mode,
+            binding["input"], successor_run_id=successor_run_id,
+        )
+        if result is not None:
+            return {
+                "baselineFiles": result.pop("_baseline_files"),
+                "artifactName": result["baseline_artifact_name"],
+                "createdAt": base.get("created_at"),
+                "completedAt": base.get("updated_at"),
+                "resume": dict(
+                    result, failed_deploy_job_conclusion="failure",
+                    public_validate_job_conclusion="skipped",
+                    lock_release_step_conclusion="skipped",
+                    fence_release_step_conclusion="skipped",
+                    rehold_step_conclusion="skipped",
+                ),
+            }
         outcomes = validate_failed_deploy_jobs(repository, run_id, profile, binding["input"])
         if outcomes == ("skipped", "skipped", "skipped"):
             result = validate_failed_deploy_artifacts(

@@ -1215,6 +1215,22 @@ validated.
   proves a CLI-owned automatic gate, run the checked-in approval path before
   retaining a watcher. A watcher transports notifications but never owns the
   pending mutation, and human-originated work remains personally gated.
+- Prepare the receiving deployment's exact, explicitly non-issuable plan while
+  data executes. Only genuine whole success, complete authenticated artifacts,
+  and readiness make it issuable. Reuse still-valid proofs and keep the same
+  owner; terminal data, materialized gates, and receiving-job transitions are
+  immediate wakeups, not routine polling work.
+- Budget handoff against the actual physical lock deadline, never artifact
+  publication time. Dispatch and approval are not takeover: receiving
+  verification and valid-owner renewal must occur before expiry. Missing
+  deadline evidence does not reset the clock or extend the 1800-second handoff.
+  Expired success is historical evidence, not current mutation authority.
+- A frozen no-takeover recovery keeps physical holder, failed receiver, fresh
+  baseline capture, and ancestral applied root distinct. Authenticate the
+  historical executable tree as well as its selected blobs, and prove the
+  existing authority producer-to-verifier-to-deployment roundtrip. A compatible
+  capture exception requires the same native qualification; it is never a
+  caller-provided bypass or a relabelled root.
 - A watcher for an ancestry PR does not cover the promotion's build or its
   `workflow_run` descendants. Reconcile every owned nonterminal run at the
   existing checkpoint and handle eligible downstream approvals promptly,

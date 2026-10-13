@@ -6,7 +6,11 @@ INVENTORY="$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.sh"
 tmp_dir="$(mktemp -d "$ROOT_DIR/.workflow-inventory-test.XXXXXX")"
 support_dir="$(mktemp -d "$ROOT_DIR/.workflow-inventory-support.XXXXXX")"
 local_extra_paths_file="$support_dir/local-extra-paths.bin"
+legacy_inventory=""
 cleanup() {
+  if [[ -n "$legacy_inventory" ]]; then
+    rm -f -- "$legacy_inventory"
+  fi
   rm -rf -- "$tmp_dir"
   rm -rf -- "$support_dir"
 }
@@ -2279,6 +2283,90 @@ assert_fail "reusable workflow from governed OCI job" "must not call a reusable 
 
 prepare_pr_remote
 assert_pr_pass "$full_set"
+
+legacy_inventory="$(mktemp "$ROOT_DIR/infra/azure/agents/.workflow-inventory-argv.XXXXXX")"
+python3 - "$INVENTORY" "$legacy_inventory" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+reader = 'json.load(open(3, encoding="utf-8"))'
+for name, invocation, original, index in (
+    ("read_pr_head_sha", 'python3 - 3<<<"$json"', 'python3 - "$json"', 1),
+    ("resolve_pr_head_tree_sha", 'python3 - "$commit_sha" 3<<<"$json"',
+     'python3 - "$commit_sha" "$json"', 2),
+    ("list_pr_workflow_paths", 'python3 - "$tree_sha" 3<<<"$json"',
+     'python3 - "$tree_sha" "$json"', 2),
+    ("download_pr_workflow_file", 'python3 - "$path" "$output" 3<<<"$json"',
+     'python3 - "$path" "$output" "$json"', 3),
+):
+    start = source.index(f"{name}() {{")
+    end = source.index("\n}\n", start) + 2
+    body = source[start:end]
+    if body.count(invocation) != 1 or body.count(reader) != 1:
+        raise SystemExit(f"original argv transport fixture differs in {name}")
+    body = body.replace(invocation, original).replace(reader, f"json.loads(sys.argv[{index}])")
+    source = source[:start] + body + source[end:]
+Path(sys.argv[2]).write_text(source, encoding="utf-8")
+PY
+chmod 700 "$legacy_inventory"
+export WORKFLOW_INVENTORY_ARGV_REAL_PYTHON3="$(command -v python3)"
+cat >"$pr_stub_dir/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+"${WORKFLOW_INVENTORY_ARGV_REAL_PYTHON3:?}" -c '
+import sys
+if any(len(argument.encode("utf-8")) + 1 > 131072 for argument in sys.argv[1:]):
+    print("Argument list too long (Linux encoded argv limit including NUL)", file=sys.stderr)
+    sys.exit(126)
+' "$@"
+exec "$WORKFLOW_INVENTORY_ARGV_REAL_PYTHON3" "$@"
+SH
+chmod 700 "$pr_stub_dir/python3"
+
+prepare_pr_remote
+python3 - "$pr_remote_root/.github/workflows/production-build.yml" <<'PY'
+import base64
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+with path.open("ab") as handle:
+    handle.write(b"\n# transport padding " + b"x" * 131072 + b"\n")
+content = base64.b64encode(path.read_bytes()).decode("ascii")
+if len(json.dumps({"content": content}).encode("utf-8")) <= 131072:
+    raise SystemExit("large workflow contents fixture did not exceed Linux's argument limit")
+PY
+saved_inventory="$INVENTORY"
+INVENTORY="$legacy_inventory"
+assert_pr_fail "original argv transport with oversized workflow contents" "Argument list too long"
+INVENTORY="$saved_inventory"
+assert_pr_pass "$full_set"
+
+prepare_pr_remote
+write_pr_tree_payload '[]'
+python3 - "$pr_tree_payload_file" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+entries = json.loads(path.read_text())
+entries.extend({"path": f"docs/transport-{index:05d}.md", "type": "blob"} for index in range(4000))
+payload = json.dumps(entries)
+if len(payload.encode("utf-8")) <= 131072:
+    raise SystemExit("large recursive tree fixture did not exceed Linux's argument limit")
+path.write_text(payload, encoding="utf-8")
+PY
+INVENTORY="$legacy_inventory"
+assert_pr_fail_no_fetch "original argv transport with oversized recursive tree" "Argument list too long"
+INVENTORY="$saved_inventory"
+assert_pr_pass "$full_set"
+rm -f -- "$pr_stub_dir/python3" "$legacy_inventory"
+legacy_inventory=""
+unset WORKFLOW_INVENTORY_ARGV_REAL_PYTHON3
+printf '%s\n' "workflow_inventory_large_json_transport=PASS cases=2 original_argv=REJECTED byte_limit=131072"
 
 prepare_pr_remote
 write_rogue_npm_publisher "$pr_remote_root/.github/workflows"

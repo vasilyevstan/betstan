@@ -482,6 +482,17 @@ inspected documents. A role change, concurrent slip mutation, or cleanup-count
 conflict blocks the resumed data phase. No profile widens normal success
 authority.
 
+The existing `oci-live-data-resume-deploy` route also admits one frozen
+expired-handoff, before-takeover case: a genuinely successful data handoff's
+1,800-second lease expired before the receiver's read-only verification, with
+fence and writer hold retained, cleanup completed, and no receiver takeover,
+renewal, image change, release or rehold executed. Qualification binds the full
+historical source tree and executable closure, authenticated attempt-one and
+latest records of the receiver's whole-run failure, complete ordered native
+jobs and steps with required conditional cleanup outcomes, consistent complete
+artifact inventory, and exact read-only expired-lease evidence. This does not
+widen legacy cases or make expiry authority.
+
 Each fixed profile downloads and parses its exact artifacts; run metadata and
 job conclusions alone are insufficient. ZIP paths and members must be safe and
 complete, checksum manifests and baseline capture identity must match, and the
@@ -491,8 +502,17 @@ deployment recovery uses the checksum-sealed intent written before lock renewal
 plus the post-rehold failure lineage.
 For released-runtime recovery after an authenticated
 `live-betting-data-resume-v2` retained-hold data resume, baseline capture identity
-follows the validated original applied-data root, while the immediate
-predecessor's evidence and ownership bindings remain distinct.
+follows the validated original applied-data root unless full native validation
+authenticates a capture inherited from a qualified expired-handoff ancestor;
+the immediate predecessor's evidence and ownership bindings remain distinct.
+
+The expired-handoff case reuses the existing `live-betting-data-resume-v2`
+before-takeover envelope; every consumer rederives the full native
+qualification. The actual successful-data holder, failed receiver, fresh
+authenticated capture and ancestral rollback root remain separately bound.
+Only that qualification lets the local verifier check the authenticated
+capture separately from the root; legacy equality, schema, source, checksum
+and native guards remain unchanged.
 
 Post-runtime retained-owner admission derives the old owner from the
 authenticated immediate predecessor, not the rollback root or whichever holder
@@ -507,22 +527,36 @@ retained lease contract. Expiry alone grants no authority. Pre-runtime and
 fresh-handoff leases remain 1,800 seconds; the new-operation lease remains
 14,400 seconds.
 
-Held-checkpoint validation, both 70-percent byte guards and fresh production
-exclusivity precede mutation. Confirmed snapshot-bound own release advances
-generation `g` to `g+1`; released-only acquisition must retain the same UID and
-exact released generation, assign the new authorized owner/current control
-source, and confirm `g+2` followed by ordinary live-lease verification. These are
-two non-atomic compare-and-swap operations. Conflict, missing acknowledgement,
+The qualified expired-handoff case requires fresh fencing and seven-writer
+quiescence, a false kickoff flag, an absent activation lease, all ten exact
+image/generation identities and supporting pods, original rollback CRI
+residency and both 70-percent disk byte limits. Stable rereads must bind the
+actual expired successful-data owner's lock UID, resource version, fencing
+generation and unchanged 1,800-second handoff metadata.
+
+For both retained-owner and qualified expired-handoff recovery, held-checkpoint
+validation, both 70-percent byte guards and fresh production exclusivity precede
+mutation. Confirmed snapshot-bound own release advances generation `g` to `g+1`
+with an empty holder and exact `0` lease duration and deadline; released-only
+acquisition must retain the same UID and exact released generation, assign the
+new authorized owner/current control source, and confirm `g+2` followed by
+ordinary live-lease verification under the unchanged 14,400-second lease. These
+are two non-atomic compare-and-swap operations. Conflict, missing acknowledgement,
 ambiguous generation or failed final verification stops recovery without new
 data execution or a fresh handoff; an unacknowledged mutation may already have
 changed ownership. Partial transitions require the existing deployment-safety
-owner's exact-state assessment, not generic acquisition, retry, compensating
-mutation, expired renewal or writer restoration. The snapshot is conditionally
+owner's exact-state assessment, not generic acquisition, reclaim, adoption,
+retry, compensating mutation, expired renewal, handoff-lease extension or writer
+restoration. The snapshot is conditionally
 preserved in protected baseline evidence, not a successful-held-handoff journal
 or new authority schema. A fresh complete v6 handoff still requires real data
-execution. Rollback must retain compatible ownership-snapshot and exact-generation
+execution and retains the 1,800-second lease. Prepare its exact receiving
+deployment plan during that execution, but keep it non-issuable until actual
+whole-run success, complete artifacts and readiness are proven. The reader,
+workflow and local verifier ship together. Rollback must retain compatible
+native qualification, ownership-snapshot and exact-generation
 transfer behavior; expired-lease rejection or generic reclaim is not a recovery
-strategy.
+strategy. Evidence compatibility never grants operation authority.
 
 Failed-activation cleanup uses a separate
 exact recovery-authority artifact rather than treating the workflow's larger
@@ -1148,14 +1182,20 @@ The conductor monitors the real blocking object: agent result, process,
 GitHub job, protected approval, handoff, or runtime health signal.
 
 Keep one operation owner and one observer for each owned release chain.
+During data execution, prepare the exact receiving-deployment plan with that
+owner, explicitly non-issuable until actual whole-run success, complete artifacts
+and readiness are proven. Reuse still-valid accepted proofs and promptly
+finalize the actual new proof with the same owner.
+
 Retain exact owned runs in the existing durable work-unit evidence across
 resume; a recent-run list is discovery, not ownership or a reason to forget a
-known run. Reconcile the exact run and its proven downstream work after each
-job or approval transition, even when the top-level status is unchanged.
+known run. Use event-first observation of terminal data, materialized gates and
+job/approval transitions to reconcile the exact run and its proven downstream
+work, even when the top-level status is unchanged.
 
 - **ACT:** an exact CLI-owned gate is eligible. The conductor immediately
-  routes the authorized orchestrator to the canonical approval path, even if
-  a timer also exists; the timer remains effective.
+  routes the authorized orchestrator to the canonical automatic approval path,
+  even if a timer also exists; the timer remains effective.
 - **WAIT:** exact evidence proves an already-approved timer or provider wait.
   Retain bounded observation without submitting a duplicate approval.
 - **BLOCK:** invalid local context, missing required proof, unresolved
@@ -1167,6 +1207,12 @@ These are caller actions, not a new authority framework or critic queue.
 Captured dispatch or issued authority is not proof that jobs and the expected
 gate have materialized. Approval submission and an intermediate green job
 are not terminal release evidence.
+
+Track the actual physical handoff-lock deadline, not an artifact timestamp.
+Dispatch or approval is not takeover; the receiving deployment must complete
+the existing live-owner verification and renewal before expiry. Missing
+deadline evidence is a blocker, never a clock reset or permission to extend
+the 1,800-second handoff.
 
 - A running watcher is notification transport, not proof of progress.
 - A waiting state is classified immediately rather than left to a watcher.

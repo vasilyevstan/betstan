@@ -94,7 +94,8 @@ python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_DISK_CHECKPOINT_SHA256" \
   "$EXPECTED_DISK_CHECKPOINT_DISPOSITION" \
   "$RESUME_BASELINE_DIR" \
-  "$(dirname "${BASH_SOURCE[0]}")/upstream_run_binding_stan.py" <<'PY'
+  "$(dirname "${BASH_SOURCE[0]}")/upstream_run_binding_stan.py" \
+  "$VERIFY_RESUME_APPLIED_RUN" "$RESUME_REPOSITORY" <<'PY'
 import hashlib
 import json
 import re
@@ -473,8 +474,41 @@ if resume_baseline_dir:
     if observed_baseline_sha256 != provenance["baseline_sha256"]:
         fail("resume rollback baseline digest differs from data evidence")
     baseline_provenance = read_env(baseline_root / "baseline-provenance.env")
+    expected_capture_run_id = resolved_applied_data_run_id
+    if (
+        sys.argv[16] == "true" and resume_authority_path.exists()
+    ):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[15])
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        runtime = "oke" if checkpoint_expected["disk_checkpoint_disposition"] == "NOT_APPLICABLE" else "k3s"
+        native = module.validate_pre_runtime_resume_chain(
+            sys.argv[17], expected["workflow_run_id"], runtime, include_capture=True,
+        )
+        if (
+            native["applied_data_run_id"] != resolved_applied_data_run_id
+            or native["applied_source_sha"] != resolved_applied_source_sha
+        ):
+            fail("native resume lineage differs from the local evidence")
+        expected_capture_run_id = native["baseline_capture_run_id"]
+        if expected_capture_run_id != resolved_applied_data_run_id:
+            baseline_files = {
+                path.relative_to(baseline_root).as_posix(): path.read_bytes()
+                for path in baseline_root.rglob("*") if path.is_file()
+            }
+            if (
+                module.validate_checksum_manifest(baseline_files, "resume current capture")
+                    != native["baseline_sha256"]
+                or set(baseline_provenance) != module.BASELINE_PROVENANCE_KEYS
+                or baseline_provenance["baseline_capture_run_attempt"] != "1"
+                or baseline_provenance["baseline_source_sha"] != native["baseline_capture_source_sha"]
+                or baseline_provenance["baseline_deploy_run_id"] != native["baseline_capture_deploy_run_id"]
+                or baseline_provenance["baseline_deploy_run_attempt"] != "1"
+            ):
+                fail("resume rollback baseline differs from its authenticated current capture")
     baseline_capture_run_id = baseline_provenance.get("baseline_capture_run_id", "")
-    if baseline_capture_run_id != resolved_applied_data_run_id:
+    if baseline_capture_run_id != expected_capture_run_id:
         fail(
             "resume rollback baseline capture run differs from the original "
             "applied data authority"
@@ -1134,24 +1168,6 @@ if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
         .display_title == ("oci-live-data apply-slip-index " + $source_sha)
       ' >/dev/null ||
     fail "original applied data run does not match the resolved source authority"
-  if [[ -f "$EVIDENCE_DIR/resume-authority.env" ]] &&
-     grep -Fxq 'resume_maintenance_mode=pre-runtime-hold' \
-       "$EVIDENCE_DIR/resume-authority.env"; then
-    python3 - "$(dirname "${BASH_SOURCE[0]}")/upstream_run_binding_stan.py" \
-      "$RESUME_REPOSITORY" "$EXPECTED_RUN_ID" \
-      "$applied_data_run_id" "$applied_source_sha" \
-      "${EXPECTED_DISK_CHECKPOINT_DISPOSITION:-}" <<'PY'
-import importlib.util, sys
-path, repo, run_id, applied_run, applied_source, disposition = sys.argv[1:]
-spec = importlib.util.spec_from_file_location("upstream_binding", path)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-runtime = "oke" if disposition == "NOT_APPLICABLE" else "k3s"
-resolved = module.validate_pre_runtime_resume_chain(repo, run_id, runtime)
-if resolved != (applied_run, applied_source):
-    module.fail("native pre-runtime lineage differs from the local evidence")
-PY
-  fi
 fi
 
 if [[ -n "$resolution" ]]; then
