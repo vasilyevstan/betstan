@@ -3580,9 +3580,11 @@ assert a.retired_bound_intent(d / "authority", old_intent)
 run(d, "--retire-preflight-read-only-failure", ok=False)
 
 # Execute the byte-identical historical v1-v4 loader, pinned independently of
-# Git history; only this patch's three additive v5 reader edits are removed.
+# Git history; only the additive v5 reader changes are removed.
 import inspect
 old_loader = inspect.getsource(a.load_record).replace(
+    "        provenance_read_record=True,\n", "",
+).replace(
     '    elif schema_version == RECORD_SCHEMA_V5:\n'
     '        if set(record) != RECORD_V2_KEYS:\n'
     '            fail("authority record has an unexpected schema")\n', "",
