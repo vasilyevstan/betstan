@@ -5977,7 +5977,11 @@ b.subprocess.run = native_subprocess_run
 original_file, original_current_pins = a.__file__, a.PROVENANCE_READ_CURRENT_BLOBS
 with tempfile.TemporaryDirectory(prefix="provenance-source-fixture-") as directory, tempfile.TemporaryDirectory(prefix="provenance-retirement-fixture-") as authority_directory:
     root = Path(directory).resolve()
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    # Earlier exported shell mocks must not override real Git or the native GH fixture.
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("GIT_", "BASH_FUNC_")) and key not in ("BASH_ENV", "ENV")
+    }
     def git(*arguments):
         return native_subprocess_run([
             "git", "-C", directory, "-c", "core.hooksPath=/dev/null",
