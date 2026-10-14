@@ -52,6 +52,9 @@ ZERO_EXECUTION_EVIDENCE_SCHEMA = "betstan.copilot-cli-zero-execution-evidence.v1
 ZERO_EXECUTION_MAX_ATTEMPTS = 100
 PREFLIGHT_READ_EVIDENCE_SCHEMA = "betstan.copilot-cli-preflight-read-evidence.v1"
 PREFLIGHT_READ_OPERATION = "oci-live-data-resume-deploy"
+JSON_MAX_BYTES = 1024 * 1024
+PROVENANCE_READ_OBSERVATION_MAX_BYTES = 4 * JSON_MAX_BYTES
+PROVENANCE_READ_RECORD_MAX_BYTES = PROVENANCE_READ_OBSERVATION_MAX_BYTES + JSON_MAX_BYTES
 PREFLIGHT_READ_BLOBS = {
     ".github/workflows/oci-live-data-rollout.yml": "27a98e345050fefb799c706fde03d8f79e14ed6c",
     "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh": "4681e877c673294e1f70974eaa6d2be7ea526f2a",
@@ -141,7 +144,7 @@ PROVENANCE_READ_CURRENT_BLOBS = {
         if path != "infra/azure/agents/copilot_cli_authority_stan.py"
     },
     ".github/workflows/oci-live-data-rollout.yml": "d4dd686a2af7f303988bb91174b50ced3ca9e256",
-    "infra/oci/scripts/upstream_run_binding_stan.py": "e9b726f2df2772609152cb9110dd77cabe2c28e2",
+    "infra/oci/scripts/upstream_run_binding_stan.py": "306bc2616742dce091b6474504c40cf553ec5323",
     "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh": "ec4574ffa88978173068ddeb61826a1f6a950a37",
 }
 PROVENANCE_READ_ACTIONS = (
@@ -522,6 +525,8 @@ def load_json_file(
     private=False,
     exact_mode=None,
     recover_atomic_link=False,
+    max_bytes=JSON_MAX_BYTES,
+    provenance_read_record=False,
 ):
     candidate = Path(path)
     if not candidate.is_absolute():
@@ -543,13 +548,30 @@ def load_json_file(
         fail(f"{label} must have mode {exact_mode:04o}")
     if private and mode & 0o077:
         fail(f"{label} must not be group- or world-accessible")
-    if metadata.st_size > 1024 * 1024:
+    limit = PROVENANCE_READ_RECORD_MAX_BYTES if provenance_read_record else max_bytes
+    if metadata.st_size > limit:
         fail(f"{label} is too large")
     try:
-        text = candidate.read_text(encoding="utf-8")
+        with candidate.open("rb") as stream:
+            raw = stream.read(limit + 1)
+        if len(raw) > limit:
+            fail(f"{label} is too large")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         fail(f"{label} must be UTF-8: {error}")
-    return load_json_text(text, label)
+    value = load_json_text(text, label)
+    if provenance_read_record and len(raw) > JSON_MAX_BYTES and (
+        not isinstance(value, dict)
+        or value.get("schemaVersion") != RECORD_SCHEMA_V5
+        or value.get("state") != "retired"
+        or value.get("operation") != PREFLIGHT_READ_OPERATION
+        or value.get("workflow") != "oci-live-data-rollout.yml"
+        or value.get("workflowBlobSha") != PROVENANCE_READ_BLOBS[
+            ".github/workflows/oci-live-data-rollout.yml"
+        ]
+    ):
+        fail(f"{label} is too large")
+    return value
 
 
 def canonical_json(value):
@@ -1314,6 +1336,7 @@ def load_record(directory, run_id):
         "authority record",
         exact_mode=0o600,
         recover_atomic_link=True,
+        provenance_read_record=True,
     )
     if not isinstance(record, dict):
         fail("authority record has an unexpected schema")
@@ -3534,7 +3557,12 @@ def validate_provenance_read_observation(record, observation):
     if specification is None or specification.loader is None:
         fail("provenance-read artifact validator is unavailable")
     binding = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(binding)
+    previous_bytecode = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        specification.loader.exec_module(binding)
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
     native = binding.live_data_native_inputs(closure["dispatchInputs"], {
         "approved_sha", "resume_source_sha", "build_run_id", "infrastructure_run_id",
         "checkpoint_source_sha", "disk_checkpoint_run_id", "phase", "prerequisite_run_id",
@@ -3736,6 +3764,8 @@ def validate_preflight_read_observation(
 ):
     path = ".github/workflows/oci-live-data-rollout.yml"
     if record["workflowBlobSha"] == PROVENANCE_READ_BLOBS[path]:
+        if len(canonical_json(observation).encode("utf-8")) > PROVENANCE_READ_OBSERVATION_MAX_BYTES:
+            fail("provenance-read observation is too large")
         native = validate_provenance_read_observation(record, observation)
         if (
             record["operation"] != PREFLIGHT_READ_OPERATION
@@ -3884,8 +3914,6 @@ def validate_preflight_read_retirement(record):
 
 def command_retire_preflight_read(args):
     directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
-    first = load_json_file(args.first_observation, "first preflight-read observation", exact_mode=0o600)
-    second = load_json_file(args.second_observation, "second preflight-read observation", exact_mode=0o600)
     if file_identity(args.first_observation) == file_identity(args.second_observation):
         fail("preflight-read retirement requires independently collected observations")
     with repository_claim_lock(directory, nonblocking=True):
@@ -3901,6 +3929,17 @@ def command_retire_preflight_read(args):
             (f"intent:{key}", "bound"), (str(record["runId"]), "consumed"),
         ]:
             fail("preflight-read retirement is blocked by other repository authority")
+        limit = JSON_MAX_BYTES
+        if record["workflowBlobSha"] == PROVENANCE_READ_BLOBS[args.workflow_path]:
+            limit = PROVENANCE_READ_OBSERVATION_MAX_BYTES
+        first = load_json_file(
+            args.first_observation, "first preflight-read observation",
+            exact_mode=0o600, max_bytes=limit,
+        )
+        second = load_json_file(
+            args.second_observation, "second preflight-read observation",
+            exact_mode=0o600, max_bytes=limit,
+        )
         for observation in (first, second):
             validate_preflight_read_observation(record, observation, args.current_master)
         if canonical_json(first) != canonical_json(second):

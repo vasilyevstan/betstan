@@ -374,7 +374,7 @@ collect_preflight_read() {
           historical: $historical, current: $current, actions: $actions}
       } else error("duplicate or partial preflight-read native documents") end' >"$destination"
   if [[ "$provenance_read" = true ]]; then
-    PYTHONDONTWRITEBYTECODE=1 python3 -I - \
+    python3 -I -B - \
       "$UPSTREAM_BINDING_VALIDATOR" "$repository" "$preflight_run_id" "$destination" <<'PY'
 import importlib.util
 import json

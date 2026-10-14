@@ -336,11 +336,15 @@ def provenance_read_authority():
     )
     if specification is None or specification.loader is None:
         fail("shared provenance-read source validator is unavailable")
+    previous_bytecode = sys.dont_write_bytecode
     try:
+        sys.dont_write_bytecode = True
         authority = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(authority)
     except (OSError, ImportError, SyntaxError):
         fail("shared provenance-read source validator is unavailable")
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
     if not callable(getattr(authority, "validate_provenance_read_observation", None)):
         fail("shared provenance-read source validator is unavailable")
     return authority
