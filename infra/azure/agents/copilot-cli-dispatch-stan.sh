@@ -290,8 +290,9 @@ collect_zero_execution() {
 }
 
 collect_preflight_read() {
-  local destination="$1" side control path expected local_blob native_blob files
+  local destination="$1" side control path expected local_blob native_blob files profile provenance_read
   local historical='{}' current='{}'
+  provenance_read="$(jq -r 'has("currentClosureProfile")' <<<"$preflight_context")"
   gh api "repos/$repository/actions/workflows/$workflow" >"$tmp_dir/preflight-workflow.json"
   gh api "repos/$repository/contents/$workflow_path?ref=$preflight_control" >"$tmp_dir/preflight-history.json"
   gh api "repos/$repository/actions/runs/$preflight_run_id" >"$tmp_dir/preflight-run.json"
@@ -314,9 +315,10 @@ collect_preflight_read() {
       then add else error("incomplete preflight-read approval pages") end
     ' >"$tmp_dir/preflight-approvals.json"
   gh api "repos/$repository/actions/runs/$preflight_run_id/artifacts?per_page=100" --paginate |
-    jq -se '
+    jq -se --argjson provenance "$provenance_read" '
       if length == 1 and (.[0].total_count | type == "number") and
-        .[0].total_count == 0 and .[0].artifacts == []
+        .[0].total_count == (if $provenance then 1 else 0 end) and
+        (.[0].artifacts | type == "array" and length == (if $provenance then 1 else 0 end))
       then .[0] else error("nonempty or incomplete preflight-read artifact pages") end
     ' >"$tmp_dir/preflight-artifacts.json"
   if [[ "$preflight_control" = "$live_master" ]]; then
@@ -333,11 +335,16 @@ collect_preflight_read() {
       ' >"$tmp_dir/preflight-compare.json"
   fi
   for side in historical current; do
+    if [[ "$side" = historical && "$provenance_read" = true ]]; then
+      continue
+    fi
     control="$preflight_control"
     [[ "$side" != current ]] || control="$live_master"
+    profile=closureProfile
+    [[ "$side" != current || "$provenance_read" != true ]] || profile=currentClosureProfile
     files='{}'
     while IFS= read -r path; do
-      expected="$(jq -er --arg path "$path" '.closureProfile[$path]' <<<"$preflight_context")"
+      expected="$(jq -er --arg path "$path" --arg profile "$profile" '.[$profile][$path]' <<<"$preflight_context")"
       local_blob="$(git -C "$ROOT_DIR" rev-parse "$control:$path")"
       native_blob="$(gh api "repos/$repository/contents/$path?ref=$control" |
         jq -er --arg path "$path" 'select(.type == "file" and .path == $path) | .sha | select(type == "string")')"
@@ -346,7 +353,7 @@ collect_preflight_read() {
       files="$(jq -cn --argjson files "$files" --arg path "$path" \
         --arg local "$local_blob" --arg github "$native_blob" \
         '$files + {($path): {local: $local, github: $github}}')"
-    done < <(jq -r '.closureProfile | keys[]' <<<"$preflight_context")
+    done < <(jq -r --arg profile "$profile" '.[$profile] | keys[]' <<<"$preflight_context")
     if [[ "$side" = historical ]]; then historical="$files"; else current="$files"; fi
   done
   jq -n --slurpfile run "$tmp_dir/preflight-run.json" \
@@ -366,6 +373,26 @@ collect_preflight_read() {
         closure: {historicalControl: $historicalControl, currentControl: $currentControl,
           historical: $historical, current: $current, actions: $actions}
       } else error("duplicate or partial preflight-read native documents") end' >"$destination"
+  if [[ "$provenance_read" = true ]]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 -I - \
+      "$UPSTREAM_BINDING_VALIDATOR" "$repository" "$preflight_run_id" "$destination" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+specification = importlib.util.spec_from_file_location("preflight_native_binding", sys.argv[1])
+if specification is None or specification.loader is None:
+    raise SystemExit("preflight-read native collection source is unavailable")
+binding = importlib.util.module_from_spec(specification)
+specification.loader.exec_module(binding)
+destination = Path(sys.argv[4])
+observation = binding.collect_provenance_read_observation(
+    sys.argv[2], sys.argv[3], json.loads(destination.read_text(encoding="utf-8")),
+)
+destination.write_text(json.dumps(observation, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  fi
 }
 
 # Bind discovery and all nested validators to the verified script checkout.
@@ -482,6 +509,7 @@ else
       "$AUTHORITY_HELPER" preflight-read-context \
         --request "$REQUEST_FILE" --repository "$repository" --policy-json "$policy_json" \
         --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+        --current-master "$live_master" \
         --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR"
     )"
     preflight_run_id="$(jq -r '.runId' <<<"$preflight_context")"

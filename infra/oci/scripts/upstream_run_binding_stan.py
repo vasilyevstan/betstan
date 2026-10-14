@@ -329,6 +329,113 @@ def live_data_native_inputs(inputs, expected_names):
     return values
 
 
+def provenance_read_authority():
+    specification = importlib.util.spec_from_file_location(
+        "provenance_read_authority",
+        Path(__file__).resolve().parents[2] / "azure/agents/copilot_cli_authority_stan.py",
+    )
+    if specification is None or specification.loader is None:
+        fail("shared provenance-read source validator is unavailable")
+    try:
+        authority = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(authority)
+    except (OSError, ImportError, SyntaxError):
+        fail("shared provenance-read source validator is unavailable")
+    if not callable(getattr(authority, "validate_provenance_read_observation", None)):
+        fail("shared provenance-read source validator is unavailable")
+    return authority
+
+
+def collect_provenance_read_observation(repository, run_id, observation=None):
+    """Collect the leaf native proof without qualifying recovery history."""
+    authority = provenance_read_authority()
+    endpoint = f"repos/{repository}/actions/runs/{run_id}"
+    path = ".github/workflows/oci-live-data-rollout.yml"
+    if observation is None:
+        latest = gh_api(endpoint)
+        job_pages = gh_api_pages(endpoint + "/attempts/1/jobs?per_page=100")
+        if (
+            len(job_pages) != 1 or not isinstance(job_pages[0], dict)
+            or type(job_pages[0].get("total_count")) is not int
+            or job_pages[0]["total_count"] != 1
+            or not isinstance(job_pages[0].get("jobs"), list)
+            or len(job_pages[0]["jobs"]) != 1
+        ):
+            fail("provenance-read assigned-job inventory is incomplete or extended")
+        approvals = gh_api(endpoint + "/approvals?per_page=100")
+        pending = gh_api(endpoint + "/pending_deployments?per_page=100")
+        if (
+            not isinstance(approvals, list) or len(approvals) != 1 or pending != []
+        ):
+            fail("provenance-read approval or pending-deployment inventory is incomplete")
+        inventory = artifact_inventory(repository, run_id, "provenance-read")
+        observation = {
+            "schemaVersion": authority.PREFLIGHT_READ_EVIDENCE_SCHEMA,
+            "run": latest,
+            "attempts": [{"run": gh_api(endpoint + "/attempts/1"), "jobs": job_pages[0]}],
+            "workflow": gh_api(f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml"),
+            "historicalWorkflow": None, "compare": None, "pending": pending,
+            "approvals": approvals,
+            "artifacts": {"total_count": len(inventory), "artifacts": inventory},
+            "closure": {},
+        }
+    source_sha = observation["run"].get("head_sha")
+    if not isinstance(source_sha, str) or FULL_SHA.fullmatch(source_sha) is None:
+        fail("provenance-read native historical source is invalid")
+    historical = {
+        name: gh_api(f"repos/{repository}/contents/{name}?ref={source_sha}")
+        for name in authority.PROVENANCE_READ_BLOBS
+    }
+    dispatch = failed_deploy_native_inputs(
+        repository, run_id, source_sha, "provenance-read", resume_dispatch=True,
+    )
+    capture_id = require_dispatch_run(dispatch, "prerequisite_run_id")
+    capture_endpoint = f"repos/{repository}/actions/runs/{capture_id}"
+    capture_inventory = artifact_inventory(repository, capture_id, "provenance-read capture")
+    failed_inventory = observation["artifacts"].get("artifacts")
+
+    def archived(items, name):
+        if not isinstance(items, list):
+            fail("provenance-read artifact inventory is malformed")
+        selected = [item for item in items if isinstance(item, dict) and item.get("name") == name]
+        if len(selected) != 1 or type(selected[0].get("id")) is not int or selected[0]["id"] < 1:
+            fail("provenance-read exact artifact is absent or ambiguous")
+        artifact_id = selected[0]["id"]
+        return {
+            "artifactId": artifact_id,
+            "bytes": base64.b64encode(gh_api_bytes(
+                f"repos/{repository}/actions/artifacts/{artifact_id}/zip",
+            )).decode("ascii"),
+        }
+
+    previous = observation["closure"]
+    current = {
+        name: previous[name] for name in ("currentControl", "current")
+        if name in previous
+    }
+    if current:
+        current["currentAuthority"] = gh_api(
+            f"repos/{repository}/contents/infra/azure/agents/copilot_cli_authority_stan.py"
+            f"?ref={current['currentControl']}"
+        )
+    observation["historicalWorkflow"] = historical[path]
+    observation["closure"] = {
+        **current, "historicalControl": source_sha,
+        "historicalCommit": gh_api(f"repos/{repository}/git/commits/{source_sha}"),
+        "historical": historical, "actions": list(authority.PROVENANCE_READ_ACTIONS),
+        "dispatchInputs": dispatch,
+        "archive": archived(failed_inventory, f"oci-live-data-baselines-{run_id}-1"),
+        "capture": {
+            "run": gh_api(capture_endpoint), "attempt": gh_api(capture_endpoint + "/attempts/1"),
+            "workflow": gh_api(f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml"),
+            "artifacts": {"total_count": len(capture_inventory), "artifacts": capture_inventory},
+            "dataArchive": archived(capture_inventory, f"oci-live-data-rollout-{capture_id}-1"),
+            "baselineArchive": archived(capture_inventory, f"oci-live-data-baselines-{capture_id}-1"),
+        },
+    }
+    return observation
+
+
 def gh_api(path):
     result = subprocess.run(
         ["gh", "api", path],
@@ -2648,6 +2755,54 @@ def held_handoff_history(
         if observations[0] != observations[1]:
             fail(f"{label} native no-execution evidence changed between complete collections")
 
+    def validate_provenance_read_failure(row):
+        nonlocal authority
+        label = f"held-handoff provenance-read run {row['id']}"
+        if expired_receiver is None:
+            fail(f"{label} does not belong to the qualified expired-handoff recovery")
+        if authority is None:
+            authority = provenance_read_authority()
+        identity = {
+            "repository": repository, "runId": row["id"], "workflowId": row.get("workflow_id"),
+            "workflow": "oci-live-data-rollout.yml", "event": "workflow_dispatch",
+            "controlSha": row.get("head_sha"),
+            "displayTitle": f"oci-live-data apply-slip-index {row.get('head_sha')}",
+        }
+        if (
+            type(identity["workflowId"]) is not int or identity["workflowId"] < 1
+            or not isinstance(identity["controlSha"], str)
+            or FULL_SHA.fullmatch(identity["controlSha"]) is None
+        ):
+            fail(f"{label} cannot bind its native identity")
+        observations = []
+        for _ in range(2):
+            observation = collect_provenance_read_observation(repository, str(row["id"]))
+            native = authority.validate_provenance_read_observation(identity, observation)
+            for run in (observation["run"], observation["attempts"][0]["run"]):
+                if cutoff is not None and parse_timestamp(run.get("updated_at"), label) > cutoff:
+                    fail(f"{label} terminalized after the immutable successor cutoff")
+            latest = observation["run"]
+            for key in (
+                "id", "workflow_id", "path", "head_sha", "head_branch", "event",
+                "run_attempt", "status", "conclusion", "display_title",
+                "created_at", "run_started_at", "updated_at", "html_url",
+            ):
+                if (
+                    key not in row or key not in latest
+                    or type(row[key]) is not type(latest[key]) or row[key] != latest[key]
+                ):
+                    fail(f"{label} native detail differs from the complete history inventory")
+            if (
+                native["prerequisite_run_id"] != str(held["id"])
+                or native["resume_source_sha"] != held["head_sha"]
+                or native["failed_deploy_run_id"] != str(expired_receiver["id"])
+            ):
+                fail(f"{label} substitutes the retained holder or expired receiver")
+            observations.append(observation)
+        if observations[0] != observations[1]:
+            fail(f"{label} native proof changed between complete collections")
+        validate_descendant_scope(identity["controlSha"], subject_sha)
+
     policy = subprocess.run(
         ["git", "show", f"{subject_sha}:infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"],
         capture_output=True, text=True, check=False,
@@ -2762,7 +2917,13 @@ def held_handoff_history(
             if row.get("head_branch") != "master":
                 continue
             if updated >= lower:
-                validate_cancelled_unstarted(row)
+                if (
+                    workflow == "oci-live-data-rollout.yml"
+                    and row.get("status") == "completed" and row.get("conclusion") == "failure"
+                ):
+                    validate_provenance_read_failure(row)
+                else:
+                    validate_cancelled_unstarted(row)
                 continue
             if row.get("status") != "completed":
                 if authority is None:
@@ -2978,6 +3139,7 @@ def validate_held_handoff_reports(files, evidence):
             "EVIDENCE_DIR": str(directory), "EXPECTED_PHASE": "apply-slip-index",
             "EXPECTED_RUN_ID": evidence["workflow_run_id"], "EXPECTED_RUN_ATTEMPT": "1",
             "RESUME_BASELINE_DIR": "", "VERIFY_RESUME_APPLIED_RUN": "false", "RESUME_REPOSITORY": "",
+            "RESUME_NATIVE_DISPATCH_INPUTS": "", "RESUME_SUCCESSOR_RUN_ID": "",
             **{f"EXPECTED_{key.upper()}": evidence[key] for key in (
                 "source_sha", "build_run_id", "infrastructure_run_id",
                 "baseline_recovery_run_id", "baseline_recovery_source_sha",

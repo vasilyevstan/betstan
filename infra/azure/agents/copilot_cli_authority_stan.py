@@ -5,11 +5,13 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import secrets
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -117,6 +119,84 @@ PREFLIGHT_READ_STEPS = (
     (74, "Post Checkout approved current master commit", "success"),
     (75, "Complete job", "success"),
 )
+PROVENANCE_READ_TREE = "cb1c4e6dee539065bc4b1d607dfbaf30ae578f73"
+PROVENANCE_READ_BLOBS = {
+    ".github/workflows/oci-live-data-rollout.yml": "e9b7c1edb311ccee646ec44d717a6834bea99672",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh": "d5afe224080abecda336f1b3d190c83674835ebf",
+    "infra/azure/agents/copilot_cli_authority_stan.py": "96c652787e73c6030ac84299973cf1598dbbd0a8",
+    "infra/oci/scripts/upstream_run_binding_stan.py": "0a815c135d406fc63639dbea96cde5eb5edc604e",
+    "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh": "2efc8e665b5d0ea0ee8a069c779be4f5eb679d7b",
+    "infra/oci/scripts/k3s_disk_recovery_stan.py": "a1f21fe3f3b538ec6965b353c08bbac8738a8b19",
+    "infra/oci/scripts/validate-legacy-oci-provenance.py": "240a4bf56cd8e5763f475dc3baa0250a7c1add5f",
+    "infra/oci/scripts/verify-images.sh": "77ff8ecdcf9b8f86ed5be3550a3cd9f91c57a514",
+    "infra/oci/scripts/lib.sh": "caabac06cc16147e12ac536112d3aa5f14d54a34",
+    "infra/oci/scripts/application-registry.sh": "c97bc549688b9d04e727fbad175a6f558832c365",
+    "infra/oci/scripts/validate-partial-recovery-authority-stan.sh": "bf089777892d70d13b4bcf880d7e5311e26c00b9",
+}
+# The authority's own blob is bound to the exact retirement commit, not to
+# itself or to a later reader. Other current dependencies retain fixed pins.
+PROVENANCE_READ_CURRENT_BLOBS = {
+    **{
+        path: sha for path, sha in PROVENANCE_READ_BLOBS.items()
+        if path != "infra/azure/agents/copilot_cli_authority_stan.py"
+    },
+    ".github/workflows/oci-live-data-rollout.yml": "d4dd686a2af7f303988bb91174b50ced3ca9e256",
+    "infra/oci/scripts/upstream_run_binding_stan.py": "e9b726f2df2772609152cb9110dd77cabe2c28e2",
+    "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh": "ec4574ffa88978173068ddeb61826a1f6a950a37",
+}
+PROVENANCE_READ_ACTIONS = (
+    "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+)
+PROVENANCE_READ_STEPS = (
+    (1, "Set up job", "success"),
+    (2, "Initialize isolated OCI data paths", "success"),
+    (3, "Checkout approved current master commit", "success"),
+    (4, "Validate exact SHA phase and trusted upstream runs", "success"),
+    (5, "Reject competing production activity", "success"),
+    (6, "Download exact OCI image provenance", "success"),
+    (7, "Download exact OCI infrastructure provenance", "success"),
+    (8, "Download exact release disk checkpoint", "success"),
+    (9, "Download prerequisite data evidence", "success"),
+    (10, "Download failed deploy protected baseline", "skipped"),
+    (11, "Download explicitly selected recovery baseline authority", "skipped"),
+    (12, "Bind historical recovery source through its exact artifact", "skipped"),
+    (13, "Verify immutable release and phase provenance", "failure"),
+    (14, "Install pinned OCI CLI", "skipped"),
+    (15, "Verify OKE identity", "skipped"),
+    (16, "Verify k3s identity", "skipped"),
+    (17, "Reconcile expired and authorize current runner IPv4", "skipped"),
+    (18, "Configure kubectl from exact cluster OCID", "skipped"),
+    (19, "Open ephemeral OCI Bastion access to k3s", "skipped"),
+    (20, "Verify exact failed-deploy resume state", "skipped"),
+    (21, "Capture and validate pre-mutation rollback baseline", "skipped"),
+    (22, "Verify reader-qualified released activation state", "skipped"),
+    (23, "Revalidate exact release disk checkpoint before lock mutation", "skipped"),
+    (24, "Acquire database operation lock", "skipped"),
+    (25, "Enter or re-establish live data maintenance", "skipped"),
+    (26, "Demote and verify exact retained live-acceptance account", "skipped"),
+    (27, "Delete exact orphaned live-acceptance slips", "skipped"),
+    (28, "Execute exact-digest live data phase", "skipped"),
+    (29, "Restore runtime or verify final deploy handoff", "skipped"),
+    (30, "Capture post-phase runtime baseline", "skipped"),
+    (31, "Require executed data-step evidence", "skipped"),
+    (32, "Upload exact sanitized data evidence", "success"),
+    (33, "Upload protected rollout baselines", "success"),
+    (34, "Restore runtime or retain hold if final handoff packaging failed", "skipped"),
+    (35, "Release database operation lock unless handed to deploy", "skipped"),
+    (36, "Revoke exact runner rule", "skipped"),
+    (37, "Close ephemeral OCI Bastion access", "skipped"),
+    (38, "Remove isolated OCI client state", "success"),
+    (76, "Post Checkout approved current master commit", "success"),
+    (77, "Complete job", "success"),
+)
+PROVENANCE_READ_BASELINE_MEMBERS = {
+    "SHA256SUMS", "deployments.tsv", "baseline-provenance.env", "images.tsv",
+    "live-images.tsv", "migration-backup-references.tsv", "migration-journal.json",
+    "migration-lock.json", "pod-images.tsv", "public-http.tsv", "queues.tsv",
+    "sse.tsv", "telemetry-pre-run.env", "trusted-deploy-provenance.txt",
+}
 AUTHORITY_OWNER = "github-copilot-cli"
 AUTHORITY_TTL_SECONDS = 24 * 60 * 60
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -3226,7 +3306,10 @@ def preflight_read_context(args, directory):
         or record["schemaVersion"] != RECORD_SCHEMA_V1
         or record["state"] != "consumed"
         or record["workflow"] != "oci-live-data-rollout.yml"
-        or record["workflowBlobSha"] != PREFLIGHT_READ_BLOBS[args.workflow_path]
+        or record["workflowBlobSha"] not in {
+            PREFLIGHT_READ_BLOBS[args.workflow_path],
+            PROVENANCE_READ_BLOBS[args.workflow_path],
+        }
     ):
         fail("preflight-read retirement requires the exact consumed resume-deploy generation")
     policy = validate_policy(load_json_text(args.policy_json, "policy"))
@@ -3250,12 +3333,23 @@ def command_preflight_read_context(args):
     directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
     with repository_claim_lock(directory, nonblocking=True):
         _, _, record, _, _, snapshot = preflight_read_context(args, directory)
-        print(canonical_json({
+        context = {
             "runId": record["runId"], "version": record["version"],
             "controlSha": record["controlSha"], "workflowBlobSha": record["workflowBlobSha"],
             "snapshot": snapshot, "closureProfile": PREFLIGHT_READ_ARCHIVE_BLOBS,
             "actionPins": PREFLIGHT_READ_ACTIONS,
-        }))
+        }
+        if record["workflowBlobSha"] == PROVENANCE_READ_BLOBS[
+            ".github/workflows/oci-live-data-rollout.yml"
+        ]:
+            context.update(
+                closureProfile=PROVENANCE_READ_BLOBS,
+                currentClosureProfile=provenance_read_current_profile(
+                    args.current_master, validate_checkout=True,
+                ),
+                actionPins=PROVENANCE_READ_ACTIONS,
+            )
+        print(canonical_json(context))
 
 
 def validate_preflight_read_receipts(record):
@@ -3271,51 +3365,49 @@ def validate_preflight_read_receipts(record):
             fail("preflight-read receipt is not bound to the original run and operation")
 
 
-def validate_preflight_read_observation(
-    record, observation, current_master, *,
-    admitted_profiles=(PREFLIGHT_READ_ARCHIVE_BLOBS,),
-):
-    path = ".github/workflows/oci-live-data-rollout.yml"
-    if (
-        not isinstance(observation, dict)
-        or set(observation) != PREFLIGHT_READ_OBSERVATION_KEYS
-        or observation["schemaVersion"] != PREFLIGHT_READ_EVIDENCE_SCHEMA
-        or record["operation"] != PREFLIGHT_READ_OPERATION
-        or record["workflow"] != "oci-live-data-rollout.yml"
-        or record["workflowBlobSha"] != PREFLIGHT_READ_BLOBS[path]
-        or not isinstance(current_master, str) or not FULL_SHA.fullmatch(current_master)
-    ):
-        fail("preflight-read observation schema or exact operation is invalid")
-    workflow = observation["workflow"]
-    if (
-        not isinstance(workflow, dict) or type(workflow.get("id")) is not int
-        or any(workflow.get(name) != value for name, value in (
-            ("id", record["workflowId"]), ("path", path), ("state", "disabled_manually"),
-        ))
-    ):
-        fail("preflight-read workflow identity or disabled state mismatch")
-    source, _ = decode_historical_workflow(
-        observation["historicalWorkflow"], path, expected_blob_sha=PREFLIGHT_READ_BLOBS[path],
-    )
-    for action in PREFLIGHT_READ_ACTIONS:
-        if not re.search(r"^[ \t]+uses: " + re.escape(action) + r"[ \t]*(?:#[^\n]*)?$", source, re.MULTILINE):
-            fail("preflight-read executed action pin differs from the reviewed closure")
-    for profile in admitted_profiles:
-        expected_files = {name: {"local": sha, "github": sha} for name, sha in profile.items()}
-        if observation["closure"] == {
-            "historicalControl": record["controlSha"], "currentControl": current_master,
-            "historical": expected_files, "current": expected_files,
-            "actions": list(PREFLIGHT_READ_ACTIONS),
-        }:
-            break
-    else:
-        fail("preflight-read historical/current dependency closure differs from the reviewed profile")
-    if current_master == record["controlSha"]:
-        if observation["compare"] is not None:
-            fail("same-control preflight retirement has unexpected ancestry evidence")
-    else:
-        validate_strict_ancestor_compare(observation["compare"], record["controlSha"], current_master)
+def provenance_read_current_profile(current_master, *, validate_checkout=False):
+    if not isinstance(current_master, str) or not FULL_SHA.fullmatch(current_master):
+        fail("provenance-read retirement requires the exact current source")
+    root = Path(__file__).resolve().parents[3]
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
 
+    def git(*arguments):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *arguments], capture_output=True,
+                text=True, check=False, env=environment, timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            fail("provenance-read immutable retirement source is unavailable")
+        if result.returncode:
+            fail("provenance-read immutable retirement source is unavailable")
+        return result.stdout.strip()
+
+    profile = dict(PROVENANCE_READ_CURRENT_BLOBS)
+    for path, expected in profile.items():
+        if git("rev-parse", "--verify", f"{current_master}:{path}") != expected:
+            fail("provenance-read current source differs from the reviewed dependency closure")
+    authority_path = "infra/azure/agents/copilot_cli_authority_stan.py"
+    authority_blob = git("rev-parse", "--verify", f"{current_master}:{authority_path}")
+    if not FULL_SHA.fullmatch(authority_blob):
+        fail("provenance-read retirement authority blob is invalid")
+    profile[authority_path] = authority_blob
+    if validate_checkout:
+        raw = Path(__file__).read_bytes()
+        observed = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+        if (
+            Path(__file__).is_symlink() or observed != authority_blob
+            or git("rev-parse", "HEAD") != current_master
+            or git("status", "--porcelain", "--untracked-files=all")
+        ):
+            fail("provenance-read executing authority is not the clean exact retirement source")
+    return profile
+
+
+def validate_preflight_read_execution(record, observation, expected_steps):
     attempts = observation["attempts"]
     if (
         not isinstance(attempts, list) or len(attempts) != 1
@@ -3362,17 +3454,17 @@ def validate_preflight_read_observation(
     if not all(window[1] <= started <= completed <= window[2] for window in windows):
         fail("preflight-read job timestamps are outside the failed run")
     steps = job.get("steps")
-    if not isinstance(steps, list) or len(steps) != len(PREFLIGHT_READ_STEPS):
+    if not isinstance(steps, list) or len(steps) != len(expected_steps):
         fail("preflight-read step inventory is incomplete or extended")
     previous = started
-    for step, expected in zip(steps, PREFLIGHT_READ_STEPS):
+    for step, expected in zip(steps, expected_steps):
         if (
             not isinstance(step, dict) or type(step.get("number")) is not int
             or tuple(step.get(name) for name in ("number", "name", "conclusion")) != expected
             or step.get("status") != "completed"
             or "started_at" not in step or "completed_at" not in step
         ):
-            fail("preflight-read steps differ from the exact reviewed 39-step sequence")
+            fail(f"preflight-read steps differ from the exact reviewed {len(expected_steps)}-step sequence")
         if step["conclusion"] == "skipped" and step["started_at"] is None and step["completed_at"] is None:
             continue
         step_start = parse_utc(step["started_at"], "step start")
@@ -3385,6 +3477,339 @@ def validate_preflight_read_observation(
             previous = step_end
     if observation["pending"] != []:
         fail("preflight-read run still has pending deployments")
+
+
+def validate_provenance_read_observation(record, observation):
+    """Leaf native proof shared by owned retirement and portable history."""
+    path = ".github/workflows/oci-live-data-rollout.yml"
+    if (
+        not isinstance(observation, dict) or set(observation) != PREFLIGHT_READ_OBSERVATION_KEYS
+        or observation["schemaVersion"] != PREFLIGHT_READ_EVIDENCE_SCHEMA
+        or record["workflow"] != "oci-live-data-rollout.yml"
+        or record["event"] != "workflow_dispatch"
+    ):
+        fail("provenance-read native observation is incomplete")
+    workflow = observation["workflow"]
+    if (
+        not isinstance(workflow, dict) or type(workflow.get("id")) is not int
+        or workflow["id"] != record["workflowId"] or workflow.get("path") != path
+        or workflow.get("state") not in {"active", "disabled_manually"}
+    ):
+        fail("provenance-read native workflow identity differs")
+    closure = observation["closure"]
+    native_keys = {
+        "historicalControl", "historicalCommit", "historical", "actions",
+        "dispatchInputs", "archive", "capture",
+    }
+    local_keys = {"currentControl", "current", "currentAuthority"}
+    if (
+        not isinstance(closure, dict) or not native_keys <= set(closure)
+        or set(closure) - native_keys not in (set(), local_keys)
+        or closure["historicalControl"] != record["controlSha"]
+        or not isinstance(closure["historicalCommit"], dict)
+        or closure["historicalCommit"].get("sha") != record["controlSha"]
+        or not isinstance(closure["historicalCommit"].get("tree"), dict)
+        or closure["historicalCommit"]["tree"].get("sha") != PROVENANCE_READ_TREE
+        or not isinstance(closure["historical"], dict)
+        or set(closure["historical"]) != set(PROVENANCE_READ_BLOBS)
+        or closure["actions"] != list(PROVENANCE_READ_ACTIONS)
+        or closure["historical"].get(path) != observation["historicalWorkflow"]
+    ):
+        fail("provenance-read historical execution closure differs")
+    source = None
+    for name, pin in PROVENANCE_READ_BLOBS.items():
+        decoded, _ = decode_historical_workflow(
+            closure["historical"][name], name, expected_blob_sha=pin,
+        )
+        if name == path:
+            source = decoded
+    for action in PROVENANCE_READ_ACTIONS:
+        if not re.search(r"^[ \t]+uses: " + re.escape(action) + r"[ \t]*(?:#[^\n]*)?$", source, re.MULTILINE):
+            fail("provenance-read executed action pin differs")
+    validate_preflight_read_execution(record, observation, PROVENANCE_READ_STEPS)
+    specification = importlib.util.spec_from_file_location(
+        "provenance_read_binding",
+        Path(__file__).resolve().parents[2] / "oci/scripts/upstream_run_binding_stan.py",
+    )
+    if specification is None or specification.loader is None:
+        fail("provenance-read artifact validator is unavailable")
+    binding = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(binding)
+    native = binding.live_data_native_inputs(closure["dispatchInputs"], {
+        "approved_sha", "resume_source_sha", "build_run_id", "infrastructure_run_id",
+        "checkpoint_source_sha", "disk_checkpoint_run_id", "phase", "prerequisite_run_id",
+        "baseline_recovery_run_id", "baseline_recovery_source_sha", "failed_deploy_run_id",
+        "failed_activation_run_id", "failed_activation_user_id", "confirmation",
+    })
+    if (
+        native["approved_sha"] != record["controlSha"]
+        or native["phase"] != "apply-slip-index"
+        or native["confirmation"] != "RESUME APPLIED LIVE DATA EXACT SHA"
+        or native["failed_activation_run_id"] != "0"
+        or native["failed_activation_user_id"] != "0"
+        or native["baseline_recovery_run_id"] != "0"
+        or native["baseline_recovery_source_sha"] != "none"
+        or any(FULL_SHA.fullmatch(native[key]) is None for key in (
+            "approved_sha", "resume_source_sha", "checkpoint_source_sha",
+        ))
+        or any(POSITIVE_INTEGER.fullmatch(native[key]) is None for key in (
+            "build_run_id", "infrastructure_run_id", "disk_checkpoint_run_id",
+            "prerequisite_run_id", "failed_deploy_run_id",
+        ))
+    ):
+        fail("provenance-read native inputs do not derive the exact resume operation")
+
+    def archive(encoded, label):
+        if not isinstance(encoded, str) or not 0 < len(encoded) <= 2 * binding.MAX_ARTIFACT_ARCHIVE_BYTES:
+            fail(f"{label} native archive is absent or oversized")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except ValueError:
+            fail(f"{label} native archive is malformed")
+        if len(raw) > binding.MAX_ARTIFACT_ARCHIVE_BYTES:
+            fail(f"{label} native archive is oversized")
+        return binding.zip_files(raw, label)
+
+    def artifacts(inventory, run_id, source_sha, names):
+        if (
+            not isinstance(inventory, dict) or type(inventory.get("total_count")) is not int
+            or inventory["total_count"] != len(names)
+            or not isinstance(inventory.get("artifacts"), list)
+            or len(inventory["artifacts"]) != len(names)
+        ):
+            fail("provenance-read native artifact inventory is incomplete or extended")
+        selected, seen = {}, set()
+        for item in inventory["artifacts"]:
+            if not isinstance(item, dict):
+                fail("provenance-read native artifact is malformed")
+            artifact_id = require_exact_integer(item.get("id"), "artifact ID", minimum=1)
+            run = item.get("workflow_run")
+            if (
+                artifact_id in seen or item.get("name") not in names or item["name"] in selected
+                or item.get("expired") is not False
+                or type(item.get("size_in_bytes")) is not int
+                or not 0 < item["size_in_bytes"] <= binding.MAX_ARTIFACT_ARCHIVE_BYTES
+                or not isinstance(run, dict) or type(run.get("id")) is not int
+                or run["id"] != int(run_id) or run.get("head_sha") != source_sha
+                or run.get("head_branch") != "master"
+            ):
+                fail("provenance-read artifact is replaced, expired, or bound to another native run")
+            seen.add(artifact_id)
+            selected[item["name"]] = item
+        return selected
+
+    failed_name = f"oci-live-data-baselines-{record['runId']}-1"
+    failed_artifact = artifacts(
+        observation["artifacts"], record["runId"], record["controlSha"], {failed_name},
+    )[failed_name]
+    if (
+        not isinstance(closure["archive"], dict)
+        or set(closure["archive"]) != {"artifactId", "bytes"}
+        or type(closure["archive"]["artifactId"]) is not int
+        or closure["archive"]["artifactId"] != failed_artifact["id"]
+    ):
+        fail("provenance-read failed artifact bytes are not natively bound")
+    failed_files = archive(closure["archive"]["bytes"], "provenance-read before baseline")
+    if set(failed_files) != {
+        f"oci-data-baseline-before/{name}" for name in PROVENANCE_READ_BASELINE_MEMBERS
+    }:
+        fail("provenance-read archive is not the exact fourteen-member before-only capture")
+    before = binding.original_before_baseline(failed_files, "provenance-read before baseline")
+    checksum = binding.validate_checksum_manifest(before, "provenance-read before baseline")
+    capture = closure["capture"]
+    if not isinstance(capture, dict) or set(capture) != {
+        "run", "attempt", "workflow", "artifacts", "dataArchive", "baselineArchive",
+    }:
+        fail("provenance-read native capture proof is incomplete")
+    capture_id, capture_source = native["prerequisite_run_id"], native["resume_source_sha"]
+    capture_identity = {
+        **record, "runId": int(capture_id), "controlSha": capture_source,
+        "displayTitle": f"oci-live-data apply-slip-index {capture_source}",
+    }
+    capture_workflow = capture["workflow"]
+    if (
+        not isinstance(capture_workflow, dict)
+        or type(capture_workflow.get("id")) is not int
+        or capture_workflow["id"] != record["workflowId"]
+        or capture_workflow.get("path") != path
+    ):
+        fail("provenance-read capture workflow identity differs")
+    capture_windows = []
+    failed_start = min(parse_utc(item["created_at"], "failed creation") for item in (
+        observation["run"], observation["attempts"][0]["run"],
+    ))
+    for item in (capture["run"], capture["attempt"]):
+        if not isinstance(item, dict):
+            fail("provenance-read capture identity is incomplete")
+        for key in ("id", "workflow_id", "run_attempt"):
+            require_exact_integer(item.get(key), key, minimum=1)
+        validate_run_against_record(item, capture_identity)
+        window = tuple(parse_utc(item.get(key), key) for key in (
+            "created_at", "run_started_at", "updated_at",
+        ))
+        if (
+            item.get("status") != "completed" or item.get("conclusion") != "success"
+            or not window[0] <= window[1] <= window[2] <= failed_start
+        ):
+            fail("provenance-read captured predecessor is not an earlier successful first attempt")
+        capture_windows.append(window)
+    if capture_windows[0][:2] != capture_windows[1][:2]:
+        fail("provenance-read capture endpoints disagree")
+    data_name = f"oci-live-data-rollout-{capture_id}-1"
+    baseline_name = f"oci-live-data-baselines-{capture_id}-1"
+    captured_artifacts = artifacts(
+        capture["artifacts"], capture_id, capture_source, {data_name, baseline_name},
+    )
+    for key, name in (("dataArchive", data_name), ("baselineArchive", baseline_name)):
+        if (
+            not isinstance(capture[key], dict) or set(capture[key]) != {"artifactId", "bytes"}
+            or type(capture[key]["artifactId"]) is not int
+            or capture[key]["artifactId"] != captured_artifacts[name]["id"]
+        ):
+            fail("provenance-read capture artifact bytes are not natively bound")
+    data_files = archive(capture["dataArchive"]["bytes"], "provenance-read captured evidence")
+    binding.validate_checksum_manifest(data_files, "provenance-read captured evidence")
+    _, data_raw = binding.unique_artifact_file(data_files, "provenance.env", "captured evidence")
+    data = binding.parse_env(data_raw, "captured evidence", binding.LIVE_V6_KEYS)
+    data_expected = {
+        "schema_version": "live-betting-v6", "source_sha": capture_source,
+        "workflow_run_id": capture_id, "workflow_run_attempt": "1",
+        "phase": "apply-slip-index", "status": "PASS", "baseline_sha256": checksum,
+        **{key: native[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id", "baseline_recovery_source_sha",
+        )},
+        **{key: "true" for key in (
+            "backfill_complete", "index_ready", "event_reschedule_complete",
+            "backoffice_pre_september_cleanup_complete", "maintenance_fence_enforced",
+            "writers_quiesced", "runtime_held_for_deploy", "operation_lock_enforced",
+            "operation_lock_handoff",
+        )},
+    }
+    if any(data.get(key) != value for key, value in data_expected.items()):
+        fail("provenance-read capture substitutes its authenticated release tuple or checksum")
+    captured_baseline = binding.original_before_baseline(
+        archive(capture["baselineArchive"]["bytes"], "provenance-read captured baseline"),
+        "provenance-read captured baseline",
+    )
+    if before != captured_baseline:
+        fail("provenance-read supplied bytes differ from the authenticated predecessor capture")
+    baseline = binding.parse_env(
+        before["baseline-provenance.env"], "provenance-read captured baseline",
+        binding.BASELINE_PROVENANCE_KEYS,
+    )
+    if (
+        baseline["baseline_capture_run_id"] != capture_id
+        or baseline["baseline_capture_run_attempt"] != "1"
+        or FULL_SHA.fullmatch(baseline["baseline_source_sha"]) is None
+        or POSITIVE_INTEGER.fullmatch(baseline["baseline_deploy_run_id"]) is None
+        or baseline["baseline_deploy_run_attempt"] != "1"
+        or baseline["baseline_recovery_run_id"] != native["baseline_recovery_run_id"]
+        or baseline["registry_provider"] != "ghcr"
+        or baseline["registry_host"] != "ghcr.io"
+        or baseline["registry_repository"] != binding.APPLICATION_REPOSITORY
+        or baseline["registry_public_anonymous"] != "true"
+    ):
+        fail("provenance-read native baseline capture identity differs")
+    reviews = observation["approvals"]
+    if not isinstance(reviews, list) or len(reviews) != 1:
+        fail("provenance-read native approval history is incomplete or extended")
+    review = reviews[0]
+    if (
+        not isinstance(review, dict) or review.get("state") != "approved"
+        or not isinstance(review.get("user"), dict)
+        or not isinstance(review["user"].get("login"), str) or not review["user"]["login"].strip()
+        or not isinstance(review.get("comment"), str) or not review["comment"].strip()
+        or not isinstance(review.get("environments"), list) or len(review["environments"]) != 1
+        or not isinstance(review["environments"][0], dict)
+        or review["environments"][0].get("name") != "oci-migration"
+    ):
+        fail("provenance-read native approval identity is incomplete")
+    require_exact_integer(review["user"].get("id"), "native approval user", minimum=1)
+    require_exact_integer(review["environments"][0].get("id"), "native approval environment", minimum=1)
+    return native
+
+
+def validate_preflight_read_observation(
+    record, observation, current_master, *,
+    admitted_profiles=(PREFLIGHT_READ_ARCHIVE_BLOBS,),
+):
+    path = ".github/workflows/oci-live-data-rollout.yml"
+    if record["workflowBlobSha"] == PROVENANCE_READ_BLOBS[path]:
+        native = validate_provenance_read_observation(record, observation)
+        if (
+            record["operation"] != PREFLIGHT_READ_OPERATION
+            or observation["workflow"]["state"] != "disabled_manually"
+            or native != {"approved_sha": record["controlSha"], **record["inputs"]}
+        ):
+            fail("provenance-read native operation differs from the owned consumed request")
+        profile = provenance_read_current_profile(current_master)
+        closure = observation["closure"]
+        if (
+            closure.get("currentControl") != current_master
+            or closure.get("current") != {
+                name: {"local": sha, "github": sha} for name, sha in profile.items()
+            }
+        ):
+            fail("provenance-read current dependency closure is incomplete or unreviewed")
+        decode_historical_workflow(
+            closure.get("currentAuthority"), "infra/azure/agents/copilot_cli_authority_stan.py",
+            expected_blob_sha=profile["infra/azure/agents/copilot_cli_authority_stan.py"],
+        )
+        if current_master == record["controlSha"]:
+            if observation["compare"] is not None:
+                fail("same-control provenance retirement has unexpected ancestry evidence")
+        else:
+            validate_strict_ancestor_compare(observation["compare"], record["controlSha"], current_master)
+        validate_preflight_read_receipts(record)
+        if (
+            len(record["approvals"]) != 1
+            or str(observation["approvals"][0]["environments"][0]["id"])
+                != str(record["approvals"][0]["environmentId"])
+        ):
+            fail("provenance-read native approval differs from the preserved same-run receipt")
+        return
+    if (
+        not isinstance(observation, dict)
+        or set(observation) != PREFLIGHT_READ_OBSERVATION_KEYS
+        or observation["schemaVersion"] != PREFLIGHT_READ_EVIDENCE_SCHEMA
+        or record["operation"] != PREFLIGHT_READ_OPERATION
+        or record["workflow"] != "oci-live-data-rollout.yml"
+        or record["workflowBlobSha"] != PREFLIGHT_READ_BLOBS[path]
+        or not isinstance(current_master, str) or not FULL_SHA.fullmatch(current_master)
+    ):
+        fail("preflight-read observation schema or exact operation is invalid")
+    workflow = observation["workflow"]
+    if (
+        not isinstance(workflow, dict) or type(workflow.get("id")) is not int
+        or any(workflow.get(name) != value for name, value in (
+            ("id", record["workflowId"]), ("path", path), ("state", "disabled_manually"),
+        ))
+    ):
+        fail("preflight-read workflow identity or disabled state mismatch")
+    source, _ = decode_historical_workflow(
+        observation["historicalWorkflow"], path, expected_blob_sha=PREFLIGHT_READ_BLOBS[path],
+    )
+    for action in PREFLIGHT_READ_ACTIONS:
+        if not re.search(r"^[ \t]+uses: " + re.escape(action) + r"[ \t]*(?:#[^\n]*)?$", source, re.MULTILINE):
+            fail("preflight-read executed action pin differs from the reviewed closure")
+    for profile in admitted_profiles:
+        expected_files = {name: {"local": sha, "github": sha} for name, sha in profile.items()}
+        if observation["closure"] == {
+            "historicalControl": record["controlSha"], "currentControl": current_master,
+            "historical": expected_files, "current": expected_files,
+            "actions": list(PREFLIGHT_READ_ACTIONS),
+        }:
+            break
+    else:
+        fail("preflight-read historical/current dependency closure differs from the reviewed profile")
+    if current_master == record["controlSha"]:
+        if observation["compare"] is not None:
+            fail("same-control preflight retirement has unexpected ancestry evidence")
+    else:
+        validate_strict_ancestor_compare(observation["compare"], record["controlSha"], current_master)
+
+    validate_preflight_read_execution(record, observation, PREFLIGHT_READ_STEPS)
     artifacts = observation["artifacts"]
     if (
         not isinstance(artifacts, dict) or type(artifacts.get("total_count")) is not int
@@ -4935,6 +5360,8 @@ def build_parser():
         common_authority_arguments(special)
         for argument in ("request", "repository", "workflow-id", "workflow-path", "policy-json"):
             special.add_argument(f"--{argument}", required=True)
+        if name == "preflight-read-context":
+            special.add_argument("--current-master")
         if name in {"retire-zero-execution", "retire-preflight-read-only-failure"}:
             for argument in (
                 "current-master", "expected-snapshot", "token",

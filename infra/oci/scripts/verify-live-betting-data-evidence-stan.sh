@@ -17,6 +17,8 @@ EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="${EXPECTED_BASELINE_RECOVERY_SOURCE_SHA:-
 RESUME_BASELINE_DIR="${RESUME_BASELINE_DIR:-}"
 VERIFY_RESUME_APPLIED_RUN="${VERIFY_RESUME_APPLIED_RUN:-false}"
 RESUME_REPOSITORY="${RESUME_REPOSITORY:-}"
+RESUME_NATIVE_DISPATCH_INPUTS="${RESUME_NATIVE_DISPATCH_INPUTS:-}"
+RESUME_SUCCESSOR_RUN_ID="${RESUME_SUCCESSOR_RUN_ID:-}"
 
 fail() {
   echo "live_betting_data_evidence=FAIL reason=$*" >&2
@@ -74,6 +76,15 @@ if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
   [[ "$RESUME_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
     fail "RESUME_REPOSITORY is invalid"
 fi
+if [[ -n "$RESUME_NATIVE_DISPATCH_INPUTS" || -n "$RESUME_SUCCESSOR_RUN_ID" ]]; then
+  [[ -n "$RESUME_NATIVE_DISPATCH_INPUTS" &&
+     "$RESUME_SUCCESSOR_RUN_ID" =~ ^[1-9][0-9]*$ &&
+     "$RESUME_SUCCESSOR_RUN_ID" = "${GITHUB_RUN_ID:-}" ]] ||
+    fail "qualified resume context requires the exact native current successor"
+  [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" &&
+     "$checkpoint_expectation_count" == "4" ]] ||
+    fail "qualified resume context requires native verification and the complete checkpoint"
+fi
 case "$EXPECTED_PHASE" in
   dry-run|apply-backfills|apply-slip-index) ;;
   *) fail "unexpected evidence phase" ;;
@@ -95,7 +106,8 @@ python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_DISK_CHECKPOINT_DISPOSITION" \
   "$RESUME_BASELINE_DIR" \
   "$(dirname "${BASH_SOURCE[0]}")/upstream_run_binding_stan.py" \
-  "$VERIFY_RESUME_APPLIED_RUN" "$RESUME_REPOSITORY" <<'PY'
+  "$VERIFY_RESUME_APPLIED_RUN" "$RESUME_REPOSITORY" \
+  "$RESUME_NATIVE_DISPATCH_INPUTS" "$RESUME_SUCCESSOR_RUN_ID" <<'PY'
 import hashlib
 import json
 import re
@@ -475,14 +487,74 @@ if resume_baseline_dir:
         fail("resume rollback baseline digest differs from data evidence")
     baseline_provenance = read_env(baseline_root / "baseline-provenance.env")
     expected_capture_run_id = resolved_applied_data_run_id
-    if (
-        sys.argv[16] == "true" and resume_authority_path.exists()
-    ):
+    native = None
+    if sys.argv[18] or sys.argv[16] == "true" and resume_authority_path.exists():
         import importlib.util
         spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[15])
+        if spec is None or spec.loader is None:
+            fail("native resume source validator is unavailable")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         runtime = "oke" if checkpoint_expected["disk_checkpoint_disposition"] == "NOT_APPLICABLE" else "k3s"
+    if sys.argv[18]:
+        if schema_version != "live-betting-v6" or resume_authority_path.exists():
+            fail("qualified expired resume requires the envelope-free v6 prerequisite")
+
+        def unique_pairs(pairs):
+            values = {}
+            for key, value in pairs:
+                if key in values:
+                    fail("qualified resume dispatch inputs contain a duplicate key")
+                values[key] = value
+            return values
+
+        try:
+            dispatch = json.loads(sys.argv[18], object_pairs_hook=unique_pairs)
+        except (ValueError, TypeError):
+            fail("qualified resume dispatch inputs are malformed")
+        dispatch = module.live_data_native_inputs(dispatch, {
+            "approved_sha", "resume_source_sha", "build_run_id",
+            "infrastructure_run_id", "checkpoint_source_sha", "disk_checkpoint_run_id",
+            "phase", "prerequisite_run_id", "baseline_recovery_run_id",
+            "baseline_recovery_source_sha", "failed_deploy_run_id",
+            "failed_activation_run_id", "failed_activation_user_id", "confirmation",
+        })
+        bindings = {
+            "resume_source_sha": expected["source_sha"],
+            "prerequisite_run_id": expected["workflow_run_id"],
+            "phase": expected["phase"],
+            **{key: expected[key] for key in (
+                "build_run_id", "infrastructure_run_id",
+                "baseline_recovery_run_id", "baseline_recovery_source_sha",
+            )},
+            **{key: checkpoint_expected[key] for key in (
+                "checkpoint_source_sha", "disk_checkpoint_run_id",
+            )},
+        }
+        if any(dispatch[key] != value for key, value in bindings.items()):
+            fail("qualified resume dispatch inputs differ from the prerequisite")
+        native = module.validate_expired_handoff_resume(
+            sys.argv[17], dispatch["failed_deploy_run_id"], dispatch["resume_source_sha"],
+            dispatch, runtime, "local expired resume",
+            successor_run_id=sys.argv[19],
+        )
+        if (
+            not isinstance(native, dict)
+            or native.get("no_takeover_handoff_qualification") != "expired-own-handoff"
+            or native.get("resume_maintenance_mode") != "pre-runtime-hold"
+            or native.get("baseline_capture_run_id") != expected["workflow_run_id"]
+            or native.get("baseline_sha256") != provenance["baseline_sha256"]
+        ):
+            fail("native expired-handoff qualification is missing or contradictory")
+        baseline_files = {
+            path.relative_to(baseline_root).as_posix(): path.read_bytes()
+            for path in baseline_root.rglob("*") if path.is_file()
+        }
+        if baseline_files != native.get("_baseline_files"):
+            fail("resume rollback baseline bytes differ from the authenticated current capture")
+        resolved_applied_data_run_id = native["applied_data_run_id"]
+        resolved_applied_source_sha = native["applied_source_sha"]
+    elif sys.argv[16] == "true" and resume_authority_path.exists():
         native = module.validate_pre_runtime_resume_chain(
             sys.argv[17], expected["workflow_run_id"], runtime, include_capture=True,
         )
@@ -491,6 +563,7 @@ if resume_baseline_dir:
             or native["applied_source_sha"] != resolved_applied_source_sha
         ):
             fail("native resume lineage differs from the local evidence")
+    if native is not None:
         expected_capture_run_id = native["baseline_capture_run_id"]
         if expected_capture_run_id != resolved_applied_data_run_id:
             baseline_files = {
