@@ -6193,11 +6193,19 @@ else:
     assert json.loads((Path(authority_directory) / "final.json").read_text()) == stored
     assert not list(root.rglob("__pycache__"))
     assert not git("status", "--porcelain", "--untracked-files=all")
-    token = a.acquire_lock_file(saved_authority, "100", os.getpid())
-    retirement_args = SimpleNamespace(
-        **vars(context_args), first_observation=str(first), second_observation=str(second),
-        token=token, expected_snapshot=preflight_context["snapshot"],
-    )
+    lock_token = a.acquire_lock_file(saved_authority, "100", os.getpid())
+    retirement_argv = ["retire-preflight-read-only-failure"]
+    for name, value in vars(context_args).items():
+        retirement_argv.extend(["--" + name.replace("_", "-"), str(value)])
+    retirement_argv.extend([
+        "--first-observation", str(first), "--second-observation", str(second),
+        "--token", lock_token, "--expected-snapshot", preflight_context["snapshot"],
+    ])
+    retirement_args = a.build_parser().parse_args(retirement_argv)
+    assert all(getattr(retirement_args, name) == value for name, value in vars(context_args).items())
+    assert retirement_args.function is a.command_retire_preflight_read
+    assert retirement_args.token == lock_token
+    assert retirement_args.expected_snapshot == preflight_context["snapshot"]
     intent_before, capture_before = intent_file.read_bytes(), capture_file.read_bytes()
     def rejects_size(callback):
         error = io.StringIO()
@@ -6221,7 +6229,7 @@ else:
     try:
         sys.dont_write_bytecode = False
         with contextlib.redirect_stdout(io.StringIO()):
-            a.command_retire_preflight_read(retirement_args)
+            retirement_args.function(retirement_args)
         assert sys.dont_write_bytecode is False
     finally:
         sys.dont_write_bytecode = previous_bytecode
@@ -6232,9 +6240,12 @@ else:
     assert intent_file.read_bytes() == intent_before and capture_file.read_bytes() == capture_before
     assert not list(root.rglob("__pycache__"))
     assert not git("status", "--porcelain", "--untracked-files=all")
-    a.command_release_lock(SimpleNamespace(
-        authority_dir=str(saved_authority), repo_root=str(root), run_id="100", token=token,
-    ))
+    release_args = a.build_parser().parse_args([
+        "release-lock", "--authority-dir", str(saved_authority), "--repo-root", str(root),
+        "--run-id", "100", "--token", lock_token,
+    ])
+    assert release_args.function is a.command_release_lock and release_args.token == lock_token
+    release_args.function(release_args)
     assert a.load_record(saved_authority, "100") == persisted
     saved_bytes = saved_record.read_bytes()
     saved_record.write_bytes(saved_bytes.ljust(a.PROVENANCE_READ_RECORD_MAX_BYTES + 1, b" "))
