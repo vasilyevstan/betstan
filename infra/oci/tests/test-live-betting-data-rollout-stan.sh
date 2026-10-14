@@ -101,6 +101,90 @@ for args in calls:
 print("PASS executed workflow successor wiring: held and expired self once, held artifact only, non-targets unchanged")
 PY
 
+resume_context_script="$(
+  ruby -ryaml - "$WORKFLOW" <<'RUBY'
+document = YAML.load_file(ARGV.fetch(0))
+trigger = document["on"] || document[true]
+inputs = trigger.fetch("workflow_dispatch").fetch("inputs")
+abort "internal resume context became a public input" if inputs.keys.any? { |key|
+  key.downcase.start_with?("resume_native_dispatch", "resume_successor")
+}
+step = document.fetch("jobs").fetch("rollout").fetch("steps").find { |item|
+  item["name"] == "Verify immutable release and phase provenance"
+}
+abort "immutable provenance step missing" unless step
+script = step.fetch("run")
+first = script.index('resume_native_dispatch_inputs=""')
+last = script.index("resolution_value() {", first || 0)
+abort "native resume context boundary missing" unless first && last && first < last
+puts script[first...last]
+RUBY
+)"
+resume_fixture="$work_dir/resume-context"
+resume_context_log="$work_dir/resume-context.jsonl"
+mkdir -p "$resume_fixture/infra/oci/scripts"
+cat >"$resume_fixture/infra/oci/scripts/verify-live-betting-data-evidence-stan.sh" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+with open(os.environ["STUB_RESUME_CONTEXT_LOG"], "a", encoding="utf-8") as output:
+    output.write(json.dumps({key: os.environ.get(key) for key in (
+        "RESUME_NATIVE_DISPATCH_INPUTS", "RESUME_SUCCESSOR_RUN_ID",
+        "VERIFY_RESUME_APPLIED_RUN", "EXPECTED_SOURCE_SHA", "EXPECTED_CHECKPOINT_SOURCE_SHA",
+    )}) + "\n")
+print("applied_data_run_id=42")
+PY
+chmod 755 "$resume_fixture/infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
+run_resume_context() {
+  (
+    cd "$resume_fixture"
+    STUB_RESUME_CONTEXT_LOG="$resume_context_log" \
+    RESUME_NATIVE_DISPATCH_INPUTS=untrusted-inherited-context RESUME_SUCCESSOR_RUN_ID=999 \
+    DISPATCH_INPUTS='{"prerequisite_run_id":"53","failed_deploy_run_id":"54"}' \
+    GITHUB_RUN_ID=55 RUNNER_TEMP="$resume_fixture" \
+    prior_source_sha=2222222222222222222222222222222222222222 \
+    prior_build_run_id=2001 prior_infrastructure_run_id=3001 \
+    CHECKPOINT_SOURCE_SHA="$SOURCE_SHA" DISK_CHECKPOINT_RUN_ID=3002 \
+    disk_checkpoint_sha256="$DISK_CHECKPOINT_SHA256" \
+    disk_checkpoint_disposition=READY_NO_RECLAIM \
+    PREREQUISITE_RUN_ID=53 BASELINE_RECOVERY_RUN_ID=0 \
+    BASELINE_RECOVERY_SOURCE_SHA=none REPOSITORY=example/repo \
+      bash -euo pipefail -c "$resume_context_script"
+  )
+}
+for qualification in expired-own-handoff ordinary none; do
+  if [[ "$qualification" == none ]]; then
+    printf '%s\n' '{"failed_deploy_run_id":{}}'
+  else
+    printf '{"failed_deploy_run_id":{"no_takeover_handoff_qualification":"%s"}}\n' \
+      "$qualification"
+  fi >"$resume_fixture/live-data-upstream-result.json"
+  run_resume_context >/dev/null
+done
+python3 - "$resume_context_log" <<'PY'
+import json
+import pathlib
+import sys
+calls = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+assert len(calls) == 3
+for index, call in enumerate(calls):
+    assert call["VERIFY_RESUME_APPLIED_RUN"] == "true"
+    assert call["EXPECTED_SOURCE_SHA"] == "2" * 40
+    assert call["EXPECTED_CHECKPOINT_SOURCE_SHA"] == "1" * 40
+    assert call["RESUME_SUCCESSOR_RUN_ID"] == ("55" if index == 0 else "")
+    assert call["RESUME_NATIVE_DISPATCH_INPUTS"] == (
+        '{"prerequisite_run_id":"53","failed_deploy_run_id":"54"}' if index == 0 else "")
+print("PASS exact workflow resume context: qualified only, native successor, inherited values cleared, no public inputs")
+PY
+for invalid_result in '[]' '{}' '{"failed_deploy_run_id":null}' '{"failed_deploy_run_id":"expired-own-handoff"}'; do
+  printf '%s\n' "$invalid_result" >"$resume_fixture/live-data-upstream-result.json"
+  if run_resume_context >/dev/null 2>&1; then
+    fail "malformed upstream result selected a resume context"
+  fi
+done
+[[ "$(wc -l <"$resume_context_log" | tr -d ' ')" == 3 ]] ||
+  fail "invalid context reached the verifier"
+
 demotion_script="$(
   ruby -ryaml - "$WORKFLOW" <<'RUBY'
 document = YAML.load_file(ARGV.fetch(0))

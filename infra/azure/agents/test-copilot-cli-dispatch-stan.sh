@@ -3580,9 +3580,11 @@ assert a.retired_bound_intent(d / "authority", old_intent)
 run(d, "--retire-preflight-read-only-failure", ok=False)
 
 # Execute the byte-identical historical v1-v4 loader, pinned independently of
-# Git history; only this patch's three additive v5 reader edits are removed.
+# Git history; only the additive v5 reader changes are removed.
 import inspect
 old_loader = inspect.getsource(a.load_record).replace(
+    "        provenance_read_record=True,\n", "",
+).replace(
     '    elif schema_version == RECORD_SCHEMA_V5:\n'
     '        if set(record) != RECORD_V2_KEYS:\n'
     '            fail("authority record has an unexpected schema")\n', "",
@@ -5620,5 +5622,703 @@ for mutation in \
   assert_profile_dispatch_rejected "$PROFILE_ACTIVATION_REQUEST" "$mutation"
 done
 echo "dispatcher_profile_artifact_rejection_tests=PASS"
+
+python3 -I -B - "$HELPER" <<'PY'
+import base64
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+import zipfile
+
+spec = importlib.util.spec_from_file_location("provenance_fixture_authority", sys.argv[1])
+a = importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+original_pins = dict(a.PROVENANCE_READ_BLOBS)
+assert len(original_pins) == 11
+assert original_pins[".github/workflows/oci-live-data-rollout.yml"] == "e9b7c1edb311ccee646ec44d717a6834bea99672"
+assert original_pins["infra/oci/scripts/upstream_run_binding_stan.py"] == "0a815c135d406fc63639dbea96cde5eb5edc604e"
+assert a.PROVENANCE_READ_TREE == "cb1c4e6dee539065bc4b1d607dfbaf30ae578f73"
+assert len(a.PREFLIGHT_READ_STEPS) == 39 and a.PREFLIGHT_READ_STEPS[3][2] == "failure"
+# Independent synthetic source content substitutes only immutable object I/O,
+# never production baseline bytes or the matcher/chronology implementation.
+source = "a" * 40
+capture_source = "b" * 40
+root_source = "c" * 40
+path = ".github/workflows/oci-live-data-rollout.yml"
+actions = [
+    "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+]
+def content(name, raw):
+    return {"path": name, "type": "file", "encoding": "base64", "size": len(raw),
+            "sha": hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest(),
+            "content": base64.b64encode(raw).decode()}
+historical = {name: content(name, (
+    "\n".join("        uses: " + action for action in actions).encode() + b"\n"
+    if name == path else ("synthetic historical source " + name + "\n").encode()
+) + b"# " + b"x" * 120000 + b"\n") for name in original_pins}
+a.PROVENANCE_READ_BLOBS = {name: item["sha"] for name, item in historical.items()}
+steps = [
+    (1, "Set up job", "success"),
+    (2, "Initialize isolated OCI data paths", "success"),
+    (3, "Checkout approved current master commit", "success"),
+    (4, "Validate exact SHA phase and trusted upstream runs", "success"),
+    (5, "Reject competing production activity", "success"),
+    (6, "Download exact OCI image provenance", "success"),
+    (7, "Download exact OCI infrastructure provenance", "success"),
+    (8, "Download exact release disk checkpoint", "success"),
+    (9, "Download prerequisite data evidence", "success"),
+    (10, "Download failed deploy protected baseline", "skipped"),
+    (11, "Download explicitly selected recovery baseline authority", "skipped"),
+    (12, "Bind historical recovery source through its exact artifact", "skipped"),
+    (13, "Verify immutable release and phase provenance", "failure"),
+    (14, "Install pinned OCI CLI", "skipped"),
+    (15, "Verify OKE identity", "skipped"),
+    (16, "Verify k3s identity", "skipped"),
+    (17, "Reconcile expired and authorize current runner IPv4", "skipped"),
+    (18, "Configure kubectl from exact cluster OCID", "skipped"),
+    (19, "Open ephemeral OCI Bastion access to k3s", "skipped"),
+    (20, "Verify exact failed-deploy resume state", "skipped"),
+    (21, "Capture and validate pre-mutation rollback baseline", "skipped"),
+    (22, "Verify reader-qualified released activation state", "skipped"),
+    (23, "Revalidate exact release disk checkpoint before lock mutation", "skipped"),
+    (24, "Acquire database operation lock", "skipped"),
+    (25, "Enter or re-establish live data maintenance", "skipped"),
+    (26, "Demote and verify exact retained live-acceptance account", "skipped"),
+    (27, "Delete exact orphaned live-acceptance slips", "skipped"),
+    (28, "Execute exact-digest live data phase", "skipped"),
+    (29, "Restore runtime or verify final deploy handoff", "skipped"),
+    (30, "Capture post-phase runtime baseline", "skipped"),
+    (31, "Require executed data-step evidence", "skipped"),
+    (32, "Upload exact sanitized data evidence", "success"),
+    (33, "Upload protected rollout baselines", "success"),
+    (34, "Restore runtime or retain hold if final handoff packaging failed", "skipped"),
+    (35, "Release database operation lock unless handed to deploy", "skipped"),
+    (36, "Revoke exact runner rule", "skipped"),
+    (37, "Close ephemeral OCI Bastion access", "skipped"),
+    (38, "Remove isolated OCI client state", "success"),
+    (76, "Post Checkout approved current master commit", "success"),
+    (77, "Complete job", "success"),
+]
+assert tuple(steps) == a.PROVENANCE_READ_STEPS
+def env(values):
+    return "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+def seal(files):
+    files = dict(files)
+    files["SHA256SUMS"] = "".join(
+        f"{hashlib.sha256(raw).hexdigest()}  {name}\n" for name, raw in sorted(files.items())
+    ).encode()
+    return files
+def zipped(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        for name, raw in files.items():
+            bundle.writestr(name, raw)
+    return base64.b64encode(output.getvalue()).decode()
+baseline_values = {
+    "baseline_source_sha": root_source, "baseline_deploy_workflow": "oci-production-deploy",
+    "baseline_deploy_run_id": "17", "baseline_deploy_run_attempt": "1",
+    "baseline_build_workflow": "oci-production-build", "baseline_build_run_id": "2",
+    "baseline_build_run_attempt": "1", "baseline_recovery_run_id": "0",
+    "baseline_recovery_run_attempt": "0", "baseline_transition_provenance_file": "none",
+    "baseline_capture_run_id": "12", "baseline_capture_run_attempt": "1",
+    "namespace": "fixture", "public_url": "https://example.org",
+    "redirect_url": "https://example.org", "diagnostic_url": "https://example.org",
+    "http_attempts": "1", "http_retry_seconds": "0", "alias_probe_mode": "none",
+    "sse_path": "/api/telemetry", "sse_requirement": "none", "sse_required": "false",
+    "database_restore": "not-required", "registry_provider": "ghcr", "registry_host": "ghcr.io",
+    "registry_repository": "ghcr.io/vasilyevstan/betstan-images", "registry_public_anonymous": "true",
+}
+baseline = seal({
+    "baseline-provenance.env": env(baseline_values),
+    **{name: b"synthetic\n" for name in (
+        "deployments.tsv", "images.tsv", "live-images.tsv", "migration-backup-references.tsv",
+        "migration-journal.json", "migration-lock.json", "pod-images.tsv", "public-http.tsv",
+        "queues.tsv", "sse.tsv", "telemetry-pre-run.env", "trusted-deploy-provenance.txt",
+    )},
+})
+checksum = hashlib.sha256(baseline["SHA256SUMS"]).hexdigest()
+inputs = {
+    "approved_sha": source, "resume_source_sha": capture_source, "build_run_id": "2",
+    "infrastructure_run_id": "3", "checkpoint_source_sha": root_source,
+    "disk_checkpoint_run_id": "4", "phase": "apply-slip-index", "prerequisite_run_id": "12",
+    "baseline_recovery_run_id": "0", "baseline_recovery_source_sha": "none",
+    "failed_deploy_run_id": "13", "failed_activation_run_id": "0",
+    "failed_activation_user_id": "0", "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA",
+}
+data = {
+    "schema_version": "live-betting-v6", "source_sha": capture_source,
+    "build_run_id": "2", "infrastructure_run_id": "3",
+    "checkpoint_source_sha": root_source, "disk_checkpoint_run_id": "4",
+    "disk_checkpoint_sha256": "d" * 64, "disk_checkpoint_disposition": "READY_NO_RECLAIM",
+    "baseline_sha256": checksum, "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none", "workflow_run_id": "12",
+    "workflow_run_attempt": "1", "phase": "apply-slip-index", "status": "PASS",
+    "backfill_complete": "true", "index_ready": "true", "event_reschedule_complete": "true",
+    "backoffice_pre_september_cleanup_complete": "true", "maintenance_fence_enforced": "true",
+    "writers_quiesced": "true", "runtime_held_for_deploy": "true", "operation_lock_enforced": "true",
+    "operation_lock_handoff": "true", "completed_at": "2026-01-01T00:01:00Z",
+}
+def run(run_id, sha, conclusion, start, end):
+    return {
+        "id": run_id, "workflow_id": 301, "path": path, "event": "workflow_dispatch",
+        "head_sha": sha, "head_branch": "master", "head_repository": {"full_name": "example/repo"},
+        "run_attempt": 1, "display_title": f"oci-live-data apply-slip-index {sha}",
+        "status": "completed", "conclusion": conclusion, "created_at": start,
+        "run_started_at": start, "updated_at": end,
+        "html_url": f"https://github.com/example/repo/actions/runs/{run_id}",
+    }
+def artifact(artifact_id, name, run_id, sha):
+    return {"id": artifact_id, "name": name, "expired": False, "size_in_bytes": 1024,
+            "workflow_run": {"id": run_id, "head_sha": sha, "head_branch": "master"}}
+failed = run(100, source, "failure", "2026-01-01T00:10:00Z", "2026-01-01T00:11:00Z")
+captured = run(12, capture_source, "success", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z")
+job = {
+    "id": 1000, "run_id": 100, "run_attempt": 1, "head_sha": source, "name": "rollout",
+    "status": "completed", "conclusion": "failure", "runner_id": 1, "runner_name": "fixture",
+    "started_at": "2026-01-01T00:10:00Z", "completed_at": "2026-01-01T00:10:50Z",
+    "steps": [
+        {"number": number, "name": name, "conclusion": conclusion, "status": "completed",
+         "started_at": None if conclusion == "skipped" else f"2026-01-01T00:10:{index+1:02d}Z",
+         "completed_at": None if conclusion == "skipped" else f"2026-01-01T00:10:{index+2:02d}Z"}
+        for index, (number, name, conclusion) in enumerate(steps)
+    ],
+}
+baseline_archive = zipped({"oci-data-baseline-before/" + name: raw for name, raw in baseline.items()})
+proof = {
+    "schemaVersion": "betstan.copilot-cli-preflight-read-evidence.v1",
+    "run": failed, "attempts": [{"run": copy.deepcopy(failed), "jobs": {"total_count": 1, "jobs": [job]}}],
+    "workflow": {"id": 301, "path": path, "state": "disabled_manually"},
+    "historicalWorkflow": historical[path], "compare": None, "pending": [],
+    "approvals": [{"state": "approved", "comment": "synthetic owned approval",
+                   "user": {"id": 1, "login": "fixture"},
+                   "environments": [{"id": 91, "name": "oci-migration"}]}],
+    "artifacts": {"total_count": 1, "artifacts": [
+        artifact(1001, "oci-live-data-baselines-100-1", 100, source)]},
+    "closure": {
+        "historicalControl": source, "historicalCommit": {"sha": source, "tree": {"sha": a.PROVENANCE_READ_TREE}},
+        "historical": historical, "actions": actions, "dispatchInputs": inputs,
+        "archive": {"artifactId": 1001, "bytes": baseline_archive},
+        "capture": {
+            "run": captured, "attempt": copy.deepcopy(captured),
+            "workflow": {"id": 301, "path": path, "state": "disabled_manually"},
+            "artifacts": {"total_count": 2, "artifacts": [
+                artifact(1201, "oci-live-data-rollout-12-1", 12, capture_source),
+                artifact(1202, "oci-live-data-baselines-12-1", 12, capture_source)]},
+            "dataArchive": {"artifactId": 1201, "bytes": zipped(seal({"provenance.env": env(data)}))},
+            "baselineArchive": {"artifactId": 1202, "bytes": baseline_archive},
+        },
+    },
+}
+identity = {"repository": "example/repo", "runId": 100, "workflowId": 301,
+            "workflow": "oci-live-data-rollout.yml", "event": "workflow_dispatch",
+            "controlSha": source, "displayTitle": failed["display_title"]}
+assert a.validate_provenance_read_observation(identity, proof) == inputs
+mutations = [
+    lambda p: p["run"].update(run_attempt=2),
+    lambda p: p["attempts"].append(copy.deepcopy(p["attempts"][0])),
+    lambda p: p["attempts"][0]["jobs"]["jobs"].append(copy.deepcopy(job)),
+    lambda p: p["attempts"][0]["jobs"]["jobs"][0].update(runner_id=0),
+    lambda p: p["attempts"][0]["jobs"]["jobs"][0]["steps"].reverse(),
+    lambda p: p["attempts"][0]["jobs"]["jobs"][0]["steps"].pop(),
+    lambda p: p["attempts"][0]["jobs"]["jobs"][0]["steps"][13].update(conclusion="success"),
+    lambda p: p["attempts"][0]["jobs"]["jobs"][0]["steps"][12].update(number=14),
+    lambda p: p["run"].update(updated_at="2026-01-01T00:10:49Z"),
+    lambda p: p.update(pending=[{}]),
+    lambda p: p["closure"]["historicalCommit"]["tree"].update(sha="f" * 40),
+    lambda p: p["closure"]["historical"][path].update(sha="f" * 40),
+    lambda p: p["closure"]["historical"].pop("infra/oci/scripts/lib.sh"),
+    lambda p: p["closure"]["actions"].reverse(),
+    lambda p: p["closure"]["dispatchInputs"].update(confirmation="DEPLOY OCI EXACT SHA"),
+    lambda p: p["closure"]["dispatchInputs"].update(prerequisite_run_id="11"),
+    lambda p: p["closure"]["archive"].update(artifactId=1002),
+    lambda p: p["closure"]["archive"].update(bytes="invalid-base64"),
+    lambda p: p["artifacts"].update(total_count=2),
+    lambda p: p["artifacts"]["artifacts"][0]["workflow_run"].update(id=99),
+    lambda p: p["artifacts"]["artifacts"][0].update(expired=True),
+    lambda p: p["closure"]["capture"]["attempt"].update(run_attempt=2),
+    lambda p: p["closure"]["capture"]["run"].update(conclusion="failure"),
+    lambda p: p["closure"]["capture"]["dataArchive"].update(artifactId=1202),
+    lambda p: p["approvals"].append(copy.deepcopy(p["approvals"][0])),
+    lambda p: p["approvals"][0].update(state="rejected"),
+    lambda p: p["approvals"][0]["environments"][0].update(name="production"),
+]
+for mutate in mutations:
+    bad = copy.deepcopy(proof); mutate(bad)
+    with contextlib.redirect_stderr(io.StringIO()):
+        try: a.validate_provenance_read_observation(identity, bad)
+        except SystemExit: pass
+        else: raise AssertionError("hostile frozen native proof was accepted")
+for files in (
+    {**{"oci-data-baseline-before/" + k: v for k, v in baseline.items()}, "oci-data-baseline-after/SHA256SUMS": b"none"},
+    {"oci-data-baseline-before/" + k: v for k, v in baseline.items() if k != "deployments.tsv"},
+    {**{"oci-data-baseline-before/" + k: v for k, v in baseline.items()},
+     "oci-data-baseline-before/deployments.tsv": b"substituted"},
+):
+    bad = copy.deepcopy(proof); bad["closure"]["archive"]["bytes"] = zipped(files)
+    with contextlib.redirect_stderr(io.StringIO()):
+        try: a.validate_provenance_read_observation(identity, bad)
+        except SystemExit: pass
+        else: raise AssertionError("after-state, missing, or replaced capture was accepted")
+# Private authority augments the same leaf; it never supplies portable proof.
+current_authority = content("infra/azure/agents/copilot_cli_authority_stan.py", b"synthetic corrected authority\n")
+current_profile = dict(a.PROVENANCE_READ_BLOBS)
+current_profile[current_authority["path"]] = current_authority["sha"]
+resolver = a.provenance_read_current_profile
+a.provenance_read_current_profile = lambda current, **_: current_profile if current == source else a.fail("wrong current source")
+local = copy.deepcopy(proof)
+local["closure"].update(currentControl=source,
+    current={name: {"local": sha, "github": sha} for name, sha in current_profile.items()},
+    currentAuthority=current_authority)
+owned = dict(identity, operation="oci-live-data-resume-deploy", inputs=inputs,
+    workflowBlobSha=historical[path]["sha"], createdAt="2026-01-01T00:09:00Z",
+    inflightApproval=None, approvals=[{"runId": 100, "operation": "oci-live-data-resume-deploy",
+    "environmentId": 91, "gateKey": "fixture", "approvedAt": "2026-01-01T00:09:01Z"}])
+a.validate_preflight_read_observation(owned, local, source)
+for mutate in (
+    lambda p: p["workflow"].update(state="active"),
+    lambda p: p["closure"]["current"][path].update(local="f" * 40, github="f" * 40),
+    lambda p: p["closure"].update(currentAuthority=historical[current_authority["path"]]),
+    lambda p: p["approvals"][0]["environments"][0].update(id=92),
+):
+    bad = copy.deepcopy(local); mutate(bad)
+    try: a.validate_preflight_read_observation(owned, bad, source)
+    except SystemExit: pass
+    else: raise AssertionError("wrong current source, helper, or owned approval was accepted")
+a.provenance_read_current_profile = resolver
+assert a.validate_provenance_read_observation(identity, proof) == inputs
+spec = importlib.util.spec_from_file_location(
+    "provenance_fixture_history",
+    Path(sys.argv[1]).resolve().parents[2] / "oci/scripts/upstream_run_binding_stan.py",
+)
+b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
+native_authority_loader = b.provenance_read_authority
+b.provenance_read_authority = lambda: a
+b.validate_expired_handoff_resume = lambda *args, **kwargs: (_ for _ in ()).throw(
+    AssertionError("portable leaf recursively qualified complete history"))
+receiver = run(13, capture_source, "failure", "2026-01-01T00:02:00Z", "2026-01-01T00:03:00Z")
+receiver.update(path=".github/workflows/oci-production-deploy.yml",
+                display_title=f"oci-deploy {capture_source}", workflow_id=302)
+b.expired_handoff_native_inputs = lambda *args: ({"data_run_id": "12"}, receiver)
+successor = run(101, source, None, "2026-01-01T00:12:00Z", "2026-01-01T00:12:02Z")
+successor.update(status="in_progress")
+b.gh_api = lambda endpoint: (
+    {"id": 301} if endpoint.endswith("/workflows/oci-live-data-rollout.yml") else
+    copy.deepcopy(successor) if endpoint.endswith("/runs/101") or endpoint.endswith("/runs/101/attempts/1")
+    else (_ for _ in ()).throw(AssertionError("unexpected portable metadata endpoint"))
+)
+b.jobs_for_run = lambda *args: [{
+    "id": 1010, "run_id": 101, "name": "rollout", "status": "in_progress",
+    "started_at": "2026-01-01T00:12:00Z",
+    "steps": [{"name": "Validate exact SHA phase and trusted upstream runs",
+               "started_at": "2026-01-01T00:12:01Z"}],
+}]
+native_subprocess_run = b.subprocess.run
+b.subprocess.run = lambda arguments, **kwargs: SimpleNamespace(
+    returncode=0, stdout=("fixture policy" if arguments[0] == "git" else
+                         "oci-live-data-rollout.yml\noci-production-deploy.yml\n"),
+)
+b.validate_descendant_scope = lambda parent, child: (
+    None if (parent, child) == (source, source) else a.fail("wrong historical source")
+)
+interference = False
+def pages(endpoint):
+    if "/workflows/oci-live-data-rollout.yml/" in endpoint:
+        rows = [captured, failed, successor]
+    else:
+        rows = [receiver]
+        if interference:
+            rows = [*rows, dict(receiver, id=99, head_sha=source,
+                               created_at="2026-01-01T00:09:00Z",
+                               updated_at="2026-01-01T00:10:00Z")]
+    return [{"total_count": len(rows), "workflow_runs": copy.deepcopy(rows)}]
+b.gh_api_pages = pages
+collections = []
+def collect(*args):
+    collections.append(args)
+    return copy.deepcopy(proof)
+b.collect_provenance_read_observation = collect
+b.held_handoff_history("example/repo", captured, source, "101",
+                       expired_receiver_run_id="13", runtime_mode="k3s")
+assert len(collections) == 2 and all(args[1] == "100" for args in collections)
+def history_rejects():
+    with contextlib.redirect_stderr(io.StringIO()):
+        try: b.held_handoff_history("example/repo", captured, source, "101",
+                                   expired_receiver_run_id="13", runtime_mode="k3s")
+        except SystemExit: return
+    raise AssertionError("unsafe portable failed-row history was admitted")
+interference = True; history_rejects(); interference = False
+b.collect_provenance_read_observation = lambda *args: {"retirement": {"state": "retired"}}
+history_rejects()
+late = copy.deepcopy(proof); late["run"]["updated_at"] = "2026-01-01T00:13:00Z"
+b.collect_provenance_read_observation = lambda *args: copy.deepcopy(late)
+history_rejects()
+rounds = 0
+def drifting(*args):
+    global rounds
+    rounds += 1
+    result = copy.deepcopy(proof)
+    if rounds % 2 == 0:
+        result["approvals"][0]["comment"] = "changed native approval"
+    return result
+b.collect_provenance_read_observation = drifting; history_rejects()
+b.collect_provenance_read_observation = collect
+b.held_handoff_history("example/repo", captured, source, "101",
+                       expired_receiver_run_id="13", runtime_mode="k3s")
+b.subprocess.run = native_subprocess_run
+original_file, original_current_pins = a.__file__, a.PROVENANCE_READ_CURRENT_BLOBS
+with tempfile.TemporaryDirectory(prefix="provenance-source-fixture-") as directory, tempfile.TemporaryDirectory(prefix="provenance-retirement-fixture-") as authority_directory:
+    root = Path(directory).resolve()
+    # Earlier exported shell mocks must not override real Git or the native GH fixture.
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("GIT_", "BASH_FUNC_")) and key not in ("BASH_ENV", "ENV")
+    }
+    def git(*arguments):
+        return native_subprocess_run([
+            "git", "-C", directory, "-c", "core.hooksPath=/dev/null",
+            "-c", "commit.gpgsign=false", "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.org", *arguments,
+        ], check=True, capture_output=True, text=True, env=environment, timeout=15).stdout.strip()
+    (root / "empty-template").mkdir()
+    git("init", "--quiet", "--template=" + str(root / "empty-template"))
+    (root / "empty-template").rmdir()
+    own_path = "infra/azure/agents/copilot_cli_authority_stan.py"
+    own = root / own_path
+    for name, item in historical.items():
+        target = root / name; target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(base64.b64decode(item["content"]))
+    a.__file__ = str(own)
+    a.PROVENANCE_READ_CURRENT_BLOBS = {name: item["sha"] for name, item in historical.items() if name != own_path}
+    reader_path = "infra/oci/scripts/upstream_run_binding_stan.py"
+    reader_bytes = (Path(original_file).resolve().parents[3] / reader_path).read_bytes()
+    (root / reader_path).write_bytes(reader_bytes)
+    a.PROVENANCE_READ_CURRENT_BLOBS[reader_path] = content(reader_path, reader_bytes)["sha"]
+    own_version_one = Path(original_file).read_bytes() + (
+        "\nPROVENANCE_READ_BLOBS = " + repr(a.PROVENANCE_READ_BLOBS)
+        + "\nPROVENANCE_READ_CURRENT_BLOBS = " + repr(a.PROVENANCE_READ_CURRENT_BLOBS)
+        + "\n"
+    ).encode()
+    own_version_two = own_version_one + b"# Synthetic compatible authority revision.\n"
+    own.write_bytes(own_version_one)
+    git("add", ".")
+    git("commit", "--quiet", "-m", "Synthetic retirement source\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>")
+    first_control = git("rev-parse", "HEAD")
+    first_profile = a.provenance_read_current_profile(first_control, validate_checkout=True)
+    assert first_profile[own_path] == content(own_path, own.read_bytes())["sha"]
+    stored = copy.deepcopy(local)
+    stored["closure"].update(currentControl=first_control,
+        current={name: {"local": sha, "github": sha} for name, sha in first_profile.items()},
+        currentAuthority=content(own_path, own.read_bytes()))
+    stored["compare"] = {"status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
+        "base_commit": {"sha": source}, "merge_base_commit": {"sha": source},
+        "commits": [{"sha": first_control}]}
+    previous_bytecode, previous_reader_file = sys.dont_write_bytecode, b.__file__
+    try:
+        sys.dont_write_bytecode = False
+        a.validate_preflight_read_observation(owned, stored, first_control)
+        assert sys.dont_write_bytecode is False
+        b.__file__ = str(root / reader_path)
+        loaded_authority = native_authority_loader()
+        assert sys.dont_write_bytecode is False
+        loaded_authority.validate_preflight_read_observation(owned, stored, first_control)
+        assert sys.dont_write_bytecode is False
+        assert not list(root.rglob("__pycache__"))
+        assert not git("status", "--porcelain", "--untracked-files=all")
+    finally:
+        sys.dont_write_bytecode, b.__file__ = previous_bytecode, previous_reader_file
+    policy = json.loads(native_subprocess_run([
+        "bash", str(Path(original_file).with_name("copilot-cli-protected-operation-policy-stan.sh")),
+        "get", "oci-live-data-resume-deploy",
+    ], check=True, capture_output=True, text=True, timeout=15).stdout)
+    normalized = a.validate_request_data({
+        "schemaVersion": a.REQUEST_SCHEMA, "repository": "example/repo",
+        "operation": "oci-live-data-resume-deploy", "controlSha": source,
+        "subjectSha": source, "targetSha": None, "inputs": inputs,
+    }, policy, "example/repo", source)
+    persisted = a.build_dispatch_record(normalized, policy, "example/repo", 301,
+        historical[path]["sha"], 100, failed["html_url"])
+    persisted.update(createdAt=owned["createdAt"], expiresAt="2026-01-01T00:20:00Z",
+        state="consumed", approvals=[dict(owned["approvals"][0], gateKey="e" * 64)])
+    saved_authority = Path(authority_directory) / "saved-authority"; saved_authority.mkdir(mode=0o700)
+    saved_record = saved_authority / "100.json"
+    saved_record.write_text(a.canonical_json(persisted)); saved_record.chmod(0o600)
+    request = {name: (a.REQUEST_SCHEMA if name == "schemaVersion" else normalized[name])
+               for name in a.REQUEST_KEYS}
+    request_file = Path(authority_directory) / "request.json"
+    request_file.write_text(a.canonical_json(request)); request_file.chmod(0o600)
+    key = a.request_key(normalized)
+    capture_name = "dispatch-" + "f" * 32 + ".log"
+    capture_file = saved_authority / capture_name
+    capture_file.write_bytes(b""); capture_file.chmod(0o600)
+    bound_intent = {
+        "schemaVersion": a.PREPARED_INTENT_SCHEMA, "requestKey": key,
+        **{name: normalized[name] for name in (
+            "repository", "operation", "controlSha", "subjectSha", "targetSha", "inputs", "inputHash",
+        )},
+        **{name: policy[name] for name in ("workflow", "event", "environment")},
+        "displayTitleTemplate": normalized["displayTitleTemplate"],
+        "workflowId": 301, "workflowBlobSha": historical[path]["sha"],
+        "authorityOwner": a.AUTHORITY_OWNER, "createdAt": "2026-01-01T00:08:00Z",
+        "expiresAt": "2026-01-01T00:23:00Z", "state": "bound", "version": 3,
+        "ownerPid": os.getpid(), "captureFile": capture_name, "dispatchStatus": 0,
+        "runId": 100, "runUrl": failed["html_url"],
+    }
+    candidates = [{"runId": 99, "headSha": source, "historicalWorkflowBlobSha": historical[path]["sha"],
+                   "evidenceSha256": "e" * 64}]
+    bound_intent["preparedSeal"] = {
+        **{name: bound_intent[name] for name in (
+            "requestKey", "inputHash", "controlSha", "workflowId", "workflowBlobSha",
+            "captureFile", "createdAt", "expiresAt", "ownerPid",
+        )},
+        "requestSha256": a.evidence_digest(request), "requestFile": a.file_identity(request_file),
+        "workflowPath": path, "policySha256": a.evidence_digest(policy),
+        "inventorySha256": "d" * 64, "captureIdentity": a.file_identity(capture_file),
+        "candidates": candidates, "candidateSetSha256": a.evidence_digest(candidates),
+        "intentIdentitySha256": a.immutable_intent_digest(bound_intent),
+    }
+    bound_intent["preparedSeal"]["sealSha256"] = a.evidence_digest(bound_intent["preparedSeal"])
+    intent_file = a.intent_path(saved_authority, key)
+    intent_file.write_text(a.canonical_json(bound_intent)); intent_file.chmod(0o600)
+    capture_file.write_text(failed["html_url"] + "\n")
+    context_args = SimpleNamespace(
+        request=str(request_file), repository="example/repo", policy_json=a.canonical_json(policy),
+        workflow_id="301", workflow_path=path, current_master=first_control,
+        authority_dir=str(saved_authority), repo_root=str(root),
+    )
+    context_output = io.StringIO()
+    with contextlib.redirect_stdout(context_output):
+        a.command_preflight_read_context(context_args)
+    preflight_context = json.loads(context_output.getvalue())
+    fixture = Path(authority_directory) / "native.json"
+    endpoints = {
+        "repos/example/repo/actions/workflows/oci-live-data-rollout.yml": stored["workflow"],
+        "repos/example/repo/actions/runs/100": stored["run"],
+        "repos/example/repo/actions/runs/100/attempts/1": stored["attempts"][0]["run"],
+        "repos/example/repo/actions/runs/100/attempts/1/jobs?per_page=100": stored["attempts"][0]["jobs"],
+        "repos/example/repo/actions/runs/100/jobs?per_page=100": stored["attempts"][0]["jobs"],
+        "repos/example/repo/actions/runs/100/pending_deployments?per_page=100": [],
+        "repos/example/repo/actions/runs/100/approvals?per_page=100": stored["approvals"],
+        "repos/example/repo/actions/runs/100/artifacts?per_page=100": stored["artifacts"],
+        f"repos/example/repo/compare/{source}...{first_control}?per_page=100": stored["compare"],
+        f"repos/example/repo/git/commits/{source}": stored["closure"]["historicalCommit"],
+        "repos/example/repo/actions/runs/12": stored["closure"]["capture"]["run"],
+        "repos/example/repo/actions/runs/12/attempts/1": stored["closure"]["capture"]["attempt"],
+        "repos/example/repo/actions/runs/12/artifacts?per_page=100": stored["closure"]["capture"]["artifacts"],
+    }
+    for name, item in historical.items():
+        endpoints[f"repos/example/repo/contents/{name}?ref={source}"] = item
+        endpoints[f"repos/example/repo/contents/{name}?ref={first_control}"] = content(name, (root / name).read_bytes())
+    mapping = {"approved_sha": "SOURCE_SHA", **{name: name.upper() for name in inputs if name != "approved_sha"}}
+    log_lines = ["##[group]Run set -euo pipefail", "  env:",
+                 "  DISPATCH_INPUTS: " + a.canonical_json(inputs),
+                 *(f"  {mapping[name]}: {value}" for name, value in inputs.items()), "##[endgroup]"]
+    log_archive = zipped({"1_rollout.txt": "".join(
+        "2026-01-01T00:10:04Z " + line + "\n" for line in log_lines
+    ).encode()})
+    binary = {
+        "repos/example/repo/actions/runs/100/attempts/1/logs": log_archive,
+        "repos/example/repo/actions/artifacts/1001/zip": stored["closure"]["archive"]["bytes"],
+        "repos/example/repo/actions/artifacts/1201/zip": stored["closure"]["capture"]["dataArchive"]["bytes"],
+        "repos/example/repo/actions/artifacts/1202/zip": stored["closure"]["capture"]["baselineArchive"]["bytes"],
+    }
+    fixture.write_text(a.canonical_json({"json": endpoints, "binary": binary})); fixture.chmod(0o600)
+    fixture_bin = Path(authority_directory) / "bin"; fixture_bin.mkdir()
+    gh = fixture_bin / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import base64, json, os, subprocess, sys
+if sys.argv[1] != "api":
+    raise SystemExit("unexpected native fixture command")
+payload = json.load(open(os.environ["PROVENANCE_NATIVE_FIXTURE"]))
+endpoint = sys.argv[2]
+if endpoint in payload["binary"]:
+    sys.stdout.buffer.write(base64.b64decode(payload["binary"][endpoint]))
+else:
+    value = payload["json"][endpoint]
+    if "--slurp" in sys.argv:
+        value = [value]
+    if "--jq" in sys.argv:
+        result = subprocess.run(["jq", "-r", sys.argv[sys.argv.index("--jq") + 1]],
+                                input=json.dumps(value), text=True, check=True, capture_output=True)
+        print(result.stdout, end="")
+    else:
+        print(json.dumps(value))
+""")
+    gh.chmod(0o700)
+    dispatcher_source = Path(original_file).with_name("copilot-cli-dispatch-stan.sh").read_text()
+    def function(name):
+        marker = name + "() {"
+        assert dispatcher_source.count("\n" + marker) == 1, name
+        return marker + dispatcher_source.split("\n" + marker, 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+    collector_script = (
+        "set -euo pipefail\numask 077\n"
+        + function("fail") + function("context_fail") + function("validate_local_context")
+        + function("collect_preflight_read")
+        + 'validate_local_context "$live_master"\n'
+        + 'collect_preflight_read "$tmp_dir/first.json"\n'
+        + 'collect_preflight_read "$tmp_dir/second.json"\n'
+        + 'collect_preflight_read "$tmp_dir/final.json"\n'
+        + 'validate_local_context "$live_master"\n'
+    )
+    collector_environment = {
+        **environment, "PATH": str(fixture_bin) + os.pathsep + os.environ["PATH"],
+        "PROVENANCE_NATIVE_FIXTURE": str(fixture), "ROOT_DIR": str(root),
+        "UPSTREAM_BINDING_VALIDATOR": str(root / reader_path), "repository": "example/repo",
+        "workflow": "oci-live-data-rollout.yml", "workflow_path": path,
+        "preflight_context": a.canonical_json(preflight_context), "preflight_control": source,
+        "preflight_run_id": "100", "live_master": first_control, "tmp_dir": authority_directory,
+    }
+    collector_result = native_subprocess_run(
+        ["bash", "-c", collector_script], cwd=root, env=collector_environment,
+        capture_output=True, text=True, timeout=60,
+    )
+    assert collector_result.returncode == 0, collector_result.stderr
+    first = Path(authority_directory) / "first.json"
+    second = Path(authority_directory) / "second.json"
+    assert sum(len(item["content"]) for item in historical.values()) + len(
+        stored["historicalWorkflow"]["content"]
+    ) + len(stored["closure"]["currentAuthority"]["content"]) >= 1_597_188
+    assert first.stat().st_size >= 1_597_188
+    collected = json.loads(first.read_text())
+    assert collected == stored, [name for name in stored if collected.get(name) != stored[name]]
+    assert json.loads(second.read_text()) == stored
+    assert json.loads((Path(authority_directory) / "final.json").read_text()) == stored
+    assert not list(root.rglob("__pycache__"))
+    assert not git("status", "--porcelain", "--untracked-files=all")
+    lock_token = a.acquire_lock_file(saved_authority, "100", os.getpid())
+    retirement_argv = ["retire-preflight-read-only-failure"]
+    for name, value in vars(context_args).items():
+        retirement_argv.extend(["--" + name.replace("_", "-"), str(value)])
+    retirement_argv.extend([
+        "--first-observation", str(first), "--second-observation", str(second),
+        "--token", lock_token, "--expected-snapshot", preflight_context["snapshot"],
+    ])
+    retirement_args = a.build_parser().parse_args(retirement_argv)
+    assert all(getattr(retirement_args, name) == value for name, value in vars(context_args).items())
+    assert retirement_args.function is a.command_retire_preflight_read
+    assert retirement_args.token == lock_token
+    assert retirement_args.expected_snapshot == preflight_context["snapshot"]
+    intent_before, capture_before = intent_file.read_bytes(), capture_file.read_bytes()
+    def rejects_size(callback):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            try: callback()
+            except SystemExit as failure:
+                assert "is too large" in str(failure) + error.getvalue(), (failure, error.getvalue())
+            else: raise AssertionError("profile evidence size limit was not enforced")
+    for filename, limit, record_flag in (
+        (first, a.PROVENANCE_READ_OBSERVATION_MAX_BYTES, False),
+        (saved_record, a.PROVENANCE_READ_RECORD_MAX_BYTES, True),
+    ):
+        oversized = Path(authority_directory) / "oversized.json"
+        oversized.write_bytes(filename.read_bytes().ljust(limit + 1, b" ")); oversized.chmod(0o600)
+        assert oversized.stat().st_size == limit + 1
+        rejects_size(lambda: a.load_json_file(
+            oversized, "oversized fixture", max_bytes=limit, provenance_read_record=record_flag,
+        ))
+    rejects_size(lambda: a.load_json_file(first, "legacy observation", exact_mode=0o600))
+    previous_bytecode = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = False
+        with contextlib.redirect_stdout(io.StringIO()):
+            retirement_args.function(retirement_args)
+        assert sys.dont_write_bytecode is False
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
+    persisted = a.load_record(saved_authority, "100")
+    assert persisted["schemaVersion"] == a.RECORD_SCHEMA_V5 and persisted["state"] == "retired"
+    assert persisted["version"] == 2 and persisted["retirement"]["evidence"] == stored
+    assert saved_record.stat().st_size >= 1_597_188
+    assert intent_file.read_bytes() == intent_before and capture_file.read_bytes() == capture_before
+    assert not list(root.rglob("__pycache__"))
+    assert not git("status", "--porcelain", "--untracked-files=all")
+    release_args = a.build_parser().parse_args([
+        "release-lock", "--authority-dir", str(saved_authority), "--repo-root", str(root),
+        "--run-id", "100", "--token", lock_token,
+    ])
+    assert release_args.function is a.command_release_lock and release_args.token == lock_token
+    release_args.function(release_args)
+    assert a.load_record(saved_authority, "100") == persisted
+    saved_bytes = saved_record.read_bytes()
+    saved_record.write_bytes(saved_bytes.ljust(a.PROVENANCE_READ_RECORD_MAX_BYTES + 1, b" "))
+    rejects_size(lambda: a.load_record(saved_authority, "100"))
+    saved_record.write_bytes(saved_bytes)
+    legacy_record = copy.deepcopy(persisted)
+    legacy_record["workflowBlobSha"] = a.PREFLIGHT_READ_BLOBS[path]
+    saved_record.write_text(a.canonical_json(legacy_record))
+    rejects_size(lambda: a.load_record(saved_authority, "100"))
+    saved_record.write_text(a.canonical_json(persisted))
+    def restart_load():
+        result = native_subprocess_run([
+            sys.executable, "-I", "-c",
+            "import runpy,sys; from pathlib import Path; "
+            "a=runpy.run_path(sys.argv[1]); "
+            "r=a['load_record'](Path(sys.argv[2]),'100'); "
+            "assert r['state']=='retired' and r['version']==2; "
+            "assert not list(Path(sys.argv[3]).rglob('__pycache__'))",
+            str(own), str(saved_authority), str(root),
+        ], env=environment, check=True, capture_output=True, text=True, timeout=30)
+        assert not result.stderr
+    restart_load()
+    own.write_bytes(own_version_two)
+    try: a.provenance_read_current_profile(first_control, validate_checkout=True)
+    except SystemExit: pass
+    else: raise AssertionError("dirty/substituted executing authority was accepted")
+    git("add", own_path)
+    git("commit", "--quiet", "-m", "Synthetic compatible reader\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>")
+    second_control = git("rev-parse", "HEAD")
+    second_profile = a.provenance_read_current_profile(second_control, validate_checkout=True)
+    assert second_profile[own_path] != first_profile[own_path]
+    assert a.provenance_read_current_profile(first_control) == first_profile
+    a.validate_preflight_read_observation(owned, stored, first_control)
+    assert a.load_record(saved_authority, "100") == persisted
+    restart_load()
+    for mutate in (
+        lambda record: record["retirement"]["evidence"]["closure"].update(
+            currentAuthority=content(own_path, own.read_bytes())),
+        lambda record: record["retirement"].update(masterShaAtRetirement=second_control),
+        lambda record: record["retirement"].update(secondObservationDigest="a" * 64),
+        lambda record: record.update(version=3),
+    ):
+        bad = copy.deepcopy(persisted); mutate(bad)
+        bad["retirement"]["evidenceDigest"] = a.preflight_read_retirement_digest(bad, bad["retirement"])
+        try: a.validate_preflight_read_retirement(bad)
+        except SystemExit: pass
+        else: raise AssertionError("resealed stored retirement source or generation substitution was accepted")
+    git_environment = {key: value for key, value in os.environ.items() if key.startswith("GIT_")}
+    os.environ.update(GIT_DIR=str(root / "unavailable"), GIT_WORK_TREE=str(root / "unavailable"))
+    assert a.provenance_read_current_profile(second_control, validate_checkout=True) == second_profile
+    for key in list(os.environ):
+        if key.startswith("GIT_"): del os.environ[key]
+    os.environ.update(git_environment)
+    own.unlink()
+    own.symlink_to(root / path)
+    try: a.provenance_read_current_profile(second_control, validate_checkout=True)
+    except SystemExit: pass
+    else: raise AssertionError("symlink executing authority was accepted")
+    own.unlink()
+    own.write_bytes(own_version_two)
+    (root / path).write_bytes(b"substituted fixed workflow\n")
+    git("add", path)
+    git("commit", "--quiet", "-m", "Synthetic unreviewed dependency\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>")
+    try: a.provenance_read_current_profile(git("rev-parse", "HEAD"))
+    except SystemExit: pass
+    else: raise AssertionError("arbitrary matching local/native current profile was accepted")
+    a.validate_preflight_read_observation(owned, stored, first_control)
+    assert a.load_record(saved_authority, "100") == persisted
+a.__file__, a.PROVENANCE_READ_CURRENT_BLOBS = original_file, original_current_pins
+print("provenance_read_leaf_and_owned_boundary_tests=PASS cases=34 original_step4_unchanged=true")
+print("provenance_read_portable_history_tests=PASS retained_failed_row=true cutoff=true private_record_rejected=true recursion=false interference_rejected=true")
+print("provenance_read_current_source_tests=PASS immutable_self=true later_reader=true dirty_symlink_rejected=true fixed_dependency_rejected=true git_environment_cleared=true")
+print("provenance_read_full_size_collector_cas_tests=PASS native_bytes_min=1597188 actual_shell_collector=true canonical_retirement=true restart=true later_reader=true bytecode=false legacy_limits_preserved=true oversize_rejected=true")
+PY
 
 echo "copilot_cli_dispatch_tests=PASS"

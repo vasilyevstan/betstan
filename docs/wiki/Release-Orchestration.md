@@ -513,6 +513,10 @@ authenticated capture and ancestral rollback root remain separately bound.
 Only that qualification lets the local verifier check the authenticated
 capture separately from the root; legacy equality, schema, source, checksum
 and native guards remain unchanged.
+Full internal native qualification can also resolve an envelope-free historical
+holder's authenticated capture separately from its true applied root. Caller
+context or a discriminator is never authority; without that context, legacy
+resolution remains unchanged.
 
 Post-runtime retained-owner admission derives the old owner from the
 authenticated immediate predecessor, not the rollback root or whichever holder
@@ -804,24 +808,35 @@ read-only preflight, before any production step executes. It uses the existing
 live-data rollout workflow, not a new workflow or protected operation. Unlike
 v4, an assigned runner and executed preflight steps are expected; v4's empty
 steps and no-assigned-runner requirements remain unchanged. Admission binds
-the complete 39-entry native step sequence and the historical/current workflow
-and executed dependency closure to a frozen reviewed profile. Two independently
-collected, complete authenticated observations must be canonically identical
+each case to its frozen reviewed profile. The original step-4 profiles retain
+their complete 39-entry native sequence and empty artifact inventory. A distinct
+step-13 read-only profile requires the complete 40-entry sequence and exactly one
+safe, 14-member, checksummed before-only capture archive. Two independently
+collected, complete authenticated observations must still be canonically identical
 across collection rounds and prove the exact attempt and single assigned-runner
-job, with no later attempt, artifacts or pending deployments, and complete native
-approval history matched to preserved same-run receipts. Within each observation,
+job, with no later attempt or pending deployments, the profile's exact artifact
+inventory, and complete native approval history matched to preserved same-run
+receipts. Within each observation,
 latest-run and exact-attempt responses must agree on immutable identity and
 creation/run-start times. Their update times need not match, but each endpoint
 must retain creation ≤ run start ≤ update, with the entire job interval inside
 that endpoint's run-start-to-update window. No tolerance or wider combined window
 is used. Both raw responses remain preserved without normalization in the
 evidence and its digests.
-Successful upload steps alone do not prove an empty artifact inventory.
+Successful upload steps alone do not prove the required artifact inventory or
+archive contents.
 Fresh source, disabled-workflow, exclusivity, native-evidence and generation
 checks precede the existing locked compare-and-swap transition; incomplete
 evidence, ambiguity or drift stays fenced. The original request, capture,
 consumed record and approval receipts remain preserved. This adds no transport
 retry and makes no claim about the original failure's cause.
+
+Portable history admission for the step-13 profile independently authenticates
+the native failed row, operation and inputs, capture bytes and successor cutoff
+through the shared non-recursive leaf proof. It does not consult private
+retirement records, recursively validate history, exclude the row or relabel
+executed preflight as non-execution. Historical rows remain preserved; this
+proof grants no operation authority.
 
 Retirement changes only local authority state and adds immutable proof,
 preserving the original request, receipt, run identity, first-attempt identity,
@@ -838,10 +853,11 @@ support, and new ordinary authority records remain v1; older readers reject v5.
 
 The original nine-blob closure profile and its diagnostic-reader variant are
 retained, with one exact archive-reader profile differing only in the reader
-blob. Historical and current closure
+blob. For these original profiles, historical and current closure
 sides, including local and authenticated remote values, must match the same
 complete profile; mixed, incomplete or unknown profiles are rejected. New
-retirement context, collection and writing admit only the archive profile.
+retirement context, collection and writing within this family still admit only
+the archive profile.
 Stored v5 loading accepts all three complete profiles and retains endpoint-local
 chronology without rewriting records, digests or history; schema and evidence
 shape are unchanged. Promote the archive reader and compatible authority
@@ -849,9 +865,17 @@ reader/writer together, only after protected promotion of endpoint-local
 chronology support and completed, persisted canonical retirement of the bound
 predecessor generation under its matching profile. No mixed-profile exception
 can replace this ordering.
+
+The step-13 profile separately binds the complete historical executable closure
+and the exact reviewed current retirement closure. At retirement, the executing
+helper must match the native Git blob at exact clean protected `master`, not a
+self-declared pin. Stored retirement remains bound to its original source;
+later compatible readers validate that binding rather than requiring it to
+match their current source.
+
 Rollback must retain endpoint-local chronology and every actually emitted
-profile, including the archive profile after its first emission; v5 schema
-support alone is insufficient. Use a reviewed forward correction if these
+profile, including the archive and step-13 profiles after their first emission;
+v5 schema support alone is insufficient. Use a reviewed forward correction if these
 capabilities cannot be retained,
 never an old-only downgrade, timestamp rewriting, record relabeling or deletion
 of spent history.

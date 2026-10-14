@@ -749,6 +749,16 @@ jobs:
               esac
             done < <(git diff --name-only "$prior_source_sha" "$SOURCE_SHA" --)
 
+            resume_native_dispatch_inputs=""
+            resume_successor_run_id=""
+            jq -e 'type == "object" and (.failed_deploy_run_id | type == "object")' \
+              "$RUNNER_TEMP/live-data-upstream-result.json" >/dev/null
+            if jq -e \
+              '.failed_deploy_run_id.no_takeover_handoff_qualification == "expired-own-handoff"' \
+              "$RUNNER_TEMP/live-data-upstream-result.json" >/dev/null; then
+              resume_native_dispatch_inputs="$DISPATCH_INPUTS"
+              resume_successor_run_id="$GITHUB_RUN_ID"
+            fi
             resume_resolution="$(
               EVIDENCE_DIR=artifacts/prerequisite \
               EXPECTED_SOURCE_SHA="$prior_source_sha" \
@@ -766,6 +776,8 @@ jobs:
               RESUME_BASELINE_DIR=artifacts/oci-data-baseline-before \
               VERIFY_RESUME_APPLIED_RUN=true \
               RESUME_REPOSITORY="$REPOSITORY" \
+              RESUME_NATIVE_DISPATCH_INPUTS="$resume_native_dispatch_inputs" \
+              RESUME_SUCCESSOR_RUN_ID="$resume_successor_run_id" \
                 ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
             )"
             resolution_value() {
@@ -788,7 +800,10 @@ jobs:
               resume_applied_source_sha \
               "$(resolution_value applied_source_sha)"
             if [ "$HELD_HANDOFF_RUN_ID" = "0" ]; then
-              [ "$(resolution_value applied_source_sha)" = "$CHECKPOINT_SOURCE_SHA" ]
+              if [ "$(resolution_value applied_source_sha)" != "$CHECKPOINT_SOURCE_SHA" ]; then
+                echo "::error::Resolved original applied data source differs from the disk checkpoint" >&2
+                exit 1
+              fi
             fi
             [ "$(resolution_value checkpoint_source_sha)" = \
               "$CHECKPOINT_SOURCE_SHA" ]
