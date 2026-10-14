@@ -15,6 +15,119 @@ const prepareShell = async (page, overrides = {}) => {
   return state;
 };
 
+test('approved blue header and plain Backoffice tasks retain representative geometry and contrast', async ({ page }, testInfo) => {
+  const state = await prepareShell(page);
+  state.backofficeEvents = createBackofficeEvents();
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const evidence = [];
+  for (const [index, viewport] of [
+    { width: 1600, height: 1000 },
+    { width: 768, height: 1000 },
+    { width: 390, height: 844 },
+  ].entries()) {
+    const ui = ['v1', 'v2', 'v3'][index];
+    for (const theme of ['dark', 'light']) {
+      state.currentUser = index === 1
+        ? { id: 'header-fixture', email: 'operator@example.com', role: 'USER' }
+        : null;
+      await page.setViewportSize(viewport);
+      await page.goto(`/backoffice?ui=${ui}&theme=${theme}&acceptanceEventIds=event-1%2Cevent-2&review=header`);
+      await expect(page.getByText('Showing 5 of 5 events')).toBeVisible();
+      const header = page.getByRole('navigation', { name: 'Primary navigation' });
+      await expect(header.getByRole('group', { name: 'Layout' })).toHaveCount(0);
+      const inspect = () => header.evaluate((navigation) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        const parse = (color) => {
+          context.clearRect(0, 0, 1, 1);
+          context.fillStyle = color;
+          context.fillRect(0, 0, 1, 1);
+          const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+          return [r, g, b, a / 255];
+        };
+        const over = (a, b) => [
+          ...a.slice(0, 3).map((value, i) => value * a[3] + b[i] * (1 - a[3])), 1,
+        ];
+        const background = (element) => element
+          ? over(parse(getComputedStyle(element).backgroundColor), background(element.parentElement))
+          : [255, 255, 255, 1];
+        const luminance = (color) => color.slice(0, 3).reduce((sum, value, i) => {
+          const channel = value / 255;
+          return sum + [0.2126, 0.7152, 0.0722][i]
+            * (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+        }, 0);
+        const contrast = (a, b) => {
+          const values = [luminance(a), luminance(b)].sort((a, b) => b - a);
+          return (values[0] + 0.05) / (values[1] + 0.05);
+        };
+        const box = (element) => {
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+        };
+        const controls = [...navigation.querySelectorAll('a')].map(box);
+        const frame = box(navigation);
+        const overlaps = controls.flatMap((a, i) => controls.slice(i + 1).filter((b) => (
+          a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+        )));
+        const text = [...navigation.querySelectorAll('.app-nav-link__label, .presentation-option, .presentation-control__label, .user-chip__name, .user-chip__avatar')];
+        const accent = parse(getComputedStyle(document.documentElement).getPropertyValue('--info'));
+        const current = navigation.querySelector('[aria-current="page"]');
+        const theme = navigation.querySelector('.presentation-option--active');
+        const focused = navigation.querySelector(':focus-visible');
+        return {
+          controls, collisions: overlaps.length,
+          contained: controls.every((b) => b.left >= frame.left && b.right <= frame.right && b.top >= frame.top && b.bottom <= frame.bottom),
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          textContrast: Math.min(...text.map((element) => contrast(parse(getComputedStyle(element).color), background(element)))),
+          accentContrast: contrast(accent, background(navigation)),
+          currentContrast: contrast(parse(getComputedStyle(current).borderColor), background(current)),
+          selectedContrast: contrast(accent, background(theme)),
+          focusContrast: focused ? contrast(parse(getComputedStyle(focused).outlineColor), background(focused.parentElement)) : null,
+          focusWidth: focused ? getComputedStyle(focused).outlineWidth : null,
+          taskBorders: [...document.querySelectorAll('.backoffice-task')].map((task) => getComputedStyle(task).borderInlineStartWidth),
+          taskColumnDeltas: [...document.querySelectorAll('.backoffice-event__controls')].map((group) => {
+            const [a, b] = [...group.querySelectorAll('.backoffice-task')].map(box);
+            return Math.abs(a.width - b.width);
+          }),
+        };
+      });
+      const dark = header.getByRole('link', { name: 'Dark', exact: true });
+      await dark.focus();
+      const normal = await inspect();
+      expect(normal.collisions).toBe(0);
+      expect(normal.contained).toBe(true);
+      expect(normal.overflow).toBeLessThanOrEqual(1);
+      expect(normal.controls.every((box) => box.width >= 44 && box.height >= 44)).toBe(true);
+      expect(normal.textContrast).toBeGreaterThanOrEqual(4.5);
+      for (const key of ['accentContrast', 'currentContrast', 'selectedContrast', 'focusContrast']) {
+        expect(normal[key], key).toBeGreaterThanOrEqual(3);
+      }
+      expect(normal.focusWidth).toBe('3px');
+      expect(normal.taskBorders.every((width) => width === '1px')).toBe(true);
+      expect(Math.max(...normal.taskColumnDeltas)).toBeLessThanOrEqual(0.75);
+      if (!state.currentUser) {
+        await header.getByRole('link', { name: 'Log in', exact: true }).hover();
+        expect((await inspect()).textContrast).toBeGreaterThanOrEqual(4.5);
+      }
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: testInfo.outputPath(`backoffice-header-${ui}-${theme}-${viewport.width}.png`), fullPage: true });
+      const skip = page.getByRole('link', { name: 'Skip to main content' });
+      await skip.focus();
+      await skip.press('Enter');
+      await expect(page.getByRole('main')).toBeFocused();
+      evidence.push({ ui, theme, viewport, ...normal });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await header.getByRole('link', { name: theme === 'dark' ? 'Light' : 'Dark', exact: true }).click();
+      await expect(page.locator('.app-shell')).toHaveClass(new RegExp(`ui-variant-${ui} ui-theme-${theme === 'dark' ? 'light' : 'dark'}`));
+      expect(new URL(page.url()).searchParams.get('acceptanceEventIds')).toBe('event-1,event-2');
+      expect(new URL(page.url()).searchParams.get('review')).toBe('header');
+    }
+  }
+  console.log(`Approved header evidence: ${JSON.stringify(evidence)}`);
+  await testInfo.attach('approved-header-measurements', { body: JSON.stringify(evidence, null, 2), contentType: 'application/json' });
+});
+
 test('browser favicon serves and decodes the standalone BetStan mark', async ({ page }) => {
   await prepareShell(page);
   await page.goto('/', { waitUntil: 'domcontentloaded' });
@@ -196,9 +309,6 @@ test('expanded mobile navigation scrolls away without hiding labelled controls o
 
   const expectedNavigationLabels = [
     'BetStan home',
-    'Standard',
-    'Compact',
-    'Spacious',
     'Dark',
     'Light',
     'Events',
@@ -352,11 +462,11 @@ test('Match Desk shell keeps semantic order and switches exactly at 1400px', asy
   await expect(page.getByRole('link', { name: 'Events' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Backoffice' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Telemetry' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Standard' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Compact' })).toHaveAttribute('aria-current', 'true');
-  await expect(page.getByRole('link', { name: 'Spacious' })).toHaveAttribute(
+  await expect(page.getByRole('group', { name: 'Layout', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /^(Standard|Compact|Spacious)$/ })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Light', exact: true })).toHaveAttribute(
     'href',
-    '/?ui=v3&theme=dark&acceptanceEventIds=event-1%2Cevent-2&review=retained'
+    '/?ui=v2&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained'
   );
   const navigationTargets = page.locator(
     '.app-nav-link, .presentation-option, .app-navbar__auth-link'
