@@ -3117,6 +3117,13 @@ grep -Fq '[ "$provisioning" = "Failed" ]' "$recovery_workflow" ||
 ! grep -Eq 'az aks (start|create|update|delete)|az aks nodepool' "$recovery_workflow" ||
   fail "stop-only recovery can start, create, resize, or delete Azure compute"
 
+ruby -ryaml - "$validate_workflow" <<'RUBY'
+workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
+timeout = workflow.dig("jobs", "offline-contract", "timeout-minutes")
+abort "oci-validate requires an integer 45-minute whole-job limit" unless
+  timeout.is_a?(Integer) && timeout == 45
+RUBY
+
 grep -Fq 'pull_request:' "$validate_workflow"
 ! grep -Eq 'workflow_dispatch:|workflow_run:|^[[:space:]]+push:' "$validate_workflow" ||
   fail "oci-validate must remain PR-only"

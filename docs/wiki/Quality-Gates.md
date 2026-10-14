@@ -91,8 +91,10 @@ required aggregate gate includes:
 | Service coverage | Auth, Backoffice, Bet, Event, Gamemaster, Moderation, Resulting, Slip, Telemetry, and Client meet at least 80% line coverage and 80% branch coverage where branches exist |
 | Client production build | The React application builds successfully in CI |
 
-The OCI-specific validation workflow also checks workflow syntax and runs the
-complete offline OCI contract suite.
+The PR-only, read-only `oci-validate` workflow's `offline-contract` job checks
+workflow syntax and runs all 24 offline OCI contract suites in their existing
+order. Its 45-minute whole-job limit includes checkout and syntax validation;
+timeout or partial completion is not passing evidence.
 
 ### Actions runtime and compatible pins
 
