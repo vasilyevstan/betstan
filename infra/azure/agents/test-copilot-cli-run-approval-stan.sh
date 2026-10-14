@@ -2306,41 +2306,42 @@ import json, pathlib, shlex, subprocess, sys
 text = pathlib.Path(sys.argv[1]).read_text()
 start = text.index("revalidate_upstream_bindings() {")
 body = text[start:text.index("\n}\n", start) + 3]
-base = {
-    "operation": "oci-live-data-continue-held-handoff", "subjectSha": "1" * 40,
-    "environment": "oci-migration", "inputs": {}, "runId": 901,
-}
-for record_id, authority_id, requested_id, mode in (
-    (901, "901", "901", "dispatch-record"), (902, "901", "901", "dispatch-record"),
-    (901, "902", "901", "dispatch-record"), (901, "901", "902", "dispatch-record"),
-    (None, "901", "901", "dispatch-record"), (901, "901", "901", "record-upstream"),
-):
-    setup = "\n".join((
-        "set -euo pipefail",
-        "fail() { exit 1; }", "gh() { printf 'k3s\\n'; }",
-        "fixture_validator() { printf '%s\\0' \"$@\"; }",
-        "BINDING_VALIDATOR=fixture_validator", "repository=example/repo",
-        "POLICY_HELPER=" + shlex.quote(sys.argv[2]),
-        "record_summary=" + shlex.quote(json.dumps({**base, "runId": record_id})),
-        "authority_run_id=" + shlex.quote(authority_id),
-        "RUN_ID=" + shlex.quote(requested_id), "authority_mode=" + shlex.quote(mode),
-        "run_id=999", body, "revalidate_upstream_bindings",
-    ))
-    result = subprocess.run(["bash"], input=setup.encode(), capture_output=True)
-    if (record_id, authority_id, requested_id, mode) == (901, "901", "901", "dispatch-record"):
-        assert result.returncode == 0, result.stderr
-        args = result.stdout.decode().strip("\0").split("\0")
-        assert args.count("--successor-run-id") == 1
-        assert args[args.index("--successor-run-id") + 1] == "901"
-        legacy = setup.replace(
-            shlex.quote(json.dumps({**base, "runId": record_id})),
-            shlex.quote(json.dumps({**base, "operation": "oci-live-data-resume-deploy", "runId": record_id})))
-        old = subprocess.run(["bash"], input=legacy.encode(), capture_output=True)
-        assert old.returncode == 0, old.stderr
-        assert "--successor-run-id" not in old.stdout.decode().split("\0")
-    else:
-        assert result.returncode != 0 and not result.stdout
-print("held_handoff_approval_owned_exclusion=PASS unrelated_or_unbound=REJECTED")
+for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-deploy"):
+    base = {
+        "operation": operation, "subjectSha": "1" * 40,
+        "environment": "oci-migration", "inputs": {}, "runId": 901,
+    }
+    for record_id, authority_id, requested_id, mode in (
+        (901, "901", "901", "dispatch-record"), (902, "901", "901", "dispatch-record"),
+        (901, "902", "901", "dispatch-record"), (901, "901", "902", "dispatch-record"),
+        (None, "901", "901", "dispatch-record"), (901, "901", "901", "record-upstream"),
+    ):
+        setup = "\n".join((
+            "set -euo pipefail",
+            "fail() { exit 1; }", "gh() { printf 'k3s\\n'; }",
+            "fixture_validator() { printf '%s\\0' \"$@\"; }",
+            "BINDING_VALIDATOR=fixture_validator", "repository=example/repo",
+            "POLICY_HELPER=" + shlex.quote(sys.argv[2]),
+            "record_summary=" + shlex.quote(json.dumps({**base, "runId": record_id})),
+            "authority_run_id=" + shlex.quote(authority_id),
+            "RUN_ID=" + shlex.quote(requested_id), "authority_mode=" + shlex.quote(mode),
+            "run_id=999", body, "revalidate_upstream_bindings",
+        ))
+        result = subprocess.run(["bash"], input=setup.encode(), capture_output=True)
+        if (record_id, authority_id, requested_id, mode) == (901, "901", "901", "dispatch-record"):
+            assert result.returncode == 0, result.stderr
+            args = result.stdout.decode().strip("\0").split("\0")
+            assert args.count("--successor-run-id") == 1
+            assert args[args.index("--successor-run-id") + 1] == "901"
+            legacy = setup.replace(
+                shlex.quote(json.dumps({**base, "runId": record_id})),
+                shlex.quote(json.dumps({**base, "operation": "oci-live-data-resume-deploy-released", "runId": record_id})))
+            old = subprocess.run(["bash"], input=legacy.encode(), capture_output=True)
+            assert old.returncode == 0, old.stderr
+            assert "--successor-run-id" not in old.stdout.decode().split("\0")
+        else:
+            assert result.returncode != 0 and not result.stdout
+print("held_and_expired_handoff_approval_owned_successor=PASS unrelated_or_unbound=REJECTED")
 PY
 
 make_request() {

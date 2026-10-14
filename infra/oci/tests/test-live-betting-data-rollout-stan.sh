@@ -38,6 +38,69 @@ fail() {
   exit 1
 }
 
+successor_preflight="$(
+  ruby -ryaml - "$WORKFLOW" <<'RUBY'
+document = YAML.load_file(ARGV.fetch(0))
+step = document.fetch("jobs").fetch("rollout").fetch("steps").find { |item|
+  item["name"] == "Validate exact SHA phase and trusted upstream runs"
+}
+abort "upstream preflight missing" unless step
+script = step.fetch("run")
+first = script.index("continuation_args=()")
+last = script.index("validate_run() {", first || 0)
+abort "upstream argument boundary missing" unless first && last && first < last
+puts script[first...last]
+RUBY
+)"
+successor_fixture="$work_dir/successor-preflight"
+successor_arguments="$work_dir/successor-arguments.jsonl"
+mkdir -p "$successor_fixture/infra/oci/scripts"
+cat >"$successor_fixture/infra/oci/scripts/upstream_run_binding_stan.py" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["STUB_SUCCESSOR_ARGUMENTS"], "a", encoding="utf-8") as output:
+    output.write(json.dumps(sys.argv[1:]) + "\n")
+PY
+chmod 755 "$successor_fixture/infra/oci/scripts/upstream_run_binding_stan.py"
+for operation in \
+  oci-live-data-continue-held-handoff \
+  oci-live-data-resume-deploy \
+  oci-live-data-resume-deploy-released \
+  oci-live-data-apply-slip-index; do
+  held_run=0
+  [[ "$operation" != oci-live-data-continue-held-handoff ]] || held_run=3998
+  (
+    cd "$successor_fixture"
+    STUB_SUCCESSOR_ARGUMENTS="$successor_arguments" \
+    HELD_HANDOFF_RUN_ID="$held_run" GITHUB_RUN_ID=3999 \
+    protected_operation="$operation" REPOSITORY=example/repo \
+    policy_json="{\"operation\":\"$operation\"}" SOURCE_SHA="$SOURCE_SHA" \
+    DISPATCH_INPUTS='{}' OCI_RUNTIME_MODE=k3s RUNNER_TEMP="$work_dir" \
+      bash -euo pipefail -c "$successor_preflight"
+  )
+done
+python3 - "$successor_arguments" <<'PY'
+import json
+import pathlib
+import sys
+calls = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+assert len(calls) == 4
+for args in calls:
+    assert args[0] == "validate-all"
+    operation = json.loads(args[args.index("--policy-json") + 1])["operation"]
+    own = operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-deploy")
+    assert args.count("--successor-run-id") == int(own)
+    if own:
+        assert args[args.index("--successor-run-id") + 1] == "3999"
+    assert args.count("--held-history-file") == int(operation == "oci-live-data-continue-held-handoff")
+    if "--held-history-file" in args:
+        assert args[args.index("--held-history-file") + 1] == (
+            "artifacts/oci-live-data-rollout/evidence/held-handoff-history.json")
+print("PASS executed workflow successor wiring: held and expired self once, held artifact only, non-targets unchanged")
+PY
+
 demotion_script="$(
   ruby -ryaml - "$WORKFLOW" <<'RUBY'
 document = YAML.load_file(ARGV.fetch(0))

@@ -765,12 +765,36 @@ azure_set="common-package-publish,production-build,production-deploy,production-
 full_set="common-package-publish,ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 install_pr_gh_stub
 
+canonical_inventory="$(WORKFLOW_DIR="$ROOT_DIR/.github/workflows" "$INVENTORY")"
+[[ "$canonical_inventory" == "production_workflows=$full_set" ]] || {
+  echo "canonical inventory differs: $canonical_inventory" >&2
+  exit 1
+}
+
 reset_fixtures
 assert_fail "Azure-only set" "expected $full_set; found $azure_set"
 
 reset_fixtures
 write_complete_oci_set
 assert_pass "$full_set"
+
+python3 - "$tmp_dir/oci-live-data-rollout.yml" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+resume_branch = (
+    '          elif [ "$protected_operation" = "oci-live-data-resume-deploy" ]; then\n'
+    '            continuation_args=(--successor-run-id "$GITHUB_RUN_ID")\n'
+)
+portable_expansion = '${continuation_args[@]+"${continuation_args[@]}"}'
+assert text.count(resume_branch) == 1 and text.count(portable_expansion) == 1
+path.write_text(text.replace(resume_branch, "").replace(portable_expansion, '"${continuation_args[@]}"'))
+PY
+assert_pass "$full_set"
+reset_fixtures
+write_complete_oci_set
 
 ruby -rdigest -ryaml -ropen3 -rfileutils - "$tmp_dir" "$support_dir" <<'RUBY'
 fixture_dir, support_dir = ARGV
@@ -1419,7 +1443,11 @@ done
 for baseline_mutation in \
   artifact-name run-id destination mode-gate producer-id duplicate-producer \
   commented-validator wrong-policy result-file imported-baseline \
-  published-file published-selector successor-binding history-destination ignored-error; do
+  published-file published-selector successor-binding resume-successor-binding \
+  both-successor-bindings resume-operation unconditional-successor \
+  missing-continuation-initializer resume-history-argument default-successor \
+  current-plain-expansion legacy-portable-expansion unsupported-expansion \
+  history-destination ignored-error; do
   reset_fixtures
   write_complete_oci_set
   python3 - "$tmp_dir/oci-live-data-rollout.yml" "$baseline_mutation" <<'PY'
@@ -1477,8 +1505,50 @@ changes = {
         "                .prerequisite_run_id |",
     ),
     "successor-binding": (
+        '              --successor-run-id "$GITHUB_RUN_ID"\n',
+        '              --successor-run-id "$HELD_HANDOFF_RUN_ID"\n',
+    ),
+    "resume-successor-binding": (
+        '            continuation_args=(--successor-run-id "$GITHUB_RUN_ID")\n',
+        '            continuation_args=(--successor-run-id "$HELD_HANDOFF_RUN_ID")\n',
+    ),
+    "both-successor-bindings": (
         '--successor-run-id "$GITHUB_RUN_ID"',
         '--successor-run-id "$HELD_HANDOFF_RUN_ID"',
+    ),
+    "resume-operation": (
+        'elif [ "$protected_operation" = "oci-live-data-resume-deploy" ]; then',
+        'elif [ "$protected_operation" = "oci-live-data-resume-released" ]; then',
+    ),
+    "unconditional-successor": (
+        'elif [ "$protected_operation" = "oci-live-data-resume-deploy" ]; then',
+        "else",
+    ),
+    "missing-continuation-initializer": (
+        "          continuation_args=()\n",
+        "",
+    ),
+    "resume-history-argument": (
+        'continuation_args=(--successor-run-id "$GITHUB_RUN_ID")',
+        'continuation_args=(--successor-run-id "$GITHUB_RUN_ID" '
+        '--held-history-file artifacts/oci-live-data-rollout/evidence/held-handoff-history.json)',
+    ),
+    "default-successor": (
+        "          continuation_args=()\n",
+        '          continuation_args=(--successor-run-id "$GITHUB_RUN_ID")\n',
+    ),
+    "current-plain-expansion": (
+        '${continuation_args[@]+"${continuation_args[@]}"}',
+        '"${continuation_args[@]}"',
+    ),
+    "legacy-portable-expansion": (
+        '          elif [ "$protected_operation" = "oci-live-data-resume-deploy" ]; then\n'
+        '            continuation_args=(--successor-run-id "$GITHUB_RUN_ID")\n',
+        "",
+    ),
+    "unsupported-expansion": (
+        '${continuation_args[@]+"${continuation_args[@]}"}',
+        '${continuation_args[@]:+"${continuation_args[@]}"}',
     ),
     "history-destination": (
         "--held-history-file artifacts/oci-live-data-rollout/evidence/held-handoff-history.json",
@@ -1490,8 +1560,15 @@ changes = {
     ),
 }
 old, new = changes[mutation]
-assert text.count(old) == 1, (mutation, text.count(old))
+expected_count = 2 if mutation == "both-successor-bindings" else 1
+assert text.count(old) == expected_count, (mutation, text.count(old))
 text = text.replace(old, new)
+if mutation == "successor-binding":
+    assert 'continuation_args=(--successor-run-id "$GITHUB_RUN_ID")' in text
+elif mutation == "resume-successor-binding":
+    assert '              --successor-run-id "$GITHUB_RUN_ID"\n' in text
+elif mutation == "both-successor-bindings":
+    assert '--successor-run-id "$GITHUB_RUN_ID"' not in text
 if mutation == "wrong-policy":
     text += '\n# --policy-json "$policy_json"\n'
 path.write_text(text)
