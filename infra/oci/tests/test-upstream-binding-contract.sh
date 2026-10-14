@@ -6201,6 +6201,78 @@ for successor_args in ([], ["--successor-run-id", "55"]):
     else:
         assert result.returncode != 0 and "not a candidate for native no-execution history" in result.stderr
         assert not resolved.exists()
+
+# Execute the actual step13 consumer before any new resume envelope exists.
+provenance_body = next(
+    step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
+    if step.get("name") == "Verify immutable release and phase provenance"
+)
+caller_body = provenance_body[
+    provenance_body.index('resume_native_dispatch_inputs=""'):
+    provenance_body.index('resume_artifact_name=')
+]
+caller = pathlib.Path(checkout) / "expired-envelope-free-caller"
+(caller / "artifacts").mkdir(parents=True)
+(caller / "runner").mkdir()
+(caller / "infra").symlink_to(root / "infra", target_is_directory=True)
+shutil.copytree(holder, caller / "artifacts/prerequisite")
+shutil.copytree(before, caller / "artifacts/oci-data-baseline-before")
+assert not (caller / "artifacts/prerequisite/resume-authority.env").exists()
+caller_result = caller / "runner/live-data-upstream-result.json"
+caller_result.write_text(json.dumps({"failed_deploy_run_id": qualification}))
+caller_env = dict(
+    os.environ, REPOSITORY=repo, RUNNER_TEMP=str(caller / "runner"),
+    GITHUB_RUN_ID="55", GITHUB_OUTPUT=str(caller / "outputs"),
+    SOURCE_SHA=control_source, DISPATCH_INPUTS=json.dumps(request),
+    prior_source_sha=expired_source, prior_build_run_id="41",
+    prior_infrastructure_run_id="44", PREREQUISITE_RUN_ID="53",
+    CHECKPOINT_SOURCE_SHA=root_source, DISK_CHECKPOINT_RUN_ID="44",
+    disk_checkpoint_sha256=activation["disk_checkpoint_sha256"],
+    disk_checkpoint_disposition="NOT_APPLICABLE", BASELINE_RECOVERY_RUN_ID="0",
+    BASELINE_RECOVERY_SOURCE_SHA="none", HELD_HANDOFF_RUN_ID="0",
+)
+def call_envelope_free(expected=True, body=caller_body, changes=None):
+    result = subprocess.run(
+        ["bash", "-euc", 'set_output() { printf "%s=%s\\n" "$1" "$2" >> "$GITHUB_OUTPUT"; }\n' + body],
+        cwd=caller, env=dict(caller_env, **(changes or {})), capture_output=True, text=True,
+    )
+    assert (result.returncode == 0) == expected, result.stderr + result.stdout
+    if expected:
+        assert "applied_data_run_id=42" in result.stdout
+        assert f"applied_source_sha={root_source}" in result.stdout
+        assert "prerequisite_data_run_id=53" in result.stdout
+    return result
+
+call_envelope_free()
+call_envelope_free(False, caller_body.replace("VERIFY_RESUME_APPLIED_RUN=true", "VERIFY_RESUME_APPLIED_RUN=false"))
+call_envelope_free(False, changes={"DISPATCH_INPUTS": json.dumps(dict(request, prerequisite_run_id="42"))})
+call_envelope_free(False, changes={"DISPATCH_INPUTS": json.dumps(dict(request, resume_source_sha=root_source))})
+call_envelope_free(False, caller_body.replace('RESUME_SUCCESSOR_RUN_ID="$resume_successor_run_id"',
+                                             'RESUME_SUCCESSOR_RUN_ID=54'))
+caller_result.write_text(json.dumps({"failed_deploy_run_id": {}}))
+missing = call_envelope_free(False)
+assert "Resolved original applied data source differs" in missing.stderr
+caller_result.write_text(json.dumps({"failed_deploy_run_id": qualification}))
+for key, bad in (
+    ("baseline_capture_run_id", "42"), ("baseline_source_sha", expired_source),
+    ("baseline_deploy_run_id", "54"),
+):
+    directory = caller / "artifacts/oci-data-baseline-before"
+    evidence = caller / "artifacts/prerequisite"
+    members = [directory / "baseline-provenance.env", directory / "SHA256SUMS",
+               evidence / "provenance.env", evidence / "schema.env", evidence / "SHA256SUMS"]
+    saved = {member: member.read_bytes() for member in members}
+    values = env(directory, "baseline-provenance.env"); values[key] = bad
+    write_env(directory, "baseline-provenance.env", values); substituted = seal(directory)
+    for name in ("provenance.env", "schema.env"):
+        values = env(evidence, name); values["baseline_sha256"] = substituted
+        write_env(evidence, name, values)
+    seal(evidence); call_envelope_free(False)
+    for member, raw in saved.items():
+        member.write_bytes(raw)
+call_envelope_free()
+print("PASS extracted step13 caller -> real envelope-free v6 verifier -> native qualifier preserves capture53/root42; context/native-self/native-verification/capture substitutions reject")
+
 write(history_endpoint, before_successor_history)
 for suffix in ("", "/attempts/1"):
     path(f"{prefix}/actions/runs/55{suffix}").unlink()
