@@ -1695,7 +1695,8 @@ if args[0] == "upstream-boundary":
     assert f.get("boundContext")
     assert args[1] == "validate-all"
     parsed = dict(zip(args[2::2], args[3::2]))
-    assert json.loads(parsed["--policy-json"])["operation"] == "oci-live-data-continue-held-handoff"
+    assert json.loads(parsed["--policy-json"])["operation"] == json.loads(
+        (d / "request.json").read_text())["operation"]
     assert json.loads(parsed["--dispatch-inputs"]) == f["inputs"]
     authority_file = d / "authority" / f'{f["newRun"]}.json'
     successor = parsed.get("--successor-run-id")
@@ -1721,7 +1722,7 @@ if args[0] == "authority-boundary":
     output_text = result.stdout
     if args[1] == "verify" and result.returncode == 0 and reads == f.get("wrongSummaryRead"):
         summary = json.loads(output_text)
-        summary["runId"] = f["newRun"] + 1
+        summary["runId"] = f.get("wrongSummaryRunId", f["newRun"] + 1)
         output_text = json.dumps(summary) + "\n"
     sys.stdout.write(output_text)
     sys.stderr.write(result.stderr)
@@ -2267,59 +2268,62 @@ assert (d / "dispatches").read_text() == "1", "post-CAS replay"
 run(d, "--resume-captured", state="active")
 
 saved_request = request
-continuation_policy = json.loads(subprocess.check_output([
-    policy_script, "get", "oci-live-data-continue-held-handoff",
-]))
-request = {
-    **copy.deepcopy(saved_request), "operation": continuation_policy["operation"],
-    "inputs": {
-        **saved_request["inputs"], **continuation_policy["fixedInputs"],
-        "prerequisite_run_id": "46", "failed_deploy_run_id": "47",
-        "held_handoff_run_id": "48", "held_handoff_source_sha": old,
-    },
-}
-for resume in ("", "--resume-captured", "--resume-run"):
-    d = setup()
-    fixture = json.loads((d / "fixture.json").read_text())
-    fixture.update(boundContext=True, pauseIssue=bool(resume))
-    write(d / "fixture.json", fixture)
-    prepared = prepare(d)
-    result = run(d, "--dispatch-prepared", state="active", ok=not bool(resume))
-    record_path = d / "authority" / f'{fixture["newRun"]}.json'
-    record = json.loads(record_path.read_text())
-    assert record["state"] == ("claimed" if resume else "issued")
-    assert intent(d)["state"] == "bound" and intent(d)["preparedSeal"] == prepared["preparedSeal"]
-    if resume:
-        if resume == "--resume-run":
-            run(d, (resume, str(fixture["newRun"] + 1)), state="active", ok=False)
-            assert json.loads(record_path.read_text())["state"] == "claimed"
-        fixture["pauseIssue"] = False
+for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-deploy"):
+    successor_policy = json.loads(subprocess.check_output([policy_script, "get", operation]))
+    request = {
+        **copy.deepcopy(saved_request), "operation": operation,
+        "inputs": {
+            **saved_request["inputs"], **successor_policy["fixedInputs"],
+            "prerequisite_run_id": "46", "failed_deploy_run_id": "47",
+        },
+    }
+    if operation == "oci-live-data-continue-held-handoff":
+        request["inputs"].update(held_handoff_run_id="48", held_handoff_source_sha=old)
+    for resume in ("", "--resume-captured", "--resume-run"):
+        d = setup()
+        fixture = json.loads((d / "fixture.json").read_text())
+        fixture.update(boundContext=True, pauseIssue=bool(resume))
         write(d / "fixture.json", fixture)
-        action = (resume, str(fixture["newRun"])) if resume == "--resume-run" else resume
-        result = run(d, action, state="active")
-    assert "authority_state=issued" in result.stdout
-    assert "job_gate_materialization=UNPROVEN" in result.stdout
-    assert json.loads(record_path.read_text())["state"] == "issued"
-    assert (d / "dispatches").read_text() == "1"
-    calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
-    assert any(not call["bound"] for call in calls) and any(call["bound"] for call in calls)
-    assert all(call["successor"] == (str(fixture["newRun"]) if call["bound"] else None)
-               for call in calls)
-    run(d, "--dispatch-prepared", state="active", ok=False)
-    assert (d / "dispatches").read_text() == "1"
-for wrong_read in (1, 2):
-    d = setup()
-    fixture = json.loads((d / "fixture.json").read_text())
-    fixture.update(boundContext=True, wrongSummaryRead=wrong_read)
-    write(d / "fixture.json", fixture)
-    prepare(d)
-    result = run(d, "--dispatch-prepared", state="active", ok=False)
-    assert "authority record does not match the bound materialization run" in result.stderr
-    assert json.loads((d / "authority" / f'{fixture["newRun"]}.json').read_text())["state"] == "claimed"
-    calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
-    assert all(not call["bound"] and call["successor"] is None for call in calls)
+        prepared = prepare(d)
+        result = run(d, "--dispatch-prepared", state="active", ok=not bool(resume))
+        record_path = d / "authority" / f'{fixture["newRun"]}.json'
+        record = json.loads(record_path.read_text())
+        assert record["state"] == ("claimed" if resume else "issued")
+        assert intent(d)["state"] == "bound" and intent(d)["preparedSeal"] == prepared["preparedSeal"]
+        if resume:
+            if resume == "--resume-run":
+                run(d, (resume, str(fixture["newRun"] + 1)), state="active", ok=False)
+                assert json.loads(record_path.read_text())["state"] == "claimed"
+            fixture["pauseIssue"] = False
+            write(d / "fixture.json", fixture)
+            action = (resume, str(fixture["newRun"])) if resume == "--resume-run" else resume
+            result = run(d, action, state="active")
+        assert "authority_state=issued" in result.stdout
+        assert "job_gate_materialization=UNPROVEN" in result.stdout
+        assert json.loads(record_path.read_text())["state"] == "issued"
+        assert (d / "dispatches").read_text() == "1"
+        calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
+        assert any(not call["bound"] for call in calls) and any(call["bound"] for call in calls)
+        assert all(call["successor"] == (str(fixture["newRun"]) if call["bound"] else None)
+                   for call in calls)
+        run(d, "--dispatch-prepared", state="active", ok=False)
+        assert (d / "dispatches").read_text() == "1"
+    for wrong_read in (1, 2):
+        for missing in (False, True):
+            d = setup()
+            fixture = json.loads((d / "fixture.json").read_text())
+            fixture.update(boundContext=True, wrongSummaryRead=wrong_read)
+            if missing:
+                fixture["wrongSummaryRunId"] = None
+            write(d / "fixture.json", fixture)
+            prepare(d)
+            result = run(d, "--dispatch-prepared", state="active", ok=False)
+            assert "authority record does not match the bound materialization run" in result.stderr
+            assert json.loads((d / "authority" / f'{fixture["newRun"]}.json').read_text())["state"] == "claimed"
+            calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
+            assert all(not call["bound"] and call["successor"] is None for call in calls)
 request = saved_request
-print("bound_successor_prepared_materialization_and_both_resumes=PASS", flush=True)
+print("held_and_expired_bound_successor_prepared_materialization_and_both_resumes=PASS", flush=True)
 
 # Every boundary drift is tested at BOTH fresh checkpoints. Failures before CAS
 # retain prepared authority; cleanup is tested separately without fabricating a

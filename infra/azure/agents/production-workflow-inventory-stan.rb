@@ -1441,6 +1441,12 @@ def validate_live_data_rollout_workflow!(file, document, content)
       )
     fi
   SH
+  portable_validator = expected_validator[0...-1] + ["${continuation_args[@]+${continuation_args[@]}}"]
+  resume_continuation = continuation.sub("fi\n", <<~'SH')
+    elif [ "$protected_operation" = "oci-live-data-resume-deploy" ]; then
+      continuation_args=(--successor-run-id "$GITHUB_RUN_ID")
+    fi
+  SH
   publisher = <<~'SH'
     result_binding=failed_deploy_run_id
     [ "$HELD_HANDOFF_RUN_ID" = "0" ] || result_binding=held_handoff_run_id
@@ -1451,12 +1457,22 @@ def validate_live_data_rollout_workflow!(file, document, content)
     ' "$RUNNER_TEMP/live-data-upstream-result.json" >> "$GITHUB_OUTPUT"
   SH
   publisher_pattern = publisher.split.map { |word| Regexp.escape(word) }.join('\s+')
-  continuation_pattern = continuation.split.map { |word| Regexp.escape(word) }.join('\s+')
-  continuation_binding = script.match(/^\s*#{continuation_pattern}\s*$/)
+  continuation_binding = nil
+  if validator_calls.length == 1
+    validator_arguments = Shellwords.shellsplit(validator_calls.first)
+    [
+      [expected_validator, continuation],
+      [portable_validator, resume_continuation]
+    ].each do |arguments, body|
+      next unless validator_arguments == arguments
+      pattern = body.split.map { |word| Regexp.escape(word) }.join('\s+')
+      continuation_binding = script.match(/^\s*#{pattern}\s*$/)
+      break if continuation_binding
+    end
+  end
   publication = script.match(/^\s*#{publisher_pattern}\s*$/)
   unless commands.first == "set -euo pipefail" &&
          validator_calls.length == 1 &&
-         Shellwords.shellsplit(validator_calls.first) == expected_validator &&
          continuation_binding &&
          continuation_binding.end(0) <= script.index("./infra/oci/scripts/upstream_run_binding_stan.py") &&
          publication &&

@@ -853,7 +853,8 @@ materialize_record() {
       fi
       [[ "$state" = "claimed" ]] ||
         fail "authority changed from claimed before materialization"
-      if [[ "$operation" = "oci-live-data-continue-held-handoff" ]]; then
+      if [[ "$operation" = "oci-live-data-continue-held-handoff" ||
+        "$operation" = "oci-live-data-resume-deploy" ]]; then
         bound_successor_run_id="$run_id"
       fi
       if ! gh api \
@@ -986,7 +987,9 @@ validate_upstream_run_bindings() {
   # drift.
   local dispatch_inputs
   local successor_args=()
-  if [[ "$operation" = "oci-live-data-continue-held-handoff" && -n "${1:-}" ]]; then
+  if [[ -n "${1:-}" &&
+    ( "$operation" = "oci-live-data-continue-held-handoff" ||
+      "$operation" = "oci-live-data-resume-deploy" ) ]]; then
     [[ "$1" =~ ^[1-9][0-9]*$ ]] ||
       fail "bound successor run ID is invalid"
     successor_args=(--successor-run-id "$1")
