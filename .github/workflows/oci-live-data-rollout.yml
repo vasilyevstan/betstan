@@ -1652,6 +1652,88 @@ jobs:
             released_generation="$((observed_generation + 1))"
             if [ "$strict_transfer" = true ]; then
               ./infra/azure/agents/production-run-exclusivity-stan.sh
+              if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+                [ ! -e artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json ] &&
+                  [ ! -L artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json ]
+                umask 077
+                transfer_dir="$RUNNER_TEMP/held-pre-transfer"
+                mkdir -m 700 "$transfer_dir"
+                if [ "$OCI_RUNTIME_MODE" = k3s ]; then
+                  SESSION_STATE_FILE=artifacts/oci-live-data-rollout/k3s-access.env \
+                  INFRA_PROVENANCE_FILE=artifacts/infrastructure/provenance.env \
+                  CANDIDATE_IMAGES_FILE=artifacts/oci-live-data-rollout/images.tsv \
+                  CHECKPOINT_FILE=artifacts/disk-checkpoint/checkpoint.json \
+                  WORK_DIR="$RUNNER_TEMP/held-pre-transfer-disk-checkpoint" \
+                  SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" CONTROL_SHA="$SOURCE_SHA" \
+                  GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
+                  REVALIDATION_PROFILE=held \
+                    ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
+                fi
+                BASELINE_DIR=artifacts/oci-data-baseline-before \
+                EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+                  ./infra/oci/scripts/validate-rollback-baseline-stan.sh
+                ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+                [ "$(gh api "repos/$REPO/commits/master" --jq .sha)" = "$SOURCE_SHA" ]
+                [ "$(gh api "repos/$REPO/environments/oci-migration/variables/OCI_RUNTIME_MODE" --jq .value)" = "$OCI_RUNTIME_MODE" ]
+                [ "$(gh api "repos/$REPO/actions/workflows/oci-live-data-rollout.yml" --jq .state)" = active ]
+                for path in .github/workflows/oci-live-data-rollout.yml \
+                  infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh; do
+                  [ "$(gh api "repos/$REPO/contents/$path?ref=$SOURCE_SHA" --jq .sha)" = \
+                    "$(git rev-parse "$SOURCE_SHA:$path")" ]
+                done
+                policy_json="$(
+                  ./infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh \
+                    get oci-live-data-continue-held-handoff
+                )"
+                ./infra/oci/scripts/upstream_run_binding_stan.py validate-all \
+                  --repository "$REPO" --policy-json "$policy_json" \
+                  --subject-sha "$SOURCE_SHA" --dispatch-inputs "$DISPATCH_INPUTS" \
+                  --runtime-mode "$OCI_RUNTIME_MODE" --successor-run-id "$GITHUB_RUN_ID" \
+                  --result-json "$transfer_dir/upstream-result.json"
+                services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
+                deployments=()
+                for service in "${services[@]}"; do deployments+=("gaming-${service}-depl"); done
+                kubectl get deployment "${deployments[@]}" -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/deployments.json"
+                kubectl get pods -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/pods.json"
+                kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/lock.json"
+                python3 - "$snapshot" "$transfer_dir" "$OCI_K8S_NAMESPACE" \
+                  "$HELD_HANDOFF_RUN_ID" "$HELD_HANDOFF_SOURCE_SHA" "$GITHUB_RUN_ID" "$SOURCE_SHA" <<'PY'
+          import importlib.util, json, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location(
+              "upstream_binding", "infra/oci/scripts/upstream_run_binding_stan.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          snapshot, temporary, namespace, held_run, held_source, run, source = sys.argv[1:]
+          temporary = Path(temporary)
+          baseline = Path("artifacts/oci-data-baseline-before")
+          if baseline.is_symlink() or any(path.is_symlink() for path in baseline.rglob("*")):
+              raise SystemExit("original held rollback baseline contains a symbolic link")
+          baseline_files = {
+              path.relative_to(baseline).as_posix(): path.read_bytes()
+              for path in baseline.rglob("*") if path.is_file()}
+          result = json.loads((temporary / "upstream-result.json").read_bytes())
+          authority = module.parse_env(
+              Path("artifacts/oci-live-data-rollout/evidence/resume-authority.env").read_bytes(),
+              "held transfer resume authority")
+          fresh = result["held_handoff_run_id"]
+          if any(authority.get(key) != fresh.get(key) for key in (
+              "applied_data_run_id", "applied_source_sha", "failed_deploy_run_id", "baseline_sha256",
+              "held_handoff_run_id", "held_handoff_source_sha", "held_handoff_evidence_sha256")):
+              raise SystemExit("local held authority differs from its fresh authenticated root")
+          module.validate_held_transfer_runtime(
+              json.loads(Path(snapshot).read_bytes()),
+              json.loads((temporary / "lock.json").read_bytes()),
+              json.loads((temporary / "deployments.json").read_bytes()),
+              json.loads((temporary / "pods.json").read_bytes()),
+              baseline_files, authority, namespace, held_run, held_source, run, source,
+              fresh.get("held_handoff_lease_until_epoch", ""),
+              fresh.get("held_handoff_fencing_generation", ""))
+          PY
+              fi
               record_transfer release unconfirmed
             fi
             if [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ]; then

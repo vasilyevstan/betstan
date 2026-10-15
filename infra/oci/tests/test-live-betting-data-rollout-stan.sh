@@ -38,6 +38,152 @@ fail() {
   exit 1
 }
 
+ruby -ryaml -rjson - "$DEPLOY_WORKFLOW" >"$work_dir/receiver-steps.json" <<'RUBY'
+steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("deploy").fetch("steps")
+puts JSON.generate(steps.select { |step|
+  ["Verify transferred database lock and maintenance fence",
+   "Renew exact transferred database lock"].include?(step["name"])
+}.to_h { |step| [step["name"], step.fetch("run")] })
+RUBY
+PYTHONDONTWRITEBYTECODE=1 python3 - \
+  "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" "$work_dir" <<'PY'
+import copy, json, os, pathlib, subprocess, sys, time
+validator, work = map(pathlib.Path, sys.argv[1:])
+root = work / "receiver-budget"
+scripts, binary = root / "infra/oci/scripts", root / "bin"
+scripts.mkdir(parents=True); binary.mkdir()
+module = scripts / "upstream_run_binding_stan.py"
+module.write_text(validator.read_text() + '''
+if os.environ.get("RECEIVER_TEST_FIXTURE"):
+    _fixture = json.loads(Path(os.environ["RECEIVER_TEST_FIXTURE"]).read_text())
+    _stamp = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
+    time.time = lambda: _fixture["now"]
+    current_held_source = lambda *a, **k: ""
+    require_fixed_run = lambda *a, **k: {"updated_at": _stamp(_fixture["packaged"])}
+    parse_live_v6_artifact = lambda *a, **k: (
+        {"source_sha": "2" * 40, "workflow_run_id": "77"}, None, {})
+    parse_resume_authority = lambda *a, **k: {"schema_version": "live-betting-data-resume-v3"}
+    native_handoff_renewal = lambda *a, **k: (_fixture["deadline"], 11)
+    def gh_api(path):
+        if "/workflows/" in path:
+            return {"id": 8, "path": ".github/workflows/oci-production-deploy.yml",
+                    "state": _fixture["workflow_state"]}
+        return {"id": 78, "workflow_id": 8, "path": ".github/workflows/oci-production-deploy.yml",
+                "head_sha": "2" * 40, "head_branch": "master", "run_attempt": _fixture["attempt"],
+                "event": "workflow_dispatch", "head_repository": {"full_name": "example/repo"},
+                "display_title": "oci-deploy " + "2" * 40, "status": "in_progress",
+                "conclusion": None, "created_at": _stamp(_fixture["created"])}
+    def jobs_for_run(repository, run, label):
+        if run == "77":
+            return [{"run_id": 77, "name": "rollout", "steps": [],
+                     "status": "completed", "conclusion": "success"}]
+        return [{"run_id": 78, "name": "deploy", "status": "in_progress",
+                 "started_at": _stamp(_fixture["started"]), "steps": [
+            {"name": "Validate exact SHA and trusted upstream runs", "conclusion": "success",
+             "completed_at": _stamp(_fixture["validated"])},
+            {"name": "Verify transferred database lock and maintenance fence",
+             "started_at": _stamp(_fixture["verified"])}]}]
+''')
+lock_helper = scripts / "shared-mongo-operation-lock-stan.sh"
+lock_helper.write_text("#!/usr/bin/env python3\n" + '''
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ["RECEIVER_TEST_FIXTURE"]).parent
+state = json.loads((root / "state.json").read_text())
+assert os.environ["LOCK_TOKEN"] == "live-data-77-1"
+assert os.environ["OPERATION_ID"] == "live-data-apply-slip-index"
+assert os.environ["SOURCE_SHA"] == "2" * 40
+with (root / "events").open("a") as output: output.write(sys.argv[1] + "\\n")
+if sys.argv[1] == "verify":
+    print("shared_mongo_lock=verify status=PASS lease_until_epoch=%s fencing_generation=11" % state["deadline"])
+    raise SystemExit(0)
+assert sys.argv[1] == "renew" and os.environ["LOCK_LEASE_SECONDS"] == "10800"
+if state["mode"] == "renew-failure":
+    raise SystemExit(1)
+until, generation = state["now"] + 10800, 12
+if state["mode"] == "wrong-generation": generation += 1
+lock = {"data": {"state": "active", "holder": "live-data-77-1", "source-sha": "2" * 40,
+                 "operation-id": "live-data-apply-slip-index", "lease-duration-seconds": "10800",
+                 "lease-until-epoch": str(until), "fencing-generation": str(generation)}}
+if state["mode"] == "wrong-holder": lock["data"]["holder"] = "foreign"
+(root / "lock.json").write_text(json.dumps(lock)); (root / "renewed").touch()
+line = "shared_mongo_lock=renew status=PASS lease_until_epoch=%s fencing_generation=%s" % (until, generation)
+if state["mode"] != "missing-ack": print(line)
+if state["mode"] == "duplicate-ack": print(line)
+''')
+lock_helper.chmod(0o700)
+maintenance = scripts / "live-data-maintenance-stan.sh"
+maintenance.write_text("#!/usr/bin/env bash\nset -euo pipefail\n[[ \"$1\" = verify-held ]]\n")
+maintenance.chmod(0o700)
+date = binary / "date"
+date.write_text("#!/usr/bin/env python3\n" + '''
+import json, os, pathlib, sys
+assert sys.argv[1:] == ["+%s"]
+path = pathlib.Path(os.environ["RECEIVER_TEST_FIXTURE"]); state = json.loads(path.read_text())
+print(state["after"] if (path.parent / "renewed").exists() else state["now"])
+''')
+date.chmod(0o700)
+kubectl = binary / "kubectl"
+kubectl.write_text("#!/usr/bin/env python3\n" + '''
+import os, pathlib, sys
+assert sys.argv[1:] == ["get", "configmap", "gaming-mongo-migration-lock", "-n", "betstan-oci", "-o", "json"]
+print((pathlib.Path(os.environ["RECEIVER_TEST_FIXTURE"]).parent / "lock.json").read_text())
+''')
+kubectl.chmod(0o700)
+steps = json.loads((work / "receiver-steps.json").read_text())
+verify = steps["Verify transferred database lock and maintenance fence"]
+renew = steps["Renew exact transferred database lock"]
+now = int(time.time())
+state = dict(now=now, after=now, deadline=now + 1500, packaged=now - 260,
+             created=now - 220, started=now - 190, validated=now - 150,
+             verified=now - 100, attempt=1, workflow_state="active", mode="success")
+env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+           RECEIVER_TEST_FIXTURE=str(root / "state.json"), REPOSITORY="example/repo",
+           DATA_RUN_ID="77", SOURCE_SHA="2" * 40, GITHUB_RUN_ID="78",
+           OCI_K8S_NAMESPACE="betstan-oci", SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS="10800")
+for mode in (
+    "success", "new-capture-old-source-expired", "reserve-equality",
+    "fresh-post-does-not-reset", "rerun-after-verify", "disabled-after-verify",
+    "late-after-physical-renewal", "renew-failure", "wrong-generation",
+    "wrong-holder", "missing-ack", "duplicate-ack",
+):
+    current = dict(state, mode=mode, posted_at=now, old_producer_deadline=now - 86400)
+    for name in ("events", "renewed", "lock.json"):
+        (root / name).unlink(missing_ok=True)
+    (root / "state.json").write_text(json.dumps(current))
+    checked = subprocess.run(["bash"], input=verify, cwd=root, env=env,
+                             text=True, capture_output=True, timeout=30)
+    assert checked.returncode == 0, (mode, checked.stderr)
+    if mode == "reserve-equality":
+        current.update(deadline=now + 720, packaged=now - 960, created=now - 780,
+                       started=now - 420, validated=now - 240, verified=now - 120)
+    elif mode == "fresh-post-does-not-reset":
+        current["deadline"] = now - 1
+    elif mode == "rerun-after-verify":
+        current["attempt"] = 2
+    elif mode == "disabled-after-verify":
+        current["workflow_state"] = "disabled_manually"
+    elif mode == "late-after-physical-renewal":
+        current["after"] = current["deadline"] - 600
+    (root / "state.json").write_text(json.dumps(current))
+    result = subprocess.run(["bash"], input=renew, cwd=root, env=env,
+                            text=True, capture_output=True, timeout=30)
+    success = mode in {"success", "new-capture-old-source-expired"}
+    assert (result.returncode == 0) == success, (mode, result.stdout, result.stderr)
+    events = (root / "events").read_text().splitlines()
+    early = mode in {"reserve-equality", "fresh-post-does-not-reset",
+                     "rerun-after-verify", "disabled-after-verify"}
+    assert events == (["verify"] if early else ["verify", "renew"]), (mode, events)
+    assert "acquire" not in events
+    if success:
+        assert "handoff_receiver_renewal=PASS" in result.stdout
+        lock = json.loads((root / "lock.json").read_text())["data"]
+        assert lock["lease-duration-seconds"] == "10800"
+        assert lock["fencing-generation"] == "12" and lock["holder"] == "live-data-77-1"
+    else:
+        assert "handoff_receiver_renewal=PASS" not in result.stdout
+print("real_yaml_receiver_timing_native_recheck_and_exact_renewal=PASS cases=12 no_acquire_fallback=true")
+PY
+
 successor_preflight="$(
   ruby -ryaml - "$WORKFLOW" <<'RUBY'
 document = YAML.load_file(ARGV.fetch(0))
@@ -3296,6 +3442,10 @@ chmod +x "$resume_script"
 cat >"$resume_fixture/bin/git" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" = rev-parse ]]; then
+  printf '%040d\n' 7
+  exit 0
+fi
 [[ "$*" == "merge-base --is-ancestor "* ]]
 printf 'ancestry\n' >>"${RESUME_TEST_LOG:?}"
 SH
@@ -3305,6 +3455,10 @@ cat >"$resume_fixture/bin/kubectl" <<'SH'
 set -euo pipefail
 
 if [[ "${1:-}" == "get" && "${2:-}" == "deployment" ]]; then
+  if [[ "${4:-}" == gaming-bet-depl ]]; then
+    cat "${RESUME_PRECAS_ROOT:?}/fresh-deployments.json"
+    exit 0
+  fi
   service="${3#gaming-}"
   service="${service%-depl}"
   printf 'deployment:%s\n' "$service" >>"${RESUME_TEST_LOG:?}"
@@ -3333,7 +3487,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "pods" ]]; then
       service="${argument#app=gaming-}"
     fi
   done
-  [[ -n "$service" ]]
+  if [[ -z "$service" ]]; then
+    cat "${RESUME_PRECAS_ROOT:?}/fresh-pods.json"
+    exit 0
+  fi
   manifest="$(
     awk -F '\t' -v service="$service" '
       $1 == service { count++; value=$4 }
@@ -3862,6 +4019,119 @@ echo "PASS pre-runtime ten-image baseline, Telemetry/fence drift, private snapsh
 
 cp "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" \
   "$resume_fixture/infra/oci/scripts/upstream_run_binding_stan.py"
+mkdir -p "$resume_fixture/artifacts/oci-live-data-rollout/evidence"
+python3 - "$resume_fixture" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+baseline = root / "artifacts/oci-data-baseline-before"
+(baseline / "live-images.tsv").write_bytes((baseline / "live-images-template.tsv").read_bytes())
+manifest = "".join(
+    f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+    for path in sorted(baseline.iterdir()) if path.name != "SHA256SUMS")
+(baseline / "SHA256SUMS").write_text(manifest)
+authority = {
+    "current_source_sha": "2" * 40, "applied_data_run_id": "3999",
+    "applied_source_sha": "1" * 40, "failed_deploy_run_id": "4000",
+    "baseline_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
+    "held_handoff_run_id": "4008", "held_handoff_source_sha": "3" * 40,
+    "held_handoff_evidence_sha256": "a" * 64,
+}
+(root / "fresh-authority.json").write_text(json.dumps(authority))
+(root / "artifacts/prerequisite/provenance.env").write_text(
+    f'baseline_sha256={authority["baseline_sha256"]}\n')
+(root / "artifacts/oci-live-data-rollout/evidence/resume-authority.env").write_text(
+    "".join(f"{key}={value}\n" for key, value in authority.items()))
+deployments, pods = [], []
+for service, _, image, manifest, platform in (
+        row.split("\t") for row in (baseline / "images.tsv").read_text().splitlines()):
+    replicas = 1 if service in {"auth", "client", "telemetry"} else 0
+    container = {"name": f"gaming-{service}", "image": image}
+    if service == "gamemaster":
+        container["env"] = [{"name": "LIVE_KICKOFFS_ENABLED", "value": "false"}]
+    deployments.append({
+        "kind": "Deployment", "apiVersion": "apps/v1",
+        "metadata": {"name": f"gaming-{service}-depl", "namespace": "betstan-oci",
+                     "uid": f"deployment-{service}", "generation": 1},
+        "spec": {"replicas": replicas, "template": {"spec": {"containers": [container]}}},
+        "status": dict(observedGeneration=1, replicas=replicas, updatedReplicas=replicas,
+                       readyReplicas=replicas, availableReplicas=replicas)})
+    if replicas:
+        pods.append({
+            "metadata": {"name": f"gaming-{service}-pod", "namespace": "betstan-oci",
+                         "uid": f"pod-{service}", "labels": {"app": f"gaming-{service}"}},
+            "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                       "containerStatuses": [{"name": f"gaming-{service}", "ready": True,
+                                              "imageID": "fixture@" + manifest}]}})
+(root / "fresh-deployments.json").write_text(json.dumps({"items": deployments}))
+(root / "fresh-pods.json").write_text(json.dumps({"items": pods}))
+script = root / "infra/oci/scripts/upstream_run_binding_stan.py"
+body = script.read_text()
+entry = '''if __name__ == "__main__":
+    if sys.argv[1:2] != ["validate-all"]:
+        main()
+    else:
+        arguments = dict(zip(sys.argv[2::2], sys.argv[3::2]))
+        root = Path(os.environ["RESUME_PRECAS_ROOT"])
+        with Path(os.environ["RESUME_TEST_LOG"]).open("a") as output:
+            output.write("authority:pre-cas\\n")
+        assert arguments["--repository"] == "example/repo"
+        assert arguments["--subject-sha"] == "2" * 40
+        assert arguments["--runtime-mode"] == "k3s"
+        assert arguments["--successor-run-id"] == "901"
+        assert json.loads(arguments["--policy-json"])["operation"] == "oci-live-data-continue-held-handoff"
+        assert json.loads(arguments["--dispatch-inputs"])["approved_sha"] == "2" * 40
+        if os.environ.get("RESUME_LOCK_FAILURE") in {"authority", "receiver"}:
+            raise SystemExit("fixture fresh owned-successor authority rejection")
+        facts = json.loads((root / "fresh-authority.json").read_text())
+        lock = json.loads((root / "pre-runtime-lock.json").read_text())["data"]
+        facts.update(held_handoff_lease_until_epoch=lock["lease-until-epoch"],
+                     held_handoff_fencing_generation=lock["fencing-generation"])
+        with Path(arguments["--result-json"]).open("x") as output:
+            json.dump({"held_handoff_run_id": facts}, output)
+'''
+assert body.count('if __name__ == "__main__":\n    main()') == 1
+script.write_text(body.replace('if __name__ == "__main__":\n    main()', entry))
+PY
+cat >"$resume_fixture/bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" = api ]]
+case "$2" in
+  repos/example/repo/commits/master)
+    [[ "${RESUME_LOCK_FAILURE:-}" != master ]] || exit 1
+    printf '%s\n' "$SOURCE_SHA" ;;
+  repos/example/repo/environments/oci-migration/variables/OCI_RUNTIME_MODE)
+    printf '%s\n' k3s ;;
+  repos/example/repo/actions/workflows/oci-live-data-rollout.yml)
+    if [[ "${RESUME_LOCK_FAILURE:-}" = workflow ]]; then
+      echo disabled_manually
+    else
+      echo active
+    fi ;;
+  repos/example/repo/contents/*)
+    [[ "${RESUME_LOCK_FAILURE:-}" != policy ]] || exit 1
+    printf '%040d\n' 7 ;;
+  *) echo "unexpected isolated pre-CAS provider call" >&2; exit 1 ;;
+esac
+SH
+cat >"$resume_fixture/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" = "get oci-live-data-continue-held-handoff" ]]
+echo '{"operation":"oci-live-data-continue-held-handoff"}'
+SH
+cat >"$resume_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" = revalidate && "$REVALIDATION_PROFILE" = held ]]
+[[ "$SOURCE_SHA" = 1111111111111111111111111111111111111111 ]]
+[[ "$CONTROL_SHA" = 2222222222222222222222222222222222222222 ]]
+printf 'checkpoint:held\n' >>"${RESUME_TEST_LOG:?}"
+[[ "${RESUME_LOCK_FAILURE:-}" != disk ]]
+SH
+chmod 755 "$resume_fixture/bin/gh" \
+  "$resume_fixture/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh" \
+  "$resume_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh"
 cat >"$resume_fixture/infra/azure/agents/production-run-exclusivity-stan.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -3882,8 +4152,13 @@ RUBY
 run_held_acquire() {
   (
     cd "$resume_fixture"
+    PATH="$resume_fixture/bin:$PATH" \
     RESUME_TEST_LOG="$resume_log" RESUME_LOCK_FAILURE="${1:-$failure}" \
     RESUME_LOCK_FIXTURE="$resume_fixture/lock.json" \
+    RESUME_PRECAS_ROOT="$resume_fixture" REPO=example/repo OCI_RUNTIME_MODE=k3s \
+    CHECKPOINT_SOURCE_SHA=1111111111111111111111111111111111111111 \
+    BUILD_RUN_ID=42 DISK_CHECKPOINT_RUN_ID=45 \
+    DISPATCH_INPUTS='{"approved_sha":"2222222222222222222222222222222222222222"}' \
     RUNNER_TEMP="$resume_fixture" OCI_K8S_NAMESPACE=betstan-oci \
     HELD_HANDOFF_RUN_ID=4008 HELD_HANDOFF_SOURCE_SHA="$RESUME_HELD_SOURCE_SHA" \
     PREREQUISITE_RUN_ID=4007 RESUME_SOURCE_SHA="$RESUME_PREREQUISITE_SOURCE_SHA" \
@@ -3894,7 +4169,8 @@ run_held_acquire() {
   )
 }
 for lease in expired live; do
-  for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation; do
+  for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation authority receiver workflow master policy disk; do
+    rm -rf "$resume_fixture/held-pre-transfer"
     rm -f "$resume_fixture/pre-runtime-lock.json" \
       "$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
     python3 - "$resume_fixture/lock.json" "$lease" <<'PY'
@@ -3924,19 +4200,30 @@ PY
     if run_held_acquire >"$resume_fixture/held-acquire.out" 2>&1; then
       [[ "$failure" = none ]] || fail "held $lease transition accepted $failure"
     else
-      [[ "$failure" != none ]] || fail "held $lease exact-owner transition failed"
+      [[ "$failure" != none ]] || {
+        cat "$resume_fixture/held-acquire.out" >&2
+        fail "held $lease exact-owner transition failed"
+      }
     fi
     python3 - "$resume_fixture" "$failure" "$resume_log" <<'PY'
 import json, pathlib, sys
 root, failure, log = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
 events = log.read_text().splitlines()
 expected = ["exclusive"]
-if failure != "exclusive": expected.append("release")
+if failure != "exclusive":
+    expected.append("checkpoint:held")
+    if failure != "disk":
+        expected.extend(["validate-baseline", "maintenance:verify-held"])
+        if failure not in {"master", "workflow", "policy"}:
+            expected.append("authority:pre-cas")
+early = failure in {"exclusive", "drift", "uid", "generation", "authority", "receiver",
+                    "workflow", "master", "policy", "disk"}
+if not early: expected.append("release")
 if failure in {"none", "acquire", "acquire-ambiguous", "verify"}: expected.append("acquire-released")
 if failure in {"none", "verify"}: expected.append("verify")
 assert events == expected, (failure, events)
 record = root / "artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
-if failure == "exclusive":
+if early:
     assert not record.exists()
 else:
     value = json.loads(record.read_text())
@@ -3968,7 +4255,7 @@ PY
       [[ ! -e "$resume_fixture/artifacts/oci-live-data-rollout/evidence/SHA256SUMS" ]] ||
         fail "failed work falsely sealed a deploy handoff"
     fi
-    if [[ "$failure" != exclusive ]]; then
+    if [[ -f "$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json" ]]; then
       journal="$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
       before_replay="$(sha256sum "$journal")"
       : >"$resume_log"
@@ -3993,7 +4280,7 @@ fi
 [[ ! -e "$resume_fixture/pre-runtime-lock.json" ]] ||
   fail "root-owner rejection persisted transfer authority"
 unset RESUME_HELD_RUN_ID RESUME_HELD_SOURCE_SHA RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
-echo "held_handoff_workflow_transfer_contract=PASS cases=22 root_owner=REJECTED"
+echo "held_handoff_workflow_transfer_contract=PASS cases=34 root_owner=REJECTED fresh_native_authority=REQUIRED"
 
 ruby -ryaml -rjson - "$WORKFLOW" "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" \
   >"$resume_fixture/retained-workflow.json" <<'RUBY'

@@ -37,6 +37,471 @@ ok() {
   printf 'PASS %s\n' "$1"
 }
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import argparse, contextlib, importlib.util, io, json, sys, threading, time
+from pathlib import Path
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("upstream_pool", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+bindings = [
+    dict(input=f"run_{i}", workflow="test.yml",
+         titleTemplates={"workflow_dispatch": "test {subject_sha}"},
+         artifactTemplate="test-{subject_sha}-{run_id}")
+    for i in range(6)
+]
+args = argparse.Namespace(
+    repository="example/repo", policy_json=json.dumps({"upstreamRunBindings": bindings}),
+    manifest="", operation="", subject_sha="1" * 40,
+    dispatch_inputs=json.dumps({b["input"]: str(i + 1) for i, b in enumerate(bindings)}),
+    runtime_mode="", successor_run_id="", result_json="", baseline_dir="",
+    held_history_file="",
+)
+lock = threading.Lock()
+state = dict(active=0, peak=0, done=0)
+def read(*values):
+    with lock:
+        state["active"] += 1
+        state["peak"] = max(state["peak"], state["active"])
+    try:
+        time.sleep(.02)
+        if values[1]["input"] == "run_0" and state.get("fail"):
+            raise SystemExit("synthetic worker failure")
+        return dict(artifactName="synthetic", createdAt="2026-10-01T00:00:00Z",
+                    completedAt="2026-10-01T00:00:01Z")
+    finally:
+        with lock:
+            state["active"] -= 1
+            state["done"] += 1
+
+with patch.object(m, "validate_binding", side_effect=read):
+    with contextlib.redirect_stdout(io.StringIO()):
+        m.command_validate_all(args)
+    assert state["peak"] == 4 and state["done"] == 6
+    state.update(done=0, fail=True)
+    args.result_json = str(Path(sys.argv[2]) / "pool-result.json")
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            m.command_validate_all(args)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("worker SystemExit passed")
+    assert state["done"] == 6 and not output.getvalue()
+    assert not Path(args.result_json).exists()
+    state.update(done=0, fail=False)
+    inputs = json.loads(args.dispatch_inputs)
+    del inputs["run_5"]
+    args.dispatch_inputs = json.dumps(inputs)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            m.command_validate_all(args)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("missing required input passed")
+    assert state["done"] == 0
+    inputs["run_5"] = "6"
+    args.dispatch_inputs = json.dumps(inputs)
+    bindings[1]["afterInput"] = "run_0"
+    args.policy_json = json.dumps({"upstreamRunBindings": bindings})
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            m.command_validate_all(args)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("overlapping chronology passed")
+    assert state["done"] == 6 and not output.getvalue()
+    assert not Path(args.result_json).exists()
+PY
+ok "bounded binding pool joins SystemExit and defers all acceptance"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import concurrent.futures, contextlib, hashlib, importlib.util, io, os, sys
+from pathlib import Path
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("upstream_bytes", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+workspace = Path(sys.argv[2]) / "private-bytes"
+workspace.mkdir(mode=0o700)
+owner = str(os.getppid())
+(workspace / "owner").write_bytes(owner.encode())
+(workspace / "owner").chmod(0o600)
+descriptor = os.open(workspace, os.O_RDONLY)
+os.dup2(descriptor, 9)
+os.close(descriptor) if descriptor != 9 else None
+payload = b"synthetic immutable bytes"
+digest = hashlib.sha256(payload).hexdigest()
+reads = []
+def load():
+    reads.append(1)
+    return payload
+def reject(action):
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            action()
+    except SystemExit:
+        return
+    raise AssertionError("unsafe byte reuse passed")
+with patch.dict(os.environ, {"BETSTAN_APPROVAL_BYTES_OWNER": owner}):
+    context = {"repository": "example/repo", "policy": "first", "validator": "reviewed"}
+    identity = ("artifact", "77", "1", 5, digest, "1" * 40, "2" * 40)
+    first = m.ImmutableBindingBytes(context)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        values = list(pool.map(lambda _: first.read(identity, load, expected_sha256=digest), range(12)))
+    assert values == [payload] * 12 and len(reads) == 1
+    for _ in range(2):
+        other_process = m.ImmutableBindingBytes(context)
+        assert other_process.read(identity, load, expected_sha256=digest) == payload
+    assert len(reads) == 1
+    for changed in (
+        {"repository": "other/repo"}, {"policy": "second"}, {"validator": "changed"},
+    ):
+        m.ImmutableBindingBytes({**context, **changed}).read(identity, load, expected_sha256=digest)
+    for changed in (
+        ("artifact", "78", "1", 5, digest, "1" * 40, "2" * 40),
+        ("artifact", "77", "2", 5, digest, "1" * 40, "2" * 40),
+        ("artifact", "77", "1", 6, digest, "1" * 40, "2" * 40),
+        ("artifact", "77", "1", 5, digest, "3" * 40, "2" * 40),
+        ("artifact", "77", "1", 5, digest, "1" * 40, "3" * 40),
+    ):
+        first.read(changed, load, expected_sha256=digest)
+    assert len(reads) == 9
+    stored = set(workspace.iterdir())
+    with patch.object(m, "gh_api_bytes", side_effect=lambda _: load()):
+        for _ in range(2):
+            token = m.BYTE_CONTEXT.set(m.ImmutableBindingBytes(context))
+            try:
+                for _ in range(2):
+                    assert m.artifact_archive("example/repo", {"id": 81}, "legacy fixture") == payload
+            finally:
+                m.BYTE_CONTEXT.reset(token)
+    assert len(reads) == 11 and set(workspace.iterdir()) == stored
+    original = next(path for path in workspace.glob("*.bin")
+                    if path.read_bytes() == payload)
+    saved = original.read_bytes()
+    original.write_bytes(b"tampered")
+    damaged = m.ImmutableBindingBytes(context)
+    for known in (identity,):
+        key = hashlib.sha256(__import__("json").dumps(
+            [context, known], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        target = workspace / (key + ".bin")
+        target.write_bytes(b"tampered")
+        reject(lambda: damaged.read(known, load, expected_sha256=digest))
+        target.unlink()
+        target.symlink_to(workspace / "owner")
+        reject(lambda: m.ImmutableBindingBytes(context).read(known, load, expected_sha256=digest))
+        target.unlink()
+        target.write_bytes(saved); target.chmod(0o600)
+        target.chmod(0o644)
+        reject(lambda: m.ImmutableBindingBytes(context).read(known, load, expected_sha256=digest))
+    (workspace / "owner").write_bytes(b"1")
+    reject(lambda: m.ImmutableBindingBytes(context))
+os.close(9)
+PY
+ok "immutable bytes full-context isolation, single fetch, rehash and unsafe workspace rejection"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib, copy, hashlib, importlib.util, io, sys, zipfile
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("upstream_complete_owned", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+def archive(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        for name, raw in files.items():
+            bundle.writestr(zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)), raw)
+    return output.getvalue()
+def reject(action):
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            action()
+    except SystemExit:
+        return
+    raise AssertionError("unowned or incomplete current package passed")
+files = {"proof": b"synthetic", "SHA256SUMS": b"synthetic package tested separately"}
+baseline = {
+    "oci-data-baseline-before/proof": b"original root",
+    "oci-data-baseline-before/SHA256SUMS":
+        f'{hashlib.sha256(b"original root").hexdigest()}  proof\n'.encode(),
+}
+zips = {1: archive(files), 2: archive(baseline)}
+source = "1" * 40
+inventory = [
+    dict(id=i, name=f"oci-live-data-{kind}-77-1", expired=False,
+         size_in_bytes=len(zips[i]), digest="sha256:" + hashlib.sha256(zips[i]).hexdigest(),
+         workflow_run=dict(id=77, head_sha=source, head_branch="master"),
+         created_at="1970-01-01T00:16:40Z", expires_at="1970-01-01T00:33:20Z")
+    for i, kind in ((1, "rollout"), (2, "baselines"))
+]
+held = dict(created_at="1970-01-01T00:15:00Z", updated_at="1970-01-01T00:20:00Z")
+def read():
+    return m.complete_held_artifacts("example/repo", "77", source, held, files, "fixture")
+def pages(_):
+    return [dict(total_count=len(inventory), artifacts=inventory[:1]),
+            dict(total_count=len(inventory), artifacts=inventory[1:])]
+with patch.object(m, "gh_api_pages", side_effect=pages), \
+        patch.object(m, "gh_api_bytes", side_effect=lambda path: zips[int(path.split("/")[-2])]), \
+        patch.object(m.time, "time", return_value=1000):
+    assert read()["proof"] == b"original root"
+    saved = copy.deepcopy(inventory)
+    for mutate in (
+        lambda: inventory.pop(),
+        lambda: inventory[1].update(id=1),
+        lambda: inventory[0].update(expired=True),
+        lambda: inventory[0].update(expires_at="1970-01-01T00:16:40Z"),
+        lambda: inventory[0]["workflow_run"].update(id=78),
+        lambda: inventory[0]["workflow_run"].update(head_sha="2" * 40),
+        lambda: inventory[0]["workflow_run"].update(head_branch="dev"),
+        lambda: inventory[0].pop("workflow_run"),
+        lambda: inventory[0].pop("digest"),
+        lambda: inventory[0].update(digest="sha256:" + "0" * 64),
+        lambda: inventory[0].update(created_at="1970-01-01T00:20:01Z"),
+    ):
+        mutate(); reject(read); inventory[:] = copy.deepcopy(saved)
+    with patch.object(m, "gh_api_pages", return_value=[dict(total_count=3, artifacts=inventory)]):
+        reject(read)
+    with patch.object(m, "gh_api_pages", return_value=[dict(artifacts=inventory)]):
+        reject(read)
+    zips[1] = archive({**files, "proof": b"tampered"})
+    reject(read)
+PY
+ok "current owned ZIP digests, complete pagination, expiry equality and original rollback bytes"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib, copy, datetime as dt, importlib.util, io, sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("upstream_timing", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+def reject(action):
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            action()
+        except SystemExit:
+            return
+    raise AssertionError("unsafe or reset physical handoff budget passed")
+base = 1800000000
+deadline = base + 1800
+tails = {
+    "dispatch": 1080, "materialization": 900, "approval-1": 780,
+    "approval-2": 700, "approval-3": 620, "native-validation": 540,
+    "startup-snapshot": 360, "receiver-renewal": 120,
+}
+for boundary, tail in tails.items():
+    equality = deadline - tail - 600
+    assert m.handoff_remaining_guard(deadline, equality - 1, boundary) == tail
+    reject(lambda: m.handoff_remaining_guard(deadline, equality, boundary))
+    reject(lambda: m.handoff_remaining_guard(deadline, equality + 1, boundary))
+    reject(lambda: m.handoff_remaining_guard(deadline, deadline + 1, boundary))
+for changed in (dict(m.HANDOFF_STAGE_CEILINGS, packaging=0),
+                dict(m.HANDOFF_STAGE_CEILINGS, approval=True),
+                dict(m.HANDOFF_STAGE_CEILINGS, approval=1000)):
+    with patch.object(m, "HANDOFF_STAGE_CEILINGS", changed):
+        reject(lambda: m.handoff_remaining_guard(deadline, base, "dispatch"))
+reject(lambda: m.handoff_remaining_guard(deadline, base, "caller-zero-tail"))
+source, producer_run, receiver_run = "1" * 40, "77", "78"
+stamp = lambda seconds: dt.datetime.fromtimestamp(base + seconds, dt.timezone.utc).isoformat()
+producer = dict(updated_at=stamp(50))
+workflow = dict(id=8, path=".github/workflows/oci-production-deploy.yml", state="active")
+receiver = dict(
+    id=78, workflow_id=8, path=workflow["path"], run_attempt=1, head_sha=source,
+    event="workflow_dispatch", head_branch="master", head_repository={"full_name": "example/repo"},
+    display_title=f"oci-deploy {source}", status="in_progress", conclusion=None, created_at=stamp(100))
+job = dict(run_id=78, name="deploy", status="in_progress", started_at=stamp(150), steps=[
+    dict(name="Validate exact SHA and trusted upstream runs", conclusion="success", completed_at=stamp(200)),
+    dict(name="Verify transferred database lock and maintenance fence", started_at=stamp(250)),
+])
+physical = dict(run_id=77, name="rollout", status="completed", conclusion="success", steps=[])
+package = dict(source_sha=source, workflow_run_id=producer_run)
+def api(path):
+    return copy.deepcopy(workflow if "/workflows/" in path else receiver)
+with patch.object(m, "require_fixed_run", return_value=producer), \
+        patch.object(m, "parse_live_v6_artifact", return_value=(package, None, {})), \
+        patch.object(m, "parse_resume_authority", return_value={"schema_version": "live-betting-data-resume-v3"}), \
+        patch.object(m, "current_held_source") as closure, \
+        patch.object(m, "native_handoff_renewal", return_value=(deadline, 11)), \
+        patch.object(m, "jobs_for_run", side_effect=lambda repo, run, label: [physical if run == producer_run else job]), \
+        patch.object(m, "gh_api", side_effect=api):
+    for boundary, now in (
+        ("dispatch", 60), ("materialization", 160), ("approval-1", 200),
+        ("approval-2", 260), ("approval-3", 320), ("native-validation", 330),
+        ("startup-snapshot", 340), ("receiver-renewal", 350),
+    ):
+        with patch.object(m.time, "time", return_value=base + now):
+            result = m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, boundary,
+                "" if boundary == "dispatch" else receiver_run)
+            assert result["deadline"] == deadline and result["generation"] == 11
+            assert result["unfinished_seconds"] == tails[boundary]
+    with patch.object(m.time, "time", return_value=base + 60):
+        for mutate in (
+            lambda: producer.update(updated_at=stamp(-1)),
+            lambda: producer.update(updated_at=stamp(121)),
+        ):
+            mutate()
+            reject(lambda: m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "dispatch"))
+            producer["updated_at"] = stamp(50)
+    for mutate in (
+        lambda: receiver.update(run_attempt=2),
+        lambda: receiver.update(head_sha="2" * 40),
+        lambda: receiver.update(status="completed"),
+        lambda: workflow.update(state="disabled_manually"),
+    ):
+        saved_receiver, saved_workflow = copy.deepcopy(receiver), copy.deepcopy(workflow)
+        mutate()
+        with patch.object(m.time, "time", return_value=base + 200):
+            reject(lambda: m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "approval-1", receiver_run))
+        receiver.clear(); receiver.update(saved_receiver)
+        workflow.clear(); workflow.update(saved_workflow)
+    with patch.object(m.time, "time", return_value=base + 371):
+        reject(lambda: m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, "receiver-renewal", receiver_run))
+    with patch.object(m.time, "time", side_effect=[base + 60, deadline]):
+        reject(lambda: m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, "dispatch"))
+    for legacy in (None, {"schema_version": "live-betting-data-resume-v2"}):
+        closure.reset_mock()
+        with patch.object(m, "parse_resume_authority", return_value=legacy), \
+                patch.object(m.time, "time", return_value=deadline + 86400):
+            assert m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "dispatch") is None
+            closure.assert_not_called()
+    with patch.object(m, "parse_resume_authority", side_effect=SystemExit("malformed v3")):
+        reject(lambda: m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, "dispatch"))
+PY
+ok "authentic new-capture budget shrinks at all boundaries, equality and renewal reject, legacy evidence clock unchanged"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import contextlib, copy, datetime as dt, hashlib, importlib.util, io, json, os, shutil, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+original, work = map(Path, sys.argv[1:])
+source = work / "authority-source"
+module_path = source / "infra/oci/scripts/upstream_run_binding_stan.py"
+module_path.parent.mkdir(parents=True)
+shutil.copy2(original, module_path)
+helper_path = source / "infra/azure/agents/copilot_cli_authority_stan.py"
+helper_path.parent.mkdir(parents=True)
+shutil.copy2(original.parents[2] / "azure/agents/copilot_cli_authority_stan.py", helper_path)
+spec = importlib.util.spec_from_file_location("upstream_authority", module_path)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+a = m.provenance_read_authority()
+directory = work / "private-held-authority"; directory.mkdir(mode=0o700)
+repository, old, new = "example/repo", "1" * 40, "2" * 40
+policy_path = original.parents[2] / "azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+policy_bytes = policy_path.read_text()
+workflow = (original.parents[3] / ".github/workflows/oci-live-data-rollout.yml").read_text()
+workflow_blob = hashlib.sha1(f"blob {len(workflow.encode())}\0".encode() + workflow.encode()).hexdigest()
+policies = {operation: json.loads(subprocess.check_output(
+    ["bash", str(policy_path), "get", operation], text=True))
+    for operation in ("oci-live-data-resume-deploy", "oci-live-data-continue-held-handoff")}
+common = dict(phase="apply-slip-index", build_run_id="21", infrastructure_run_id="22",
+              checkpoint_source_sha=old, disk_checkpoint_run_id="23", prerequisite_run_id="24",
+              resume_source_sha=old, failed_deploy_run_id="25",
+              failed_activation_run_id="0", failed_activation_user_id="0",
+              baseline_recovery_run_id="0", baseline_recovery_source_sha="none")
+native = m.live_data_native_inputs(
+    dict(common, approved_sha=old, confirmation="RESUME APPLIED LIVE DATA EXACT SHA"),
+    policies["oci-live-data-resume-deploy"]["inputNames"])
+dispatch = m.live_data_native_inputs(
+    dict(common, approved_sha=new, held_handoff_run_id="77", held_handoff_source_sha=old,
+         confirmation=m.HELD_HANDOFF_CONFIRMATION),
+    policies["oci-live-data-continue-held-handoff"]["inputNames"])
+def record(operation, run, sha, inputs, state):
+    policy = policies[operation]
+    normalized = a.validate_request_data(dict(
+        schemaVersion=a.REQUEST_SCHEMA, repository=repository, operation=operation,
+        controlSha=sha, subjectSha=sha, targetSha=None, inputs=inputs),
+        policy, repository, sha)
+    result = a.build_dispatch_record(
+        normalized, policy, repository, 313, workflow_blob, run,
+        f"https://github.com/{repository}/actions/runs/{run}")
+    result["state"] = state
+    if state == "consumed":
+        created = a.utc_now() - dt.timedelta(seconds=2 * a.AUTHORITY_TTL_SECONDS)
+        result.update(createdAt=a.utc_text(created),
+                      expiresAt=a.utc_text(created + dt.timedelta(seconds=a.AUTHORITY_TTL_SECONDS)))
+        result["approvals"] = [dict(
+            runId=run, operation=operation, environmentId=901,
+            gateKey="a" * 64, approvedAt=a.utc_text(created))]
+    return result
+producer = record("oci-live-data-resume-deploy", 77, old, native, "consumed")
+successor_record = record("oci-live-data-continue-held-handoff", 78, new, dispatch, "issued")
+def save(value):
+    path = directory / f'{value["runId"]}.json'
+    path.write_text(json.dumps(value)); path.chmod(0o600)
+save(producer); save(successor_record)
+def native_run(value, status, conclusion):
+    return dict(id=value["runId"], workflow_id=313, path=".github/workflows/oci-live-data-rollout.yml",
+                head_sha=value["controlSha"], head_branch="master", event="workflow_dispatch",
+                head_repository={"full_name": repository}, run_attempt=1,
+                display_title=value["displayTitle"], status=status, conclusion=conclusion)
+held = native_run(producer, "completed", "success")
+held["_held_native_inputs"] = native
+successor = native_run(successor_record, "waiting", None)
+review = dict(state="approved", comment="Copilot CLI exact-run approval: oci-live-data-resume-deploy",
+              user={"id": 1, "login": "fixture-cli"}, environments=[{"id": 901, "name": "oci-migration"}])
+def api(path):
+    if path.endswith("/pending_deployments"): return []
+    if path.endswith("/approvals"): return [copy.deepcopy(review)]
+    assert path.endswith("/actions/runs/78"), path
+    return copy.deepcopy(successor)
+def read():
+    return m.held_handoff_authority(repository, held, new, dispatch, "78", "fixture fresh authority")
+def reject():
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            read()
+        except (SystemExit, OSError):
+            return
+    raise AssertionError("missing, stale or competing owned authority proved absence")
+with patch.dict(os.environ, {"COPILOT_CLI_AUTHORITY_DIR": str(directory), "GITHUB_ACTIONS": "false"}), \
+        patch.object(m, "held_source_bytes", side_effect=lambda repo, sha, path, label:
+                     policy_bytes if path.endswith("policy-stan.sh") else workflow), \
+        patch.object(m, "gh_api", side_effect=api):
+    read()
+    for mutate in (
+        lambda value: value.update(state="retired"),
+        lambda value: value.update(subjectSha=old),
+        lambda value: value.update(workflowBlobSha="f" * 40),
+        lambda value: value.update(runAttempt=2),
+        lambda value: value.update(version=0),
+        lambda value: value.update(expiresAt=producer["expiresAt"]),
+        lambda value: value["inputs"].update(prerequisite_run_id="99"),
+    ):
+        changed = copy.deepcopy(successor_record); mutate(changed); save(changed)
+        reject(); save(successor_record)
+    (directory / "77.json").unlink(); reject(); save(producer)
+    (directory / "78.json").unlink(); reject(); save(successor_record)
+    unconsumed = dict(producer, state="issued"); save(unconsumed); reject(); save(producer)
+    other = record("oci-live-data-continue-held-handoff", 79, new, dispatch, "issued")
+    save(other); reject(); (directory / "79.json").unlink()
+    unknown = directory / "unexplained.json"; unknown.write_text("{}"); unknown.chmod(0o600)
+    reject(); unknown.unlink()
+    intent = directory / ("request-" + "b" * 64 + ".json")
+    intent.write_text("{}"); intent.chmod(0o600)
+    reject(); intent.unlink()
+    saved = copy.deepcopy(review)
+    for key, value in (("comment", "different owner"), ("state", "rejected"),
+                       ("environments", [{"id": 902, "name": "wrong"}])):
+        review[key] = value; reject(); review.clear(); review.update(copy.deepcopy(saved))
+    successor["run_attempt"] = 2; reject(); successor["run_attempt"] = 1
+    with patch.dict(os.environ, {"COPILOT_CLI_AUTHORITY_DIR": str(directory / "missing")}):
+        reject()
+    read()
+PY
+ok "fresh real private authority: consumed expired producer, exact successor only, missing/stale/intent/competing owners reject"
+
 # Keep the frozen source and ancestry fixtures offline in depth-one checkouts.
 historical_fixture="$ROOT_DIR/infra/oci/tests/fixtures/upstream-historical-source.pack"
 [[ "$(sha256sum "$historical_fixture" | awk '{print $1}')" = \
@@ -108,7 +573,7 @@ for entries, allowed in (
 PY
 ok "partial-recovery empty failures scope"
 
-PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$ROOT_DIR" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$ROOT_DIR" "$WORK/repository" <<'PY'
 import contextlib, copy, datetime as dt, hashlib, importlib.util, io, json, re, subprocess, sys, zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -122,7 +587,10 @@ native = dict(approved_sha=source, build_run_id="21", infrastructure_run_id="22"
               baseline_recovery_run_id="0", baseline_recovery_source_sha="none",
               confirmation="DEPLOY OCI EXACT SHA")
 workflow = Path(sys.argv[2]) / ".github/workflows/oci-production-deploy.yml"
-raw = workflow.read_bytes()
+raw = subprocess.check_output([
+    "git", "-C", sys.argv[3], "cat-file", "blob",
+    m.EXPIRED_HANDOFF_CLOSURE[".github/workflows/oci-production-deploy.yml"],
+])
 assert hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest() == m.EXPIRED_HANDOFF_CLOSURE[
     ".github/workflows/oci-production-deploy.yml"]
 names = ["Set up job", *re.findall(r"(?m)^      - name: (.+)$",
@@ -615,6 +1083,71 @@ with patch.object(m, "require_fixed_run", return_value=held_metadata), \
                           {"sha": "0" * 40} if changed in endpoint else held_blob(endpoint)):
             reject(held_native)
 print("PASS fixed successful held producer, exact native slots 1..37/74/75, complete outcomes, and original root tuple")
+current_workflow = subprocess.check_output([
+    "git", "-C", sys.argv[2], "show", source + ":.github/workflows/oci-live-data-rollout.yml",
+]).decode()
+current_names = re.findall(r"(?m)^      - name: (.+)$", current_workflow)
+current_skipped = held_skipped | {"Verify reader-qualified released activation state"}
+current_start = m.dt.datetime(2026, 10, 7, 9, 9, tzinfo=m.dt.timezone.utc)
+current_steps = []
+for index, name in enumerate([
+    "Set up job", *current_names, "Post Checkout approved current master commit", "Complete job",
+]):
+    began = current_start + m.dt.timedelta(seconds=2 * index)
+    current_steps.append(dict(
+        name=name, number=index + 1, status="completed",
+        conclusion="skipped" if name in current_skipped else "success",
+        started_at=began.isoformat(), completed_at=(began + m.dt.timedelta(seconds=1)).isoformat(),
+    ))
+current_steps[-2]["number"] = 2 * (len(current_names) + 1)
+current_steps[-1]["number"] = current_steps[-2]["number"] + 1
+current_job = dict(held_original[0], steps=current_steps,
+                  started_at=current_start.isoformat(), completed_at="2026-10-07T09:12:00Z")
+current_metadata = dict(held_metadata, updated_at="2026-10-07T09:12:01Z")
+renewal_step = next(step for step in current_steps
+                    if step["name"] == "Restore runtime or verify final deploy handoff")
+renewal_epoch = int(m.parse_timestamp(renewal_step["started_at"], "fixture").timestamp())
+def renewal_log(deadline=renewal_epoch + 1800, generation=12):
+    timestamp = renewal_step["started_at"].replace("+00:00", "Z")
+    output = [
+        "##[group]Run shell",
+        "echo shared_mongo_lock=renew status=PASS lease_until_epoch=9999999999 fencing_generation=999",
+        "##[endgroup]",
+        "live_data_maintenance=verify-held status=PASS http_mutation_fence=true writers_quiesced=true",
+        f"shared_mongo_lock=verify status=PASS lease_until_epoch={renewal_epoch + 14400} fencing_generation=11",
+        f"shared_mongo_lock=renew status=PASS lease_until_epoch={deadline} fencing_generation={generation}",
+    ]
+    return log_archive("\n".join(f"{timestamp} {line}" for line in output).encode(), ("0_rollout.txt",))
+with patch.object(m, "require_fixed_run", return_value=current_metadata), \
+        patch.object(m, "jobs_for_run", side_effect=lambda *_: [current_job]), \
+        patch.object(m, "gh_api", return_value={"sha": "0" * 40}), \
+        patch.object(m, "current_held_source", return_value=current_workflow), \
+        patch.object(m, "failed_deploy_native_inputs", return_value=values), \
+        patch.object(m, "gh_api_bytes", return_value=renewal_log()):
+    observed = held_native()
+    assert observed["_held_complete"] is True
+    assert observed["_handoff_deadline"] == renewal_epoch + 1800
+    assert current_job["steps"] == current_steps
+    for deadline, generation in ((renewal_epoch + 1802, 12), (renewal_epoch + 1800, 11),
+                                 (renewal_epoch + 3600, 12), (renewal_epoch - 1, 12)):
+        with patch.object(m, "gh_api_bytes", return_value=renewal_log(deadline, generation)):
+            reject(held_native)
+    for field, bad in (("conclusion", "failure"), ("run_id", 78), ("id", True)):
+        with patch.dict(current_job, {field: bad}):
+            reject(held_native)
+    with patch.dict(current_steps[3], {"started_at": current_steps[0]["started_at"]}):
+        reject(held_native)
+    with patch.dict(current_steps[4], {"conclusion": "skipped"}):
+        reject(held_native)
+    with patch.object(m, "failed_deploy_native_inputs", return_value=dict(values, build_run_id="99")):
+        reject(held_native)
+tree = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", source + "^{tree}"], text=True).strip()
+with patch.object(m, "gh_api", return_value={"sha": source, "tree": {"sha": tree}}):
+    assert m.current_held_source("example/repo", source, "fixture") == current_workflow
+for bad in ({"sha": source, "tree": {"sha": "0" * 40}}, {"sha": "0" * 40, "tree": {"sha": tree}}):
+    with patch.object(m, "gh_api", return_value=bad):
+        reject(lambda: m.current_held_source("example/repo", source, "fixture"))
+print("PASS complete current producer closure, native chronology, authentic final renewal and no historical fallback")
 history_held = {
     "id": 77, "head_sha": source, "created_at": "2026-10-07T08:00:00Z",
     "updated_at": "2026-10-07T09:00:00Z",
@@ -2016,7 +2549,7 @@ def held_admission():
         "example/repo", "39", source, source, held_request, "oke", "held fixture", successor_run_id="40")
 with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
         patch.object(m, "validate_held_handoff_native", return_value=held_metadata), \
-        patch.object(m, "held_handoff_history", side_effect=lambda *_: copy.deepcopy(held_history)), \
+        patch.object(m, "held_handoff_history", side_effect=lambda *_, **__: copy.deepcopy(held_history)), \
         patch.object(m, "validate_held_handoff_reports") as report_check, \
         patch.object(m, "exact_artifact", side_effect=lambda repo, run, name, label: (
             {"id": 2100} if (run, name) == ("21", f"oci-image-provenance-{source}-21-1")
@@ -2050,6 +2583,42 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
                 for name, raw in sorted(held_files.items()) if name != "SHA256SUMS").encode()
         reject(held_admission)
     held_files = original_members
+    complete_members = dict(original_members, **{"resume-images.tsv": held_images})
+    complete_members["SHA256SUMS"] = "".join(
+        f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
+        for name, raw in sorted(complete_members.items()) if name != "SHA256SUMS").encode()
+    current_held = dict(
+        held_metadata, _held_complete=True, _held_native_inputs=resume_requests["25"],
+        _handoff_deadline=1234567890,
+    )
+    held_files = complete_members
+    with patch.object(m, "validate_held_handoff_native", return_value=current_held), \
+            patch.object(m, "complete_held_artifacts",
+                         return_value=m.original_before_baseline(baseline_files, "fixture")), \
+            patch.object(m, "held_handoff_authority") as owner_check:
+        current = held_admission()
+        assert current["resume"]["applied_data_run_id"] == "23"
+        owner_check.assert_called_once()
+        for mutation in ("missing-images", "wrong-images", "wrong-owner", "wrong-root", "missing-report"):
+            held_files = copy.deepcopy(complete_members)
+            if mutation == "missing-images": held_files.pop("resume-images.tsv")
+            elif mutation == "wrong-images": held_files["resume-images.tsv"] = held_images.replace(b"0001", b"9999")
+            elif mutation == "missing-report": held_files.pop("reports/final-slip-index.json")
+            elif mutation == "wrong-owner":
+                held_files["resume-authority.env"] = held_files["resume-authority.env"].replace(
+                    b"failed_deploy_run_id=77", b"failed_deploy_run_id=99")
+            else:
+                held_files["resume-authority.env"] = held_files["resume-authority.env"].replace(
+                    b"applied_data_run_id=23", b"applied_data_run_id=25")
+            held_files["SHA256SUMS"] = "".join(
+                f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
+                for name, raw in sorted(held_files.items()) if name != "SHA256SUMS").encode()
+            reject(held_admission)
+        held_files = complete_members
+        with patch.object(m, "complete_held_artifacts", return_value={"substituted": b"root"}):
+            reject(held_admission)
+    held_files = original_members
+    print("PASS complete current package admission and root/image/owner omissions without historical fallback")
     successor_authority = dict(
         held_authority, schema_version="live-betting-data-resume-v3",
         held_handoff_run_id="39", held_handoff_source_sha=source,

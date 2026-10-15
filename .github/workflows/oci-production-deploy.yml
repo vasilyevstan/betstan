@@ -509,9 +509,22 @@ jobs:
       - name: Verify transferred database lock and maintenance fence
         id: handoff
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           STATE_FILE: artifacts/oci-deploy/unused-maintenance-state.tsv
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, json, os
+          spec = importlib.util.spec_from_file_location(
+              "upstream_binding", "infra/oci/scripts/upstream_run_binding_stan.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          result = module.validate_receiver_handoff_timing(
+              os.environ["REPOSITORY"], os.environ["DATA_RUN_ID"], os.environ["SOURCE_SHA"],
+              "startup-snapshot", os.environ["GITHUB_RUN_ID"])
+          print("handoff_timing=" + json.dumps(result, sort_keys=True))
+          PY
           ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
@@ -618,13 +631,63 @@ jobs:
 
       - name: Renew exact transferred database lock
         id: renew_lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          set -euo pipefail
+          timing="$(
+            python3 - <<'PY'
+          import importlib.util, json, os
+          spec = importlib.util.spec_from_file_location(
+              "upstream_binding", "infra/oci/scripts/upstream_run_binding_stan.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          result = module.validate_receiver_handoff_timing(
+              os.environ["REPOSITORY"], os.environ["DATA_RUN_ID"], os.environ["SOURCE_SHA"],
+              "receiver-renewal", os.environ["GITHUB_RUN_ID"])
+          print(json.dumps(result, sort_keys=True))
+          PY
+          )"
+          renewal_started="$(date +%s)"
+          result="$(
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
           OPERATION_ID="live-data-apply-slip-index" \
           LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
+          )"
+          [[ "$result" =~ ^shared_mongo_lock=renew\ status=PASS\ lease_until_epoch=([1-9][0-9]*)\ fencing_generation=([1-9][0-9]*)$ ]] ||
+            { echo "receiver renewal acknowledgement is missing, ambiguous or malformed" >&2; exit 1; }
+          renewed_deadline="${BASH_REMATCH[1]}"
+          renewed_generation="${BASH_REMATCH[2]}"
+          if [ "$timing" = null ]; then
+            printf '%s\n' "$result"
+            exit 0
+          fi
+          producer_deadline="$(jq -er '.deadline' <<<"$timing")"
+          producer_generation="$(jq -er '.generation' <<<"$timing")"
+          [ "$renewed_generation" = "$((producer_generation + 1))" ]
+          renewed_at="$(date +%s)"
+          if ! (( renewed_at < producer_deadline - 600 &&
+             renewed_at - (producer_deadline - 1800) <= 1200 &&
+             renewed_deadline >= renewal_started + 10800 &&
+             renewed_deadline <= renewed_at + 10800 )); then
+            echo "actual receiver renewal exhausted the authentic handoff deadline or reserve" >&2
+            exit 1
+          fi
+          kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json |
+            jq -e --arg holder "live-data-${DATA_RUN_ID}-1" --arg source "$SOURCE_SHA" \
+              --arg until "$renewed_deadline" --arg generation "$renewed_generation" '
+              .data.state == "active" and .data.holder == $holder and
+              .data["operation-id"] == "live-data-apply-slip-index" and
+              .data["source-sha"] == $source and .data["lease-duration-seconds"] == "10800" and
+              .data["lease-until-epoch"] == $until and .data["fencing-generation"] == $generation
+            ' >/dev/null
+          printf '%s\n' "$result"
+          printf 'handoff_receiver_renewal=PASS whole_elapsed_seconds=%s reserve_remaining_seconds=%s\n' \
+            "$((renewed_at - (producer_deadline - 1800)))" "$((producer_deadline - renewed_at))"
 
       - name: Deploy immutable images sequentially
         id: apply

@@ -16,6 +16,8 @@ the two paths cannot drift.
 import argparse
 import base64
 import binascii
+import concurrent.futures
+import contextvars
 import datetime as dt
 import hashlib
 import importlib.util
@@ -28,6 +30,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -70,6 +73,12 @@ MAX_ARTIFACT_EVIDENCE_BYTES = 1024 * 1024
 ARTIFACT_DOWNLOAD_ATTEMPTS = 3
 ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS = 120
 ARTIFACT_DOWNLOAD_BACKOFF_SECONDS = (1, 2)
+BYTE_CONTEXT = contextvars.ContextVar("binding_immutable_bytes", default=None)
+HANDOFF_STAGE_CEILINGS = {
+    "packaging": 120, "admission": 180, "queue": 120, "approval": 240,
+    "native-validation": 180, "startup-snapshot": 240, "receiver-renewal": 120,
+}
+HANDOFF_RESERVE_SECONDS = 600
 EXPIRED_HANDOFF_TREE = "03381913c7ba16a9c9faf8699740e892564a6628"
 EXPIRED_HANDOFF_CLOSURE = {
     ".github/workflows/oci-production-deploy.yml":
@@ -562,6 +571,158 @@ def _artifact_download_diagnostic(stderr):
 
 
 def gh_api_bytes(path):
+    cache = BYTE_CONTEXT.get()
+    if cache is not None and re.fullmatch(
+        r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*/attempts/1/logs",
+        path,
+    ):
+        return cache.read(
+            ("native-attempt-one-zip", path), lambda: download_api_bytes(path), share=False,
+        )
+    return download_api_bytes(path)
+
+
+def command_owner_is_ancestor(owner):
+    if not isinstance(owner, str) or POSITIVE_INTEGER.fullmatch(owner) is None:
+        return False
+    parent = os.getppid()
+    for _ in range(3):
+        if parent == int(owner):
+            return True
+        result = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(parent)],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode or not result.stdout.strip().isdigit():
+            return False
+        parent = int(result.stdout.strip())
+    return False
+
+
+class ImmutableBindingBytes:
+    def __init__(self, context):
+        self.context = context
+        self.entries = {}
+        self.locks = {}
+        self.lock = threading.Lock()
+        self.workspace = None
+        owner = os.environ.get("BETSTAN_APPROVAL_BYTES_OWNER", "")
+        if owner:
+            if POSITIVE_INTEGER.fullmatch(owner) is None:
+                fail("approval byte workspace owner is invalid")
+            try:
+                info = os.fstat(9)
+                if (
+                    not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700
+                ):
+                    fail("approval byte workspace is not a private owned directory")
+                self.workspace = 9
+                if self._read_file("owner", 64) != owner.encode():
+                    fail("approval byte workspace belongs to another command")
+                if not command_owner_is_ancestor(owner):
+                    fail("approval byte workspace owner is not this command")
+            except OSError:
+                fail("approval byte workspace is unavailable")
+
+    def _read_file(self, name, limit):
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.workspace)
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                or not 0 < info.st_size <= limit
+            ):
+                fail("approval byte workspace entry is unsafe")
+            raw = handle.read(limit + 1)
+            if len(raw) != info.st_size:
+                fail("approval byte workspace entry changed while reading")
+            return raw
+
+    def _write_file(self, name, raw):
+        descriptor = os.open(
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600, dir_fd=self.workspace,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(raw)
+
+    def read(self, identity, loader, *, expected_sha256=None, expected_blob=None, share=True):
+        key = hashlib.sha256(json.dumps(
+            [self.context, identity], sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        with self.lock:
+            entry_lock = self.locks.setdefault(key, threading.Lock())
+        with entry_lock:
+            entry = self.entries.get(key)
+            try:
+                if entry is None and self.workspace is not None and share:
+                    try:
+                        raw = self._read_file(key + ".bin", MAX_ARTIFACT_ARCHIVE_BYTES)
+                    except FileNotFoundError:
+                        try:
+                            os.stat(key + ".sha256", dir_fd=self.workspace, follow_symlinks=False)
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            fail("approval byte workspace is incomplete")
+                    else:
+                        digest = self._read_file(key + ".sha256", 64).decode("ascii")
+                        entry = (raw, digest)
+                if entry is None:
+                    raw = loader()
+                    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_ARTIFACT_ARCHIVE_BYTES:
+                        fail("immutable binding bytes have an invalid size")
+                    entry = (raw, hashlib.sha256(raw).hexdigest())
+                    self._verify(entry, expected_sha256, expected_blob)
+                    if self.workspace is not None and share:
+                        self._write_file(key + ".bin", raw)
+                        self._write_file(key + ".sha256", entry[1].encode())
+                self._verify(entry, expected_sha256, expected_blob)
+                self.entries[key] = entry
+                return entry[0]
+            except (OSError, UnicodeError):
+                fail("approval byte workspace is incomplete or unsafe")
+
+    @staticmethod
+    def _verify(entry, expected_sha256, expected_blob):
+        raw, recorded = entry
+        actual = hashlib.sha256(raw).hexdigest()
+        if recorded != actual or expected_sha256 is not None and actual != expected_sha256:
+            fail("immutable binding byte checksum differs")
+        if expected_blob is not None and hashlib.sha1(
+            f"blob {len(raw)}\0".encode() + raw
+        ).hexdigest() != expected_blob:
+            fail("immutable binding source blob differs")
+
+
+def artifact_archive(repository, artifact, label):
+    artifact_id = artifact.get("id")
+    if type(artifact_id) is not int or artifact_id < 1:
+        fail(f"{label} artifact has an invalid ID")
+    digest = artifact.get("digest")
+    if digest is not None and (
+        not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+    ):
+        fail(f"{label} artifact has an invalid archive digest")
+    loader = lambda: gh_api_bytes(
+        f"repos/{repository}/actions/artifacts/{artifact_id}/zip"
+    )
+    cache = BYTE_CONTEXT.get()
+    if cache is not None:
+        return cache.read(
+            ("artifact-zip", repository, artifact), loader,
+            expected_sha256=digest[7:] if digest else None,
+            share=digest is not None,
+        )
+    raw = loader()
+    if digest is not None and hashlib.sha256(raw).hexdigest() != digest[7:]:
+        fail(f"{label} artifact archive digest differs")
+    return raw
+
+
+def download_api_bytes(path):
     if re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/artifacts/[1-9][0-9]*/zip", path):
         request_kind = "artifact-zip"
     elif re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/jobs/[1-9][0-9]*/logs", path):
@@ -804,9 +965,7 @@ def load_artifact_content(
     artifact_id = artifact.get("id")
     if type(artifact_id) is not int or artifact_id < 1:
         fail(f"{binding['input']} artifact has an invalid ID")
-    archive = gh_api_bytes(
-        f"repos/{repository}/actions/artifacts/{artifact_id}/zip"
-    )
+    archive = artifact_archive(repository, artifact, binding["input"])
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             infos = bundle.infolist()
@@ -933,9 +1092,7 @@ def artifact_files(
     artifact_id = artifact.get("id")
     if type(artifact_id) is not int or artifact_id < 1:
         fail(f"{label} artifact has an invalid ID")
-    archive = gh_api_bytes(
-        f"repos/{repository}/actions/artifacts/{artifact_id}/zip"
-    )
+    archive = artifact_archive(repository, artifact, label)
     return zip_files(archive, label, allowed_empty_suffixes=allowed_empty_suffixes)
 
 
@@ -2448,7 +2605,391 @@ def expired_handoff_native_inputs(repository, run_id, runtime_mode, label):
     return native, metadata
 
 
+def held_source_bytes(repository, source_sha, path, label):
+    result = subprocess.run(
+        ["git", "rev-parse", f"{source_sha}:{path}"],
+        capture_output=True, text=True, check=False,
+    )
+    blob = result.stdout.strip()
+    if result.returncode or FULL_SHA.fullmatch(blob) is None:
+        fail(f"{label} executed source closure is unavailable")
+    def load():
+        result = subprocess.run(
+            ["git", "cat-file", "blob", blob], capture_output=True, check=False,
+        )
+        if result.returncode:
+            fail(f"{label} executed source bytes are unavailable")
+        return result.stdout
+    cache = BYTE_CONTEXT.get()
+    if cache is not None:
+        raw = cache.read(
+            ("source-blob", repository, source_sha, path, blob), load, expected_blob=blob,
+        )
+    else:
+        raw = load()
+        ImmutableBindingBytes._verify((raw, hashlib.sha256(raw).hexdigest()), None, blob)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{label} executed source is not UTF-8")
+
+
+def current_held_source(repository, source_sha, label, *, native_sources=None):
+    commit = gh_api(f"repos/{repository}/git/commits/{source_sha}")
+    local = subprocess.run(
+        ["git", "rev-parse", f"{source_sha}^{{tree}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if (
+        local.returncode or not isinstance(commit, dict)
+        or commit.get("sha") != source_sha
+        or FULL_SHA.fullmatch(local.stdout.strip()) is None
+        or (commit.get("tree") or {}).get("sha") != local.stdout.strip()
+    ):
+        fail(f"{label} executed source tree differs")
+    paths = {
+        ".github/workflows/oci-live-data-rollout.yml",
+        "infra/oci/scripts/live-betting-data-rollout-stan.sh",
+        "infra/oci/scripts/live-data-maintenance-stan.sh",
+        "infra/oci/scripts/shared-mongo-operation-lock-stan.sh",
+        "infra/azure/agents/shared-mongo-operation-lock-stan.sh",
+        "infra/oci/scripts/upstream_run_binding_stan.py",
+        "infra/oci/scripts/baseline-capture-stan.sh",
+        "infra/oci/scripts/validate-rollback-baseline-stan.sh",
+        "infra/oci/scripts/k3s-node-disk-recovery-stan.sh",
+        "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
+    }
+    sources = {path: held_source_bytes(repository, source_sha, path, label) for path in sorted(paths)}
+    workflow = sources[".github/workflows/oci-live-data-rollout.yml"]
+    producer = sources["infra/oci/scripts/live-betting-data-rollout-stan.sh"]
+    if native_sources is not None:
+        for observed, raw in zip(native_sources, (workflow.encode(), producer.encode())):
+            if (
+                not isinstance(observed, dict) or observed.get("type") != "file"
+                or observed.get("sha") != hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+            ):
+                fail(f"{label} native executed source blob differs from its authenticated tree")
+    if (
+        re.findall(r"(?m)^  ([a-z][a-z-]*):$", workflow.partition("\njobs:\n")[2]) != ["rollout"]
+        or set(re.findall(r"(?m)^\s+uses: ([^\s#]+)", workflow)) != {
+            "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+            "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
+            "oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58",
+            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+        }
+        or 'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' not in workflow
+        or any(token not in producer for token in (
+            'destination = root / "resume-images.tsv"',
+            'hashlib.sha256(images).hexdigest() != expected[0]',
+            'with destination.open("xb") as output:',
+        ))
+    ):
+        fail(f"{label} does not implement the complete held producer contract")
+    return workflow
+
+
+def native_handoff_renewal(repository, run_id, job, label):
+    steps = [
+        step for step in job["steps"]
+        if step.get("name") == "Restore runtime or verify final deploy handoff"
+    ]
+    if len(steps) != 1 or steps[0].get("conclusion") != "success":
+        fail(f"{label} final handoff renewal step is absent")
+    files = zip_files(
+        gh_api_bytes(f"repos/{repository}/actions/runs/{run_id}/attempts/1/logs"),
+        label, require_original_names=True,
+    )
+    logs = [raw for path, raw in files.items() if re.fullmatch(r"-?[0-9]+_rollout\.txt", path)]
+    if len(logs) != 1:
+        fail(f"{label} native renewal log is absent or ambiguous")
+    try:
+        lines = native_step_log_lines(logs[0].decode("utf-8"), steps[0], label)
+    except UnicodeDecodeError:
+        fail(f"{label} native renewal log is not UTF-8")
+    output, grouped = [], False
+    for line in lines:
+        if line.startswith("##[group]"):
+            grouped = True
+        elif line == "##[endgroup]":
+            grouped = False
+        elif not grouped and line.startswith(("shared_mongo_lock=", "live_data_maintenance=")):
+            output.append(line)
+    if len(output) != 3 or output[0] != (
+        "live_data_maintenance=verify-held status=PASS http_mutation_fence=true writers_quiesced=true"
+    ):
+        fail(f"{label} native final renewal did not preserve the held fence")
+    verified = re.fullmatch(
+        r"shared_mongo_lock=verify status=PASS lease_until_epoch=([1-9][0-9]*) "
+        r"fencing_generation=([0-9]+)", output[1],
+    )
+    renewed = re.fullmatch(
+        r"shared_mongo_lock=renew status=PASS lease_until_epoch=([1-9][0-9]*) "
+        r"fencing_generation=([1-9][0-9]*)", output[2],
+    )
+    if verified is None or renewed is None or int(renewed[2]) != int(verified[2]) + 1:
+        fail(f"{label} native final renewal is not a confirmed owner-bound transition")
+    renewal_epoch = int(renewed[1]) - 1800
+    if not (
+        parse_timestamp(steps[0]["started_at"], label).timestamp() - 1
+        <= renewal_epoch
+        <= parse_timestamp(steps[0]["completed_at"], label).timestamp()
+    ):
+        fail(f"{label} final native physical deadline is outside its authenticated step")
+    return int(renewed[1]), int(renewed[2])
+
+
+def handoff_remaining_guard(deadline, now, boundary):
+    stages = HANDOFF_STAGE_CEILINGS
+    if (
+        set(stages) != {
+            "packaging", "admission", "queue", "approval", "native-validation",
+            "startup-snapshot", "receiver-renewal",
+        }
+        or any(type(value) is not int or value <= 0 for value in stages.values())
+        or sum(stages.values()) > 1200 or HANDOFF_RESERVE_SECONDS != 600
+        or sum(stages.values()) + HANDOFF_RESERVE_SECONDS > 1800
+    ):
+        fail("handoff timing has no supported positive whole-path ceiling")
+    native = sum(stages[key] for key in ("native-validation", "startup-snapshot", "receiver-renewal"))
+    tails = {
+        "dispatch": stages["admission"] + stages["queue"] + stages["approval"] + native,
+        "materialization": stages["queue"] + stages["approval"] + native,
+        "approval-1": stages["approval"] + native,
+        "approval-2": (stages["approval"] * 2 + 2) // 3 + native,
+        "approval-3": (stages["approval"] + 2) // 3 + native,
+        "native-validation": native,
+        "startup-snapshot": stages["startup-snapshot"] + stages["receiver-renewal"],
+        "receiver-renewal": stages["receiver-renewal"],
+    }
+    if boundary not in tails or type(deadline) is not int or deadline <= 0:
+        fail("handoff timing boundary or authentic physical deadline is unsupported")
+    tail = tails[boundary]
+    remaining = deadline - now
+    if remaining <= tail + HANDOFF_RESERVE_SECONDS:
+        fail("authentic physical handoff deadline cannot cover the unfinished path plus reserve")
+    return tail
+
+
+def validate_receiver_handoff_timing(repository, data_run, source, boundary, receiver_run=""):
+    label = "receiver handoff timing"
+    producer = require_fixed_run(
+        repository, data_run, "oci-live-data-rollout.yml", "success", source,
+        f"oci-live-data apply-slip-index {source}", label,
+    )
+    evidence, _, files = parse_live_v6_artifact(repository, data_run, label, include_files=True)
+    authority = parse_resume_authority(files, evidence, label)
+    if authority is None or authority["schema_version"] == "live-betting-data-resume-v2":
+        return None
+    if evidence["source_sha"] != source or evidence["workflow_run_id"] != data_run:
+        fail("receiver handoff timing producer differs from its authenticated package")
+    current_held_source(repository, source, label)
+    jobs = jobs_for_run(repository, data_run, label)
+    job = exact_job(jobs, "rollout", label)
+    if (
+        len(jobs) != 1 or type(job.get("run_id")) is not int or job["run_id"] != int(data_run)
+        or job.get("status") != "completed" or job.get("conclusion") != "success"
+    ):
+        fail("receiver handoff timing requires its whole-success physical producer")
+    deadline, generation = native_handoff_renewal(repository, data_run, job, label)
+    renewal = deadline - 1800
+    now = time.time()
+    packaged = parse_timestamp(producer.get("updated_at"), label).timestamp()
+    elapsed = {"packaging": packaged - renewal}
+    if boundary != "dispatch" and not receiver_run:
+        fail("receiver timing boundary has no exact native receiving run")
+    if receiver_run:
+        if POSITIVE_INTEGER.fullmatch(receiver_run) is None:
+            fail("receiver timing run ID is malformed")
+        endpoint = f"repos/{repository}/actions/runs/{receiver_run}"
+        latest, first = gh_api(endpoint), gh_api(endpoint + "/attempts/1")
+        workflow = gh_api(f"repos/{repository}/actions/workflows/oci-production-deploy.yml")
+        if (
+            not isinstance(workflow, dict) or type(workflow.get("id")) is not int or workflow["id"] < 1
+            or workflow.get("path") != ".github/workflows/oci-production-deploy.yml"
+            or workflow.get("state") != "active"
+        ):
+            fail("receiver timing workflow identity or active state changed")
+        for run in (latest, first):
+            if (
+                not isinstance(run, dict) or type(run.get("id")) is not int
+                or run["id"] != int(receiver_run) or type(run.get("run_attempt")) is not int
+                or run["run_attempt"] != 1 or run.get("head_sha") != source
+                or run.get("workflow_id") != workflow["id"] or run.get("path") != workflow["path"]
+                or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "master"
+                or (run.get("head_repository") or {}).get("full_name") != repository
+                or run.get("display_title") != f"oci-deploy {source}"
+                or run.get("status") not in {"queued", "waiting", "requested", "pending", "in_progress"}
+                or run.get("conclusion") is not None
+            ):
+                fail("receiver timing identity, first attempt or mutable state differs")
+        if any(latest.get(key) != first.get(key) for key in ("created_at", "status", "conclusion")):
+            fail("receiver timing first-attempt observations drifted")
+        created = parse_timestamp(first.get("created_at"), label).timestamp()
+        elapsed["admission"] = created - packaged
+        if boundary.startswith("approval-") or boundary == "materialization":
+            elapsed["queue-and-approval"] = now - created
+        else:
+            current_jobs = jobs_for_run(repository, receiver_run, label)
+            receiving = exact_job(current_jobs, "deploy", label)
+            if receiving.get("run_id") != int(receiver_run) or receiving.get("status") != "in_progress":
+                fail("receiver timing native deploy job is not executing")
+            started = parse_timestamp(receiving.get("started_at"), label).timestamp()
+            elapsed["queue-and-approval"] = started - created
+            if boundary == "native-validation":
+                elapsed["native-validation"] = now - started
+            else:
+                validation = [
+                    step for step in receiving["steps"]
+                    if step.get("name") == "Validate exact SHA and trusted upstream runs"
+                ]
+                if len(validation) != 1 or validation[0].get("conclusion") != "success":
+                    fail("receiver timing native validation did not complete")
+                validated_at = parse_timestamp(validation[0].get("completed_at"), label).timestamp()
+                elapsed["native-validation"] = validated_at - started
+                handoff = [
+                    step for step in receiving["steps"]
+                    if step.get("name") == "Verify transferred database lock and maintenance fence"
+                ]
+                if len(handoff) != 1:
+                    fail("receiver timing verification boundary is ambiguous")
+                verify_started = parse_timestamp(handoff[0].get("started_at"), label).timestamp()
+                elapsed["startup-snapshot"] = verify_started - validated_at
+                if boundary == "receiver-renewal":
+                    elapsed["receiver-renewal"] = now - verify_started
+    else:
+        elapsed["admission"] = now - packaged
+    now = time.time()
+    if not receiver_run:
+        elapsed["admission"] = now - packaged
+    elif boundary.startswith("approval-") or boundary == "materialization":
+        elapsed["queue-and-approval"] = now - created
+    elif boundary == "native-validation":
+        elapsed["native-validation"] = now - started
+    else:
+        elapsed["receiver-renewal"] = now - verify_started
+    for stage, duration in elapsed.items():
+        ceiling = (
+            HANDOFF_STAGE_CEILINGS["queue"] + HANDOFF_STAGE_CEILINGS["approval"]
+            if stage == "queue-and-approval" else HANDOFF_STAGE_CEILINGS[stage]
+        )
+        if duration < 0 or duration > ceiling:
+            fail(f"receiver handoff {stage} elapsed stage exceeds its strict source ceiling")
+    tail = handoff_remaining_guard(deadline, now, boundary)
+    if now - renewal > 1200:
+        fail("receiver handoff whole renewal-to-renewal ceiling was exhausted")
+    return {
+        "deadline": deadline, "generation": generation, "boundary": boundary,
+        "unfinished_seconds": tail, "remaining_seconds": int(deadline - now),
+        "elapsed_seconds": int(now - renewal),
+        "stage_elapsed_seconds": {key: int(value) for key, value in elapsed.items()},
+    }
+
+
 def validate_held_handoff_native(
+    repository, run_id, source_sha, dispatch_inputs, runtime_mode, label,
+):
+    historical_pins = (
+        (".github/workflows/oci-live-data-rollout.yml", "27a98e345050fefb799c706fde03d8f79e14ed6c"),
+        ("infra/oci/scripts/live-betting-data-rollout-stan.sh", "1752489383424fa4bd55bbc7d36e4cac95e14d31"),
+    )
+    observed = [
+        gh_api(f"repos/{repository}/contents/{path}?ref={source_sha}")
+        for path, _ in historical_pins
+    ]
+    if all(isinstance(row, dict) and row.get("sha") == pin
+           for row, (_, pin) in zip(observed, historical_pins)):
+        return validate_historical_held_handoff_native(
+            repository, run_id, source_sha, dispatch_inputs, runtime_mode, label,
+        )
+    workflow = current_held_source(repository, source_sha, label, native_sources=observed)
+    metadata = require_fixed_run(
+        repository, run_id, "oci-live-data-rollout.yml", "success", source_sha,
+        f"oci-live-data apply-slip-index {source_sha}", label,
+    )
+    if runtime_mode not in {"k3s", "oke"}:
+        fail(f"{label} held-handoff runtime mode is unsupported")
+    jobs = jobs_for_run(repository, run_id, label)
+    job = exact_job(jobs, "rollout", label)
+    names = re.findall(r"(?m)^      - name: (.+)$", workflow)
+    expected_names = [
+        "Set up job", *names, "Post Checkout approved current master commit", "Complete job",
+    ]
+    if (
+        len(names) != len(set(names)) or len(jobs) != 1
+        or type(job.get("id")) is not int or job["id"] < 1
+        or type(job.get("run_id")) is not int or job["run_id"] != int(run_id)
+        or job.get("status") != "completed" or job.get("conclusion") != "success"
+        or [step.get("name") for step in job["steps"]] != expected_names
+    ):
+        fail(f"{label} complete held producer native inventory differs")
+    skipped = {
+        "Download failed deploy protected baseline", "Verify reader-qualified released activation state",
+        "Demote and verify exact retained live-acceptance account",
+        "Delete exact orphaned live-acceptance slips", "Capture post-phase runtime baseline",
+        "Restore runtime or retain hold if final handoff packaging failed",
+        "Release database operation lock unless handed to deploy",
+    }
+    if str(dispatch_inputs.get("baseline_recovery_run_id")) == "0":
+        skipped.update({
+            "Download explicitly selected recovery baseline authority",
+            "Bind historical recovery source through its exact artifact",
+        })
+    skipped.update({
+        "Verify OKE identity", "Reconcile expired and authorize current runner IPv4",
+        "Configure kubectl from exact cluster OCID", "Revoke exact runner rule",
+    } if runtime_mode == "k3s" else {
+        "Verify k3s identity", "Open ephemeral OCI Bastion access to k3s",
+        "Revalidate exact release disk checkpoint before lock mutation", "Close ephemeral OCI Bastion access",
+    })
+    start = parse_timestamp(job.get("started_at"), label)
+    end = parse_timestamp(job.get("completed_at"), label)
+    previous = start
+    if not parse_timestamp(metadata.get("created_at"), label) <= start <= end <= parse_timestamp(
+        metadata.get("updated_at"), label,
+    ):
+        fail(f"{label} complete held producer job chronology differs")
+    numbers = [*range(1, len(names) + 2), 2 * (len(names) + 1), 2 * (len(names) + 1) + 1]
+    for step, number in zip(job["steps"], numbers):
+        expected = "skipped" if step["name"] in skipped else "success"
+        if (
+            type(step.get("number")) is not int or step["number"] != number
+            or step.get("status") != "completed" or step.get("conclusion") != expected
+        ):
+            fail(f"{label} complete held producer step outcome differs")
+        if expected == "success":
+            began = parse_timestamp(step.get("started_at"), label)
+            completed = parse_timestamp(step.get("completed_at"), label)
+            if not previous <= began <= completed <= end:
+                fail(f"{label} complete held producer steps run backward")
+            previous = completed
+    native = failed_deploy_native_inputs(
+        repository, run_id, source_sha, label, resume_dispatch=True,
+    )
+    common = {
+        key: dispatch_inputs.get(key) for key in (
+            "resume_source_sha", "build_run_id", "infrastructure_run_id",
+            "checkpoint_source_sha", "disk_checkpoint_run_id", "prerequisite_run_id",
+            "baseline_recovery_run_id", "baseline_recovery_source_sha", "failed_deploy_run_id",
+        )
+    }
+    if (
+        any(native.get(key) != value for key, value in common.items())
+        or native.get("approved_sha") != source_sha or native.get("phase") != "apply-slip-index"
+        or native.get("failed_activation_run_id") != "0"
+        or native.get("failed_activation_user_id") != "0"
+        or native.get("confirmation") not in {
+            "RESUME APPLIED LIVE DATA EXACT SHA", HELD_HANDOFF_CONFIRMATION,
+        }
+    ):
+        fail(f"{label} complete held producer substituted its original root tuple")
+    deadline, generation = native_handoff_renewal(repository, run_id, job, label)
+    return {
+        **metadata, "_held_complete": True, "_held_native_inputs": native,
+        "_handoff_deadline": deadline, "_handoff_generation": generation,
+    }
+
+
+def validate_historical_held_handoff_native(
     repository, run_id, source_sha, dispatch_inputs, runtime_mode, label,
 ):
     metadata = require_fixed_run(
@@ -2578,12 +3119,219 @@ def validate_held_handoff_native(
     return metadata
 
 
+def native_cli_handoff_approval(repository, run_id, operation, label):
+    endpoint = f"repos/{repository}/actions/runs/{run_id}"
+    if gh_api(endpoint + "/pending_deployments") != []:
+        fail(f"{label} consumed physical producer still has a pending gate")
+    reviews = gh_api(endpoint + "/approvals")
+    if not isinstance(reviews, list) or len(reviews) != 1 or not isinstance(reviews[0], dict):
+        fail(f"{label} consumed owner approval history is incomplete or extended")
+    review = reviews[0]
+    environments, user = review.get("environments"), review.get("user")
+    if (
+        review.get("state") != "approved"
+        or review.get("comment") != f"Copilot CLI exact-run approval: {operation}"
+        or not isinstance(user, dict) or type(user.get("id")) is not int or user["id"] < 1
+        or not isinstance(user.get("login"), str) or not user["login"]
+        or not isinstance(environments, list) or len(environments) != 1
+        or not isinstance(environments[0], dict) or environments[0].get("name") != "oci-migration"
+        or type(environments[0].get("id")) is not int or environments[0]["id"] < 1
+    ):
+        fail(f"{label} consumed owner has no exact native CLI approval receipt")
+    return environments[0]["id"]
+
+
+def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, successor_run_id, label):
+    authority = provenance_read_authority()
+    native = held.get("_held_native_inputs")
+    if native is None:
+        native = failed_deploy_native_inputs(
+            repository, str(held["id"]), held["head_sha"], label, resume_dispatch=True,
+        )
+    operation = (
+        "oci-live-data-continue-held-handoff" if native["confirmation"] == HELD_HANDOFF_CONFIRMATION
+        else "oci-live-data-resume-deploy"
+    )
+    environment_id = native_cli_handoff_approval(repository, str(held["id"]), operation, label)
+    successor = None
+    if successor_run_id:
+        successor = gh_api(f"repos/{repository}/actions/runs/{successor_run_id}")
+        if not isinstance(successor, dict) or (
+            type(successor.get("id")) is not int or successor["id"] != int(successor_run_id)
+            or successor.get("head_sha") != subject_sha
+            or type(successor.get("run_attempt")) is not int or successor["run_attempt"] != 1
+            or successor.get("path") != ".github/workflows/oci-live-data-rollout.yml"
+            or successor.get("event") != "workflow_dispatch" or successor.get("head_branch") != "master"
+            or (successor.get("head_repository") or {}).get("full_name") != repository
+        ):
+            fail(f"{label} successor is not the exact native first attempt")
+        portable = successor.get("status") == "completed" and successor.get("conclusion") == "success"
+        executing = (
+            successor.get("status") == "in_progress"
+            and os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("GITHUB_RUN_ID") == successor_run_id
+            and os.environ.get("GITHUB_REPOSITORY") == repository
+            and os.environ.get("GITHUB_SHA") == subject_sha
+        )
+        if portable or executing:
+            native_cli_handoff_approval(
+                repository, successor_run_id, "oci-live-data-continue-held-handoff", label,
+            )
+            if portable and failed_deploy_native_inputs(
+                repository, successor_run_id, subject_sha, label, resume_dispatch=True,
+            ) != dispatch_inputs:
+                fail(f"{label} completed successor substituted its native dispatch tuple")
+            if executing:
+                job = exact_job(jobs_for_run(repository, successor_run_id, label), "rollout", label)
+                admissions = [
+                    step for step in job["steps"]
+                    if step.get("name") == "Validate exact SHA phase and trusted upstream runs"
+                ]
+                if (
+                    job.get("run_id") != int(successor_run_id) or len(admissions) != 1
+                    or admissions[0].get("status") not in {"in_progress", "completed"}
+                    or admissions[0].get("status") == "completed"
+                    and admissions[0].get("conclusion") != "success"
+                ):
+                    fail(f"{label} native successor has not executed its authenticated admission")
+            return
+    root = Path(__file__).resolve().parents[3]
+    directory = authority.ensure_authority_dir(
+        os.environ.get("COPILOT_CLI_AUTHORITY_DIR") or str(
+            Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+            / "betstan/copilot-cli-authority"),
+        root, create=False,
+    )
+    def policy_at(source, operation):
+        policy_source = held_source_bytes(
+            repository, source, "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh", label,
+        )
+        result = subprocess.run(
+            ["bash", "-s", "--", "get", operation], input=policy_source,
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode:
+            fail(f"{label} source-bound authority policy is unavailable")
+        try:
+            policy = json.loads(result.stdout)
+        except ValueError:
+            fail(f"{label} source-bound authority policy is malformed")
+        return policy
+    def verify(record, source, expected_inputs, historical=False):
+        policy = policy_at(source, record["operation"])
+        workflow = held_source_bytes(
+            repository, source, ".github/workflows/oci-live-data-rollout.yml", label,
+        ).encode()
+        blob = hashlib.sha1(f"blob {len(workflow)}\0".encode() + workflow).hexdigest()
+        authority.verify_record(
+            record, policy, repository, source, record["workflowId"], blob,
+            retirement_only=historical,
+        )
+        observed = live_data_native_inputs(
+            {"approved_sha": record["controlSha"], **record["inputs"]},
+            policy["inputNames"],
+        )
+        if observed != expected_inputs:
+            fail(f"{label} owned authority substituted its complete native tuple")
+        return policy
+    producer = authority.load_record(directory, str(held["id"]))
+    if producer["state"] != "consumed" or producer["inflightApproval"] is not None:
+        fail(f"{label} physical producer has no consumed owned authority")
+    verify(producer, held["head_sha"], native, historical=True)
+    authority.validate_run_against_record(held, producer)
+    if not any(
+        receipt["runId"] == held["id"] and receipt["operation"] == operation
+        and receipt["environmentId"] == environment_id
+        for receipt in producer["approvals"]
+    ):
+        fail(f"{label} physical producer consumed receipt differs from native approval")
+    owned_successor = None
+    if successor is not None:
+        owned_successor = authority.load_record(directory, successor_run_id)
+        if owned_successor["operation"] != "oci-live-data-continue-held-handoff" or owned_successor["state"] not in {
+            "claimed", "issued", "inflight", "consumed",
+        }:
+            fail(f"{label} successor has no eligible exact owned authority")
+        verify(owned_successor, subject_sha, dispatch_inputs)
+        authority.validate_run_against_record(successor, owned_successor)
+        if authority.parse_utc(owned_successor["expiresAt"], label).timestamp() <= time.time():
+            fail(f"{label} successor owned authority has expired")
+    entries = sorted(directory.glob("*.json"))
+    if len(entries) > 1000:
+        fail(f"{label} private authority inventory exceeds its complete bound")
+    for path in entries:
+        if POSITIVE_INTEGER.fullmatch(path.stem):
+            record = authority.load_record(directory, path.stem)
+            if record["repository"] != repository or record["runId"] in {
+                held["id"], int(successor_run_id or "0"),
+            }:
+                continue
+            if record["state"] not in {"consumed", "retired"}:
+                fail(f"{label} competing unresolved owned authority prevents receiver absence")
+        else:
+            match = re.fullmatch(r"(?:request-|spent-)([0-9a-f]{64})(?:-dispatch-[0-9a-f]{32})?", path.stem)
+            if match is None:
+                fail(f"{label} private authority inventory contains an unexplained record")
+            intent = authority.load_intent_file(path, match[1])
+            if intent["repository"] != repository:
+                continue
+            if intent["state"] == "bound":
+                record = authority.bound_intent_record(directory, intent)
+                if record["runId"] in {held["id"], int(successor_run_id or "0")} or record["state"] in {
+                    "consumed", "retired",
+                }:
+                    continue
+            elif not successor_run_id and intent["state"] in {"prepared", "dispatching"}:
+                owner = os.environ.get("BETSTAN_HELD_DISPATCH_OWNER", "")
+                if (
+                    command_owner_is_ancestor(owner)
+                    and (intent["state"] == "prepared" or intent["ownerPid"] == int(owner))
+                    and intent["operation"] == "oci-live-data-continue-held-handoff"
+                    and intent["controlSha"] == subject_sha
+                    and intent["subjectSha"] == subject_sha and intent["targetSha"] is None
+                    and {"approved_sha": subject_sha, **intent["inputs"]} == dispatch_inputs
+                    and intent["inputHash"] == authority.canonical_input_hash(intent["inputs"])
+                    and intent["dispatchStatus"] is None
+                    and authority.parse_utc(intent["expiresAt"], label).timestamp() > time.time()
+                ):
+                    policy = policy_at(subject_sha, intent["operation"])
+                    normalized = authority.validate_request_data({
+                        "schemaVersion": authority.REQUEST_SCHEMA, "repository": repository,
+                        "operation": intent["operation"], "controlSha": subject_sha,
+                        "subjectSha": subject_sha, "targetSha": None, "inputs": dispatch_inputs,
+                    }, policy, repository, subject_sha)
+                    workflow = gh_api(f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml")
+                    raw = held_source_bytes(
+                        repository, subject_sha, ".github/workflows/oci-live-data-rollout.yml", label,
+                    ).encode()
+                    authority.verify_intent(
+                        intent, normalized, policy, repository, subject_sha,
+                        workflow["id"], hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest(),
+                    )
+                    if intent["state"] == "prepared":
+                        if intent["schemaVersion"] != authority.PREPARED_INTENT_SCHEMA:
+                            fail(f"{label} prepared successor is not sealed")
+                        authority.require_prepared_capture(directory, intent)
+                        if intent["preparedSeal"]["policySha256"] != authority.evidence_digest(policy):
+                            fail(f"{label} prepared successor policy changed")
+                    capture = directory / intent["captureFile"]
+                    metadata = capture.lstat()
+                    if (
+                        stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid()
+                        and stat.S_IMODE(metadata.st_mode) == 0o600 and metadata.st_nlink == 1
+                        and metadata.st_size == 0
+                    ):
+                        continue
+            fail(f"{label} unresolved dispatch intent prevents receiver absence")
+
+
 def held_handoff_history(
     repository, held, subject_sha, successor_run_id="", *,
-    expired_receiver_run_id="", runtime_mode=None,
+    expired_receiver_run_id="", runtime_mode=None, fresh=False,
 ):
     authority = None
     expired_receiver = None
+    active_inventory = fresh
     if expired_receiver_run_id:
         qualified = expired_handoff_native_inputs(
             repository, expired_receiver_run_id, runtime_mode, "expired-handoff history",
@@ -2662,7 +3410,7 @@ def held_handoff_history(
                 ))
                 if not window[0] <= window[1] <= window[2]:
                     fail(f"{label} endpoint chronology is invalid")
-                if cutoff is not None and window[2] > cutoff:
+                if cutoff is not None and not active_inventory and window[2] > cutoff:
                     fail(f"{label} terminalized after the immutable successor cutoff")
                 windows.append(window)
             if windows[0][:2] != windows[1][:2]:
@@ -2783,7 +3531,7 @@ def held_handoff_history(
             observation = collect_provenance_read_observation(repository, str(row["id"]))
             native = authority.validate_provenance_read_observation(identity, observation)
             for run in (observation["run"], observation["attempts"][0]["run"]):
-                if cutoff is not None and parse_timestamp(run.get("updated_at"), label) > cutoff:
+                if cutoff is not None and not active_inventory and parse_timestamp(run.get("updated_at"), label) > cutoff:
                     fail(f"{label} terminalized after the immutable successor cutoff")
             latest = observation["run"]
             for key in (
@@ -2848,6 +3596,7 @@ def held_handoff_history(
                 fail("held-handoff successor repository differs")
         if latest.get("status") != first.get("status") or latest.get("conclusion") != first.get("conclusion"):
             fail("held-handoff successor attempt state differs")
+        active_inventory = fresh and first.get("status") != "completed"
         if first.get("status") == "completed" and first.get("conclusion") != "success":
             fail("held-handoff completed successor is not successful")
         if parse_timestamp(held.get("updated_at"), "held handoff") > parse_timestamp(
@@ -2876,7 +3625,7 @@ def held_handoff_history(
     counts = {}
     for workflow in workflows:
         endpoint = f"repos/{repository}/actions/workflows/{workflow}/runs?per_page=100"
-        if cutoff is not None:
+        if cutoff is not None and not active_inventory:
             endpoint += "&created=%3C%3D" + cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
         pages = gh_api_pages(endpoint)
         totals = {page.get("total_count") for page in pages}
@@ -2902,11 +3651,21 @@ def held_handoff_history(
             ids.add(row["id"])
             created = parse_timestamp(row.get("created_at"), "historical run")
             updated = parse_timestamp(row.get("updated_at"), "historical run")
-            if updated < created or cutoff is not None and created > cutoff:
+            if updated < created or cutoff is not None and not active_inventory and created > cutoff:
                 fail("held-handoff historical interval is inconsistent")
             if row["id"] in {held["id"], int(successor_run_id or "0")}:
                 if workflow != "oci-live-data-rollout.yml":
                     fail("held-handoff historical owner is bound to another workflow")
+                authenticated = held if row["id"] == held["id"] else first
+                for key in (
+                    "id", "head_sha", "created_at", "updated_at", "workflow_id", "run_attempt",
+                    "event", "head_branch", "status", "conclusion", "display_title",
+                ):
+                    if key in authenticated and (
+                        key not in row or type(row[key]) is not type(authenticated[key])
+                        or row[key] != authenticated[key]
+                    ):
+                        fail("held-handoff owner inventory differs from its authenticated native identity")
                 continue
             if expired_receiver is not None and row["id"] == expired_receiver["id"]:
                 if workflow != "oci-production-deploy.yml" or any(
@@ -3035,7 +3794,10 @@ def held_handoff_history(
                 required_ids.add(int(successor_run_id))
             if not required_ids <= ids:
                 fail("held-handoff history omitted an independently authenticated run")
-        counts[workflow] = len(rows)
+        counts[workflow] = sum(
+            cutoff is None or parse_timestamp(row.get("created_at"), "historical run") <= cutoff
+            for row in rows
+        )
     return {
         "schema_version": "live-betting-held-handoff-history-v1",
         "repository": repository, "held_handoff_run_id": str(held["id"]),
@@ -3131,6 +3893,126 @@ def validate_held_handoff_transfer(transfer, authority, current):
             fail("held-handoff transfer snapshot binding is malformed")
 
 
+def validate_held_transfer_runtime(
+    snapshot, current, deployments, pods, baseline_files, resume_authority,
+    namespace, held_run, held_source, successor_run, successor_source, deadline="", generation="",
+):
+    label = "fresh held-handoff physical transfer"
+    if (
+        not isinstance(snapshot, dict) or not isinstance(current, dict)
+        or current.get("kind") != "ConfigMap" or current.get("apiVersion") != "v1"
+        or snapshot.get("kind") != "ConfigMap" or snapshot.get("apiVersion") != "v1"
+        or not isinstance(current.get("metadata"), dict) or not isinstance(current.get("data"), dict)
+        or any(current["metadata"].get(key) != snapshot.get("metadata", {}).get(key)
+               for key in ("name", "namespace", "uid", "resourceVersion"))
+        or current["metadata"].get("name") != "gaming-mongo-migration-lock"
+        or current["metadata"].get("namespace") != namespace
+        or current["data"] != snapshot.get("data")
+    ):
+        fail(f"{label} exact lock snapshot changed")
+    data = current["data"]
+    if (
+        data.get("holder") != f"live-data-{held_run}-1"
+        or data.get("source-sha") != held_source or data.get("state") != "active"
+        or data.get("operation-id") != "live-data-apply-slip-index"
+        or data.get("lease-duration-seconds") != "1800" or data.get("released-at-epoch") != "0"
+        or len({held_run, successor_run, resume_authority.get("applied_data_run_id"),
+                resume_authority.get("failed_deploy_run_id")}) != 4
+        or resume_authority.get("current_source_sha") != successor_source
+    ):
+        fail(f"{label} lock holder or distinct root/receiver/capture roles differ")
+    for value, pattern in (
+        (current["metadata"].get("uid"), r"[A-Za-z0-9._:-]+"),
+        (current["metadata"].get("resourceVersion"), r"[1-9][0-9]*"),
+        *((data.get(key), r"[1-9][0-9]*") for key in (
+            "acquired-at-epoch", "lease-until-epoch", "fencing-generation",
+        )),
+    ):
+        if type(value) is not str or re.fullmatch(pattern, value) is None:
+            fail(f"{label} lock metadata is malformed")
+    if (
+        not int(data["acquired-at-epoch"]) <= int(data["lease-until-epoch"]) - 1800 <= time.time()
+        or deadline and data["lease-until-epoch"] != deadline
+        or generation and data["fencing-generation"] != generation
+    ):
+        fail(f"{label} authentic native lease metadata differs")
+    if validate_checksum_manifest(baseline_files, label) != resume_authority.get("baseline_sha256"):
+        fail(f"{label} original rollback baseline changed")
+    images = parse_tsv(baseline_files.get("images.tsv", b""), 5, label)
+    desired = parse_tsv(baseline_files.get("deployments.tsv", b""), 6, label)
+    if (
+        len(images) != 10 or len(desired) != 10
+        or {row[0] for row in images} != CURRENT_SERVICES
+        or {row[0] for row in desired} != CURRENT_SERVICES
+    ):
+        fail(f"{label} original runtime baseline is incomplete")
+    images = {row[0]: row for row in images}
+    desired = {row[0]: row[3] for row in desired}
+    items = deployments.get("items") if isinstance(deployments, dict) else None
+    live_pods = pods.get("items") if isinstance(pods, dict) else None
+    if (
+        not isinstance(items, list) or len(items) != 10
+        or {item.get("metadata", {}).get("name") for item in items}
+        != {f"gaming-{service}-depl" for service in CURRENT_SERVICES}
+        or not isinstance(live_pods, list)
+    ):
+        fail(f"{label} fresh workload inventory is incomplete")
+    supporting = {"auth", "client", "telemetry"}
+    for item in items:
+        meta, spec, status = item.get("metadata", {}), item.get("spec", {}), item.get("status", {})
+        service = meta["name"].removeprefix("gaming-").removesuffix("-depl")
+        if POSITIVE_INTEGER.fullmatch(desired[service]) is None:
+            fail(f"{label} original supporting replica count is invalid")
+        replicas = int(desired[service]) if service in supporting else 0
+        containers = [
+            container for container in spec.get("template", {}).get("spec", {}).get("containers", [])
+            if container.get("name") == f"gaming-{service}"
+        ]
+        if (
+            item.get("kind") != "Deployment" or item.get("apiVersion") != "apps/v1"
+            or meta.get("namespace") != namespace or not isinstance(meta.get("uid"), str) or not meta["uid"]
+            or type(meta.get("generation")) is not int or meta["generation"] < 1
+            or type(status.get("observedGeneration")) is not int
+            or status["observedGeneration"] != meta["generation"]
+            or type(spec.get("replicas")) is not int or spec["replicas"] != replicas
+            or any(type(status.get(key, 0)) is not int or status.get(key, 0) != replicas for key in (
+                "replicas", "updatedReplicas", "readyReplicas", "availableReplicas",
+            ))
+            or len(containers) != 1 or containers[0].get("image") != images[service][2]
+        ):
+            fail(f"{label} fresh deployment image, generation or quiescence differs")
+        if service == "gamemaster":
+            env = containers[0].get("env", [])
+            flags = [entry for entry in env if entry.get("name") == "LIVE_KICKOFFS_ENABLED"]
+            if (
+                len(flags) != 1 or flags[0].get("value") != "false" or "valueFrom" in flags[0]
+                or any(entry.get("name") == "LIVE_KICKOFFS_LEASE_UNTIL_EPOCH" for entry in env)
+            ):
+                fail(f"{label} live kickoff state is not dark")
+        selected = [
+            pod for pod in live_pods
+            if pod.get("metadata", {}).get("labels", {}).get("app") == f"gaming-{service}"
+        ]
+        if len(selected) != replicas:
+            fail(f"{label} fresh supporting pod or quiesced-writer inventory differs")
+        for pod in selected:
+            meta, status = pod.get("metadata", {}), pod.get("status", {})
+            containers = [
+                container for container in status.get("containerStatuses", [])
+                if container.get("name") == f"gaming-{service}"
+            ]
+            if (
+                meta.get("namespace") != namespace or not isinstance(meta.get("uid"), str) or not meta["uid"]
+                or meta.get("deletionTimestamp") is not None or status.get("phase") != "Running"
+                or len([condition for condition in status.get("conditions", [])
+                        if condition.get("type") == "Ready" and condition.get("status") == "True"]) != 1
+                or len(containers) != 1 or containers[0].get("ready") is not True
+                or not isinstance(containers[0].get("imageID"), str)
+                or not any(containers[0]["imageID"].endswith("@" + digest) for digest in images[service][3:5])
+            ):
+                fail(f"{label} fresh supporting pod identity or residency differs")
+
+
 def validate_held_handoff_reports(files, evidence):
     with tempfile.TemporaryDirectory(prefix=".held-handoff-evidence-", dir=Path.cwd()) as temporary:
         directory = Path(temporary)
@@ -3159,6 +4041,42 @@ def validate_held_handoff_reports(files, evidence):
             fail("held-handoff schema, journal, or sanitized reports are invalid")
 
 
+def complete_held_artifacts(repository, run_id, source_sha, held, files, label):
+    inventory = artifact_inventory(repository, run_id, label)
+    expected = {
+        f"oci-live-data-rollout-{run_id}-1", f"oci-live-data-baselines-{run_id}-1",
+    }
+    if (
+        len(inventory) != 2 or {item.get("name") for item in inventory} != expected
+        or any(type(item.get("id")) is not int or item["id"] < 1 for item in inventory)
+        or len({item["id"] for item in inventory}) != 2
+    ):
+        fail(f"{label} complete producer artifact inventory differs")
+    for item in inventory:
+        owner = item.get("workflow_run")
+        if (
+            not isinstance(owner, dict) or type(owner.get("id")) is not int
+            or owner["id"] != int(run_id) or owner.get("head_sha") != source_sha
+            or owner.get("head_branch") != "master" or item.get("expired") is not False
+            or not isinstance(item.get("digest"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", item["digest"]) is None
+            or type(item.get("size_in_bytes")) is not int
+            or not 0 < item["size_in_bytes"] <= MAX_ARTIFACT_ARCHIVE_BYTES
+            or parse_timestamp(item.get("expires_at"), label).timestamp() <= time.time()
+        ):
+            fail(f"{label} complete producer artifact is unowned, expired or unauthenticated")
+        created = parse_timestamp(item.get("created_at"), label)
+        if not parse_timestamp(held["created_at"], label) <= created <= parse_timestamp(
+            held["updated_at"], label,
+        ):
+            fail(f"{label} complete producer artifact chronology differs")
+    rollout = next(item for item in inventory if item["name"].startswith("oci-live-data-rollout-"))
+    if artifact_files(repository, rollout, label) != files:
+        fail(f"{label} complete producer package changed during validation")
+    baseline = next(item for item in inventory if item["name"].startswith("oci-live-data-baselines-"))
+    return original_before_baseline(artifact_files(repository, baseline, label), label)
+
+
 def validate_held_handoff_artifact(
     repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
     *, successor_run_id="",
@@ -3170,6 +4088,13 @@ def validate_held_handoff_artifact(
         require_dispatch_run(dispatch_inputs, "failed_deploy_run_id"),
     }:
         fail("held-handoff physical owner cannot substitute the original root")
+    if (
+        dispatch_inputs.get("prerequisite_run_id") == dispatch_inputs.get("failed_deploy_run_id")
+        or successor_run_id and successor_run_id in {
+            run_id, dispatch_inputs.get("prerequisite_run_id"), dispatch_inputs.get("failed_deploy_run_id"),
+        }
+    ):
+        fail("held-handoff root, failed receiver, producer and new capture must be distinct")
     validate_descendant_scope(source_sha, subject_sha)
     held = validate_held_handoff_native(
         repository, run_id, source_sha, dispatch_inputs, runtime_mode, label,
@@ -3184,11 +4109,26 @@ def validate_held_handoff_artifact(
     reports |= {"reports/preflight-event-reschedule.json"}
     reports |= {f"reports/{stage}-backoffice-pre-september-cleanup.json"
                 for stage in ("preflight", "apply", "verify")}
-    if set(files) != reports | {
+    package = reports | {
         "SHA256SUMS", "provenance.env", "schema.env", "journal.json", "resume-authority.env",
-    }:
-        fail("held handoff does not have exactly the known historical packaging omission")
-    authority = parse_env(files["resume-authority.env"], label, LIVE_RESUME_AUTHORITY_V2_KEYS)
+    }
+    complete = held.get("_held_complete") is True
+    if complete:
+        authority = parse_resume_authority(files, evidence, label)
+        if authority is None:
+            fail("complete held handoff has no resume authority")
+        package.add("resume-images.tsv")
+        if authority["schema_version"] == "live-betting-data-resume-v3":
+            package.update({"held-handoff-history.json", "held-handoff-transfer.json"})
+        if set(files) != package:
+            fail("complete held handoff does not have its exact checksummed package")
+        captured_baseline = complete_held_artifacts(
+            repository, run_id, source_sha, held, files, label,
+        )
+    else:
+        if set(files) != package:
+            fail("held handoff does not have exactly the known historical packaging omission")
+        authority = parse_env(files["resume-authority.env"], label, LIVE_RESUME_AUTHORITY_V2_KEYS)
     root_source = require_dispatch_sha(dispatch_inputs, "resume_source_sha")
     failed_run = require_dispatch_run(dispatch_inputs, "failed_deploy_run_id")
     profile = "oci-failed-deploy-retained-hold-v1"
@@ -3199,12 +4139,14 @@ def validate_held_handoff_artifact(
         repository, failed_run, root_source, None, dispatch_inputs, runtime_mode,
         profile, *outcomes, label, pre_runtime=True,
     )
+    if complete and captured_baseline != root["_baseline_files"]:
+        fail("complete held handoff replaced the original protected root rollback baseline")
     checkpoint = parse_checkpoint_artifact(repository, dispatch_inputs, runtime_mode, label)
     validate_live_v6_lineage(
         evidence, checkpoint, dispatch_inputs, run_id, source_sha, "apply-slip-index", label,
     )
     expected_authority = {
-        "schema_version": "live-betting-data-resume-v2",
+        "schema_version": authority["schema_version"] if complete else "live-betting-data-resume-v2",
         "applied_data_run_id": root["applied_data_run_id"],
         "applied_source_sha": root["applied_source_sha"], "failed_deploy_run_id": failed_run,
         "resume_maintenance_mode": "pre-runtime-hold", "failed_deploy_job_conclusion": "failure",
@@ -3226,10 +4168,42 @@ def validate_held_handoff_artifact(
     image_bytes = artifact_member(repository, build, "images.tsv", label)
     candidate_images_checksum(image_bytes)
     expected_authority["runtime_images_sha256"] = hashlib.sha256(image_bytes).hexdigest()
+    if complete:
+        if files["resume-images.tsv"] != image_bytes:
+            fail("complete held handoff substituted the authenticated original image bytes")
+        native = held["_held_native_inputs"]
+        if authority["schema_version"] == "live-betting-data-resume-v3":
+            if native.get("confirmation") != HELD_HANDOFF_CONFIRMATION:
+                fail("complete held handoff substituted its prior physical producer")
+            predecessor = validate_held_handoff_artifact(
+                repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],
+                source_sha, native, runtime_mode, label, successor_run_id=run_id,
+            )
+            expected_authority.update({
+                key: predecessor["resume"][key] for key in (
+                    "held_handoff_run_id", "held_handoff_source_sha", "held_handoff_evidence_sha256",
+                )
+            })
+            try:
+                transfer = json.loads(files["held-handoff-transfer.json"])
+            except (ValueError, UnicodeError):
+                fail("complete held handoff transfer is malformed")
+            validate_held_handoff_transfer(transfer, authority, held)
+        elif native.get("confirmation") != "RESUME APPLIED LIVE DATA EXACT SHA":
+            fail("complete held handoff cannot omit its transferred-owner authority")
     if authority != expected_authority:
         fail("held-handoff authority substituted its root, checkpoint, or original image bytes")
     validate_held_handoff_reports(files, evidence)
-    history = held_handoff_history(repository, held, subject_sha, successor_run_id)
+    if complete:
+        try:
+            held_handoff_authority(
+                repository, held, subject_sha, dispatch_inputs, successor_run_id, label,
+            )
+        except (OSError, KeyError, TypeError, ValueError):
+            fail("complete held handoff owned authority is missing, malformed or inconsistent")
+    history = held_handoff_history(
+        repository, held, subject_sha, successor_run_id, **({"fresh": True} if complete else {}),
+    )
     return {
         "artifactName": f"oci-live-data-rollout-{run_id}-1",
         "createdAt": held["created_at"], "completedAt": held["updated_at"],
@@ -3237,6 +4211,9 @@ def validate_held_handoff_artifact(
         "resume": {
             **root, "held_handoff_run_id": run_id, "held_handoff_source_sha": source_sha,
             "held_handoff_evidence_sha256": manifest_sha,
+            **({"held_handoff_lease_until_epoch": str(held["_handoff_deadline"])} if complete else {}),
+            **({"held_handoff_fencing_generation": str(held["_handoff_generation"])}
+               if complete and "_handoff_generation" in held else {}),
             **{key: authority[key] for key in (
                 "failed_deploy_job_conclusion", "public_validate_job_conclusion",
                 "lock_release_step_conclusion", "fence_release_step_conclusion", "rehold_step_conclusion",
@@ -6260,6 +7237,9 @@ def command_validate_all(args):
     inputs = json.loads(args.dispatch_inputs)
     if not isinstance(inputs, dict):
         fail("dispatch inputs must be an object")
+    bindings = resolve_bindings(args)
+    for binding in bindings:
+        validate_binding_shape(binding)
     if args.policy_json and not args.manifest:
         policy = json.loads(args.policy_json)
         if isinstance(policy, dict) and policy.get("workflow") == "oci-live-data-rollout.yml":
@@ -6267,16 +7247,15 @@ def command_validate_all(args):
                 fail("live data policy input contract is missing")
             inputs = live_data_native_inputs(inputs, policy["inputNames"])
         if isinstance(policy, dict) and any(binding.get("runProfile") == "oci-successful-held-handoff-v1"
-               for binding in policy.get("upstreamRunBindings", [])):
+               for binding in bindings):
             if policy.get("operation") != "oci-live-data-continue-held-handoff":
                 fail("successful held-handoff profile is restricted to its fixed operation")
         if isinstance(policy, dict) and any(
             binding.get("runProfile") == "oci-failed-activation-released-resume-v1"
-            for binding in policy.get("upstreamRunBindings", [])
+            for binding in bindings
         ):
             if policy.get("operation") != "oci-live-data-resume-activation-released":
                 fail("released activation profile is restricted to its fixed operation")
-    bindings = resolve_bindings(args)
     if any(
         binding.get("runProfile") == "oci-failed-activation-released-resume-v1"
         for binding in bindings if isinstance(binding, dict)
@@ -6287,12 +7266,11 @@ def command_validate_all(args):
         or policy.get("workflow") != "oci-live-data-rollout.yml"
     ):
         fail("released activation profile requires its fixed operation policy")
-    for binding in bindings:
-        validate_binding_shape(binding)
     binding_names = [binding["input"] for binding in bindings]
     if len(binding_names) != len(set(binding_names)):
         fail("upstream bindings contain a duplicate input")
     chronology_inputs = set()
+    preceding_inputs = set()
     for binding in bindings:
         after_input = binding.get("afterInput")
         if after_input is not None:
@@ -6301,23 +7279,70 @@ def command_validate_all(args):
                     f"binding {binding['input']} depends on unknown input "
                     f"{after_input}"
                 )
+            if after_input not in preceding_inputs:
+                fail(
+                    f"binding {binding['input']} depends on unvalidated input "
+                    f"{after_input}"
+                )
             chronology_inputs.update((binding["input"], after_input))
-    validated = {}
+        preceding_inputs.add(binding["input"])
     for binding in bindings:
         name = binding["input"]
         if name not in inputs:
             fail(f"dispatch inputs are missing bound value {name}")
         if inputs[name] in (None, ""):
             fail(f"dispatch input {name} is empty")
-        facts = validate_binding(
-            args.repository,
-            binding,
-            args.subject_sha,
-            str(inputs[name]),
-            inputs,
-            args.runtime_mode,
-            getattr(args, "successor_run_id", ""),
-        )
+        if POSITIVE_INTEGER.fullmatch(str(inputs[name])) is None:
+            fail(f"dispatch input {name} must be a positive run ID")
+        expected_head = binding.get("expectedHeadShaInput")
+        if expected_head is not None and (
+            not isinstance(inputs.get(expected_head), str)
+            or FULL_SHA.fullmatch(inputs[expected_head]) is None
+        ):
+            fail(f"dispatch input {expected_head} must be a complete source SHA")
+    validated = {}
+    failures = []
+    if bindings:
+        byte_context = ImmutableBindingBytes({
+            "repository": args.repository, "subject": args.subject_sha,
+            "inputs": inputs, "bindings": bindings, "runtime": args.runtime_mode,
+            "policy": args.policy_json, "operation": getattr(args, "operation", ""),
+            "successor": getattr(args, "successor_run_id", ""),
+            "manifest": (
+                Path(args.manifest).read_text(encoding="utf-8") if args.manifest else ""
+            ),
+            "validator": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        })
+        def read_binding(binding):
+            token = BYTE_CONTEXT.set(byte_context)
+            try:
+                return validate_binding(
+                    args.repository, binding, args.subject_sha,
+                    str(inputs[binding["input"]]), inputs, args.runtime_mode,
+                    getattr(args, "successor_run_id", ""),
+                )
+            finally:
+                BYTE_CONTEXT.reset(token)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(4, len(bindings))
+        ) as pool:
+            futures = [
+                pool.submit(
+                    read_binding,
+                    binding,
+                )
+                for binding in bindings
+            ]
+            for binding, future in zip(bindings, futures):
+                try:
+                    validated[binding["input"]] = future.result()
+                except BaseException as error:
+                    failures.append(error)
+        if failures:
+            raise failures[0]
+    for binding in bindings:
+        name = binding["input"]
+        facts = validated[name]
         if name in chronology_inputs:
             facts["createdAt"] = parse_timestamp(
                 facts["createdAt"],
@@ -6331,17 +7356,50 @@ def command_validate_all(args):
                 fail(f"{name} run completion predates creation")
         after_input = binding.get("afterInput")
         if after_input is not None:
-            if after_input not in validated:
-                fail(
-                    f"binding {name} depends on unvalidated input {after_input}"
-                )
             if validated[after_input]["completedAt"] > facts["createdAt"]:
                 fail(
                     f"binding {name} began before {after_input} completed"
                 )
-        validated[name] = facts
-        print(f"upstream_binding={name} run={inputs[name]} status=OK")
-    print(f"upstream_bindings_validated={len(bindings)}")
+    timing = None
+    operation = policy.get("operation", "") if args.policy_json and not args.manifest else args.operation
+    if operation in {"oci-production-deploy", "oci-production-deploy-recovered"}:
+        if not bindings or "data_run_id" not in validated:
+            fail("receiver handoff timing requires its authenticated data binding")
+        boundary, receiver = "dispatch", ""
+        owner = os.environ.get("BETSTAN_BINDING_COMMAND_OWNER", "")
+        if command_owner_is_ancestor(owner):
+            boundary = os.environ.get("BETSTAN_BINDING_BOUNDARY", "")
+            receiver = os.environ.get("BETSTAN_BOUND_RECEIVER_RUN_ID", "")
+            if boundary.startswith("approval-") and (
+                byte_context.workspace is None
+                or os.environ.get("BETSTAN_APPROVAL_BYTES_OWNER") != owner
+            ):
+                fail("receiver approval timing requires this command's private byte workspace")
+        elif (
+            os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("GITHUB_REPOSITORY") == args.repository
+            and os.environ.get("GITHUB_SHA") == args.subject_sha
+        ):
+            boundary, receiver = "native-validation", os.environ.get("GITHUB_RUN_ID", "")
+        token = BYTE_CONTEXT.set(byte_context)
+        try:
+            timing = validate_receiver_handoff_timing(
+                args.repository, str(inputs["data_run_id"]), args.subject_sha, boundary, receiver,
+            )
+        finally:
+            BYTE_CONTEXT.reset(token)
+    histories = [facts["heldHistory"] for facts in validated.values() if "heldHistory" in facts]
+    baselines = [facts["baselineFiles"] for facts in validated.values() if "baselineFiles" in facts]
+    if getattr(args, "held_history_file", "") and (
+        len(histories) != 1 or histories[0]["cutoff_at"] is None
+    ):
+        fail("held-handoff history requires an authenticated running successor cutoff")
+    if args.baseline_dir:
+        if any(files != baselines[0] for files in baselines):
+            fail("held-handoff and original root baselines disagree")
+        root = Path(args.baseline_dir)
+        if baselines and (root.is_symlink() or (root.exists() and any(root.iterdir()))):
+            fail("original before baseline output must be empty")
     if args.result_json:
         safe_results = {
             name: facts["resume"] for name, facts in validated.items()
@@ -6350,27 +7408,25 @@ def command_validate_all(args):
         with open(args.result_json, "x", encoding="utf-8") as handle:
             json.dump(safe_results, handle, sort_keys=True)
     if getattr(args, "held_history_file", ""):
-        histories = [facts["heldHistory"] for facts in validated.values() if "heldHistory" in facts]
-        if len(histories) != 1 or histories[0]["cutoff_at"] is None:
-            fail("held-handoff history requires an authenticated running successor cutoff")
         output = Path(args.held_history_file)
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("x", encoding="utf-8") as handle:
             json.dump(histories[0], handle, sort_keys=True)
     if args.baseline_dir:
-        baselines = [facts["baselineFiles"] for facts in validated.values() if "baselineFiles" in facts]
-        if any(files != baselines[0] for files in baselines):
-            fail("held-handoff and original root baselines disagree")
         for files in baselines[:1]:
             root = Path(args.baseline_dir)
-            if root.is_symlink() or (root.exists() and any(root.iterdir())):
-                fail("original before baseline output must be empty")
             root.mkdir(parents=True, exist_ok=True)
             for relative, raw in files.items():
                 destination = root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with destination.open("xb") as handle:
                     handle.write(raw)
+    for binding in bindings:
+        name = binding["input"]
+        print(f"upstream_binding={name} run={inputs[name]} status=OK")
+    if timing is not None:
+        print("handoff_timing=" + json.dumps(timing, sort_keys=True, separators=(",", ":")))
+    print(f"upstream_bindings_validated={len(bindings)}")
 
 
 def main():

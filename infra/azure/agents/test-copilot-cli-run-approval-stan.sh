@@ -233,6 +233,7 @@ for script, args in ((dispatcher, (request, "--dispatch")), (approver, ("7001", 
     no_repo_script = context / "no-repository/infra/azure/agents" / script.name
     no_repo_script.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(script, no_repo_script)
+    (context / "no-repository/.git").write_text("gitdir: missing-fixture-git-directory\n")
     invalid_root = run(no_repo_script, *args)
     assert invalid_root.returncode == 1 and "unable to validate the script repository root" in invalid_root.stderr
     assert mutations() == before, "context failure reached a provider mutation"
@@ -498,6 +499,7 @@ binding_run_json() {
 binding_artifacts_json() {
   local run_id="$1"
   local artifact artifact_id
+  local digest=""
   local subject_sha="${STUB_BINDING_SHA:-$SHA}"
   case "$run_id" in
     38)
@@ -601,13 +603,17 @@ binding_artifacts_json() {
       ;;
     *) return 1 ;;
   esac
-  jq -cn --arg artifact "$artifact" --argjson artifact_id "$artifact_id" '{
+  if [[ "$run_id" = 41 ]]; then
+    digest="sha256:$(binding_artifact_zip "$artifact_id" | sha256sum | awk '{print $1}')"
+  fi
+  jq -cn --arg artifact "$artifact" --argjson artifact_id "$artifact_id" --arg digest "$digest" '{
     total_count:1,
     artifacts:[{
       id:$artifact_id,
       name:$artifact,
       expired:false,
-      size_in_bytes:4096
+      size_in_bytes:4096,
+      digest:(if $digest == "" then null else $digest end)
     }]
   }'
 }
@@ -658,7 +664,8 @@ def archive(files):
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as bundle:
         for name, raw in files.items():
-            bundle.writestr(name, raw)
+            bundle.writestr(zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)), raw,
+                            compress_type=zipfile.ZIP_DEFLATED)
     sys.stdout.buffer.write(output.getvalue())
 
 def rewrite_checked_env(files, file_name, key, value):
@@ -1757,7 +1764,8 @@ import zipfile
 file_name, content = sys.argv[1:]
 archive = io.BytesIO()
 with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
-    bundle.writestr(file_name, content)
+    bundle.writestr(zipfile.ZipInfo(file_name, (1980, 1, 1, 0, 0, 0)), content,
+                    compress_type=zipfile.ZIP_DEFLATED)
 sys.stdout.buffer.write(archive.getvalue())
 PY
 }
@@ -1882,6 +1890,26 @@ gh() {
   fi
   local endpoint="$1"
   shift
+  if [[ -n "${STUB_BINDING_TRACE:-}" &&
+        -n "${BETSTAN_APPROVAL_BYTES_OWNER:-}" ]]; then
+    case "$endpoint" in
+      "repos/$REPOSITORY/actions/runs/41")
+        printf 'read\t%s\t%s\t%s\n' "$BETSTAN_BINDING_BOUNDARY" \
+          "$BETSTAN_APPROVAL_BYTES_OWNER" "$PPID" >>"$STUB_BINDING_TRACE"
+        if [[ "${STUB_DRIFT_AT_BOUNDARY:-}" = "$BETSTAN_BINDING_BOUNDARY" ]]; then
+          binding_run_json 41 | jq '.run_attempt=2'
+          return
+        fi
+        if [[ "${STUB_INTERRUPT_AT_BOUNDARY:-}" = "$BETSTAN_BINDING_BOUNDARY" ]]; then
+          kill -TERM "$BETSTAN_APPROVAL_BYTES_OWNER"
+          return 1
+        fi
+        ;;
+      "repos/$REPOSITORY/actions/artifacts/9041/zip")
+        printf 'zip\t%s\t%s\t%s\n' "$BETSTAN_BINDING_BOUNDARY" \
+          "$BETSTAN_APPROVAL_BYTES_OWNER" "$PPID" >>"$STUB_BINDING_TRACE" ;;
+    esac
+  fi
 
   if [[ "$method" = "POST" ]]; then
     [[ "$endpoint" = "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID/pending_deployments" ]] ||
@@ -3955,4 +3983,50 @@ jq -e --argjson run_id "$STUB_RUN_ID" \
   "$authority_dir"/request-*.json >/dev/null
 unset STUB_GHOST_WORKFLOW_ID STUB_GHOST_PATH
 echo "prepared_v2_approval_consumer_activation_tests=PASS"
+unset STUB_GHOST_DIR STUB_GHOST_ID
+three_fresh_run_id=14000
+for boundary in none approval-1 approval-2 approval-3 interrupt; do
+  three_fresh_run_id=$((three_fresh_run_id + 1))
+  authority_dir="$tmp_dir/three-fresh-authority-$boundary"
+  make_record oci-production-deploy "$three_fresh_run_id"
+  load_record_stub oci-production-deploy "$three_fresh_run_id"
+  trace="$tmp_dir/three-fresh-$boundary.tsv"
+  : >"$trace"
+  before="$(cat "$post_count_file")"
+  drift="$boundary"
+  interrupt=""
+  [[ "$boundary" != none ]] || drift=""
+  if [[ "$boundary" = interrupt ]]; then drift=""; interrupt=approval-2; fi
+  if STUB_BINDING_TRACE="$trace" STUB_DRIFT_AT_BOUNDARY="$drift" \
+    STUB_INTERRUPT_AT_BOUNDARY="$interrupt" BETSTAN_BINDING_BOUNDARY=caller-forged \
+    BETSTAN_BINDING_BYTES_CACHE_DIR="$tmp_dir/caller-cache-must-not-exist" \
+    COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve \
+      >"$output_file" 2>"$error_file"; then
+    [[ "$boundary" = none ]] || {
+      echo "fresh approval boundary drift or interruption was accepted: $boundary" >&2; exit 1;
+    }
+    grep -qF status=APPROVED "$output_file"
+    [[ "$(cat "$post_count_file")" = "$((before + 1))" ]]
+  else
+    [[ "$boundary" != none ]] || { cat "$error_file" >&2; exit 1; }
+    [[ "$(cat "$post_count_file")" = "$before" ]]
+    ! grep -qF status=APPROVED "$output_file"
+  fi
+  python3 - "$trace" "$boundary" "${TMPDIR:?}" "$tmp_dir/caller-cache-must-not-exist" <<'PY'
+from pathlib import Path
+import sys
+trace, boundary, temporary, caller = sys.argv[1:]
+rows = [line.split("\t") for line in Path(trace).read_text().splitlines()]
+reads = [row for row in rows if row[0] == "read"]
+count = 3 if boundary == "none" else 2 if boundary == "interrupt" else int(boundary[-1])
+assert [row[1] for row in reads] == [f"approval-{n}" for n in range(1, count + 1)], rows
+assert len({row[2] for row in reads}) == 1, "approval command owner drifted"
+assert len({row[3] for row in reads}) == count, "validators were not separate processes"
+if boundary == "none":
+    assert len([row for row in rows if row[0] == "zip"]) == 1, rows
+assert not list(Path(temporary).glob("betstan-cli-approval.*")), "private command workspace leaked"
+assert not Path(caller).exists(), "caller selected the byte workspace"
+PY
+done
+echo "approval_three_fresh_processes_authenticated_byte_reuse_drift_and_interrupt_cleanup=PASS"
 echo "copilot_cli_run_approval_tests=PASS"

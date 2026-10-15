@@ -568,6 +568,9 @@ diagnostic evidence directory as that authority.
 
 The single `oci-live-data-continue-held-handoff` operation uses the existing
 data workflow, `apply-slip-index` phase and `oci-migration` environment.
+Its `oci-successful-held-handoff-v1` profile, inputs and confirmation remain
+unchanged; authenticated evidence, not a caller-selected mode, determines
+which producer qualification applies.
 Hash-covered `held_handoff_run_id` and `held_handoff_source_sha` identify the
 actual successful held owner, separately from the original applied-data and
 failed-deployment rollback root. Original root inputs and historical request
@@ -584,17 +587,45 @@ remain in complete history and require their separate, double-observed native
 no-execution proof against a frozen reviewed workflow source. These caller and
 source-profile capabilities ship together; rollback retains them or fails closed.
 
-Before intent/approval and in workflow preflight, this operation admits only
-the reviewed historical producer's missing `resume-images.tsv`. Complete
-first-attempt success and held-work proof, safe inventory, full checksum
-coverage, provenance, schema, journal, reports and original root evidence remain
-mandatory. The native step sequence retains slots 1–37, 74 and 75 without
-renumbering. The recorded image hash must match the independently validated
+Before intent/approval and in workflow preflight, historical qualification
+retains only the frozen reviewed producer's packaging omission, including
+missing `resume-images.tsv`, with unchanged source pins and native step slots
+1–37, 74 and 75. A separate current-producer qualification requires complete
+checksummed v6 packaging, authenticated executed source/tree closure, complete
+native chronology and final renewal, whole first-attempt success, and positive
+proof that no receiver took ownership. Its `resume-images.tsv` bytes must match
+the authenticated runtime-image checksum. Malformed current evidence cannot
+fall back to the historical omission.
+
+Both qualifications retain held-work proof, safe complete artifact inventory,
+full checksum coverage, provenance, schema, journal, reports and the original
+root evidence. The recorded image hash must match the independently validated
 original build manifest; no historical artifact is reconstructed or made
-deployable. Complete bounded history must exclude intervening deployments or
-incompatible transitions up to an immutable successor cutoff bound to native
-creation/execution evidence. Later legitimate deployment cannot invalidate
-that interval; fresh current exclusivity remains mandatory.
+deployable. Complete bounded, paginated native history must exclude intervening
+deployments or incompatible transitions. Completed lineage retains its immutable
+successor cutoff; later legitimate deployment cannot invalidate that interval.
+Current-producer admission additionally authenticates consumed-owner authority
+and, while its successor is unfinished, reads the full current history rather
+than hiding later receivers behind that cutoff. Missing records never prove
+absence; incomplete inventories, unresolved authority or dispatch, reruns and
+unexplained history block admission. Current receiver absence and production
+exclusivity must be freshly established at dispatch, materialization, all three
+approval revalidations and immediately before physical transfer; only the exact
+authenticated owned successor may be excluded.
+
+Validation may reuse verified immutable artifact ZIP and exact source bytes,
+never admission verdicts or mutable observations. Across the three approval
+revalidations, reuse is private to that approval command's temporary workspace,
+removed on exit; dispatch and native validation remain independent. Reuse binds
+the full repository, run/attempt, artifact/digest, source/blob and validator/policy
+context, rehashes bytes, and repeats parsing and validation. Current source,
+workflow/policy identity and state, run status/attempt, complete artifact
+inventory, ownership and expiry, authority state, pending gates, exclusivity
+and receiver absence remain fresh at every authority boundary. At most four
+independent read-only bindings may run concurrently after serial input checks.
+Every result must be joined and every failure propagated before complete-map
+chronology and dependency checks or acceptance; recursive history remains serial
+within each binding. This adds no persistent cache, workflow, schema or bypass.
 
 Older nonterminal records remain counted and untouched. Only records last
 updated strictly before the held handoff's creation may use the existing
@@ -626,13 +657,51 @@ unmaterialized-run classifier remains unchanged.
 Physical admission uses the actual held owner, not the root tuple: a fresh
 baseline, verified fence, seven quiescent writers, exact images and supporting
 state, held checkpoint and fresh owner/source-bound lock snapshot are required.
+Immediately before transfer, reobserve the exact holder/source, lock identity
+and generation, lease, fence, dark state, writer quiescence, disk/residency and
+original rollback baseline. The historical failed receiver, current physical
+producer, fresh capture/successor and original applied root stay distinct;
+neither a fresh capture nor newer application build replaces the original
+build, infrastructure, checkpoint, image or rollback tuple.
 Strict snapshot-bound own release and released-only acquisition retain the
 same UID and exact released generation, even for an expired lease; expiry
 grants no authority. These two compare-and-swap transitions are not atomic.
-Partial or ambiguous failure retains maintenance, records confirmed ownership
-honestly and permits no blind replay, fallback or false successful handoff.
+Partial or ambiguous failure retains maintenance, fencing and dark state,
+records confirmed and unconfirmed stages in the existing transfer journal, and
+permits no blind replay, fallback, writer restoration or false successful handoff.
 Success requires real new `apply-slip-index` execution and complete validation
 under the successor lock, never skipping work because the prior phase succeeded.
+
+An expired retained producer may supply authenticated evidence for a new
+authorized operation and capture; it is not itself a live receiver handoff.
+The new operation must perform real data execution, and its own final native
+renewal starts a new, unchanged 1,800-second handoff clock. This does not revive
+or extend the old producer's lease. Artifact upload, dispatch and approval
+cannot reset the new deadline either. The separate 10,800-second
+retained/deployment operation duration is not a handoff extension.
+
+The receiving deployment for a fresh continuation handoff enforces
+source-defined stage ceilings and a strictly shrinking remaining-path budget
+against that handoff's authentic native deadline. Before starting a timed
+handoff, require supported whole renewal-to-renewal timing of at most 1,200
+seconds plus 600 seconds of reserve. At dispatch, materialization, each of the
+three approval revalidations and native receiving boundaries, remaining time
+must be strictly greater than the unfinished-path bound plus that reserve.
+The bound shrinks only as this fresh receiving path advances; it is not an
+admission deadline for the expired producer used as retained evidence.
+Packaging and whole-run success, admission, queue/materialization, approval,
+native validation/startup/snapshot, and actual receiver verification and
+exact-owner renewal are included. Renewal has no acquire fallback, and its
+acknowledgement and live lock must confirm the exact owner, source, generation
+and operation duration before acceptance. Configured ceilings, fixtures or a
+successful dispatch request do not prove production timing, timely takeover
+or service restoration; unsupported timing withholds operational readiness.
+The separate expired-handoff and fenced rollback routes still require their
+genuinely qualifying failed receiver; no receiver may be fabricated or
+substituted to obtain recovery eligibility.
+Ship compatible qualification readers and producer together. Rollback must
+preserve emitted evidence, original-root rollback and strict transfer semantics;
+an older reader's fail-closed rejection is not recovery authority.
 
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this
 operation-specific check at the actual selected fresh or imported baseline.
