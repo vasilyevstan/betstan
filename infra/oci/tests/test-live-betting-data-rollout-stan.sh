@@ -135,14 +135,14 @@ renew = steps["Renew exact transferred database lock"]
 now = int(time.time())
 state = dict(now=now, after=now, deadline=now + 1500, packaged=now - 260,
              created=now - 220, started=now - 190, validated=now - 150,
-             verified=now - 100, attempt=1, workflow_state="active", mode="success")
+             verified=now - 100, attempt=1, workflow_state="disabled_manually", mode="success")
 env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
            RECEIVER_TEST_FIXTURE=str(root / "state.json"), REPOSITORY="example/repo",
            DATA_RUN_ID="77", SOURCE_SHA="2" * 40, GITHUB_RUN_ID="78",
            OCI_K8S_NAMESPACE="betstan-oci", SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS="10800")
 for mode in (
     "success", "new-capture-old-source-expired", "reserve-equality",
-    "fresh-post-does-not-reset", "rerun-after-verify", "disabled-after-verify",
+    "fresh-post-does-not-reset", "rerun-after-verify", "active-after-verify",
     "late-after-physical-renewal", "renew-failure", "wrong-generation",
     "wrong-holder", "missing-ack", "duplicate-ack",
 ):
@@ -160,8 +160,8 @@ for mode in (
         current["deadline"] = now - 1
     elif mode == "rerun-after-verify":
         current["attempt"] = 2
-    elif mode == "disabled-after-verify":
-        current["workflow_state"] = "disabled_manually"
+    elif mode == "active-after-verify":
+        current["workflow_state"] = "active"
     elif mode == "late-after-physical-renewal":
         current["after"] = current["deadline"] - 600
     (root / "state.json").write_text(json.dumps(current))
@@ -171,7 +171,7 @@ for mode in (
     assert (result.returncode == 0) == success, (mode, result.stdout, result.stderr)
     events = (root / "events").read_text().splitlines()
     early = mode in {"reserve-equality", "fresh-post-does-not-reset",
-                     "rerun-after-verify", "disabled-after-verify"}
+                     "rerun-after-verify", "active-after-verify"}
     assert events == (["verify"] if early else ["verify", "renew"]), (mode, events)
     assert "acquire" not in events
     if success:
@@ -4104,9 +4104,9 @@ case "$2" in
     printf '%s\n' k3s ;;
   repos/example/repo/actions/workflows/oci-live-data-rollout.yml)
     if [[ "${RESUME_LOCK_FAILURE:-}" = workflow ]]; then
-      echo disabled_manually
-    else
       echo active
+    else
+      echo disabled_manually
     fi ;;
   repos/example/repo/contents/*)
     [[ "${RESUME_LOCK_FAILURE:-}" != policy ]] || exit 1

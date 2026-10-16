@@ -663,6 +663,16 @@ original rollback baseline. The historical failed receiver, current physical
 producer, fresh capture/successor and original applied root stay distinct;
 neither a fresh capture nor newer application build replaces the original
 build, infrastructure, checkpoint, image or rollback tuple.
+
+Retained restoration keeps the existing application-scope guard: control-source
+changes are limited to GitHub configuration, infrastructure and Markdown while
+the original application images and release tuple remain authoritative. A fresh
+capture does not deliver newer application or UI changes, even if already
+reviewed. Keep that delivery separate from recovery, staging an ordinary forward
+application release after restoration with a fresh exact-current-`master` build
+and matching infrastructure, checkpoint, data and deployment evidence. This adds
+no workflow or exception to recovery admission.
+
 Strict snapshot-bound own release and released-only acquisition retain the
 same UID and exact released generation, even for an expired lease; expiry
 grants no authority. These two compare-and-swap transitions are not atomic.

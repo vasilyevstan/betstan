@@ -2800,15 +2800,24 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     if receiver_run:
         if POSITIVE_INTEGER.fullmatch(receiver_run) is None:
             fail("receiver timing run ID is malformed")
+        if boundary in ("dispatch", "materialization"):
+            expected_workflow_state = "active"
+        elif boundary in (
+            "approval-1", "approval-2", "approval-3", "native-validation",
+            "startup-snapshot", "receiver-renewal",
+        ):
+            expected_workflow_state = "disabled_manually"
+        else:
+            fail("receiver timing workflow boundary is unsupported")
         endpoint = f"repos/{repository}/actions/runs/{receiver_run}"
         latest, first = gh_api(endpoint), gh_api(endpoint + "/attempts/1")
         workflow = gh_api(f"repos/{repository}/actions/workflows/oci-production-deploy.yml")
         if (
             not isinstance(workflow, dict) or type(workflow.get("id")) is not int or workflow["id"] < 1
             or workflow.get("path") != ".github/workflows/oci-production-deploy.yml"
-            or workflow.get("state") != "active"
+            or workflow.get("state") != expected_workflow_state
         ):
-            fail("receiver timing workflow identity or active state changed")
+            fail("receiver timing workflow identity or lifecycle state changed")
         for run in (latest, first):
             if (
                 not isinstance(run, dict) or type(run.get("id")) is not int
@@ -3596,7 +3605,6 @@ def held_handoff_history(
                 fail("held-handoff successor repository differs")
         if latest.get("status") != first.get("status") or latest.get("conclusion") != first.get("conclusion"):
             fail("held-handoff successor attempt state differs")
-        active_inventory = fresh and first.get("status") != "completed"
         if first.get("status") == "completed" and first.get("conclusion") != "success":
             fail("held-handoff completed successor is not successful")
         if parse_timestamp(held.get("updated_at"), "held handoff") > parse_timestamp(
@@ -4131,14 +4139,33 @@ def validate_held_handoff_artifact(
         authority = parse_env(files["resume-authority.env"], label, LIVE_RESUME_AUTHORITY_V2_KEYS)
     root_source = require_dispatch_sha(dispatch_inputs, "resume_source_sha")
     failed_run = require_dispatch_run(dispatch_inputs, "failed_deploy_run_id")
-    profile = "oci-failed-deploy-retained-hold-v1"
-    outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, label)
-    if outcomes != ("skipped", "skipped", "skipped"):
-        fail("held handoff does not preserve the original pre-runtime failure")
-    root = validate_failed_deploy_artifacts(
-        repository, failed_run, root_source, None, dispatch_inputs, runtime_mode,
-        profile, *outcomes, label, pre_runtime=True,
-    )
+    root, predecessor = None, None
+    if complete:
+        native = held["_held_native_inputs"]
+        if authority["schema_version"] == "live-betting-data-resume-v3":
+            if native.get("confirmation") != HELD_HANDOFF_CONFIRMATION:
+                fail("complete held handoff substituted its prior physical producer")
+            predecessor = validate_held_handoff_artifact(
+                repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],
+                source_sha, native, runtime_mode, label, successor_run_id=run_id,
+            )
+            root = dict(predecessor["resume"], _baseline_files=predecessor["baselineFiles"])
+        else:
+            if native.get("confirmation") != "RESUME APPLIED LIVE DATA EXACT SHA":
+                fail("complete held handoff cannot omit its transferred-owner authority")
+            root = validate_expired_handoff_resume(
+                repository, failed_run, root_source, native, runtime_mode, label,
+                successor_run_id=run_id,
+            )
+    if root is None:
+        profile = "oci-failed-deploy-retained-hold-v1"
+        outcomes = validate_failed_deploy_jobs(repository, failed_run, profile, label)
+        if outcomes != ("skipped", "skipped", "skipped"):
+            fail("held handoff does not preserve the original pre-runtime failure")
+        root = validate_failed_deploy_artifacts(
+            repository, failed_run, root_source, None, dispatch_inputs, runtime_mode,
+            profile, *outcomes, label, pre_runtime=True,
+        )
     if complete and captured_baseline != root["_baseline_files"]:
         fail("complete held handoff replaced the original protected root rollback baseline")
     checkpoint = parse_checkpoint_artifact(repository, dispatch_inputs, runtime_mode, label)
@@ -4171,14 +4198,7 @@ def validate_held_handoff_artifact(
     if complete:
         if files["resume-images.tsv"] != image_bytes:
             fail("complete held handoff substituted the authenticated original image bytes")
-        native = held["_held_native_inputs"]
         if authority["schema_version"] == "live-betting-data-resume-v3":
-            if native.get("confirmation") != HELD_HANDOFF_CONFIRMATION:
-                fail("complete held handoff substituted its prior physical producer")
-            predecessor = validate_held_handoff_artifact(
-                repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],
-                source_sha, native, runtime_mode, label, successor_run_id=run_id,
-            )
             expected_authority.update({
                 key: predecessor["resume"][key] for key in (
                     "held_handoff_run_id", "held_handoff_source_sha", "held_handoff_evidence_sha256",
@@ -4189,8 +4209,6 @@ def validate_held_handoff_artifact(
             except (ValueError, UnicodeError):
                 fail("complete held handoff transfer is malformed")
             validate_held_handoff_transfer(transfer, authority, held)
-        elif native.get("confirmation") != "RESUME APPLIED LIVE DATA EXACT SHA":
-            fail("complete held handoff cannot omit its transferred-owner authority")
     if authority != expected_authority:
         fail("held-handoff authority substituted its root, checkpoint, or original image bytes")
     validate_held_handoff_reports(files, evidence)
