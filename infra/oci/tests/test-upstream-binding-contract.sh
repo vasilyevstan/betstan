@@ -7179,7 +7179,7 @@ write(endpoint, history); consume(False); member.write_bytes(original)
 consume()
 print("PASS native-enabled capture/digest/source substitutions, both root relabellings, unknown wire key, disabled/missing/unqualified native proof and late supersession reject")
 
-import contextlib, importlib.util
+import argparse, contextlib, importlib.util
 from unittest.mock import patch
 
 fixture_snapshot = {item: item.read_bytes() for item in pathlib.Path(fixtures).iterdir() if item.is_file()}
@@ -7194,6 +7194,7 @@ native_paths = {
     "infra/oci/scripts/shared-mongo-operation-lock-stan.sh",
     "infra/azure/agents/shared-mongo-operation-lock-stan.sh",
     "infra/oci/scripts/upstream_run_binding_stan.py",
+    "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
     "infra/oci/scripts/baseline-capture-stan.sh",
     "infra/oci/scripts/validate-rollback-baseline-stan.sh",
     "infra/oci/scripts/k3s-node-disk-recovery-stan.sh",
@@ -7334,28 +7335,169 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
     assert failed_root["baselineFiles"] == held155["baselineFiles"]
     assert failed_root["resume"]["baseline_capture_run_id"] == "53"
     assert failed_root["resume"]["applied_data_run_id"] == "42"
+    for result in (held155, failed_root):
+        assert "no_takeover_handoff_qualification" not in result["resume"]
+    canonical_result = native_authority_dir / "live-data-upstream-result.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        complete_reader.command_validate_all(argparse.Namespace(
+            repository=repo, policy_json=json.dumps(held_policy), manifest="", operation="",
+            subject_sha=native_source, dispatch_inputs=json.dumps(continuation), runtime_mode="oke",
+            successor_run_id="156", result_json=str(canonical_result), baseline_dir="",
+            held_history_file=""))
+    canonical = json.loads(canonical_result.read_text())
+    assert set(canonical) == {
+        "build_run_id", "infrastructure_run_id", "disk_checkpoint_run_id",
+        "prerequisite_run_id", "failed_deploy_run_id", "held_handoff_run_id"}
+    header = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
+                  if step.get("name") == "Validate exact SHA phase and trusted upstream runs")
+    start = header.index("result_binding=failed_deploy_run_id")
+    output_end = '>> "$GITHUB_OUTPUT"'
+    header = header[start:header.index(output_end, start) + len(output_end)]
+    output_file = native_authority_dir / "upstream-outputs"
+    result = subprocess.run(["bash", "-euc", header], cwd=native_authority_dir,
+        env=dict(os.environ, HELD_HANDOFF_RUN_ID="155", RUNNER_TEMP=str(native_authority_dir),
+                 GITHUB_OUTPUT=str(output_file)), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    output_values = dict(line.split("=", 1) for line in output_file.read_text().splitlines())
+    assert output_values["baseline_capture_run_id"] == "53"
+    assert output_values["applied_data_run_id"] == "42"
+    assert "no_takeover_handoff_qualification" not in output_values
+    for run, operation in ((155, "oci-live-data-resume-deploy"),
+                           (156, "oci-live-data-continue-held-handoff")):
+        write(f"{prefix}/actions/runs/{run}/pending_deployments", [])
+        write(f"{prefix}/actions/runs/{run}/approvals", [{
+            "state": "approved", "comment": f"Copilot CLI exact-run approval: {operation}",
+            "user": {"id": 123, "login": "fixture-owner"},
+            "environments": [{"id": 456, "name": "oci-migration"}]}])
+    caller_original = caller_result.read_bytes()
+    caller_result.write_bytes(canonical_result.read_bytes())
+    held_caller_env = {
+        "SOURCE_SHA": native_source, "GITHUB_RUN_ID": "156",
+        "HELD_HANDOFF_RUN_ID": "155", "HELD_HANDOFF_SOURCE_SHA": native_source,
+        "DISPATCH_INPUTS": json.dumps(continuation)}
+    call_envelope_free(changes=held_caller_env)
+    call_envelope_free(False, changes=dict(held_caller_env, DISPATCH_INPUTS=json.dumps(
+        dict(continuation, held_handoff_run_id="53"))))
+    caller_result.write_bytes(caller_original)
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            complete_reader.validate_expired_handoff_resume(
+                repo, "54", expired_source, continuation, "oke", "direct CONTINUE remains forbidden")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("CONTINUE entered the direct expired-receiver helper")
     held_writer = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
                        if step.get("name") == "Verify exact failed-deploy resume state")
-    held_writer = held_writer[held_writer.index("mkdir -p artifacts/oci-live-data-rollout/evidence"):]
+    held_expressions = dict(expressions, **{
+        f"steps.provenance_request.outputs.{key}": output_values[key] for key in (
+            "failed_deploy_job_conclusion", "public_validate_job_conclusion",
+            "lock_release_step_conclusion", "fence_release_step_conclusion", "rehold_step_conclusion")})
     held_writer = re.sub(r"\$\{\{\s*([^{}]+?)\s*\}\}",
-                        lambda match: expressions[match.group(1)], held_writer)
-    (native_authority_dir / "live-data-upstream-result.json").write_text(json.dumps({
-        "held_handoff_run_id": held155["resume"]}))
-    result = subprocess.run(["bash", "-euc", held_writer], cwd=native_authority_dir,
-        env=dict(producer_env, SOURCE_SHA=native_source, RUNNER_TEMP=str(native_authority_dir),
-                 HELD_HANDOFF_RUN_ID="155", HELD_HANDOFF_SOURCE_SHA=native_source),
-        capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+                        lambda match: held_expressions[match.group(1)], held_writer)
+    (native_authority_dir / "infra").symlink_to(root / "infra", target_is_directory=True)
+    shutil.copytree(holder, native_authority_dir / "artifacts/prerequisite")
+    shutil.copytree(before, native_authority_dir / "artifacts/oci-data-baseline-before")
+    shutil.copyfile(images, native_authority_dir / "artifacts/oci-live-data-rollout/resume-images.tsv")
+    namespace = env(before, "baseline-provenance.env")["namespace"]
+    runtime = {"images": {}, "deployments": {}, "pods": {},
+        "fence": 'if ($host = "www.betstan.xyz") {\n  return 308 https://betstan.xyz$request_uri;\n}'
+                 '\nif ($request_method !~ ^(GET|HEAD|OPTIONS)$) {\n  return 503;\n}',
+        "lock": {"kind": "ConfigMap", "apiVersion": "v1",
+            "metadata": {"name": "gaming-mongo-migration-lock", "namespace": namespace,
+                         "uid": "fixture-expired-lineage", "resourceVersion": "42"},
+            "data": {"state": "active", "holder": "live-data-155-1", "source-sha": native_source,
+                "operation-id": "live-data-apply-slip-index", "fencing-generation": "12",
+                "lease-duration-seconds": "1800", "released-at-epoch": "0",
+                "acquired-at-epoch": str(int(output_values["held_handoff_lease_until_epoch"]) - 1800),
+                "lease-until-epoch": output_values["held_handoff_lease_until_epoch"]}}}
+    desired = {row[0]: int(row[3]) for row in (
+        line.split("\t") for line in (before / "deployments.tsv").read_text().splitlines())}
+    for row in (line.split("\t") for line in (before / "images.tsv").read_text().splitlines()):
+        service = row[0]; replicas = desired[service] if service in {"auth", "client", "telemetry"} else 0
+        runtime["images"][service] = row[2]
+        runtime["deployments"][service] = {
+            "kind": "Deployment", "apiVersion": "apps/v1",
+            "metadata": {"name": f"gaming-{service}-depl", "namespace": namespace,
+                         "uid": f"fixture-{service}", "generation": 1},
+            "spec": {"replicas": replicas, "template": {"spec": {"containers": [{
+                "name": f"gaming-{service}", "image": row[2],
+                "env": [{"name": "LIVE_KICKOFFS_ENABLED", "value": "false"}]}]}}},
+            "status": dict(observedGeneration=1, **{key: replicas for key in (
+                "replicas", "updatedReplicas", "readyReplicas", "availableReplicas")})}
+        runtime["pods"][service] = {"items": [{
+            "metadata": {"name": f"fixture-{service}-{index}", "namespace": namespace,
+                "uid": f"fixture-{service}-{index}", "labels": {"app": f"gaming-{service}"}},
+            "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [{"name": f"gaming-{service}", "ready": True,
+                                      "imageID": f"fixture@{row[4]}"}]}}
+            for index in range(replicas)]}
+    runtime_file = native_authority_dir / "runtime.json"
+    runtime_file.write_text(json.dumps(runtime))
+    native_bin = native_authority_dir / "bin"
+    native_bin.mkdir()
+    kubectl = native_bin / "kubectl"
+    kubectl.write_text("#!/usr/bin/env python3\n" + r'''
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+state = json.loads(Path(os.environ["HELD_NATIVE_RUNTIME"]).read_text())
+if args[:2] == ["rollout", "status"]:
+    pass
+elif args[:3] == ["exec", "-n", "ingress-nginx"] and args[-3:] == ["sh", "-c", "nginx -T 2>&1"]:
+    print(state["fence"])
+elif args[:2] == ["get", "configmap"]:
+    if args[2] == "ingress-nginx-controller":
+        print(state["fence"])
+    elif args[2] == "gaming-mongo-migration-lock":
+        print(json.dumps(state["lock"]))
+    else:
+        raise SystemExit("unexpected native fixture ConfigMap")
+elif args[:2] == ["get", "deployment"]:
+    service = args[2].removeprefix("gaming-").removesuffix("-depl")
+    output = args[args.index("-o") + 1]
+    print(state["images"][service] if output.startswith("jsonpath=")
+          else json.dumps(state["deployments"][service]))
+elif args[:2] == ["get", "pods"]:
+    if args[args.index("-n") + 1] == "ingress-nginx":
+        print(json.dumps({"items": [{"metadata": {"name": "fixture-ingress"},
+            "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}]}))
+    else:
+        service = args[args.index("-l") + 1].removeprefix("app=gaming-")
+        print(json.dumps(state["pods"][service]))
+else:
+    raise SystemExit("unmodelled or mutating native fixture command")
+''')
+    kubectl.chmod(0o755)
+    native_env = dict(producer_env, SOURCE_SHA=native_source, RUNNER_TEMP=str(native_authority_dir),
+        OCI_K8S_NAMESPACE=namespace, PREREQUISITE_RUN_ID="53", RESUME_SOURCE_SHA=expired_source,
+        BASELINE_RECOVERY_RUN_ID="0", NO_TAKEOVER_HANDOFF_QUALIFICATION="none",
+        BASELINE_CAPTURE_RUN_ID=output_values["baseline_capture_run_id"],
+        BASELINE_CAPTURE_SOURCE_SHA=output_values["baseline_capture_source_sha"],
+        HELD_HANDOFF_RUN_ID="155", HELD_HANDOFF_SOURCE_SHA=native_source,
+        HELD_NATIVE_RUNTIME=str(runtime_file), PATH=str(native_bin) + os.pathsep + os.environ["PATH"])
+    snapshot = native_authority_dir / "pre-runtime-lock.json"
+    def native_prefix(expected=True, changes=None):
+        snapshot.unlink(missing_ok=True)
+        native_authority.unlink(missing_ok=True)
+        result = subprocess.run(["bash", "-euc", held_writer], cwd=native_authority_dir,
+            env=dict(native_env, **(changes or {})), capture_output=True, text=True)
+        assert (result.returncode == 0) == expected, result.stderr + result.stdout
+        assert native_authority.exists() == expected
+    native_prefix()
+    assert json.loads(snapshot.read_text()) == runtime["lock"]
+    native_prefix(False, {"NO_TAKEOVER_HANDOFF_QUALIFICATION": "expired-own-handoff"})
+    native_prefix(False, {"BASELINE_CAPTURE_RUN_ID": "42"})
+    runtime["lock"]["data"]["holder"] = "live-data-53-1"
+    runtime_file.write_text(json.dumps(runtime))
+    native_prefix(False)
+    runtime["lock"]["data"]["holder"] = "live-data-155-1"
+    runtime_file.write_text(json.dumps(runtime))
+    native_prefix()
+    print("PASS canonical six-binding JSON -> actual YAML outputs -> held prerequisite verifier -> FULL native prefix, capture53/root42/holder155; ancestral classification, capture and physical-owner substitutions reject")
     complete156 = base / "real-data-156"
     complete156.mkdir()
     (complete156 / "held-handoff-history.json").write_text(json.dumps(held155["heldHistory"]))
-    snapshot = native_authority_dir / "held-snapshot.json"
-    snapshot.write_text(json.dumps({
-        "metadata": {"uid": "fixture-expired-lineage", "resourceVersion": "42"},
-        "data": {"state": "active", "holder": "live-data-155-1", "source-sha": native_source,
-                 "operation-id": "live-data-apply-slip-index", "fencing-generation": "12",
-                 "lease-until-epoch": held155["resume"]["held_handoff_lease_until_epoch"]},
-    }))
     for stage in ("release", "acquire", "verify"):
         for state in ("unconfirmed", "confirmed"):
             complete_reader.record_held_handoff_transfer(

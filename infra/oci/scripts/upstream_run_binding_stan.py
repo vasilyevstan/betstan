@@ -4317,6 +4317,8 @@ def validate_held_handoff_artifact(
         except (OSError, KeyError, TypeError, ValueError):
             fail("complete held handoff owned authority is missing, malformed or inconsistent")
     history = held_handoff_history(repository, held, subject_sha, successor_run_id)
+    # The expired receiver qualifies the ancestor, not the current physical transfer.
+    root.pop("no_takeover_handoff_qualification", None)
     return {
         "artifactName": f"oci-live-data-rollout-{run_id}-1",
         "createdAt": held["created_at"], "completedAt": held["updated_at"],

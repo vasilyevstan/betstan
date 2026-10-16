@@ -587,6 +587,13 @@ remain in complete history and require their separate, double-observed native
 no-execution proof against a frozen reviewed workflow source. These caller and
 source-profile capabilities ship together; rollback retains them or fails closed.
 
+An ancestor's expired-receiver classification is historical provenance, not
+current held-transfer authority. The original applied root, authenticated baseline
+capture and actual held owner remain distinct. Current continuation must use its
+own fully qualified held-owner evidence, not an inherited expired-resume
+classification; native baseline-source validation remains bound to the
+authenticated capture.
+
 Before intent/approval and in workflow preflight, historical qualification
 retains only the frozen reviewed producer's packaging omission, including
 missing `resume-images.tsv`, with unchanged source pins and native step slots

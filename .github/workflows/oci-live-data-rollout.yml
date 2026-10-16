@@ -753,7 +753,7 @@ jobs:
             resume_successor_run_id=""
             jq -e 'type == "object" and (.failed_deploy_run_id | type == "object")' \
               "$RUNNER_TEMP/live-data-upstream-result.json" >/dev/null
-            if jq -e \
+            if [ "$HELD_HANDOFF_RUN_ID" != "0" ] || jq -e \
               '.failed_deploy_run_id.no_takeover_handoff_qualification == "expired-own-handoff"' \
               "$RUNNER_TEMP/live-data-upstream-result.json" >/dev/null; then
               resume_native_dispatch_inputs="$DISPATCH_INPUTS"
@@ -933,7 +933,14 @@ jobs:
           set -euo pipefail
           NO_TAKEOVER_HANDOFF_QUALIFICATION="${NO_TAKEOVER_HANDOFF_QUALIFICATION:-none}"
           case "$NO_TAKEOVER_HANDOFF_QUALIFICATION" in
-            none) ;;
+            none)
+              if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+                [ "$RESUME_MAINTENANCE_MODE" = pre-runtime-hold ]
+                [ "$FAILED_ACTIVATION_RUN_ID" = 0 ]
+                [ "$BASELINE_CAPTURE_RUN_ID" = "$PREREQUISITE_RUN_ID" ]
+                [[ "$BASELINE_CAPTURE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              fi
+              ;;
             expired-own-handoff)
               [ "$RESUME_MAINTENANCE_MODE" = pre-runtime-hold ]
               [ "$FAILED_ACTIVATION_RUN_ID" = 0 ] && [ "$HELD_HANDOFF_RUN_ID" = 0 ]
@@ -971,7 +978,8 @@ jobs:
           if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
             expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"
             expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
-          elif [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ]; then
+          elif [ "$NO_TAKEOVER_HANDOFF_QUALIFICATION" = expired-own-handoff ] ||
+               [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
             expected_baseline_source_sha="$BASELINE_CAPTURE_SOURCE_SHA"
           fi
           BASELINE_DIR="$baseline_dir" \
