@@ -496,6 +496,9 @@ workflow = "oci-live-data-rollout.yml"
 path = ".github/workflows/" + workflow
 source_pin = "c3c9332f4b23b55de6c32ae2183b89478f97884f"
 
+class ControlledPhaseFailure(RuntimeError):
+    pass
+
 def check(pooled, failure=None):
     def row(identifier, status, conclusion, recent):
         created = "2026-10-10T01:00:00Z" if recent else "2026-10-09T00:00:00Z"
@@ -511,17 +514,49 @@ def check(pooled, failure=None):
     held = row(1, "completed", "success", False)
     held.update(head_sha=subject, created_at="2026-10-10T00:00:00Z",
                 updated_at="2026-10-10T00:01:00Z")
+    barrier = row(17, "completed", "success", False)
+    barrier["head_branch"] = "feature-fixture"
     rows = [
         held, *(row(i, "completed", "cancelled", True) for i in range(10, 17)),
-        row(17, "completed", "success", False),
-        *(row(i, "queued", None, False) for i in range(20, 27)),
+        barrier,
+        *(item for i in range(20, 27) for item in (
+            row(i, "queued", None, False), row(i + 80, "completed", "success", False),
+        )),
     ]
+    if failure == "owner-boundary":
+        rows.remove(held)
+        rows.insert(next(i for i, item in enumerate(rows) if item["id"] == 20) + 1, held)
+    elif failure == "provenance-boundary":
+        rows.insert(next(i for i, item in enumerate(rows) if item["id"] == 20) + 1,
+                    row(78, "completed", "failure", True))
+    elif failure == "final-fold":
+        rows = [item for item in rows if item["id"] < 20 or item["id"] in {20, 100}]
     if failure == "guard":
         rows[1]["conclusion"] = "success"
     original = {item["id"]: copy.deepcopy(item) for item in rows}
+    inventory = {item["id"]: item for item in rows}
+    passive_failures = {"passive-identity", "passive-duplicate", "passive-chronology"}
+    if failure == "passive-identity":
+        inventory[100]["path"] = ".github/workflows/other.yml"
+    elif failure == "passive-duplicate":
+        inventory[100]["id"] = 20
+    elif failure == "passive-chronology":
+        inventory[100]["updated_at"] = "2026-10-08T00:00:00Z"
+    elif failure == "U-order":
+        inventory[101].update(
+            created_at="2026-10-09T00:00:01Z", updated_at="2026-10-09T00:00:01Z",
+        )
     trace, modes, loads = {}, {}, []
     current, lock = threading.local(), threading.Lock()
     release, ready, waiting = threading.Event(), threading.Event(), set()
+    u_release, u_ready, u_waiting = threading.Event(), threading.Event(), set()
+    entered, later_failed, closing, boundary_joined = (
+        threading.Event() for _ in range(4)
+    )
+    earlier = ControlledPhaseFailure("earlier row closing failure")
+    later = ControlledPhaseFailure("later row opening failure")
+    rejected = []
+    successful = failure in {None, "owner-boundary", "final-fold"}
     def note(value):
         identifier = current.identifier
         with lock:
@@ -534,6 +569,15 @@ def check(pooled, failure=None):
         if match:
             current.identifier = int(match[1])
             note("attempt" if match[2] else "run")
+            if failure == "U-order" and current.identifier == 20 and trace[20].count("run") == 2:
+                closing.set()
+                assert later_failed.wait(5)
+                raise earlier
+            if failure == "U-order" and current.identifier == 21:
+                assert closing.wait(5)
+                raise later
+            if failure == "owner-boundary" and current.identifier == 21:
+                assert boundary_joined.is_set()
             return copy.deepcopy(original[current.identifier])
         if "/actions/workflows/" in endpoint:
             note("workflow")
@@ -581,8 +625,8 @@ def check(pooled, failure=None):
                 assert release.wait(5)
             elif identifier == 15 and m.history_worker_context() is None:
                 assert ready.wait(5)
-                rows[2]["head_repository"]["full_name"] = "mutated/after-admission"
-                rows[2]["html_url"] = "mutated-after-admission"
+                inventory[11]["head_repository"]["full_name"] = "mutated/after-admission"
+                inventory[11]["html_url"] = "mutated-after-admission"
                 release.set()
         if failure == "C-source" and identifier == 11:
             raise SystemExit("controlled source proof failure")
@@ -605,6 +649,23 @@ def check(pooled, failure=None):
         assert evidence["minimum_age_seconds"] == 600
         assert evidence["require_disabled_workflow"] is False
         assert evidence["expected_workflow_id"] == 10 and evidence["expected_path"] == path
+        if pooled and failure is None:
+            if 20 <= identifier <= 23:
+                assert m.history_worker_context() is not None
+                with lock:
+                    u_waiting.add(identifier)
+                    if len(u_waiting) == 4:
+                        u_ready.set()
+                assert u_release.wait(5), "passive rows serialized independent U proofs"
+            elif identifier == 24 and m.history_worker_context() is None:
+                assert u_ready.wait(5)
+                u_release.set()
+        if identifier == 20 and (
+            failure in passive_failures
+            or failure in {"owner-boundary", "provenance-boundary", "final-fold"}
+        ):
+            entered.set()
+            assert u_release.wait(5)
         if failure == "U-proof" and identifier == 21:
             raise SystemExit("controlled unmaterialized proof failure")
     authority = SimpleNamespace(
@@ -624,6 +685,44 @@ def check(pooled, failure=None):
             return subprocess.CompletedProcess(arguments, 0, stdout="source-bound-policy")
         assert arguments == ["bash", "-s", "--", "workflows"]
         return subprocess.CompletedProcess(arguments, 0, stdout=workflow + "\n")
+    original_remember = m.HistoryProofCollection.remember
+    original_join = m.HistoryProofCollection.join
+    original_parse = m.parse_timestamp
+    original_fail = m.fail
+    def remember(collection, ordinal, error, priority=1):
+        original_remember(collection, ordinal, error, priority)
+        if error is later:
+            later_failed.set()
+        if failure in passive_failures and isinstance(error, SystemExit):
+            assert entered.wait(5)
+            u_release.set()
+    def join(collection):
+        caller = sys._getframe(1)
+        boundary_id = {"owner-boundary": 1, "provenance-boundary": 78, "final-fold": 100}
+        at_boundary = (
+            failure in boundary_id and caller.f_code.co_name == "_held_handoff_history"
+            and caller.f_locals.get("row", {}).get("id") == boundary_id[failure]
+        )
+        if at_boundary:
+            assert entered.wait(5)
+            u_release.set()
+        elif caller.f_code.co_name == "__exit__":
+            u_release.set()
+        result = original_join(collection)
+        if at_boundary:
+            assert trace[20].count("run") == 2 and "proof" in trace[20]
+            assert pool.active == 0 and not pool.pending
+            boundary_joined.set()
+        return result
+    def parse(value, label):
+        if failure == "U-order" and value == "2026-10-09T00:00:01Z":
+            assert later_failed.wait(5)
+        return original_parse(value, label)
+    def reject(message):
+        rejected.append(message)
+        if failure == "provenance-boundary" and "provenance-read run 78" in message:
+            assert boundary_joined.is_set() and pool.active == 0
+        return original_fail(message)
     native = pool = None
     with contextlib.ExitStack() as scope:
         scope.enter_context(patch.object(m, "gh_api", side_effect=api))
@@ -634,6 +733,10 @@ def check(pooled, failure=None):
                                         return_value=specification))
         scope.enter_context(patch.object(m.importlib.util, "module_from_spec",
                                         return_value=authority))
+        scope.enter_context(patch.object(m.HistoryProofCollection, "remember", remember))
+        scope.enter_context(patch.object(m.HistoryProofCollection, "join", join))
+        scope.enter_context(patch.object(m, "parse_timestamp", side_effect=parse))
+        scope.enter_context(patch.object(m, "fail", side_effect=reject))
         scope.enter_context(contextlib.redirect_stderr(io.StringIO()))
         if pooled:
             token = m.BYTE_CONTEXT.set(m.ImmutableBindingBytes({"fixture": "history-phases"}))
@@ -644,10 +747,12 @@ def check(pooled, failure=None):
             pool = scope.enter_context(m.HistoryProofCommand(native))
         try:
             result = m.held_handoff_history(repository, held, subject)
-        except SystemExit:
-            assert failure is not None
+        except (SystemExit, ControlledPhaseFailure) as error:
+            assert not successful
+            if failure == "U-order":
+                assert error is earlier
         else:
-            assert failure is None and result["workflow_counts"] == {workflow: len(rows)}
+            assert successful and result["workflow_counts"] == {workflow: len(rows)}
         if pool is not None:
             assert pool.active == 0 and not pool.pending and native.active == 0
     if failure == "guard":
@@ -670,6 +775,21 @@ def check(pooled, failure=None):
         assert trace[11] == expected and modes[11] == {"pooled"}
     elif failure == "U-proof":
         assert trace[21] == unmaterialized_order[:-1] and modes[21] == {"pooled"}
+    elif failure == "U-order":
+        assert trace[20] == unmaterialized_order and trace[21] == ["run"]
+        assert modes[20] == modes[21] == {"pooled"} and 22 not in trace
+    elif failure in passive_failures:
+        assert trace[20] == unmaterialized_order and modes[20] == {"pooled"}
+        assert 21 not in trace
+        expected = "interval is inconsistent" if failure == "passive-chronology" else "identity is invalid"
+        assert any(expected in message for message in rejected)
+    elif failure in {"owner-boundary", "provenance-boundary", "final-fold"}:
+        assert boundary_joined.is_set() and trace[20] == unmaterialized_order
+        if failure == "provenance-boundary":
+            assert 21 not in trace
+        else:
+            expected_ids = [20] if failure == "final-fold" else range(20, 27)
+            assert all(trace[i] == unmaterialized_order for i in expected_ids)
     else:
         assert all(trace[i] == cancelled_order * 2 for i in range(10, 17))
         assert all(trace[i] == unmaterialized_order for i in range(20, 27))
@@ -677,17 +797,23 @@ def check(pooled, failure=None):
         if pooled:
             assert all(modes[i] == {"pooled"} for i in range(11, 15))
             assert modes[15] == {"inline"}
+            assert all(modes[i] == {"pooled"} for i in range(20, 24))
+            assert modes[24] == {"inline"}
         else:
             assert all(value == {"inline"} for value in modes.values())
 
 check(False)
-for failure in (None, "guard", "init", "C-source", "C-compare", "U-proof"):
+for failure in (
+    None, "guard", "init", "C-source", "C-compare", "U-proof", "U-order",
+    "passive-identity", "passive-duplicate", "passive-chronology",
+    "owner-boundary", "provenance-boundary", "final-fold",
+):
     check(True, failure)
 assert m.NATIVE_CONTEXT.get() is None and m.BYTE_CONTEXT.get() is None
 assert m.BINDING_CONTEXT.get() is None
 print("history_complete_proof_phases=PASS")
 PY
-ok "actual C/U history proofs preserve serial initialization, snapshots, phase barriers and short circuits"
+ok "actual C/U proofs span passive rows while preserving guards, failures and dependency barriers"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import argparse, concurrent.futures, contextlib, fcntl, importlib.util, io, json

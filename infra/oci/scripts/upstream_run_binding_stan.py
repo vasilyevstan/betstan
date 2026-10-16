@@ -4438,8 +4438,6 @@ def _held_handoff_history(
                     _validate_unmaterialized_history, repository, copy.deepcopy(row),
                     subject_sha, authority, label, identity_keys, offload=initialized,
                 )
-            else:
-                proofs.join()
         proofs.join()
         if workflow == "oci-live-data-rollout.yml":
             required_ids = {held["id"]}
