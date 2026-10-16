@@ -5941,6 +5941,10 @@ def pages(endpoint):
                                updated_at="2026-01-01T00:10:00Z")]
     return [{"total_count": len(rows), "workflow_runs": copy.deepcopy(rows)}]
 b.gh_api_pages = pages
+b.native_api_batch = lambda requests: [
+    b.gh_api_pages(endpoint) if paginated else b.gh_api(endpoint)
+    for endpoint, paginated in requests
+]
 collections = []
 def collect(*args):
     collections.append(args)

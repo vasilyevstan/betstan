@@ -201,6 +201,8 @@ try:
         sys.stdout.write("{")
     else:
         value = {"endpoint": path, "payload": "p" * 200000}
+        if "bad-stderr" in path:
+            sys.stderr.buffer.write(b"\xff")
         sys.stderr.write("e" * 200000)
         sys.stderr.flush()
         sys.stdout.write(json.dumps([value] if kind == "pages" else value))
@@ -332,6 +334,30 @@ with patch.dict(os.environ, environment):
             raise AssertionError("malformed native response accepted")
         assert native.active == 0
     gone(state()["pids"])
+
+    for paginated in (False, True):
+        for batched in (False, True):
+            reset(4 if batched else 1)
+            path = "native/run_0/bad-stderr"
+            with m.NativeReadCommand(1) as native:
+                try:
+                    if batched:
+                        m.native_api_batch([(path, paginated)] + [
+                            (f"native/run_0/{index}", index % 2 == 1)
+                            for index in range(1, 4)
+                        ])
+                    else:
+                        (m.gh_api_pages if paginated else m.gh_api)(path)
+                except UnicodeDecodeError:
+                    pass
+                else:
+                    raise AssertionError("undecodable native stderr accepted")
+                assert native.active == 0
+                assert m.gh_api("native/run_0/recovered")["endpoint"] == "native/run_0/recovered"
+                assert native.active == 0
+            assert not state()["active"]
+            gone(state()["pids"])
+    print("native_plain_and_paginated_stderr_decoding=PASS singleton_and_batch=true")
 
     reset()
     with m.NativeReadCommand(1) as native:

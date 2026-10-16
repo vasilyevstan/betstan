@@ -664,10 +664,12 @@ def _native_json(outcome, path, paginated=False):
         raise outcome
     if outcome is None:
         fail(f"native read collection is incomplete for {path}")
+    stdout = _native_text(outcome.stdout)
+    _native_text(outcome.stderr)
     if outcome.returncode != 0:
         fail(f"unable to read {'all pages of ' if paginated else ''}{path}")
     try:
-        payload = json.loads(_native_text(outcome.stdout))
+        payload = json.loads(stdout)
     except json.JSONDecodeError:
         fail(f"malformed {'paginated response' if paginated else 'response'} for {path}")
     if not paginated:
