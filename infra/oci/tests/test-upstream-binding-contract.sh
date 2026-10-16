@@ -7483,6 +7483,7 @@ else:
 ''')
     kubectl.chmod(0o755)
     native_env = dict(producer_env, SOURCE_SHA=native_source, RUNNER_TEMP=str(native_authority_dir),
+        GIT_DIR=str(pathlib.Path(checkout) / ".git"), GIT_WORK_TREE=checkout,
         OCI_K8S_NAMESPACE=namespace, PREREQUISITE_RUN_ID="53", RESUME_SOURCE_SHA=expired_source,
         BASELINE_RECOVERY_RUN_ID="0",
         RESUME_MAINTENANCE_MODE=output_values["resume_maintenance_mode"],
@@ -7505,13 +7506,14 @@ else:
     assert json.loads(snapshot.read_text()) == runtime["lock"]
     native_prefix(False, {"NO_TAKEOVER_HANDOFF_QUALIFICATION": "expired-own-handoff"})
     native_prefix(False, {"BASELINE_CAPTURE_RUN_ID": "42"})
+    native_prefix(False, {"RESOLVED_APPLIED_SOURCE_SHA": native_source})
     runtime["lock"]["data"]["holder"] = "live-data-53-1"
     runtime_file.write_text(json.dumps(runtime))
     native_prefix(False)
     runtime["lock"]["data"]["holder"] = "live-data-155-1"
     runtime_file.write_text(json.dumps(runtime))
     native_prefix()
-    print("PASS canonical six-binding JSON -> actual YAML outputs -> held prerequisite verifier -> FULL native prefix, capture53/root42/holder155; ancestral classification, capture and physical-owner substitutions reject")
+    print("PASS canonical six-binding JSON -> actual YAML outputs -> held prerequisite verifier -> FULL native prefix, capture53/root42/holder155; ancestral classification, capture, ancestry and physical-owner substitutions reject")
     complete156 = base / "real-data-156"
     complete156.mkdir()
     (complete156 / "held-handoff-history.json").write_text(json.dumps(held155["heldHistory"]))
