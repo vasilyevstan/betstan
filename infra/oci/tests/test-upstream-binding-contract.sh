@@ -6812,14 +6812,28 @@ consumer_body = consumer_body[:consumer_body.index(
 fresh = base / "expired-current-baseline"
 shutil.copytree(public / "baseline", fresh / "oci-data-baseline-before")
 before = fresh / "oci-data-baseline-before"
+images = latest / "resume-images.tsv"
+image_rows = [line.split("\t") for line in images.read_text().splitlines()]
+assert len(image_rows) == 10
+shutil.copyfile(images, before / "images.tsv")
+(before / "live-images.tsv").write_text("".join(f"{row[0]}\t{row[2]}\n" for row in image_rows))
+(before / "deployments.tsv").write_text("".join(
+    f"{row[0]}\t{row[2]}\t1\t1\t1\t1\n" for row in image_rows))
+(before / "pod-images.tsv").write_text("".join(
+    f"{row[0]}\tbaseline-{row[0]}-0\t{row[1]}@{row[4]}\n" for row in image_rows))
+(before / "queues.tsv").write_text("telemetry:events:v1\t0\t0\t1\n")
+write_env(before, "telemetry-pre-run.env", {
+    "mode": "retained", "image": next(row[2] for row in image_rows if row[0] == "telemetry"),
+    "database_initialized": "true", "queue_present": "true"})
+baseline_deploy = env(deployed, "provenance.txt")
+assert baseline_deploy["image_provenance_sha256"] == hashlib.sha256(images.read_bytes()).hexdigest()
+write_env(before, "trusted-deploy-provenance.txt", baseline_deploy)
 values = env(before, "baseline-provenance.env")
 values.update(baseline_capture_run_id="53", baseline_source_sha=current_source,
-              baseline_deploy_run_id="51")
+              baseline_deploy_run_id="51", baseline_build_run_id=baseline_deploy["build_run_id"])
 write_env(before, "baseline-provenance.env", values)
 fresh_sha = seal(before)
 shutil.copytree(before, fresh / "oci-data-baseline-after")
-images = latest / "resume-images.tsv"
-assert len(images.read_text().splitlines()) == 10
 
 def produce(run, source, authority="none", baseline=fresh_sha):
     directory = base / f"real-data-{run}"
