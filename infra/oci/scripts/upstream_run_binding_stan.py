@@ -539,6 +539,7 @@ class HistoryProofWork:
         self.function = function
         self.arguments = arguments
         self.future = None
+        self.worker = None
         self.started = False
         self.terminal = False
         self.retired = False
@@ -546,6 +547,7 @@ class HistoryProofWork:
         self.released = False
         self.proof_error = None
         self.submission_error = None
+        self.proof_terminal = threading.Event()
         self.finalized = threading.Event()
 
     def execute(self):
@@ -553,6 +555,7 @@ class HistoryProofWork:
             if self.retired or self.started:
                 raise RuntimeError("held-handoff proof cannot claim retired or started work")
             self.started = True
+            self.worker = threading.current_thread()
         previous = getattr(HISTORY_WORKER, "work", None)
         try:
             if previous is not None:
@@ -572,6 +575,7 @@ class HistoryProofWork:
                 HISTORY_WORKER.work = previous
             with self.command.lock:
                 self.terminal = True
+            self.proof_terminal.set()
 
     def prove(self):
         history_worker_context()
@@ -701,11 +705,16 @@ class HistoryProofCommand:
             work.finalized.wait()
         self.executor.shutdown(wait=True, cancel_futures=True)
         with self.lock:
-            if ambiguous.started:
-                if not ambiguous.terminal:
-                    raise RuntimeError("ambiguous held-handoff proof cleanup is incomplete")
-            else:
+            if not ambiguous.started:
                 ambiguous.retired = True
+            worker = ambiguous.worker
+        # Thread.start can raise after starting a worker the executor never registered.
+        if worker is not None:
+            ambiguous.proof_terminal.wait()
+            worker.join()
+        with self.lock:
+            if ambiguous.started and not ambiguous.terminal:
+                raise RuntimeError("ambiguous held-handoff proof cleanup is incomplete")
             ambiguous.quiesced = True
         self.release(ambiguous)
         ambiguous.finalized.set()

@@ -446,6 +446,55 @@ with command() as (native, pool, cache):
     pool.release(work)
     assert pool.active == 0
 
+for proof_failure in (None, SystemExit("unacknowledged proof failed")):
+    with command() as (native, pool, cache):
+        ready, release, shutdown_returned = (
+            threading.Event(), threading.Event(), threading.Event(),
+        )
+        failure, owned, workers = RuntimeError("failure after actual worker start"), [], []
+        original_shutdown = pool.executor.shutdown
+        def proof():
+            ready.set()
+            assert release.wait(5)
+            if proof_failure is not None:
+                raise proof_failure
+        def fail_after_start(thread):
+            result = original_start(thread)
+            if thread.name.startswith("held-history-proof"):
+                workers.append(thread)
+                assert ready.wait(5)
+                with pool.lock:
+                    owned.extend(work for work in pool.pending if work.future is None)
+                raise failure
+            return result
+        def observe_shutdown(*args, **kwargs):
+            result = original_shutdown(*args, **kwargs)
+            if kwargs.get("cancel_futures"):
+                shutdown_returned.set()
+            return result
+        def submit_started():
+            with m.HistoryProofCollection(pool) as rows:
+                rows.before_row()
+                rows.run(proof)
+        with patch.object(threading.Thread, "start", new=fail_after_start), \
+                patch.object(pool.executor, "shutdown", side_effect=observe_shutdown):
+            thread, outcome = coordinator(submit_started)
+            assert pool.poisoned.wait(5) and shutdown_returned.wait(5)
+            assert len(owned) == 1 and len(workers) == 1
+            work = owned[0]
+            assert work.started and work.future is None and not work.terminal
+            assert pool.active == 1 and not work.released and not work.finalized.is_set()
+            assert thread.is_alive() and workers[0].is_alive()
+            release.set()
+            thread.join(1)
+            assert not thread.is_alive(), "started unacknowledged proof never finalized"
+        assert outcome.get("error") is failure
+        assert work.proof_error is proof_failure and work.submission_error is failure
+        assert work.terminal and work.quiesced and work.released and work.finalized.is_set()
+        assert not workers[0].is_alive() and not pool.active and not pool.pending
+        assert not native.active and not native.cancelled.is_set()
+print("started_unacknowledged_proof_quiescence=PASS success_and_failure=true")
+
 with command() as (native, pool, cache):
     release, ready = threading.Event(), threading.Event()
     earlier, submission = SystemExit("earlier than ambiguous row"), RuntimeError("later submit failure")
@@ -1188,24 +1237,31 @@ def read(*values):
     if mode == "binding":
         m.native_api_batch([(f"native/{values[1]['input']}/hang-{i}", False) for i in range(4)])
     else:
-        native, starts = m.NATIVE_CONTEXT.get(), [0]
+        native, starts, ready = m.NATIVE_CONTEXT.get(), [0], threading.Event()
         original_start = threading.Thread.start
         def fail_second(thread):
             if thread.name.startswith("held-history-proof"):
                 starts[0] += 1
-                if starts[0] == 2:
+                if mode == "history-started-poison":
+                    original_start(thread)
+                    assert ready.wait(5)
+                    raise RuntimeError("signal during started unacknowledged proof")
+                elif starts[0] == 2:
                     raise RuntimeError("signal during ambiguous submission")
             return original_start(thread)
         scope = (
             patch.object(threading.Thread, "start", new=fail_second)
-            if mode == "history-poison" else contextlib.nullcontext()
+            if mode in ("history-poison", "history-started-poison") else contextlib.nullcontext()
         )
+        def proof(index):
+            ready.set()
+            m.native_api_batch([
+                (f"native/run_{index}/hang-{leaf}", False) for leaf in range(4)
+            ])
         with scope, m.HistoryProofCollection(native.history_proofs) as rows:
             for index in range(2 if mode == "history-poison" else 4):
                 rows.before_row()
-                rows.run(m.native_api_batch, [
-                    (f"native/run_{index}/hang-{leaf}", False) for leaf in range(4)
-                ])
+                rows.run(proof, index)
     return dict(artifactName="unexpected")
 m.validate_binding = read
 m.command_validate_all(argparse.Namespace(
@@ -1216,7 +1272,9 @@ m.command_validate_all(argparse.Namespace(
 ))
 '''
     for mode, signum in (
-        (mode, signum) for mode in ("binding", "history", "history-poison")
+        (mode, signum) for mode in (
+            "binding", "history", "history-poison", "history-started-poison",
+        )
         for signum in (signal.SIGINT, signal.SIGTERM)
     ):
         target = 16 if mode == "binding" else 4
