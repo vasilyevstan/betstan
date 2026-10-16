@@ -361,14 +361,24 @@ with patch.dict(os.environ, environment):
         timer.start()
         started = time.monotonic()
         try:
-            try:
-                m._native_run(["gh", "api", "native/run_1/unadmitted"], timeout=.05)
-            except subprocess.TimeoutExpired:
+            endpoint = "repos/example/repo/actions/artifacts/999/zip"
+            class ObservedBackoff(Exception):
                 pass
-            else:
-                raise AssertionError("permit waiting reset the native timeout")
+            def observe_backoff(seconds):
+                assert seconds == 1 and endpoint not in state()["calls"]
+                raise ObservedBackoff
+            with patch.object(m, "ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS", .05), \
+                    patch.object(m, "time", wraps=m.time) as clock, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                clock.sleep.side_effect = observe_backoff
+                try:
+                    m.download_api_bytes(endpoint)
+                except ObservedBackoff:
+                    pass
+                else:
+                    raise AssertionError("binary permit waiting reset the native timeout")
             assert time.monotonic() - started < .5
-            assert "native/run_1/unadmitted" not in state()["calls"]
+            assert endpoint not in state()["calls"]
         finally:
             release.touch()
             timer.cancel()

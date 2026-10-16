@@ -813,7 +813,7 @@ def command_owner_is_ancestor(owner):
     for _ in range(3):
         if parent == int(owner):
             return True
-        result = _native_run(
+        result = subprocess.run(
             ["ps", "-o", "ppid=", "-p", str(parent)],
             capture_output=True, text=True, check=False,
         )
@@ -958,7 +958,7 @@ def download_api_bytes(path):
     for attempt in range(1, ARTIFACT_DOWNLOAD_ATTEMPTS + 1):
         captured_stderr = None
         try:
-            result = subprocess.run(
+            result = _native_run(
                 ["gh", "api", path],
                 capture_output=True,
                 check=False,
