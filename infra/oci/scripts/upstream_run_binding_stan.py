@@ -19,6 +19,7 @@ import binascii
 import concurrent.futures
 import contextlib
 import contextvars
+import copy
 import datetime as dt
 import hashlib
 import importlib.util
@@ -78,6 +79,8 @@ ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS = 120
 ARTIFACT_DOWNLOAD_BACKOFF_SECONDS = (1, 2)
 BYTE_CONTEXT = contextvars.ContextVar("binding_immutable_bytes", default=None)
 NATIVE_CONTEXT = contextvars.ContextVar("binding_native_reads", default=None)
+BINDING_CONTEXT = contextvars.ContextVar("binding_input", default=None)
+HISTORY_WORKER = threading.local()
 HANDOFF_STAGE_CEILINGS = {
     "packaging": 120, "admission": 180, "queue": 120, "approval": 240,
     "native-validation": 180, "startup-snapshot": 240, "receiver-renewal": 120,
@@ -463,6 +466,7 @@ class NativeReadCommand:
         self.cancelled = threading.Event()
         self.interruption = None
         self.handlers = {}
+        self.history_proofs = None
 
     def __enter__(self):
         self.token = NATIVE_CONTEXT.set(self)
@@ -512,7 +516,274 @@ class NativeReadCommand:
             self.active -= 1
 
 
+def history_worker_context():
+    work = getattr(HISTORY_WORKER, "work", None)
+    if work is not None and (
+        NATIVE_CONTEXT.get() is not work.command.native
+        or BYTE_CONTEXT.get() is not work.byte_context
+        or BINDING_CONTEXT.get() != work.binding
+        or work.command.native.history_proofs is not work.command
+    ):
+        raise RuntimeError("held-handoff proof lost its authenticated command context")
+    return work
+
+
+class HistoryProofWork:
+    def __init__(self, collection, function, arguments):
+        self.collection = collection
+        self.command = collection.command
+        self.ordinal = collection.ordinal
+        self.binding = BINDING_CONTEXT.get()
+        self.byte_context = BYTE_CONTEXT.get()
+        self.context = contextvars.copy_context()
+        self.function = function
+        self.arguments = arguments
+        self.future = None
+        self.started = False
+        self.terminal = False
+        self.retired = False
+        self.quiesced = False
+        self.released = False
+        self.proof_error = None
+        self.submission_error = None
+        self.finalized = threading.Event()
+
+    def execute(self):
+        with self.command.lock:
+            if self.retired or self.started:
+                raise RuntimeError("held-handoff proof cannot claim retired or started work")
+            self.started = True
+        previous = getattr(HISTORY_WORKER, "work", None)
+        try:
+            if previous is not None:
+                raise RuntimeError("held-handoff proof cannot execute descendants")
+            HISTORY_WORKER.work = self
+            return self.context.run(self.prove)
+        except BaseException as error:
+            with self.command.lock:
+                self.proof_error = error
+            self.collection.remember(self.ordinal, error)
+            raise
+        finally:
+            if previous is None:
+                if hasattr(HISTORY_WORKER, "work"):
+                    del HISTORY_WORKER.work
+            else:
+                HISTORY_WORKER.work = previous
+            with self.command.lock:
+                self.terminal = True
+
+    def prove(self):
+        history_worker_context()
+        result = self.function(*self.arguments)
+        history_worker_context()
+        return result
+
+
+class HistoryProofCommand:
+    def __init__(self, native):
+        self.native = native
+        self.lock = threading.Lock()
+        self.submission = threading.Lock()
+        self.poisoned = threading.Event()
+        self.active = 0
+        self.pending = set()
+
+    def __enter__(self):
+        if (
+            history_worker_context() is not None
+            or NATIVE_CONTEXT.get() is not self.native
+            or self.native.history_proofs is not None
+        ):
+            raise RuntimeError("held-handoff proof pool requires its own native command")
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="held-history-proof",
+        )
+        self.native.history_proofs = self
+        return self
+
+    def __exit__(self, error_type, error, traceback):
+        try:
+            self.executor.shutdown(wait=True)
+            if self.active or self.pending:
+                if error is None:
+                    raise RuntimeError("held-handoff proof command left owned work")
+                print("held-handoff proof cleanup left owned work", file=sys.stderr)
+        finally:
+            self.native.history_proofs = None
+
+    def check_context(self):
+        if (
+            history_worker_context() is not None
+            or NATIVE_CONTEXT.get() is not self.native
+            or self.native.history_proofs is not self
+            or BYTE_CONTEXT.get() is None
+            or not isinstance(BINDING_CONTEXT.get(), str)
+            or not BINDING_CONTEXT.get()
+        ):
+            raise RuntimeError("held-handoff proof requires its authenticated binding context")
+
+    def try_submit(self, collection, function, arguments):
+        if not self.submission.acquire(blocking=False):
+            return False
+        submission_error = None
+        try:
+            with self.lock:
+                if collection.failed or self.poisoned.is_set() or self.active >= 4:
+                    return False
+                work = HistoryProofWork(collection, function, arguments)
+                collection.pending.append(work)
+                self.pending.add(work)
+                self.active += 1
+            try:
+                future = self.executor.submit(work.execute)
+            except BaseException as error:
+                submission_error = error
+                with self.lock:
+                    work.submission_error = error
+                    self.poisoned.set()
+                collection.remember(work.ordinal, error, priority=0)
+            else:
+                with self.lock:
+                    work.future = future
+                future.add_done_callback(lambda completed: self.complete(work, completed))
+        finally:
+            self.submission.release()
+        if submission_error is not None:
+            self.quiesce(work)
+            raise submission_error
+        return True
+
+    def complete(self, work, future):
+        try:
+            error = (
+                concurrent.futures.CancelledError("held-handoff proof was cancelled")
+                if future.cancelled() else future.exception()
+            )
+            if error is not None:
+                work.collection.remember(work.ordinal, error)
+            self.release(work, error)
+        except BaseException as error:
+            work.collection.remember(work.ordinal, error, priority=0)
+            raise
+        finally:
+            work.finalized.set()
+
+    def release(self, work, future_error=None):
+        with self.lock:
+            if work.released:
+                return
+            if work.submission_error is not None:
+                if not work.quiesced:
+                    raise RuntimeError("ambiguous held-handoff proof is not quiescent")
+            elif work.future is None or not work.future.done():
+                raise RuntimeError("held-handoff proof Future is not terminal")
+            elif not work.started:
+                if future_error is None:
+                    raise RuntimeError("held-handoff proof completed without execution")
+                work.retired = True
+            if not work.terminal and not work.retired:
+                raise RuntimeError("held-handoff proof cleanup is incomplete")
+            if self.active < 1:
+                raise RuntimeError("held-handoff proof reservation was already released")
+            work.released = True
+            self.active -= 1
+            self.pending.remove(work)
+
+    def quiesce(self, ambiguous):
+        with self.lock:
+            acknowledged = [work for work in self.pending if work.future is not None]
+        for work in acknowledged:
+            try:
+                work.future.result()
+            except BaseException as error:
+                work.collection.remember(work.ordinal, error)
+            work.finalized.wait()
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        with self.lock:
+            if ambiguous.started:
+                if not ambiguous.terminal:
+                    raise RuntimeError("ambiguous held-handoff proof cleanup is incomplete")
+            else:
+                ambiguous.retired = True
+            ambiguous.quiesced = True
+        self.release(ambiguous)
+        ambiguous.finalized.set()
+
+
+class HistoryProofCollection:
+    def __init__(self, command):
+        self.command = command
+        self.lock = command.lock if command is not None else threading.Lock()
+        self.ordinal = -1
+        self.failed = False
+        self.failure = None
+        self.pending = []
+
+    def __enter__(self):
+        if history_worker_context() is not None:
+            raise RuntimeError("held-handoff proof workers cannot collect history")
+        return self
+
+    def __exit__(self, error_type, error, traceback):
+        if error is not None:
+            self.remember(self.ordinal, error, priority=0)
+        self.join()
+        return False
+
+    def remember(self, ordinal, error, priority=1):
+        with self.lock:
+            self.failed = True
+            if self.failure is None or (ordinal, priority) < self.failure[:2]:
+                self.failure = (ordinal, priority, error)
+
+    def before_row(self):
+        self.ordinal += 1
+        if self.command is not None:
+            self.command.native.check_cancelled()
+        self.check_failure()
+
+    def check_failure(self):
+        with self.lock:
+            failed = self.failed
+        if failed:
+            self.join()
+
+    def run(self, function, *arguments, offload=True):
+        if self.command is not None:
+            self.command.check_context()
+        self.check_failure()
+        if (
+            offload and self.command is not None
+            and self.command.try_submit(self, function, arguments)
+        ):
+            return
+        self.check_failure()
+        try:
+            function(*arguments)
+        except BaseException as error:
+            self.remember(self.ordinal, error)
+            raise
+
+    def join(self):
+        if history_worker_context() is not None:
+            raise RuntimeError("held-handoff proof workers cannot wait on history")
+        for work in self.pending:
+            if work.future is not None:
+                try:
+                    work.future.result()
+                except BaseException as error:
+                    self.remember(work.ordinal, error)
+            work.finalized.wait()
+        self.pending.clear()
+        with self.lock:
+            failure = self.failure
+        if failure is not None:
+            raise failure[2]
+
+
 def native_window(requests):
+    history_worker_context()
     started = time.monotonic()
     current = NATIVE_CONTEXT.get()
     scope = contextlib.nullcontext(current) if current is not None else NativeReadCommand(1)
@@ -2869,6 +3140,7 @@ def held_source_bytes(repository, source_sha, path, label):
 
 
 def held_raw_ancestry(authority, repository, row, subject_sha, label):
+    history_worker_context()
     try:
         carrier = authority.RawCommitAncestry
         helper_digest = hashlib.sha256(Path(authority.__file__).read_bytes()).hexdigest()
@@ -3714,9 +3986,181 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
             fail(f"{label} unresolved dispatch intent prevents receiver absence")
 
 
+def _validate_cancelled_unstarted_history(repository, row, subject_sha, authority, label, path):
+    expected = {
+        "id": row["id"], "workflow_id": row["workflow_id"], "path": path,
+        "head_sha": row["head_sha"], "head_branch": "master",
+        "event": "workflow_dispatch", "run_attempt": 1,
+        "status": "completed", "conclusion": "cancelled",
+        "display_title": f"oci-live-data apply-slip-index {row['head_sha']}",
+        "html_url": f"https://github.com/{repository}/actions/runs/{row['id']}",
+    }
+    endpoint = f"repos/{repository}/actions/runs/{row['id']}"
+    observations = []
+    for _ in range(2):
+        latest = gh_api(endpoint)
+        first = gh_api(endpoint + "/attempts/1")
+        windows = []
+        for run in (latest, first):
+            if (
+                not isinstance(run, dict)
+                or any(type(run.get(key)) is not type(value) or run.get(key) != value
+                       for key, value in expected.items())
+                or not isinstance(run.get("head_repository"), dict)
+                or run["head_repository"].get("full_name") != repository
+            ):
+                fail(f"{label} is not an exact cancelled first attempt")
+            window = tuple(parse_timestamp(run.get(key), label) for key in (
+                "created_at", "run_started_at", "updated_at",
+            ))
+            if not window[0] <= window[1] <= window[2]:
+                fail(f"{label} endpoint chronology is invalid")
+            windows.append(window)
+        if windows[0][:2] != windows[1][:2]:
+            fail(f"{label} latest and first-attempt start windows disagree")
+        if any(
+            key not in row or type(row[key]) is not type(latest[key])
+            or row[key] != latest[key]
+            for key in (*expected, "created_at", "run_started_at", "updated_at")
+        ):
+            fail(f"{label} native details differ from the complete inventory")
+        workflow_metadata, job_pages, pending, approvals, artifact_pages = native_api_batch([
+            (f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml", False),
+            (endpoint + "/attempts/1/jobs?per_page=100", True),
+            (endpoint + "/pending_deployments", False),
+            (endpoint + "/approvals", False),
+            (endpoint + "/artifacts?per_page=100", True),
+        ])
+        if (
+            not isinstance(workflow_metadata, dict)
+            or type(workflow_metadata.get("id")) is not int
+            or workflow_metadata["id"] != row["workflow_id"]
+            or workflow_metadata.get("path") != path
+            or workflow_metadata.get("state") not in {"active", "disabled_manually"}
+        ):
+            fail(f"{label} workflow identity is invalid")
+        jobs = jobs_from_pages(job_pages, label)
+        if len(jobs) != 1:
+            fail(f"{label} must have exactly one cancelled rollout job")
+        job = exact_job(jobs, "rollout", label)
+        job_expected = {
+            "run_id": row["id"], "run_attempt": 1, "head_sha": row["head_sha"],
+            "head_branch": "master", "status": "completed", "conclusion": "cancelled",
+        }
+        if (
+            type(job.get("id")) is not int or job["id"] < 1
+            or any(type(job.get(key)) is not type(value) or job.get(key) != value
+                   for key, value in job_expected.items())
+            or job["steps"] != []
+            or "runner_id" not in job or "runner_name" not in job
+            or not (job["runner_id"] is None
+                    or type(job["runner_id"]) is int and job["runner_id"] == 0)
+            or job["runner_name"] not in (None, "")
+        ):
+            fail(f"{label} has assigned, executed, or ambiguous job evidence")
+        job_times = tuple(parse_timestamp(job.get(key), label) for key in (
+            "created_at", "started_at", "completed_at",
+        ))
+        if not all(window[1] <= job_times[0] <= job_times[1] <= job_times[2] <= window[2]
+                   for window in windows):
+            fail(f"{label} job is outside an authenticated endpoint window")
+        artifacts = artifacts_from_pages(artifact_pages, label)
+        if pending != [] or approvals != [] or artifacts:
+            fail(f"{label} has pending, approved, or artifact evidence")
+        historical = gh_api(
+            f"repos/{repository}/contents/{path}?ref={row['head_sha']}"
+        )
+        source_pin = historical.get("sha") if isinstance(historical, dict) else None
+        if source_pin not in (
+            "c3c9332f4b23b55de6c32ae2183b89478f97884f",
+            "472896760221c61ef517d656b0ef102d7344f2c9",
+        ):
+            fail(f"{label} historical workflow is not the guarded source profile")
+        try:
+            _, source_blob = authority.validate_historical_unmaterialized_workflow(
+                path, historical, blob_sha=source_pin,
+            )
+        except (AttributeError, SystemExit):
+            fail(f"{label} historical workflow is not the guarded source profile")
+        compare = None
+        if row["head_sha"] != subject_sha:
+            compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
+            try:
+                authority.validate_strict_ancestor_compare(compare, row["head_sha"], subject_sha)
+            except (AttributeError, SystemExit):
+                fail(f"{label} source is not a proven ancestor of the exact anchor")
+        observations.append({
+            "latest": {key: latest[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
+            "first": {key: first[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
+            "workflow": {key: workflow_metadata[key] for key in ("id", "path", "state")},
+            "job": job, "source_blob": source_blob, "compare": compare,
+        })
+    if observations[0] != observations[1]:
+        fail(f"{label} native no-execution evidence changed between complete collections")
+
+
+def _validate_unmaterialized_history(
+    repository, row, subject_sha, authority, label, identity_keys,
+):
+    run_endpoint = f"repos/{repository}/actions/runs/{row['id']}"
+    native = gh_api(run_endpoint)
+    def validate_opening_identity(observed):
+        if (
+            not isinstance(observed, dict)
+            or any(
+                key not in observed or type(observed[key]) is not type(row[key])
+                or observed[key] != row[key] for key in identity_keys
+            )
+            or not isinstance(observed.get("head_repository"), dict)
+            or observed["head_repository"].get("full_name") != repository
+        ):
+            fail(f"{label} native details drifted from the complete inventory")
+    validate_opening_identity(native)
+    workflow_metadata, jobs, pending, approvals, artifacts = native_api_batch([
+        (f"repos/{repository}/actions/workflows/{row['workflow_id']}", False),
+        (run_endpoint + "/jobs?filter=all&per_page=100", False),
+        (run_endpoint + "/pending_deployments", False),
+        (run_endpoint + "/approvals", False),
+        (run_endpoint + "/artifacts?per_page=100", False),
+    ])
+    historical = gh_api(
+        f"repos/{repository}/contents/{row['path']}?ref={row['head_sha']}"
+    )
+    compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
+    try:
+        authority.validate_unmaterialized_run_evidence(
+            run=native, workflow=workflow_metadata, jobs=jobs, pending=pending,
+            approvals=approvals, artifacts=artifacts,
+            compare=compare,
+            historical_workflow=historical, repository=repository,
+            current_master=subject_sha, now_epoch=int(time.time()),
+            minimum_age_seconds=600, expected_run_id=row["id"],
+            expected_workflow_id=row["workflow_id"], expected_path=row["path"],
+            expected_head_sha=row["head_sha"], require_disabled_workflow=False,
+        )
+    except SystemExit:
+        fail(f"{label} is not an authenticated unmaterialized run")
+    validate_opening_identity(gh_api(run_endpoint))
+
+
 def held_handoff_history(
     repository, held, subject_sha, successor_run_id="", *,
     expired_receiver_run_id="", runtime_mode=None, fresh=False,
+):
+    native = NATIVE_CONTEXT.get()
+    with HistoryProofCollection(
+        native.history_proofs if native is not None else None,
+    ) as proofs:
+        return _held_handoff_history(
+            repository, held, subject_sha, successor_run_id,
+            expired_receiver_run_id=expired_receiver_run_id,
+            runtime_mode=runtime_mode, fresh=fresh, proofs=proofs,
+        )
+
+
+def _held_handoff_history(
+    repository, held, subject_sha, successor_run_id="", *,
+    expired_receiver_run_id="", runtime_mode=None, fresh=False, proofs,
 ):
     authority = None
     expired_receiver = None
@@ -3747,6 +4191,7 @@ def held_handoff_history(
             or FULL_SHA.fullmatch(row["head_sha"]) is None
         ):
             fail(f"{label} is not a candidate for native no-execution history")
+        initialized = authority is not None
         if authority is None:
             try:
                 specification = importlib.util.spec_from_file_location(
@@ -3760,116 +4205,10 @@ def held_handoff_history(
                 specification.loader.exec_module(authority)
             except (OSError, ImportError, SyntaxError):
                 fail(f"{label} shared source validator is unavailable")
-        expected = {
-            "id": row["id"], "workflow_id": row["workflow_id"], "path": path,
-            "head_sha": row["head_sha"], "head_branch": "master",
-            "event": "workflow_dispatch", "run_attempt": 1,
-            "status": "completed", "conclusion": "cancelled",
-            "display_title": f"oci-live-data apply-slip-index {row['head_sha']}",
-            "html_url": f"https://github.com/{repository}/actions/runs/{row['id']}",
-        }
-        endpoint = f"repos/{repository}/actions/runs/{row['id']}"
-        observations = []
-        for _ in range(2):
-            latest = gh_api(endpoint)
-            first = gh_api(endpoint + "/attempts/1")
-            windows = []
-            for run in (latest, first):
-                if (
-                    not isinstance(run, dict)
-                    or any(type(run.get(key)) is not type(value) or run.get(key) != value
-                           for key, value in expected.items())
-                    or not isinstance(run.get("head_repository"), dict)
-                    or run["head_repository"].get("full_name") != repository
-                ):
-                    fail(f"{label} is not an exact cancelled first attempt")
-                window = tuple(parse_timestamp(run.get(key), label) for key in (
-                    "created_at", "run_started_at", "updated_at",
-                ))
-                if not window[0] <= window[1] <= window[2]:
-                    fail(f"{label} endpoint chronology is invalid")
-                windows.append(window)
-            if windows[0][:2] != windows[1][:2]:
-                fail(f"{label} latest and first-attempt start windows disagree")
-            if any(
-                key not in row or type(row[key]) is not type(latest[key])
-                or row[key] != latest[key]
-                for key in (*expected, "created_at", "run_started_at", "updated_at")
-            ):
-                fail(f"{label} native details differ from the complete inventory")
-            workflow_metadata, job_pages, pending, approvals, artifact_pages = native_api_batch([
-                (f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml", False),
-                (endpoint + "/attempts/1/jobs?per_page=100", True),
-                (endpoint + "/pending_deployments", False),
-                (endpoint + "/approvals", False),
-                (endpoint + "/artifacts?per_page=100", True),
-            ])
-            if (
-                not isinstance(workflow_metadata, dict)
-                or type(workflow_metadata.get("id")) is not int
-                or workflow_metadata["id"] != row["workflow_id"]
-                or workflow_metadata.get("path") != path
-                or workflow_metadata.get("state") not in {"active", "disabled_manually"}
-            ):
-                fail(f"{label} workflow identity is invalid")
-            jobs = jobs_from_pages(job_pages, label)
-            if len(jobs) != 1:
-                fail(f"{label} must have exactly one cancelled rollout job")
-            job = exact_job(jobs, "rollout", label)
-            job_expected = {
-                "run_id": row["id"], "run_attempt": 1, "head_sha": row["head_sha"],
-                "head_branch": "master", "status": "completed", "conclusion": "cancelled",
-            }
-            if (
-                type(job.get("id")) is not int or job["id"] < 1
-                or any(type(job.get(key)) is not type(value) or job.get(key) != value
-                       for key, value in job_expected.items())
-                or job["steps"] != []
-                or "runner_id" not in job or "runner_name" not in job
-                or not (job["runner_id"] is None
-                        or type(job["runner_id"]) is int and job["runner_id"] == 0)
-                or job["runner_name"] not in (None, "")
-            ):
-                fail(f"{label} has assigned, executed, or ambiguous job evidence")
-            job_times = tuple(parse_timestamp(job.get(key), label) for key in (
-                "created_at", "started_at", "completed_at",
-            ))
-            if not all(window[1] <= job_times[0] <= job_times[1] <= job_times[2] <= window[2]
-                       for window in windows):
-                fail(f"{label} job is outside an authenticated endpoint window")
-            artifacts = artifacts_from_pages(artifact_pages, label)
-            if pending != [] or approvals != [] or artifacts:
-                fail(f"{label} has pending, approved, or artifact evidence")
-            historical = gh_api(
-                f"repos/{repository}/contents/{path}?ref={row['head_sha']}"
-            )
-            source_pin = historical.get("sha") if isinstance(historical, dict) else None
-            if source_pin not in (
-                "c3c9332f4b23b55de6c32ae2183b89478f97884f",
-                "472896760221c61ef517d656b0ef102d7344f2c9",
-            ):
-                fail(f"{label} historical workflow is not the guarded source profile")
-            try:
-                _, source_blob = authority.validate_historical_unmaterialized_workflow(
-                    path, historical, blob_sha=source_pin,
-                )
-            except (AttributeError, SystemExit):
-                fail(f"{label} historical workflow is not the guarded source profile")
-            compare = None
-            if row["head_sha"] != subject_sha:
-                compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
-                try:
-                    authority.validate_strict_ancestor_compare(compare, row["head_sha"], subject_sha)
-                except (AttributeError, SystemExit):
-                    fail(f"{label} source is not a proven ancestor of the exact anchor")
-            observations.append({
-                "latest": {key: latest[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
-                "first": {key: first[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
-                "workflow": {key: workflow_metadata[key] for key in ("id", "path", "state")},
-                "job": job, "source_blob": source_blob, "compare": compare,
-            })
-        if observations[0] != observations[1]:
-            fail(f"{label} native no-execution evidence changed between complete collections")
+        proofs.run(
+            _validate_cancelled_unstarted_history, repository, copy.deepcopy(row),
+            subject_sha, authority, label, path, offload=initialized,
+        )
 
     def validate_provenance_read_failure(row):
         nonlocal authority
@@ -4007,6 +4346,7 @@ def held_handoff_history(
             fail("held-handoff historical inventory is incomplete")
         ids = set()
         for row in rows:
+            proofs.before_row()
             if (
                 not isinstance(row, dict) or type(row.get("id")) is not int
                 or row["id"] < 1 or row["id"] in ids
@@ -4021,6 +4361,7 @@ def held_handoff_history(
             if updated < created or cutoff is not None and not active_inventory and created > cutoff:
                 fail("held-handoff historical interval is inconsistent")
             if row["id"] in {held["id"], int(successor_run_id or "0")}:
+                proofs.join()
                 if workflow != "oci-live-data-rollout.yml":
                     fail("held-handoff historical owner is bound to another workflow")
                 authenticated = held if row["id"] == held["id"] else first
@@ -4035,6 +4376,7 @@ def held_handoff_history(
                         fail("held-handoff owner inventory differs from its authenticated native identity")
                 continue
             if expired_receiver is not None and row["id"] == expired_receiver["id"]:
+                proofs.join()
                 if workflow != "oci-production-deploy.yml" or any(
                     row.get(key) != expired_receiver.get(key) for key in (
                         "id", "workflow_id", "path", "head_sha", "head_branch", "event",
@@ -4045,17 +4387,20 @@ def held_handoff_history(
                     fail("expired-handoff historical receiver identity changed")
                 continue
             if row.get("head_branch") != "master":
+                proofs.join()
                 continue
             if updated >= lower:
                 if (
                     workflow == "oci-live-data-rollout.yml"
                     and row.get("status") == "completed" and row.get("conclusion") == "failure"
                 ):
+                    proofs.join()
                     validate_provenance_read_failure(row)
                 else:
                     validate_cancelled_unstarted(row)
                 continue
             if row.get("status") != "completed":
+                initialized = authority is not None
                 if authority is None:
                     try:
                         specification = importlib.util.spec_from_file_location(
@@ -4089,45 +4434,13 @@ def held_handoff_history(
                     or FULL_SHA.fullmatch(row["head_sha"]) is None
                 ):
                     fail(f"{label} inventory cannot bind unmaterialized evidence")
-                run_endpoint = f"repos/{repository}/actions/runs/{row['id']}"
-                native = gh_api(run_endpoint)
-                def validate_opening_identity(observed):
-                    if (
-                        not isinstance(observed, dict)
-                        or any(
-                            key not in observed or type(observed[key]) is not type(row[key])
-                            or observed[key] != row[key] for key in identity_keys
-                        )
-                        or not isinstance(observed.get("head_repository"), dict)
-                        or observed["head_repository"].get("full_name") != repository
-                    ):
-                        fail(f"{label} native details drifted from the complete inventory")
-                validate_opening_identity(native)
-                workflow_metadata, jobs, pending, approvals, artifacts = native_api_batch([
-                    (f"repos/{repository}/actions/workflows/{row['workflow_id']}", False),
-                    (run_endpoint + "/jobs?filter=all&per_page=100", False),
-                    (run_endpoint + "/pending_deployments", False),
-                    (run_endpoint + "/approvals", False),
-                    (run_endpoint + "/artifacts?per_page=100", False),
-                ])
-                historical = gh_api(
-                    f"repos/{repository}/contents/{row['path']}?ref={row['head_sha']}"
+                proofs.run(
+                    _validate_unmaterialized_history, repository, copy.deepcopy(row),
+                    subject_sha, authority, label, identity_keys, offload=initialized,
                 )
-                compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
-                try:
-                    authority.validate_unmaterialized_run_evidence(
-                        run=native, workflow=workflow_metadata, jobs=jobs, pending=pending,
-                        approvals=approvals, artifacts=artifacts,
-                        compare=compare,
-                        historical_workflow=historical, repository=repository,
-                        current_master=subject_sha, now_epoch=int(time.time()),
-                        minimum_age_seconds=600, expected_run_id=row["id"],
-                        expected_workflow_id=row["workflow_id"], expected_path=row["path"],
-                        expected_head_sha=row["head_sha"], require_disabled_workflow=False,
-                    )
-                except SystemExit:
-                    fail(f"{label} is not an authenticated unmaterialized run")
-                validate_opening_identity(gh_api(run_endpoint))
+            else:
+                proofs.join()
+        proofs.join()
         if workflow == "oci-live-data-rollout.yml":
             required_ids = {held["id"]}
             if successor_run_id:
@@ -7675,7 +7988,7 @@ def command_validate_all(args):
         ):
             fail(f"dispatch input {expected_head} must be a complete source SHA")
     operation = policy.get("operation", "") if args.policy_json and not args.manifest else args.operation
-    with NativeReadCommand(len(bindings)) as native:
+    with NativeReadCommand(len(bindings)) as native, HistoryProofCommand(native):
         return validate_all_bindings(
             args, inputs, bindings, chronology_inputs, operation, native,
         )
@@ -7698,6 +8011,7 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
         def read_binding(binding):
             token = BYTE_CONTEXT.set(byte_context)
             native_token = NATIVE_CONTEXT.set(native)
+            binding_token = BINDING_CONTEXT.set(binding["input"])
             try:
                 return validate_binding(
                     args.repository, binding, args.subject_sha,
@@ -7705,6 +8019,7 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
                     getattr(args, "successor_run_id", ""),
                 )
             finally:
+                BINDING_CONTEXT.reset(binding_token)
                 NATIVE_CONTEXT.reset(native_token)
                 BYTE_CONTEXT.reset(token)
         with concurrent.futures.ThreadPoolExecutor(

@@ -121,6 +121,575 @@ PY
 ok "bounded binding pool joins SystemExit and defers all acceptance"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import concurrent.futures, contextlib, contextvars, hashlib, importlib.util
+import sys, threading
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("history_proofs", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+@contextlib.contextmanager
+def command():
+    cache = m.ImmutableBindingBytes({"fixture": "history-proofs"})
+    byte_token = m.BYTE_CONTEXT.set(cache)
+    binding_token = m.BINDING_CONTEXT.set("history-fixture")
+    try:
+        with m.NativeReadCommand(4) as native, m.HistoryProofCommand(native) as pool:
+            yield native, pool, cache
+            assert not pool.active and not pool.pending and not native.active
+    finally:
+        m.BINDING_CONTEXT.reset(binding_token)
+        m.BYTE_CONTEXT.reset(byte_token)
+    assert not any(t.name.startswith("held-history-proof") for t in threading.enumerate())
+
+def coordinator(action):
+    context, outcome = contextvars.copy_context(), {}
+    def run():
+        try:
+            outcome["value"] = context.run(action)
+        except BaseException as error:
+            outcome["error"] = error
+    thread = threading.Thread(target=run, name="history-fixture-coordinator")
+    thread.start()
+    return thread, outcome
+
+def joined(thread):
+    thread.join(10)
+    assert not thread.is_alive(), "history fixture coordinator escaped"
+
+marker = contextvars.ContextVar("history-fixture-row", default=None)
+with command() as (native, pool, cache):
+    release, ready = threading.Event(), threading.Event()
+    lock, seen = threading.Lock(), []
+    def held(index):
+        assert m.NATIVE_CONTEXT.get() is native and m.BYTE_CONTEXT.get() is cache
+        assert m.BINDING_CONTEXT.get() == "history-fixture"
+        assert marker.get() == index and m.history_worker_context() is not None
+        with lock:
+            seen.append(index)
+            if len(seen) == 4:
+                ready.set()
+        assert release.wait(5)
+    with m.HistoryProofCollection(pool) as rows:
+        for index in range(4):
+            rows.before_row()
+            token = marker.set(index)
+            try:
+                rows.run(held, index)
+            finally:
+                marker.reset(token)
+        assert ready.wait(5) and pool.active == 4 and len(pool.pending) == 4
+        token = m.BINDING_CONTEXT.set("other-binding")
+        try:
+            with m.HistoryProofCollection(pool) as other:
+                other.before_row()
+                def inline_proof():
+                    assert m.history_worker_context() is None
+                    seen.append("inline")
+                    release.set()
+                other.run(inline_proof)
+        finally:
+            m.BINDING_CONTEXT.reset(token)
+    assert sorted(seen[:4]) == list(range(4)) and seen[4] == "inline"
+
+for structural in (False, True):
+    with command() as (native, pool, cache):
+        ready, release = threading.Event(), threading.Event()
+        earlier, later = SystemExit("earlier late proof"), SystemExit("later early failure")
+        def first():
+            ready.set()
+            assert release.wait(5)
+            raise earlier
+        def second():
+            assert ready.wait(5)
+            release.set()
+            raise later
+        try:
+            with m.HistoryProofCollection(pool) as rows:
+                rows.before_row()
+                rows.run(first)
+                rows.before_row()
+                if structural:
+                    release.set()
+                    raise later
+                rows.run(second)
+        except SystemExit as error:
+            assert error is earlier
+        else:
+            raise AssertionError("history failure accepted")
+        assert rows.failed and not native.cancelled.is_set()
+        with m.HistoryProofCollection(pool) as other:
+            other.before_row()
+            other.run(lambda: None)
+
+with command() as (native, pool, cache):
+    release, ready = threading.Event(), threading.Event()
+    lock, count = threading.Lock(), [0]
+    earlier, inline = SystemExit("earlier saturated proof"), SystemExit("inline failure")
+    def held(index):
+        with lock:
+            count[0] += 1
+            if count[0] == 4:
+                ready.set()
+        assert release.wait(5)
+        if index == 0:
+            raise earlier
+    def failed_inline():
+        release.set()
+        raise inline
+    try:
+        with m.HistoryProofCollection(pool) as rows:
+            for index in range(4):
+                rows.before_row()
+                rows.run(held, index)
+            assert ready.wait(5)
+            rows.before_row()
+            rows.run(failed_inline)
+    except SystemExit as error:
+        assert error is earlier
+    else:
+        raise AssertionError("inline failure accepted")
+
+for variable in (m.NATIVE_CONTEXT, m.BYTE_CONTEXT, m.BINDING_CONTEXT):
+    with command() as (native, pool, cache):
+        def lost_context():
+            variable.set(None)
+            m.native_window([])
+        try:
+            with m.HistoryProofCollection(pool) as rows:
+                rows.before_row()
+                rows.run(lost_context)
+        except RuntimeError as error:
+            assert "lost its authenticated command context" in str(error)
+        else:
+            raise AssertionError("lost worker context accepted")
+
+with command() as (native, pool, cache):
+    for action in (
+        lambda: m.held_handoff_history("example/repo", {}, "1" * 40),
+        lambda: m.HistoryProofCollection(pool).join(),
+        lambda: m.HistoryProofCollection(pool).run(lambda: None),
+    ):
+        try:
+            with m.HistoryProofCollection(pool) as rows:
+                rows.before_row()
+                rows.run(action)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("pooled descendant history work accepted")
+    cancelled = concurrent.futures.Future()
+    cancelled.cancel()
+    with patch.object(pool.executor, "submit", return_value=cancelled):
+        try:
+            with m.HistoryProofCollection(pool) as rows:
+                rows.before_row()
+                rows.run(lambda: (_ for _ in ()).throw(AssertionError("cancelled proof ran")))
+        except concurrent.futures.CancelledError:
+            pass
+        else:
+            raise AssertionError("unexpected proof cancellation accepted")
+
+with command() as (native, pool, cache):
+    release, ready, entered = threading.Event(), threading.Event(), threading.Event()
+    lock, count, loads = threading.Lock(), [0], [0]
+    raw = b"authenticated shared immutable bytes"
+    def loader():
+        loads[0] += 1
+        assert release.wait(5)
+        return raw
+    def read_shared():
+        with lock:
+            count[0] += 1
+            if count[0] == 4:
+                ready.set()
+        entered.set()
+        assert cache.read(("shared",), loader, expected_sha256=hashlib.sha256(raw).hexdigest()) == raw
+    with m.HistoryProofCollection(pool) as rows:
+        for _ in range(4):
+            rows.before_row()
+            rows.run(read_shared)
+        assert entered.wait(5) and ready.wait(5)
+        rows.before_row()
+        rows.run(lambda: (release.set(), read_shared()))
+    assert loads == [1]
+
+original_start = threading.Thread.start
+with command() as (native, pool, cache):
+    failure, owned, calls = RuntimeError("first worker start failed"), [], []
+    def fail_start(thread):
+        if thread.name.startswith("held-history-proof"):
+            with pool.lock:
+                owned.extend(pool.pending)
+            raise failure
+        return original_start(thread)
+    with patch.object(threading.Thread, "start", new=fail_start):
+        try:
+            with m.HistoryProofCollection(pool) as rows:
+                rows.before_row()
+                rows.run(lambda: calls.append("invalid"))
+        except RuntimeError as error:
+            assert error is failure
+        else:
+            raise AssertionError("first-worker submission failure accepted")
+    assert len(owned) == 1 and not calls
+    work = owned[0]
+    assert work.future is None and not work.started and work.retired
+    assert work.quiesced and work.released and work.finalized.is_set()
+    assert work.submission_error is failure and pool.poisoned.is_set()
+    with patch.object(pool.executor, "submit", side_effect=AssertionError("poison resubmitted")):
+        with m.HistoryProofCollection(pool) as other:
+            other.before_row()
+            other.run(lambda: calls.append("complete-inline-proof"))
+    assert calls == ["complete-inline-proof"]
+    try:
+        work.execute()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("retired proof executed")
+
+with command() as (native, pool, cache):
+    release_first, release_other = threading.Event(), threading.Event()
+    first_started, other_started, ambiguous_done = (
+        threading.Event(), threading.Event(), threading.Event(),
+    )
+    failure, calls = RuntimeError("next worker start failed"), []
+    def held(started, release):
+        started.set()
+        assert release.wait(5)
+    def ambiguous():
+        calls.append("ambiguous-once")
+        ambiguous_done.set()
+    def fail_next_start(thread):
+        if thread.name.startswith("held-history-proof"):
+            raise failure
+        return original_start(thread)
+    try:
+        with m.HistoryProofCollection(pool) as rows, m.HistoryProofCollection(pool) as other:
+            rows.before_row()
+            rows.run(held, first_started, release_first)
+            assert first_started.wait(5)
+            token = m.BINDING_CONTEXT.set("other-binding")
+            try:
+                other.before_row()
+                other.run(held, other_started, release_other)
+            finally:
+                m.BINDING_CONTEXT.reset(token)
+            assert other_started.wait(5)
+            def submit_ambiguous():
+                rows.before_row()
+                rows.run(ambiguous)
+            with patch.object(pool.executor, "submit", wraps=pool.executor.submit) as submit, \
+                    patch.object(threading.Thread, "start", new=fail_next_start):
+                thread, outcome = coordinator(submit_ambiguous)
+                assert pool.poisoned.wait(5)
+                with pool.lock:
+                    assert pool.active == 3 and len(pool.pending) == 3
+                    work = next(work for work in pool.pending if work.future is None)
+                    assert not work.released and not work.started
+                with m.HistoryProofCollection(pool) as inline:
+                    inline.before_row()
+                    inline.run(lambda: calls.append("other-inline-proof"))
+                assert submit.call_count == 1 and thread.is_alive()
+                release_first.set()
+                assert ambiguous_done.wait(5)
+                assert not work.released and thread.is_alive()
+                release_other.set()
+                joined(thread)
+                assert outcome.get("error") is failure
+                assert other.pending[0].future.result() is None
+                assert not other.pending[0].future.cancelled()
+    except RuntimeError as error:
+        assert error is failure
+    else:
+        raise AssertionError("ambiguous submission became success")
+    assert calls.count("ambiguous-once") == 1 and calls.count("other-inline-proof") == 1
+    assert work.started and work.terminal and work.quiesced and work.released
+    assert not native.cancelled.is_set() and other.failure is None
+
+with command() as (native, pool, cache):
+    release, ready, completed = threading.Event(), threading.Event(), threading.Event()
+    failure, owned, calls = RuntimeError("failure after immediate execution"), [], []
+    def first():
+        ready.set()
+        assert release.wait(5)
+    def immediate():
+        calls.append("executed-once")
+        completed.set()
+    def fail_after_execution(thread):
+        if thread.name.startswith("held-history-proof"):
+            release.set()
+            assert completed.wait(5)
+            with pool.lock:
+                owned.extend(work for work in pool.pending if work.future is None)
+                assert len(owned) == 1 and not owned[0].released
+            raise failure
+        return original_start(thread)
+    try:
+        with m.HistoryProofCollection(pool) as rows:
+            rows.before_row()
+            rows.run(first)
+            assert ready.wait(5)
+            rows.before_row()
+            with patch.object(threading.Thread, "start", new=fail_after_execution):
+                rows.run(immediate)
+    except RuntimeError as error:
+        assert error is failure
+    else:
+        raise AssertionError("immediate ambiguous success accepted")
+    assert calls == ["executed-once"] and len(owned) == 1
+    work = owned[0]
+    assert work.submission_error is failure and work.proof_error is None
+    assert work.terminal and work.quiesced and work.released
+    pool.release(work)
+    assert pool.active == 0
+
+with command() as (native, pool, cache):
+    release, ready = threading.Event(), threading.Event()
+    earlier, submission = SystemExit("earlier than ambiguous row"), RuntimeError("later submit failure")
+    def first():
+        ready.set()
+        assert release.wait(5)
+        raise earlier
+    def fail_later_start(thread):
+        if thread.name.startswith("held-history-proof"):
+            release.set()
+            raise submission
+        return original_start(thread)
+    try:
+        with m.HistoryProofCollection(pool) as rows:
+            rows.before_row()
+            rows.run(first)
+            assert ready.wait(5)
+            rows.before_row()
+            with patch.object(threading.Thread, "start", new=fail_later_start):
+                rows.run(lambda: None)
+    except SystemExit as error:
+        assert error is earlier
+    else:
+        raise AssertionError("later submission replaced earlier proof failure")
+    assert pool.poisoned.is_set() and not native.cancelled.is_set()
+
+with m.HistoryProofCollection(None) as rows:
+    rows.before_row()
+    def serial_proof():
+        assert m.history_worker_context() is None
+    rows.run(serial_proof)
+assert m.NATIVE_CONTEXT.get() is None and m.BYTE_CONTEXT.get() is None
+assert m.BINDING_CONTEXT.get() is None
+print("history_proof_ownership_lifecycle=PASS")
+PY
+ok "bounded history proofs, ordered failures, contexts and ambiguous submission ownership"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import contextlib, copy, importlib.util, io, re, subprocess, sys, threading
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("history_phases", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+repository, subject, old = "example/repo", "f" * 40, "a" * 40
+workflow = "oci-live-data-rollout.yml"
+path = ".github/workflows/" + workflow
+source_pin = "c3c9332f4b23b55de6c32ae2183b89478f97884f"
+
+def check(pooled, failure=None):
+    def row(identifier, status, conclusion, recent):
+        created = "2026-10-10T01:00:00Z" if recent else "2026-10-09T00:00:00Z"
+        return dict(
+            id=identifier, workflow_id=10, path=path, head_sha=old, head_branch="master",
+            head_repository={"full_name": repository}, event="workflow_dispatch",
+            run_attempt=1, status=status, conclusion=conclusion,
+            display_title=f"oci-live-data apply-slip-index {old}", created_at=created,
+            run_started_at="2026-10-10T01:01:00Z" if recent else created,
+            updated_at="2026-10-10T01:02:00Z" if recent else created,
+            html_url=f"https://github.com/{repository}/actions/runs/{identifier}",
+        )
+    held = row(1, "completed", "success", False)
+    held.update(head_sha=subject, created_at="2026-10-10T00:00:00Z",
+                updated_at="2026-10-10T00:01:00Z")
+    rows = [
+        held, *(row(i, "completed", "cancelled", True) for i in range(10, 17)),
+        row(17, "completed", "success", False),
+        *(row(i, "queued", None, False) for i in range(20, 27)),
+    ]
+    if failure == "guard":
+        rows[1]["conclusion"] = "success"
+    original = {item["id"]: copy.deepcopy(item) for item in rows}
+    trace, modes, loads = {}, {}, []
+    current, lock = threading.local(), threading.Lock()
+    release, ready, waiting = threading.Event(), threading.Event(), set()
+    def note(value):
+        identifier = current.identifier
+        with lock:
+            trace.setdefault(identifier, []).append(value)
+            modes.setdefault(identifier, set()).add(
+                "pooled" if m.history_worker_context() is not None else "inline",
+            )
+    def api(endpoint):
+        match = re.fullmatch(r"repos/example/repo/actions/runs/([0-9]+)(/attempts/1)?", endpoint)
+        if match:
+            current.identifier = int(match[1])
+            note("attempt" if match[2] else "run")
+            return copy.deepcopy(original[current.identifier])
+        if "/actions/workflows/" in endpoint:
+            note("workflow")
+            return dict(id=10, path=path, state="disabled_manually")
+        if "/contents/" in endpoint:
+            note("source")
+            return dict(sha=source_pin, row_id=current.identifier)
+        if endpoint.endswith("/pending_deployments"):
+            note("pending")
+            return []
+        if endpoint.endswith("/approvals"):
+            note("approvals")
+            return []
+        if "/jobs?" in endpoint:
+            note("jobs")
+            if current.identifier >= 20:
+                return dict(total_count=0, jobs=[])
+            run = original[current.identifier]
+            return dict(total_count=1, jobs=[dict(
+                id=run["id"] * 10, name="rollout", run_id=run["id"], run_attempt=1,
+                head_sha=old, head_branch="master", status="completed", conclusion="cancelled",
+                runner_id=None, runner_name=None, steps=[],
+                created_at=run["run_started_at"], started_at=run["run_started_at"],
+                completed_at="2026-10-10T01:01:30Z",
+            )])
+        if "/artifacts?" in endpoint:
+            note("artifacts")
+            return dict(total_count=0, artifacts=[])
+        raise AssertionError(endpoint)
+    def batch(requests):
+        if len(requests) == 1 and "/runs?" in requests[0][0]:
+            assert requests[0][1] is True
+            return [[dict(total_count=len(rows), workflow_runs=rows)]]
+        return [[api(endpoint)] if paged else api(endpoint) for endpoint, paged in requests]
+    def historical(observed_path, evidence, *, blob_sha):
+        assert observed_path == path and blob_sha == source_pin
+        note("source-proof")
+        identifier = current.identifier
+        if pooled and failure is None:
+            if 11 <= identifier <= 14 and trace[identifier].count("source-proof") == 1:
+                with lock:
+                    waiting.add(identifier)
+                    if len(waiting) == 4:
+                        ready.set()
+                assert release.wait(5)
+            elif identifier == 15 and m.history_worker_context() is None:
+                assert ready.wait(5)
+                rows[2]["head_repository"]["full_name"] = "mutated/after-admission"
+                rows[2]["html_url"] = "mutated-after-admission"
+                release.set()
+        if failure == "C-source" and identifier == 11:
+            raise SystemExit("controlled source proof failure")
+        return None, "authenticated-source-blob"
+    def ancestry(helper, repo, observed, anchor, label):
+        assert helper is authority and repo == repository and anchor == subject
+        assert observed == original[observed["id"]], "row snapshot changed after admission"
+        note("raw")
+        return dict(base=old, head=subject)
+    def compare(evidence, base, head):
+        assert evidence == dict(base=old, head=subject) and (base, head) == (old, subject)
+        note("compare")
+        if failure == "C-compare" and current.identifier == 11:
+            raise SystemExit("controlled ancestry proof failure")
+    def unmaterialized(**evidence):
+        note("proof")
+        identifier = evidence["expected_run_id"]
+        assert identifier == current.identifier and evidence["run"] == original[identifier]
+        assert evidence["repository"] == repository and evidence["current_master"] == subject
+        assert evidence["minimum_age_seconds"] == 600
+        assert evidence["require_disabled_workflow"] is False
+        assert evidence["expected_workflow_id"] == 10 and evidence["expected_path"] == path
+        if failure == "U-proof" and identifier == 21:
+            raise SystemExit("controlled unmaterialized proof failure")
+    authority = SimpleNamespace(
+        UNMATERIALIZED_WORKFLOWS={path: {}},
+        validate_historical_unmaterialized_workflow=historical,
+        validate_strict_ancestor_compare=compare,
+        validate_unmaterialized_run_evidence=unmaterialized,
+    )
+    def load(module):
+        assert module is authority
+        loads.append((threading.current_thread(), m.history_worker_context()))
+        if failure == "init":
+            raise ImportError("controlled serial initialization failure")
+    specification = SimpleNamespace(loader=SimpleNamespace(exec_module=load))
+    def policy(arguments, **kwargs):
+        if arguments[:2] == ["git", "show"]:
+            return subprocess.CompletedProcess(arguments, 0, stdout="source-bound-policy")
+        assert arguments == ["bash", "-s", "--", "workflows"]
+        return subprocess.CompletedProcess(arguments, 0, stdout=workflow + "\n")
+    native = pool = None
+    with contextlib.ExitStack() as scope:
+        scope.enter_context(patch.object(m, "gh_api", side_effect=api))
+        scope.enter_context(patch.object(m, "native_api_batch", side_effect=batch))
+        scope.enter_context(patch.object(m, "held_raw_ancestry", side_effect=ancestry))
+        scope.enter_context(patch.object(m.subprocess, "run", side_effect=policy))
+        scope.enter_context(patch.object(m.importlib.util, "spec_from_file_location",
+                                        return_value=specification))
+        scope.enter_context(patch.object(m.importlib.util, "module_from_spec",
+                                        return_value=authority))
+        scope.enter_context(contextlib.redirect_stderr(io.StringIO()))
+        if pooled:
+            token = m.BYTE_CONTEXT.set(m.ImmutableBindingBytes({"fixture": "history-phases"}))
+            scope.callback(m.BYTE_CONTEXT.reset, token)
+            token = m.BINDING_CONTEXT.set("phase-fixture")
+            scope.callback(m.BINDING_CONTEXT.reset, token)
+            native = scope.enter_context(m.NativeReadCommand(1))
+            pool = scope.enter_context(m.HistoryProofCommand(native))
+        try:
+            result = m.held_handoff_history(repository, held, subject)
+        except SystemExit:
+            assert failure is not None
+        else:
+            assert failure is None and result["workflow_counts"] == {workflow: len(rows)}
+        if pool is not None:
+            assert pool.active == 0 and not pool.pending and native.active == 0
+    if failure == "guard":
+        assert loads == [] and trace == {}
+        return
+    assert len(loads) == 1 and loads[0] == (threading.current_thread(), None)
+    if failure == "init":
+        assert trace == {}
+        return
+    cancelled_order = [
+        "run", "attempt", "workflow", "jobs", "pending", "approvals", "artifacts",
+        "source", "source-proof", "raw", "compare",
+    ]
+    unmaterialized_order = [
+        "run", "workflow", "jobs", "pending", "approvals", "artifacts",
+        "source", "raw", "proof", "run",
+    ]
+    if failure in {"C-source", "C-compare"}:
+        expected = cancelled_order[:9] if failure == "C-source" else cancelled_order
+        assert trace[11] == expected and modes[11] == {"pooled"}
+    elif failure == "U-proof":
+        assert trace[21] == unmaterialized_order[:-1] and modes[21] == {"pooled"}
+    else:
+        assert all(trace[i] == cancelled_order * 2 for i in range(10, 17))
+        assert all(trace[i] == unmaterialized_order for i in range(20, 27))
+        assert modes[10] == {"inline"}
+        if pooled:
+            assert all(modes[i] == {"pooled"} for i in range(11, 15))
+            assert modes[15] == {"inline"}
+        else:
+            assert all(value == {"inline"} for value in modes.values())
+
+check(False)
+for failure in (None, "guard", "init", "C-source", "C-compare", "U-proof"):
+    check(True, failure)
+assert m.NATIVE_CONTEXT.get() is None and m.BYTE_CONTEXT.get() is None
+assert m.BINDING_CONTEXT.get() is None
+print("history_complete_proof_phases=PASS")
+PY
+ok "actual C/U history proofs preserve serial initialization, snapshots, phase barriers and short circuits"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import argparse, concurrent.futures, contextlib, fcntl, importlib.util, io, json
 import os, signal, subprocess, sys, threading, time
 from pathlib import Path
@@ -193,7 +762,7 @@ try:
         sys.stderr.write("synthetic native failure")
         raise SystemExit(1)
     if kind == "binary":
-        if worker == "run_0" and attempt == 1 and mode == "retry":
+        if worker == "run_0" and attempt == 1 and mode in {"retry", "history-retry"}:
             sys.stderr.write("gh: HTTP 502\n")
             raise SystemExit(1)
         sys.stdout.buffer.write(b"native-binary")
@@ -293,6 +862,71 @@ with patch.dict(os.environ, environment):
             assert set(observed["kinds"]) == {"json", "pages", "binary"}
             assert observed["calls"]["repos/example/repo/actions/artifacts/100/zip"] == 2
         print(f"native_child_caps bindings={count} global={cap} per_worker=4 status=PASS")
+
+    for count in (1, 4):
+        cap, modes = min(16, 4 * count), set()
+        reset(cap, "history-retry")
+        def read_history_binding(*values):
+            native = m.NATIVE_CONTEXT.get()
+            binding = values[1]["input"]
+            assert native.limit == cap
+            def proof(index):
+                work = m.history_worker_context()
+                modes.add("pooled" if work is not None else "binding" if index == 0 else "inline")
+                assert m.NATIVE_CONTEXT.get() is native
+                assert m.BINDING_CONTEXT.get() == binding and m.BYTE_CONTEXT.get() is not None
+                task = int(binding[4:]) * 10 + index
+                requests = [(f"native/run_{task}/{leaf}", leaf % 2 == 1) for leaf in range(5)]
+                m.native_api_batch(requests)
+                assert m.download_api_bytes(
+                    f"repos/example/repo/actions/artifacts/{100 + task}/zip",
+                ) == b"native-binary"
+                with native.history_proofs.lock:
+                    assert native.history_proofs.active <= 4
+            with m.HistoryProofCollection(native.history_proofs) as rows:
+                for index in range(7):
+                    rows.before_row()
+                    rows.run(proof, index, offload=index != 0)
+            return dict(artifactName="history-native-fixture")
+        with patch.object(m, "validate_binding", side_effect=read_history_binding), \
+                patch.object(m, "time", wraps=m.time) as clock, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            clock.sleep.return_value = None
+            m.command_validate_all(arguments(count))
+        observed = state()
+        assert modes == {"binding", "pooled", "inline"}, modes
+        assert observed["peak"] == cap and not observed["active"], observed
+        assert max(observed["per_worker"].values()) <= 4
+        assert set(observed["kinds"]) == {"json", "pages", "binary"}
+        assert observed["calls"]["repos/example/repo/actions/artifacts/100/zip"] == 2
+        gone(observed["pids"])
+        print(f"history_native_caps bindings={count} global={cap} all_execution_modes=PASS")
+
+    for endpoint, expected in (
+        ("hang", subprocess.TimeoutExpired), ("bad-stderr", UnicodeDecodeError),
+    ):
+        reset()
+        contexts = []
+        def failed_history_binding(*values):
+            native = m.NATIVE_CONTEXT.get()
+            contexts.append(native)
+            with m.HistoryProofCollection(native.history_proofs) as rows:
+                rows.before_row()
+                rows.run(lambda: m._native_run(
+                    ["gh", "api", "native/run_0/" + endpoint],
+                    text=True, timeout=.1 if endpoint == "hang" else None,
+                ))
+            raise AssertionError("failed native proof accepted")
+        try:
+            with patch.object(m, "validate_binding", side_effect=failed_history_binding), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                m.command_validate_all(arguments(1))
+        except expected:
+            pass
+        else:
+            raise AssertionError("pooled timeout or strict decoding accepted")
+        assert contexts[0].active == 0 and contexts[0].history_proofs is None
+        gone(state()["pids"])
 
     reset()
     with m.NativeReadCommand(1) as native:
@@ -414,15 +1048,38 @@ with patch.dict(os.environ, environment):
     gone(state()["pids"])
 
     driver = r'''
-import argparse, importlib.util, json, sys
+import argparse, contextlib, importlib.util, json, sys, threading
+from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("native_signal_driver", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+mode = sys.argv[2]
 bindings = [dict(input=f"run_{i}", workflow="test.yml",
                 titleTemplates={"workflow_dispatch": "test {subject_sha}"},
-                artifactTemplate="test-{subject_sha}-{run_id}") for i in range(4)]
+                artifactTemplate="test-{subject_sha}-{run_id}")
+            for i in range(4 if mode == "binding" else 1)]
 def read(*values):
-    m.native_api_batch([(f"native/{values[1]['input']}/hang-{i}", False) for i in range(4)])
+    if mode == "binding":
+        m.native_api_batch([(f"native/{values[1]['input']}/hang-{i}", False) for i in range(4)])
+    else:
+        native, starts = m.NATIVE_CONTEXT.get(), [0]
+        original_start = threading.Thread.start
+        def fail_second(thread):
+            if thread.name.startswith("held-history-proof"):
+                starts[0] += 1
+                if starts[0] == 2:
+                    raise RuntimeError("signal during ambiguous submission")
+            return original_start(thread)
+        scope = (
+            patch.object(threading.Thread, "start", new=fail_second)
+            if mode == "history-poison" else contextlib.nullcontext()
+        )
+        with scope, m.HistoryProofCollection(native.history_proofs) as rows:
+            for index in range(2 if mode == "history-poison" else 4):
+                rows.before_row()
+                rows.run(m.native_api_batch, [
+                    (f"native/run_{index}/hang-{leaf}", False) for leaf in range(4)
+                ])
     return dict(artifactName="unexpected")
 m.validate_binding = read
 m.command_validate_all(argparse.Namespace(
@@ -432,15 +1089,19 @@ m.command_validate_all(argparse.Namespace(
     runtime_mode="", successor_run_id="", result_json="", baseline_dir="", held_history_file="",
 ))
 '''
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        reset(16)
+    for mode, signum in (
+        (mode, signum) for mode in ("binding", "history", "history-poison")
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    ):
+        target = 16 if mode == "binding" else 4
+        reset(target)
         process = subprocess.Popen(
-            [sys.executable, "-I", "-B", "-c", driver, sys.argv[1]],
+            [sys.executable, "-I", "-B", "-c", driver, sys.argv[1], mode],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         )
         try:
             deadline = time.monotonic() + 15
-            while len(state()["pids"]) != 16:
+            while len(state()["pids"]) != target:
                 assert process.poll() is None, process.communicate()
                 assert time.monotonic() < deadline, "signal fixture did not admit children"
                 time.sleep(.01)

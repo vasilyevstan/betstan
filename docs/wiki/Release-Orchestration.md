@@ -631,23 +631,37 @@ rehashes bytes, and repeats parsing and validation. Current source,
 workflow/policy identity and state, run status/attempt, complete artifact
 inventory, ownership and expiry, authority state, pending gates, exclusivity
 and receiver absence remain fresh at every authority boundary. After serial
-input checks, the unchanged `min(4, binding_count)` binding workers each allow
-at most four active authentic native `gh` read children. One enforced
-process-wide `min(16, 4 * binding_count)` budget covers JSON, paginated and binary
-reads, including every retry attempt. Only independent workflow-history
-enumerations and existing one-run state leaves may overlap within a collection;
-row qualification and recursive history remain serial. Opening identities
-precede leaves, closing rereads follow their completion and validation, and the
-full first observation finishes before the second starts. Known failure stops
-new admission; owned children are cancelled as needed, drained and reaped before
-permit release or failure propagation. Main-thread interruption cancels children
-before joining the binding pool. All results are joined before complete-map
-chronology, dependency checks or acceptance. No additional thread or executor
-pool, native-response coalescing or caching, transport or credential change is
-introduced. The three approval revalidations remain sequential in the existing
-private workspace. Native freshness, current-clock, ownership, compare-and-swap,
-fence, data and baseline safeguards are unchanged. The resource cap proves no
-speedup, timing bound or operational readiness; stage values remain unchanged.
+input checks, binding coordinators remain `min(4, original_binding_count)`.
+Each authentic native `gh` read window allows at most four children under one
+shared `min(16, 4 * original_binding_count)` budget across JSON, paginated and
+binary reads, including every retry attempt. Existing independent workflow-history
+and one-run state batching is preserved. One command-global four-worker executor
+owns at most four reserved, queued or running offloads in total, only for
+nonrecursive cancelled/unstarted and unmaterialized row proofs. Unavailable
+nonblocking admission uses the same complete proof inline in its binding
+coordinator. Helper initialization stays serial and lazy; proofs receive fixed,
+explicit inputs and contexts. Recursive, dependency and owner qualifications
+retain serial collection barriers. Unmaterialized proofs keep opening checks,
+required leaves/history/raw validation and pure proof before closing rereads,
+with no extra reads after failure. Cancelled proofs complete the full first
+observation, including proof, before the fresh second observation and equality
+comparison. Proof workers cannot enumerate workflow history, recurse, submit
+or await futures. An atomic collection failure latch stops new row admission;
+all admitted work joins on every path, preserving the earliest original-row-order
+failure without ordinary row errors cancelling other bindings.
+Ownership precedes submission: ambiguity retains its reservation and original
+failure and disables offloads without cancelling other bindings' full inline
+proofs; all acknowledged work must finish naturally, awaited outside all locks,
+before shutdown may discard unstarted ambiguous work, followed by verified
+cleanup or atomic late-entry-safe retirement and exactly-once release.
+Main-thread interruption requests cancellation before pool joins; all native
+children are drained and reaped, with permits restored before exit. All binding
+results join before complete-map chronology, dependency checks or acceptance.
+The three approval revalidations remain sequential fresh processes with private
+immutable-byte reuse only. Native-response coalescing or caching, transport,
+credentials, freshness, current-clock, ownership, compare-and-swap, fence, data
+and baseline safeguards are unchanged. Resource caps prove no speedup, timing
+bound or operational readiness; stage values remain unchanged.
 This adds no persistent cache, workflow, schema or bypass.
 
 Older nonterminal records remain counted and untouched. Only records last
