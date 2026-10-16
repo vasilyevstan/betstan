@@ -8888,7 +8888,9 @@ def complete_native(run, values, minute):
         raw = bundle.read("0_rollout.txt")
     renewal = next(step for step in steps if step["name"] == "Restore runtime or verify final deploy handoff")
     renewed = dt.datetime.fromisoformat(renewal["started_at"])
-    deadline = int(renewed.timestamp()) + 1800
+    lease_seconds = (complete_reader.HANDOFF_V4_LEASE_SECONDS
+                     if values.get("held_handoff_run_id", "0") not in {"", "0"} else 1800)
+    deadline = int(renewed.timestamp()) + lease_seconds
     generation = 12 if run == 155 else 14
     for message in (
         "live_data_maintenance=verify-held status=PASS http_mutation_fence=true writers_quiesced=true",
@@ -8954,6 +8956,7 @@ held_binding = next(item for item in held_policy["upstreamRunBindings"]
 with patch.object(complete_reader, "held_handoff_authority") as private_authority:
     held155 = complete_reader.validate_binding(
         repo, held_binding, native_source, "155", continuation, "oke", successor_run_id="156")
+    assert held155["resume"]["held_handoff_lease_seconds"] == "1800"
     assert held155["resume"]["applied_data_run_id"] == "42"
     assert held155["resume"]["baseline_capture_run_id"] == "53"
     failed_binding = next(item for item in held_policy["upstreamRunBindings"]
@@ -9154,10 +9157,11 @@ else:
             except SystemExit:
                 pass
             else:
-                raise AssertionError(f"completed v3 lineage relabelled its capture/controller as the root: {key}")
+                raise AssertionError(f"completed v4 lineage relabelled its capture/controller as the root: {key}")
         log156.write_bytes(original_log156)
     held156 = complete_reader.validate_binding(repo, held_binding, native_source, "156",
         dict(continuation, held_handoff_run_id="156"), "oke")
+    assert held156["resume"]["held_handoff_lease_seconds"] == "3600"
     assert held156["baselineFiles"] == held155["baselineFiles"]
     assert held156["resume"]["applied_data_run_id"] == "42"
     assert private_authority.call_count >= 3
@@ -9195,9 +9199,17 @@ else:
         display_title=f"oci-infrastructure finalize oke {native_source}", status="in_progress",
         created_at=(dt.datetime.fromisoformat(cutoff156) - dt.timedelta(seconds=1)).isoformat())
     for boundary in ("materialization", "approval-1", "approval-2", "approval-3", "native-validation"):
-        receiver["status"] = "in_progress" if boundary == "native-validation" else "waiting"
+        executing = boundary == "native-validation"
+        receiver["status"] = "in_progress" if executing else "waiting"
         receiver_job.update(status=receiver["status"],
-                            started_at=receiver_started.isoformat() if boundary == "native-validation" else None)
+            started_at=receiver_started.isoformat() if executing else None,
+            steps=[
+                dict(name="Validate exact SHA and trusted upstream runs", number=1,
+                     status="in_progress" if executing else "queued", conclusion=None,
+                     started_at=receiver_started.isoformat() if executing else None, completed_at=None),
+                dict(name="Verify transferred database lock and maintenance fence", number=2,
+                     status="queued", conclusion=None, started_at=None, completed_at=None),
+            ])
         receiver_workflow["state"] = "active" if boundary == "materialization" else "disabled_manually"
         write(f"{prefix}/actions/workflows/oci-production-deploy.yml", receiver_workflow)
         write(receiver_inventory, inventory)
@@ -9212,6 +9224,7 @@ else:
             timing = complete_reader.validate_receiver_handoff_timing(
                 repo, "156", native_source, boundary, "157")
             assert timing["boundary"] == boundary and timing["generation"] == 14
+            assert timing["profile"] == "live-betting-data-resume-v4" and timing["lease_seconds"] == 3600
             for endpoint in unchanged_inventories:
                 rows = read(endpoint)
                 rows["workflow_runs"].append(competitor); rows["total_count"] += 1
@@ -9239,7 +9252,7 @@ else:
         updated_at=(receiver_created + dt.timedelta(hours=1, minutes=1)).isoformat()))
     inventory["total_count"] += 1; write(receiver_inventory, inventory)
     assert complete_reader.validate_pre_runtime_resume_chain(repo, "156", "oke") == ("42", root_source)
-    print("PASS receiver-present complete-v6 -> v3 ordinary binding and authentic timing at materialization/three approvals/native; competing held-interval operation rejects; later deployments preserve immutable lineage")
+    print("PASS receiver-present complete-v6 -> v4 ordinary binding and authentic timing at materialization/three approvals/native; competing held-interval operation rejects; later deployments preserve immutable lineage")
     with contextlib.redirect_stderr(io.StringIO()):
         try:
             complete_reader.validate_failed_deploy_jobs(
@@ -9263,7 +9276,7 @@ for item in pathlib.Path(fixtures).iterdir():
         item.unlink()
 for item, raw in fixture_snapshot.items():
     item.write_bytes(raw)
-print("PASS real complete-v6 native producer -> expired-no-takeover held policy binding -> v3 recursive/current reader preserves capture53/root42 without retained-profile relabelling")
+print("PASS real complete-v6 native producer -> expired-no-takeover held policy binding -> v4 recursive/current reader preserves capture53/root42 without retained-profile relabelling")
 
 def install_consumer(evidence, baseline, run, source=control_source):
     shutil.rmtree(consumer_dir / "artifacts/data")
