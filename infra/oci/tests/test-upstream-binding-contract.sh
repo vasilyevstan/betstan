@@ -476,7 +476,8 @@ historical_jobs = [{
     "name": "rollout", "status": "completed", "conclusion": "success",
     "created_at": "2026-10-07T06:00:03Z", "started_at": "2026-10-07T06:00:04Z",
     "completed_at": "2026-10-07T06:00:59Z",
-    "steps": [{"name": "Complete historical operation", "status": "completed", "conclusion": "success"}],
+    "steps": [{"name": "Complete historical operation", "status": "completed", "conclusion": "success",
+               "started_at": "2026-10-07T06:00:05Z", "completed_at": "2026-10-07T06:00:58Z"}],
 }]
 historical_inventory = {"total_count": 1, "jobs": historical_jobs}
 historical_pending = []
@@ -563,19 +564,31 @@ with patch.dict(os.environ, {"COPILOT_CLI_AUTHORITY_DIR": str(directory), "GITHU
     historical_first["updated_at"] = "2026-10-07T06:01:01Z"; reject()
     historical_first["updated_at"] = historical_run["updated_at"]
     original_job = copy.deepcopy(historical_jobs[0])
+    historical_jobs[0].pop("id"); reject(); historical_jobs[0]["id"] = original_job["id"]
     for field, bad in (
+        ("id", 0), ("id", True), ("id", None),
         ("run_id", 81), ("run_attempt", 2), ("head_sha", new), ("head_branch", "dev"),
         ("status", "in_progress"), ("conclusion", None),
         ("created_at", None), ("completed_at", None), ("completed_at", held["created_at"]),
         ("started_at", None), ("started_at", "2026-10-07T06:01:01Z"),
+        ("steps", {}), ("steps", None), ("steps", "unknown"), ("steps", [None]),
+        ("steps", [dict(original_job["steps"][0], completed_at=held["created_at"])]),
+        ("steps", [dict(original_job["steps"][0], started_at="2026-10-07T06:00:02Z")]),
+        ("steps", [dict(original_job["steps"][0], completed_at=None)]),
         ("steps", [{"name": "still running", "status": "in_progress", "conclusion": None}]),
     ):
         historical_jobs[0][field] = bad; reject()
         historical_jobs[0].clear(); historical_jobs[0].update(copy.deepcopy(original_job))
+    historical_jobs.append(copy.deepcopy(original_job)); historical_inventory["total_count"] = 2
+    reject(); historical_jobs.pop(); historical_inventory["total_count"] = 1
     historical_inventory["total_count"] = 2; reject(); historical_inventory["total_count"] = 1
     historical_pending.append({"environment": {"name": "oci-migration"}}); reject(); historical_pending.clear()
     historical_reads = 0; historical_drift = True; reject(); historical_drift = False
     historical_jobs[0].update(conclusion="skipped", started_at=None, steps=[])
+    read()
+    historical_jobs[0].clear(); historical_jobs[0].update(copy.deepcopy(original_job))
+    historical_jobs[0]["steps"] = [dict(original_job["steps"][0], conclusion="skipped",
+                                      started_at=None, completed_at=None)]
     read()
     historical_jobs[0].clear(); historical_jobs[0].update(copy.deepcopy(original_job))
     intent = directory / ("request-" + "b" * 64 + ".json")
@@ -7229,6 +7242,7 @@ def complete_native(run, values, minute):
     steps[-1]["number"] = steps[-2]["number"] + 1
     ended = began + dt.timedelta(seconds=len(names) * 2)
     metadata = dict(read(f"{prefix}/actions/runs/55"), id=run, head_sha=native_source,
+        html_url=f"https://github.com/{repo}/actions/runs/{run}",
         display_title=f"oci-live-data apply-slip-index {native_source}", status="completed",
         conclusion="success", created_at=(began - dt.timedelta(seconds=60)).isoformat(),
         run_started_at=began.isoformat(), updated_at=(ended + dt.timedelta(seconds=2)).isoformat())
@@ -7313,6 +7327,13 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
         repo, held_binding, native_source, "155", continuation, "oke", successor_run_id="156")
     assert held155["resume"]["applied_data_run_id"] == "42"
     assert held155["resume"]["baseline_capture_run_id"] == "53"
+    failed_binding = next(item for item in held_policy["upstreamRunBindings"]
+                          if item["input"] == "failed_deploy_run_id")
+    failed_root = complete_reader.validate_binding(
+        repo, failed_binding, native_source, "54", continuation, "oke", successor_run_id="156")
+    assert failed_root["baselineFiles"] == held155["baselineFiles"]
+    assert failed_root["resume"]["baseline_capture_run_id"] == "53"
+    assert failed_root["resume"]["applied_data_run_id"] == "42"
     held_writer = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
                        if step.get("name") == "Verify exact failed-deploy resume state")
     held_writer = held_writer[held_writer.index("mkdir -p artifacts/oci-live-data-rollout/evidence"):]
@@ -7343,6 +7364,23 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
     complete156 = produce(156, native_source, native_authority)
     complete_package(156, complete156, metadata156)
     assert complete_reader.validate_pre_runtime_resume_chain(repo, "156", "oke") == ("42", root_source)
+    captured156 = complete_reader.validate_pre_runtime_resume_chain(repo, "156", "oke", include_capture=True)
+    assert captured156["baseline_capture_run_id"] == "53"
+    assert captured156["applied_data_run_id"] == "42" and captured156["applied_source_sha"] == root_source
+    for key in ("baseline_capture_source_sha", "baseline_capture_deploy_run_id", "baseline_sha256"):
+        assert captured156[key] == held155["resume"][key]
+    log156 = path(f"{prefix}/actions/runs/156/attempts/1/logs")
+    original_log156 = log156.read_bytes()
+    for key, bad in (("prerequisite_run_id", "42"), ("resume_source_sha", root_source)):
+        native(156, "rollout", dict(continuation, **{key: bad}), cutoff156.replace("+00:00", "Z"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                complete_reader.validate_pre_runtime_resume_chain(repo, "156", "oke")
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(f"completed v3 lineage relabelled its capture/controller as the root: {key}")
+        log156.write_bytes(original_log156)
     held156 = complete_reader.validate_binding(repo, held_binding, native_source, "156",
         dict(continuation, held_handoff_run_id="156"), "oke")
     assert held156["baselineFiles"] == held155["baselineFiles"]
@@ -7361,12 +7399,14 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
     receiver_started = receiver_created + dt.timedelta(seconds=1)
     receiver = dict(metadata156, id=157, workflow_id=read(
         f"{prefix}/actions/workflows/oci-production-deploy.yml")["id"],
+        html_url=f"https://github.com/{repo}/actions/runs/157",
         path=".github/workflows/oci-production-deploy.yml", display_title=f"oci-deploy {native_source}",
         status="waiting", conclusion=None, created_at=receiver_created.isoformat(),
         run_started_at=receiver_created.isoformat(), updated_at=receiver_created.isoformat())
     receiver_job = dict(id=15700, run_id=157, name="deploy", status="in_progress", conclusion=None,
         started_at=receiver_started.isoformat(), steps=[])
-    receiver_workflow = read(f"{prefix}/actions/workflows/oci-production-deploy.yml")
+    receiver_workflow = dict(read(f"{prefix}/actions/workflows/oci-production-deploy.yml"),
+                             path=".github/workflows/oci-production-deploy.yml")
     receiver_inventory = f"{prefix}/actions/workflows/oci-production-deploy.yml/runs?per_page=100"
     inventory = read(receiver_inventory)
     inventory["workflow_runs"].append(receiver); inventory["total_count"] += 1
@@ -7381,8 +7421,11 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
         created_at=(dt.datetime.fromisoformat(cutoff156) - dt.timedelta(seconds=1)).isoformat())
     for boundary in ("materialization", "approval-1", "approval-2", "approval-3", "native-validation"):
         receiver["status"] = "in_progress" if boundary == "native-validation" else "waiting"
+        receiver_job.update(status=receiver["status"],
+                            started_at=receiver_started.isoformat() if boundary == "native-validation" else None)
         receiver_workflow["state"] = "active" if boundary == "materialization" else "disabled_manually"
         write(f"{prefix}/actions/workflows/oci-production-deploy.yml", receiver_workflow)
+        write(receiver_inventory, inventory)
         for suffix in ("", "/attempts/1"):
             write(f"{prefix}/actions/runs/157{suffix}", receiver)
         write(f"{prefix}/actions/runs/157/attempts/1/jobs?per_page=100",

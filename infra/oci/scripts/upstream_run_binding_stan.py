@@ -3310,14 +3310,20 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
             if any(type(latest[key]) is not type(first[key]) or latest[key] != first[key] for key in keys):
                 fail(f"{label} historical issued first-attempt observations disagree")
             jobs = jobs_for_run(repository, str(record["runId"]), label)
+            job_ids = set()
             for job in jobs:
                 if (
-                    type(job.get("run_id")) is not int or job["run_id"] != record["runId"]
+                    type(job.get("id")) is not int or job["id"] < 1 or job["id"] in job_ids
+                    or type(job.get("run_id")) is not int or job["run_id"] != record["runId"]
                     or type(job.get("run_attempt")) is not int or job["run_attempt"] != 1
                     or job.get("head_sha") != source or job.get("head_branch") != "master"
                     or job.get("status") != "completed" or job.get("conclusion") not in terminal
                 ):
                     fail(f"{label} historical issued job is not an exact terminal first attempt")
+                job_ids.add(job["id"])
+                steps = job.get("steps")
+                if not isinstance(steps, list) or any(not isinstance(step, dict) for step in steps):
+                    fail(f"{label} historical issued job step inventory is malformed")
                 job_created = parse_timestamp(job.get("created_at"), label)
                 job_ended = parse_timestamp(job.get("completed_at"), label)
                 if not created <= job_created <= job_ended <= ended or not job_ended < cutoff:
@@ -3327,9 +3333,21 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
                         fail(f"{label} historical issued job has ambiguous execution evidence")
                 elif not job_created <= parse_timestamp(job["started_at"], label) <= job_ended:
                     fail(f"{label} historical issued job chronology is inconsistent")
-                if any(step.get("status") != "completed" or step.get("conclusion") not in terminal
-                       for step in job["steps"]):
-                    fail(f"{label} historical issued job retains nonterminal or unknown steps")
+                for step in steps:
+                    if (
+                        step.get("status") != "completed" or step.get("conclusion") not in terminal
+                        or "started_at" not in step or "completed_at" not in step
+                    ):
+                        fail(f"{label} historical issued job retains incomplete or unknown steps")
+                    if step["started_at"] is None and step["completed_at"] is None:
+                        if step["conclusion"] not in {"cancelled", "skipped"}:
+                            fail(f"{label} historical issued executed step has no native window")
+                    elif not (
+                        parse_timestamp(job["started_at"], label)
+                        <= parse_timestamp(step["started_at"], label)
+                        <= parse_timestamp(step["completed_at"], label) <= job_ended
+                    ):
+                        fail(f"{label} historical issued step contradicts its authenticated job window")
             pending = gh_api(endpoint + "/pending_deployments")
             if pending != []:
                 fail(f"{label} historical issued run retains pending deployment authority")
@@ -4243,6 +4261,8 @@ def validate_held_handoff_artifact(
             repository, failed_run, root_source, None, dispatch_inputs, runtime_mode,
             profile, *outcomes, label, pre_runtime=True,
         )
+    if dispatch_inputs["prerequisite_run_id"] != root["baseline_capture_run_id"]:
+        fail("held handoff substituted the failed receiver's authenticated capture")
     if complete and captured_baseline != root["_baseline_files"]:
         fail("complete held handoff replaced the original protected root rollback baseline")
     checkpoint = parse_checkpoint_artifact(repository, dispatch_inputs, runtime_mode, label)
@@ -4342,8 +4362,6 @@ def validate_pre_runtime_resume_chain(
         )
         expected_request = {
             "approved_sha": evidence["source_sha"],
-            "resume_source_sha": authority["applied_source_sha"],
-            "prerequisite_run_id": authority["applied_data_run_id"],
             "failed_deploy_run_id": authority["failed_deploy_run_id"],
             "held_handoff_run_id": authority["held_handoff_run_id"],
             "held_handoff_source_sha": authority["held_handoff_source_sha"],
@@ -4354,7 +4372,11 @@ def validate_pre_runtime_resume_chain(
                 "disk_checkpoint_run_id", "baseline_recovery_run_id", "baseline_recovery_source_sha",
             )},
         }
-        if request != expected_request:
+        # The failed receiver's capture and controller can differ from the original applied root.
+        if (
+            set(request) != set(expected_request) | {"resume_source_sha", "prerequisite_run_id"}
+            or any(request[key] != value for key, value in expected_request.items())
+        ):
             fail("held-handoff successor substituted its native root or previous physical holder")
         result = validate_held_handoff_artifact(
             repository, authority["held_handoff_run_id"], authority["held_handoff_source_sha"],
@@ -4386,7 +4408,10 @@ def validate_pre_runtime_resume_chain(
         return (
             {"applied_data_run_id": authority["applied_data_run_id"],
              "applied_source_sha": authority["applied_source_sha"],
-             "baseline_capture_run_id": authority["applied_data_run_id"]}
+             "baseline_capture_run_id": result["resume"]["baseline_capture_run_id"],
+             **{key: result["resume"][key] for key in (
+                 "baseline_capture_source_sha", "baseline_capture_deploy_run_id", "baseline_sha256",
+             ) if key in result["resume"]}}
             if include_capture else (
                 authority["applied_data_run_id"], authority["applied_source_sha"],
             )
@@ -7138,6 +7163,21 @@ def validate_binding(
             runtime_mode, binding["input"], successor_run_id=successor_run_id,
         )
     if profile == "oci-failed-deploy-retained-hold-v1":
+        if dispatch_inputs.get("confirmation") == HELD_HANDOFF_CONFIRMATION:
+            if dispatch_inputs.get("failed_deploy_run_id") != run_id:
+                fail(f"{binding['input']} held continuation substituted its failed receiver")
+            held_result = validate_held_handoff_artifact(
+                repository, require_dispatch_run(dispatch_inputs, "held_handoff_run_id"),
+                require_dispatch_sha(dispatch_inputs, "held_handoff_source_sha"),
+                subject_sha, dispatch_inputs, runtime_mode, binding["input"],
+                successor_run_id=successor_run_id,
+            )
+            return {
+                "baselineFiles": held_result["baselineFiles"],
+                "artifactName": held_result["resume"]["baseline_artifact_name"],
+                "createdAt": base.get("created_at"), "completedAt": base.get("updated_at"),
+                "resume": held_result["resume"],
+            }
         result = validate_expired_handoff_resume(
             repository, run_id, expected_head_sha, dispatch_inputs, runtime_mode,
             binding["input"], successor_run_id=successor_run_id,
