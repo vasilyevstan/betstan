@@ -2634,6 +2634,56 @@ def held_source_bytes(repository, source_sha, path, label):
         fail(f"{label} executed source is not UTF-8")
 
 
+def held_raw_ancestry(authority, repository, row, subject_sha, label):
+    try:
+        carrier = authority.RawCommitAncestry
+        helper_digest = hashlib.sha256(Path(authority.__file__).read_bytes()).hexdigest()
+        reader_digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except (AttributeError, OSError):
+        fail(f"{label} raw ancestry shared source validator is unavailable")
+    if not isinstance(carrier, type):
+        fail(f"{label} raw ancestry shared source validator is incompatible")
+
+    def read_git(arguments, source=subprocess.DEVNULL):
+        with subprocess.Popen(
+            ["git", "--no-replace-objects", *arguments],
+            stdin=source, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        ) as process:
+            raw = process.stdout.read(MAX_ARTIFACT_ARCHIVE_BYTES + 1)
+            if len(raw) > MAX_ARTIFACT_ARCHIVE_BYTES:
+                process.kill()
+                process.wait()
+                fail(f"{label} raw ancestry exceeds the bounded byte ceiling")
+            if process.wait():
+                fail(f"{label} raw ancestry Git source is unavailable")
+            return raw
+
+    def load():
+        try:
+            if read_git(["rev-parse", "--is-shallow-repository"]).strip() != b"false":
+                fail(f"{label} raw ancestry requires complete Git history")
+            commits = read_git(["rev-list", subject_sha])
+            with tempfile.TemporaryFile() as source:
+                source.write(commits)
+                source.seek(0)
+                return read_git(["cat-file", "--batch"], source)
+        except OSError:
+            fail(f"{label} raw ancestry Git source is unavailable")
+
+    cache = BYTE_CONTEXT.get()
+    if cache is None:
+        raw = load()
+    else:
+        raw = cache.read(
+            (
+                "raw-commit-closure", repository, str(row["id"]), row["run_attempt"],
+                row["head_sha"], subject_sha, reader_digest, helper_digest,
+            ),
+            load,
+        )
+    return carrier(row["head_sha"], subject_sha, raw)
+
+
 def current_held_source(repository, source_sha, label, *, native_sources=None):
     commit = gh_api(f"repos/{repository}/git/commits/{source_sha}")
     local = subprocess.run(
@@ -3571,32 +3621,7 @@ def held_handoff_history(
                 fail(f"{label} historical workflow is not the guarded source profile")
             compare = None
             if row["head_sha"] != subject_sha:
-                pages = gh_api_pages(
-                    f"repos/{repository}/compare/{row['head_sha']}...{subject_sha}?per_page=100"
-                )
-                metadata, commits = None, []
-                keys = ("status", "ahead_by", "behind_by", "total_commits",
-                        "base_commit", "merge_base_commit")
-                for page in pages:
-                    if (
-                        not isinstance(page, dict) or any(key not in page for key in keys)
-                        or not isinstance(page.get("commits"), list) or not page["commits"]
-                    ):
-                        fail(f"{label} ancestry pagination is malformed")
-                    current = {key: page[key] for key in keys[:4]}
-                    for key in keys[4:]:
-                        if not isinstance(page[key], dict):
-                            fail(f"{label} ancestry pagination is malformed")
-                        current[key] = {"sha": page[key].get("sha")}
-                    if metadata is None:
-                        metadata = current
-                    elif any(type(current[key]) is not type(metadata[key])
-                             or current[key] != metadata[key] for key in keys):
-                        fail(f"{label} ancestry pagination changed")
-                    commits.extend(page["commits"])
-                if metadata is None:
-                    fail(f"{label} ancestry pagination is empty")
-                compare = {**metadata, "commits": commits}
+                compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
                 try:
                     authority.validate_strict_ancestor_compare(compare, row["head_sha"], subject_sha)
                 except (AttributeError, SystemExit):
@@ -3837,36 +3862,7 @@ def held_handoff_history(
                 historical = gh_api(
                     f"repos/{repository}/contents/{row['path']}?ref={row['head_sha']}"
                 )
-                compare_pages = gh_api_pages(
-                    f"repos/{repository}/compare/{row['head_sha']}...{subject_sha}?per_page=100"
-                )
-                compare_metadata, commits = None, []
-                compare_keys = (
-                    "status", "ahead_by", "behind_by", "total_commits",
-                    "base_commit", "merge_base_commit",
-                )
-                for page in compare_pages:
-                    if (
-                        not isinstance(page, dict)
-                        or any(key not in page for key in compare_keys)
-                        or not isinstance(page.get("commits"), list) or not page["commits"]
-                    ):
-                        fail(f"{label} ancestry pagination is malformed")
-                    metadata = {key: page[key] for key in compare_keys[:4]}
-                    for key in compare_keys[4:]:
-                        if not isinstance(page[key], dict):
-                            fail(f"{label} ancestry pagination is malformed")
-                        metadata[key] = {"sha": page[key].get("sha")}
-                    if compare_metadata is None:
-                        compare_metadata = metadata
-                    elif any(
-                        type(metadata[key]) is not type(compare_metadata[key])
-                        or metadata[key] != compare_metadata[key] for key in compare_keys
-                    ):
-                        fail(f"{label} ancestry pagination is inconsistent")
-                    commits.extend(page["commits"])
-                if compare_metadata is None:
-                    fail(f"{label} ancestry pagination is empty")
+                compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
                 for observed in (native, gh_api(run_endpoint)):
                     if (
                         not isinstance(observed, dict)
@@ -3882,7 +3878,7 @@ def held_handoff_history(
                     authority.validate_unmaterialized_run_evidence(
                         run=native, workflow=workflow_metadata, jobs=jobs, pending=pending,
                         approvals=approvals, artifacts=artifacts,
-                        compare={**compare_metadata, "commits": commits},
+                        compare=compare,
                         historical_workflow=historical, repository=repository,
                         current_master=subject_sha, now_epoch=int(time.time()),
                         minimum_age_seconds=600, expected_run_id=row["id"],

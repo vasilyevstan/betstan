@@ -620,12 +620,14 @@ exclusivity must be freshly established at dispatch, materialization, all three
 approval revalidations and immediately before physical transfer; only the exact
 authenticated owned successor may be excluded.
 
-Validation may reuse verified immutable artifact ZIP and exact source bytes,
-never admission verdicts or mutable observations. Across the three approval
+Validation may reuse verified immutable artifact ZIP, exact source and bounded
+raw Git commit-object bytes, never admission or ancestry verdicts or mutable
+observations. Across the three approval
 revalidations, reuse is private to that approval command's temporary workspace,
 removed on exit; dispatch and native validation remain independent. Reuse binds
-the full repository, run/attempt, artifact/digest, source/blob and validator/policy
-context, rehashes bytes, and repeats parsing and validation. Current source,
+the full repository, run/attempt, artifact/digest, source/blob, validator/policy
+and exact shared-helper identity within the existing command-owned context,
+rehashes bytes, and repeats parsing and validation. Current source,
 workflow/policy identity and state, run status/attempt, complete artifact
 inventory, ownership and expiry, authority state, pending gates, exclusivity
 and receiver absence remain fresh at every authority boundary. At most four
@@ -644,6 +646,19 @@ history-only proof may validate an active workflow; it neither enables the
 workflow nor grants dispatch, approval or current exclusivity. Current serialized
 admission and disabled-workflow safeguards remain independent and unchanged.
 
+For the cancelled and unmaterialized held-history ancestry readers, proof uses
+complete authenticated raw Git commit objects at exact endpoints authenticated
+by fresh native history checks. Git is an untrusted enumerator: replacements are
+disabled and full history is required. Every use reauthenticates object type,
+exact size and SHA-1, parses ordered parents, proves complete parent closure,
+and recomputes endpoint reachability, strict ancestry and the full
+target-minus-base set. Incomplete history, missing parents or exhausted bounds
+fail closed rather than truncate. Converted readers have no raw-to-API fallback;
+genuine legacy GitHub dictionary callers retain their unchanged validation
+branch. Reader and shared helper must ship together at the same exact source
+SHA. This changes no wire profile, schema, lease, timer, compare-and-swap,
+freshness, history or concurrency rule.
+
 A separate history-only case admits an otherwise blocking post-held terminal
 `apply-slip-index` data run only when two complete authenticated native
 collections agree without drift on non-execution. Exact repository, workflow,
@@ -660,7 +675,7 @@ other post-held transitions still block. This portable proof
 establishes only native non-execution, not request ownership, inputs or canonical
 retirement, and requires no private dispatcher authority records. It grants no
 current exclusivity, approval, adoption or lease authority. The older pre-held
-unmaterialized-run classifier remains unchanged.
+unmaterialized-run eligibility rules remain unchanged.
 
 The existing receiver-absence validator treats an older issued record only as
 read-only historical evidence, never as consumed or retired authority. This

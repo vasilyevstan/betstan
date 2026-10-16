@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -1987,7 +1988,104 @@ def validate_historical_unmaterialized_workflow(path, historical, *, blob_sha=No
     return specification, observed_blob_sha
 
 
+@dataclass(frozen=True)
+class RawCommitAncestry:
+    base: str
+    target: str
+    stream: bytes
+
+
+def validate_raw_commit_ancestry(proof, ancestor_sha, current_master):
+    if (
+        not isinstance(ancestor_sha, str) or not FULL_SHA.fullmatch(ancestor_sha)
+        or not isinstance(current_master, str) or not FULL_SHA.fullmatch(current_master)
+        or proof.base != ancestor_sha or proof.target != current_master
+        or ancestor_sha == current_master
+    ):
+        fail("raw commit ancestry endpoints do not prove a strict ancestor")
+    raw = proof.stream
+    if type(raw) is not bytes or not 0 < len(raw) <= 50 * JSON_MAX_BYTES:
+        fail("raw commit ancestry exceeds the bounded byte ceiling")
+    parents, offset = {}, 0
+    while offset < len(raw):
+        end = raw.find(b"\n", offset)
+        if end < 0:
+            fail("raw commit ancestry frame is incomplete")
+        frame = re.fullmatch(rb"([0-9a-f]{40}) commit ([1-9][0-9]*)", raw[offset:end])
+        if frame is None:
+            fail("raw commit ancestry frame is malformed")
+        sha = frame[1].decode("ascii")
+        if len(frame[2]) > len(str(len(raw))):
+            fail("raw commit ancestry object size is invalid")
+        size = int(frame[2])
+        offset = end + 1
+        if size >= len(raw) - offset or raw[offset + size:offset + size + 1] != b"\n":
+            fail("raw commit ancestry object size is invalid")
+        body = raw[offset:offset + size]
+        offset += size + 1
+        if hashlib.sha1(b"commit " + frame[2] + b"\0" + body).hexdigest() != sha:
+            fail("raw commit ancestry object hash differs")
+        if sha in parents:
+            fail("raw commit ancestry repeats an object")
+        headers, separator, _ = body.partition(b"\n\n")
+        lines = headers.split(b"\n")
+        if (
+            not separator or b"\0" in headers
+            or re.fullmatch(rb"tree [0-9a-f]{40}", lines[0]) is None
+        ):
+            fail("raw commit ancestry headers are malformed")
+        ordered, identities = [], set()
+        previous, parent_headers = b"tree", True
+        for line in lines[1:]:
+            if line.startswith(b" "):
+                if previous in {b"tree", b"parent", b"author", b"committer"}:
+                    fail("raw commit ancestry header continuation is invalid")
+                continue
+            name, space, value = line.partition(b" ")
+            if not space or not value or re.fullmatch(rb"[A-Za-z0-9-]+", name) is None:
+                fail("raw commit ancestry header is malformed")
+            if name == b"parent":
+                if not parent_headers or re.fullmatch(rb"[0-9a-f]{40}", value) is None:
+                    fail("raw commit ancestry parent header is malformed")
+                ordered.append(value.decode("ascii"))
+            else:
+                parent_headers = False
+                if name == b"tree":
+                    fail("raw commit ancestry repeats its tree header")
+                if name in {b"author", b"committer"}:
+                    if name in identities:
+                        fail("raw commit ancestry repeats an identity header")
+                    identities.add(name)
+            previous = name
+        if identities != {b"author", b"committer"}:
+            fail("raw commit ancestry lacks commit identities")
+        parents[sha] = tuple(ordered)
+
+    def reachable(start):
+        found, pending = set(), [start]
+        while pending:
+            sha = pending.pop()
+            if sha in found:
+                continue
+            if sha not in parents:
+                fail("raw commit ancestry parent closure is incomplete")
+            found.add(sha)
+            pending.extend(parents[sha])
+        return found
+
+    target_reachable = reachable(current_master)
+    if target_reachable != set(parents):
+        fail("raw commit ancestry contains unrelated objects")
+    if ancestor_sha not in target_reachable:
+        fail("raw commit ancestry base is not an ancestor")
+    base_reachable = reachable(ancestor_sha)
+    if current_master in base_reachable or not target_reachable - base_reachable:
+        fail("raw commit ancestry does not prove a strict ancestor")
+
+
 def validate_strict_ancestor_compare(compare, ancestor_sha, current_master):
+    if isinstance(compare, RawCommitAncestry):
+        return validate_raw_commit_ancestry(compare, ancestor_sha, current_master)
     if not isinstance(compare, dict):
         fail("GitHub compare evidence must be an object")
     ahead_by = require_exact_integer(compare.get("ahead_by"), "compare ahead_by")

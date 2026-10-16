@@ -565,8 +565,8 @@ jobs:
           CHECKPOINT_FILE: artifacts/disk-checkpoint/checkpoint.json
           WORK_DIR: ${{ runner.temp }}/pre-deploy-disk-checkpoint
         run: |
-          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           CONTROL_SHA="$SOURCE_SHA" \
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" \
           DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
           REVALIDATION_PROFILE=held \
@@ -764,8 +764,8 @@ jobs:
           CHECKPOINT_FILE: artifacts/disk-checkpoint/checkpoint.json
           WORK_DIR: ${{ runner.temp }}/post-deploy-disk-checkpoint
         run: |
-          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           CONTROL_SHA="$SOURCE_SHA" \
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" \
           DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
           REVALIDATION_PROFILE=held \

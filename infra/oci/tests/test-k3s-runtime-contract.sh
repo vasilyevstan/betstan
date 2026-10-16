@@ -840,6 +840,15 @@ if [[ "$1" == renew ]]; then
     "$(( $(date +%s) + LOCK_LEASE_SECONDS ))"
 fi
 SH
+cat >"$deploy_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == revalidate && "$REVALIDATION_PROFILE" == held ]]
+[[ "$SOURCE_SHA" == "$EXPECTED_CHECKPOINT_SHA" && "$CONTROL_SHA" == "$EXPECTED_CONTROL_SHA" ]]
+[[ "$GHCR_BUILD_RUN_ID" == 42 && "$DISK_CHECKPOINT_RUN_ID" == 45 ]]
+printf 'checkpoint_source_sha=%s control_source_sha=%s\n' \
+  "$SOURCE_SHA" "$CONTROL_SHA" >>"$DEPLOY_FIXTURE/checkpoint-roles.log"
+SH
 cat >"$deploy_fixture/bin/oci" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -888,7 +897,28 @@ steps = workflow.fetch("steps")
 %w[renew_lock release_lock].each do |id|
   File.write(File.join(ARGV[1], "#{id}.sh"), steps.find { |step| step["id"] == id }.fetch("run"))
 end
+[
+  "Revalidate held release disk checkpoint before lock renewal",
+  "Revalidate held release disk checkpoint after protected health"
+].each_with_index do |name, index|
+  matches = steps.select { |step| step["name"] == name }
+  abort "checkpoint revalidation step is not unique" unless matches.length == 1
+  File.write(File.join(ARGV[1], "checkpoint-#{index}.sh"), matches.fetch(0).fetch("run"))
+end
 RUBY
+for checkpoint in "$control_source" "$infrastructure_source"; do
+  for boundary in 0 1; do
+    (
+      cd "$deploy_fixture"
+      SOURCE_SHA="$control_source" EXPECTED_CONTROL_SHA="$control_source" \
+      CHECKPOINT_SOURCE_SHA="$checkpoint" EXPECTED_CHECKPOINT_SHA="$checkpoint" \
+      BUILD_RUN_ID=42 DISK_CHECKPOINT_RUN_ID=45 DEPLOY_FIXTURE="$deploy_fixture" \
+        bash "checkpoint-$boundary.sh"
+    ) || fail "checkpoint $boundary confused original checkpoint and current control sources"
+  done
+done
+[[ "$(wc -l <"$deploy_fixture/checkpoint-roles.log" | tr -d ' ')" == 4 ]] ||
+  fail "checkpoint source roles did not execute both original workflow boundaries"
 run_deploy_source_fixture() {
   local checkpoint="$1" infra="$2" instance_source="$3"
   cat >"$deploy_fixture/infrastructure.env" <<EOF

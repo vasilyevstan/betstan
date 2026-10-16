@@ -206,6 +206,206 @@ os.close(9)
 PY
 ok "immutable bytes full-context isolation, single fetch, rehash and unsafe workspace rejection"
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
+import contextlib, dataclasses, hashlib, importlib.util, io, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+
+def module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+m = module("raw_ancestry_reader", sys.argv[1])
+authority = module("raw_ancestry_authority", sys.argv[2])
+repository = Path(sys.argv[3]) / "raw-ancestry"
+repository.mkdir()
+environment = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_COUNT"):
+    environment.pop(key, None)
+
+def git(*arguments, data=None):
+    return subprocess.check_output(
+        ["git", "-C", str(repository), *arguments], input=data,
+        env=environment, stderr=subprocess.DEVNULL,
+    ).strip()
+
+git("init", "--quiet")
+tree = git("mktree", data=b"")
+identities = b"author Fixture <fixture@example.invalid> 1000 +0000\ncommitter Fixture <fixture@example.invalid> 1000 +0000\n"
+objects = {}
+def commit(parents=(), message=b"fixture", extra=b""):
+    body = (b"tree " + tree + b"\n"
+            + b"".join(b"parent " + parent.encode() + b"\n" for parent in parents)
+            + identities + extra + b"\n" + message + b"\n")
+    sha = git("hash-object", "-t", "commit", "-w", "--stdin", data=body).decode()
+    objects[sha] = body
+    return sha
+
+root = commit(message=b"root")
+left = commit((root,), b"left")
+right = commit((root,), b"right")
+signed = b"gpgsig -----BEGIN PGP SIGNATURE-----\n fixture\n \n -----END PGP SIGNATURE-----\n"
+target = commit((left, right), b"merge", signed)
+def frame(sha, body):
+    return sha.encode() + b" commit " + str(len(body)).encode() + b"\n" + body + b"\n"
+def stream(selected):
+    return b"".join(frame(sha, objects[sha]) for sha in selected)
+def verify(raw, base=root, head=target, requested_base=None, requested_head=None):
+    authority.validate_strict_ancestor_compare(
+        authority.RawCommitAncestry(base, head, raw),
+        base if requested_base is None else requested_base,
+        head if requested_head is None else requested_head,
+    )
+def reject(action):
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            action()
+    except SystemExit:
+        return
+    raise AssertionError("invalid raw commit ancestry passed")
+
+complete = stream((target, right, left, root))
+verify(complete)
+verify(stream((left, root)), head=left)
+verify(complete, base=left)
+verify(complete, base=right)
+carrier = authority.RawCommitAncestry(root, target, complete)
+try:
+    carrier.base = left
+except dataclasses.FrozenInstanceError:
+    pass
+else:
+    raise AssertionError("raw carrier is mutable")
+for bad in (
+    b"", bytearray(complete), complete[:-1], complete + b"\n",
+    complete.replace(b" commit ", b" blob ", 1),
+    complete.replace(target.encode(), b"f" * 40, 1),
+    complete.replace(b"merge\n", b"other\n", 1),
+    complete + frame(root, objects[root]),
+    stream((target, left, right)),
+    b"f" * 40 + b" commit " + b"9" * 5000 + b"\n",
+    b"x" * (50 * authority.JSON_MAX_BYTES + 1),
+):
+    reject(lambda bad=bad: verify(bad))
+for body in (
+    objects[left].replace(b"tree ", b"tree invalid", 1),
+    objects[left].replace(b"parent " + root.encode(), b"parent " + b"f" * 40),
+    objects[left].replace(b"\nauthor ", b"\n parent continued\n author ", 1),
+    objects[left].replace(b"\ncommitter ", b"\nauthor duplicate\ncommitter ", 1),
+    objects[left].replace(b"\n\n", b"\nparent " + root.encode() + b"\n\n", 1),
+    objects[left].replace(b"\n\n", b"\n"),
+    objects[left].replace(b"\nauthor ", b"\0author ", 1),
+):
+    sha = hashlib.sha1(b"commit " + str(len(body)).encode() + b"\0" + body).hexdigest()
+    reject(lambda body=body, sha=sha: verify(
+        frame(sha, body) + frame(root, objects[root]), head=sha))
+foreign = commit(message=b"unrelated")
+reject(lambda: verify(complete + frame(foreign, objects[foreign])))
+reject(lambda: verify(stream((root,)), base=root, head=root))
+reject(lambda: verify(stream((left, root)), base=target, head=left))
+reject(lambda: verify(stream((left, root)), base=right, head=left))
+reject(lambda: verify(complete, requested_base=left))
+reject(lambda: verify(complete, requested_head=left))
+
+legacy = {
+    "status": "ahead", "ahead_by": 2, "behind_by": 0, "total_commits": 2,
+    "base_commit": {"sha": root}, "merge_base_commit": {"sha": root},
+    "commits": [{"sha": left}, {"sha": target}],
+}
+authority.validate_strict_ancestor_compare(legacy, root, target)
+for key, bad in (
+    ("status", "diverged"), ("ahead_by", True), ("behind_by", False),
+    ("behind_by", 1), ("total_commits", 3), ("base_commit", {"sha": left}),
+    ("merge_base_commit", {"sha": left}), ("commits", [{"sha": left}]),
+    ("commits", [{"sha": target}, {"sha": target}]),
+    ("commits", [{"sha": target}, {"sha": left}]), ("commits", {}),
+):
+    reject(lambda key=key, bad=bad:
+           authority.validate_strict_ancestor_compare({**legacy, key: bad}, root, target))
+
+previous_directory = Path.cwd()
+try:
+    os.chdir(repository)
+    with patch.dict(os.environ, environment, clear=True), \
+         patch.object(m, "gh_api", side_effect=AssertionError("raw ancestry used API fallback")), \
+         patch.object(m, "gh_api_pages", side_effect=AssertionError("raw ancestry used API fallback")):
+        row = {"id": 77, "run_attempt": 1, "head_sha": root}
+        def read(selected=row, head=target):
+            proof = m.held_raw_ancestry(authority, "example/repo", selected, head, "raw fixture")
+            authority.validate_strict_ancestor_compare(proof, selected["head_sha"], head)
+            return proof
+        assert read().stream
+        git("replace", root, foreign)
+        assert read().stream
+        git("replace", "-d", root)
+        (repository / ".git/shallow").write_text(target + "\n")
+        reject(read)
+        (repository / ".git/shallow").unlink()
+        reject(lambda: read(head="f" * 40))
+        with patch.object(m.subprocess, "Popen", side_effect=FileNotFoundError):
+            reject(read)
+        with patch.object(m, "MAX_ARTIFACT_ARCHIVE_BYTES", 8):
+            reject(read)
+        with patch.object(authority, "RawCommitAncestry", None):
+            reject(read)
+
+        cache = m.ImmutableBindingBytes({
+            "repository": "example/repo", "inputs": {"run": "77"},
+            "policy": "reviewed", "validator": "reviewed", "attempt": 1,
+        })
+        token = m.BYTE_CONTEXT.set(cache)
+        try:
+            native_popen = subprocess.Popen
+            native_hash = hashlib.sha1
+            with patch.object(m.subprocess, "Popen", wraps=native_popen) as reads, \
+                 patch.object(authority.hashlib, "sha1", wraps=native_hash) as hashes:
+                first = read()
+                count = reads.call_count
+                assert count == 3 and hashes.call_count == 4
+                assert read() == first
+                assert reads.call_count == count and hashes.call_count == 8
+                original_key = next(iter(cache.entries))
+                for changed in ({"id": 78}, {"run_attempt": 2}, {"head_sha": left}):
+                    before = reads.call_count
+                    read({**row, **changed})
+                    assert reads.call_count == before + 3
+                for key in ("repository", "policy", "validator", "attempt"):
+                    before = reads.call_count
+                    original = cache.context[key]
+                    cache.context[key] = "changed"
+                    read()
+                    assert reads.call_count == before + 3
+                    cache.context[key] = original
+                helper = repository / "helper-copy.py"
+                helper.write_bytes(Path(authority.__file__).read_bytes() + b"\n")
+                with patch.object(authority, "__file__", str(helper)):
+                    before = reads.call_count
+                    read()
+                    assert reads.call_count == before + 3
+                reader = repository / "reader-copy.py"
+                reader.write_bytes(Path(m.__file__).read_bytes() + b"\n")
+                with patch.object(m, "__file__", str(reader)):
+                    before = reads.call_count
+                    read()
+                    assert reads.call_count == before + 3
+            saved = cache.entries[original_key]
+            damaged = saved[0].replace(b"merge\n", b"other\n", 1)
+            cache.entries[original_key] = (damaged, saved[1])
+            reject(read)
+            cache.entries[original_key] = (damaged, hashlib.sha256(damaged).hexdigest())
+            reject(read)
+            cache.entries[original_key] = saved
+            assert read() == first
+        finally:
+            m.BYTE_CONTEXT.reset(token)
+finally:
+    os.chdir(previous_directory)
+PY
+ok "authenticated raw commit closure, legacy API compatibility, fail-closed collection and warm recomputation"
+
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib, copy, hashlib, importlib.util, io, sys, zipfile
 from unittest.mock import patch
@@ -602,14 +802,10 @@ ok "fresh private authority and immutable pre-producer issued history; reruns, p
 # Keep the frozen source and ancestry fixtures offline in depth-one checkouts.
 historical_fixture="$ROOT_DIR/infra/oci/tests/fixtures/upstream-historical-source.pack"
 [[ "$(sha256sum "$historical_fixture" | awk '{print $1}')" = \
-  c117f905c92aedb4bf8b105889272cf9b149281908c911a7d1c58dfec53487fb ]] ||
+  7d1ed1a3ac8c34aa45b05b7732d7eaebbed5481523d05a42c23954f89750f366 ]] ||
   fail "historical source fixture checksum differs"
 git init --quiet --initial-branch=upstream-fixture "$WORK/repository"
 git -C "$WORK/repository" unpack-objects -q <"$historical_fixture"
-printf '%s\n' \
-  1bf86112ba2458161e6039091b1aa6289fdfce1d \
-  daa5cffe56d008c948cc8654e903c4a48450c5a2 \
-  >"$WORK/repository/.git/shallow"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib
@@ -805,12 +1001,14 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import re
 import stat
 import subprocess
 import sys
 import warnings
 import zipfile
+from pathlib import Path
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
@@ -820,6 +1018,33 @@ native_byte_reader = m.gh_api_bytes
 native_jobs_inventory = m.jobs_for_run
 native_artifacts_inventory = m.artifact_inventory
 source = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", "HEAD"], text=True).strip()
+source_tree = subprocess.check_output([
+    "git", "-C", sys.argv[2], "rev-parse", source + "^{tree}",
+], text=True).strip()
+source_objects = subprocess.check_output([
+    "git", "-C", sys.argv[2], "rev-parse", "--path-format=absolute", "--git-path", "objects",
+], text=True).strip()
+history_repository = Path(sys.argv[3]).parent / "history-repository"
+subprocess.run(["git", "init", "--quiet", "--initial-branch=history-fixture",
+                str(history_repository)], check=True)
+(history_repository / ".git/objects/info/alternates").write_text(
+    source_objects + "\n" + str(Path(sys.argv[3]) / ".git/objects") + "\n")
+os.environ.update(GIT_DIR=str(history_repository / ".git"), GIT_WORK_TREE=sys.argv[2])
+def history_commit(message, parents=()):
+    return subprocess.check_output([
+        "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit-tree", source_tree,
+        *(argument for parent in parents for argument in ("-p", parent)), "-m", message,
+    ], text=True).strip()
+ghost_sources = []
+for index in range(3):
+    ghost_sources.append(history_commit(f"historical source {index}", ghost_sources[-1:]))
+source = history_commit("current source", [
+    history_commit("intermediate source", [ghost_sources[-1]]),
+])
+divergent_source = history_commit("unrelated source")
+descendant_source = history_commit("later source", [source])
+subprocess.run(["git", "update-ref", "refs/heads/history-fixture", source], check=True)
 blob = subprocess.check_output([
     "git", "-C", sys.argv[2], "show",
     f"{source}:.github/workflows/oci-production-deploy.yml",
@@ -1377,7 +1602,7 @@ for offset, workflow_name in enumerate((
 )):
     run_id, workflow_id = 610 + offset, 710 + offset
     path = ".github/workflows/" + workflow_name
-    old_sha = "abc"[offset] * 40
+    old_sha = ghost_sources[offset]
     row = {
         "id": run_id, "workflow_id": workflow_id, "path": path, "head_sha": old_sha,
         "head_branch": "master", "head_repository": {"full_name": "example/repo"},
@@ -1401,14 +1626,15 @@ for offset, workflow_name in enumerate((
         f"repos/example/repo/contents/{path}?ref={old_sha}": historical_response(
             path, (Path(sys.argv[2]) / path).read_bytes()),
     })
-    compare = {
-        "status": "ahead", "ahead_by": 2, "behind_by": 0, "total_commits": 2,
+    compared_commits = subprocess.check_output([
+        "git", "--no-replace-objects", "rev-list", "--reverse", old_sha + ".." + source,
+    ], text=True).splitlines()
+    ghost_compares[old_sha] = {
+        "status": "ahead", "ahead_by": len(compared_commits),
+        "behind_by": 0, "total_commits": len(compared_commits),
         "base_commit": {"sha": old_sha}, "merge_base_commit": {"sha": old_sha},
+        "commits": [{"sha": sha} for sha in compared_commits],
     }
-    ghost_compares[f"repos/example/repo/compare/{old_sha}...{source}?per_page=100"] = [
-        {**compare, "commits": [{"sha": "d" * 40}]},
-        {**compare, "commits": [{"sha": source}]},
-    ]
 original_ghost_rows = copy.deepcopy(ghost_rows)
 original_ghost_responses = copy.deepcopy(ghost_responses)
 original_ghost_compares = copy.deepcopy(ghost_compares)
@@ -1436,7 +1662,7 @@ def ghost_pages(endpoint):
     if endpoint == ghost_api_failure:
         m.fail("fresh historical pagination is unavailable")
     if "/compare/" in endpoint:
-        return copy.deepcopy(ghost_compares[endpoint])
+        raise AssertionError("raw held history attempted native API ancestry fallback")
     pages = history_pages(endpoint)
     name = endpoint.split("/workflows/", 1)[1].split("/", 1)[0]
     extra = [copy.deepcopy(row) for row in ghost_rows if row["path"] == ".github/workflows/" + name]
@@ -1459,11 +1685,10 @@ with patch.object(m, "gh_api", side_effect=ghost_api), \
         assert ghost_reads.count(f"repos/example/repo/actions/runs/{row['id']}") == 2
         ghost_responses[f"repos/example/repo/actions/workflows/{row['workflow_id']}"]["state"] = "active"
     assert ghost_history() == ghost_proof
-    assert all("..."+source+"?per_page=100" in endpoint for endpoint in ghost_reads if "/compare/" in endpoint)
+    assert not any("/compare/" in endpoint for endpoint in ghost_reads)
     assert not any("/git/ref/" in endpoint for endpoint in ghost_reads)
     for row in ghost_rows:
         endpoint = f"repos/example/repo/actions/runs/{row['id']}"
-        compare_pages = ghost_compares[f"repos/example/repo/compare/{row['head_sha']}...{source}?per_page=100"]
         evidence = {
             "run": ghost_responses[endpoint],
             "workflow": ghost_responses[f"repos/example/repo/actions/workflows/{row['workflow_id']}"],
@@ -1471,7 +1696,7 @@ with patch.object(m, "gh_api", side_effect=ghost_api), \
             "pending": ghost_responses[endpoint + "/pending_deployments"],
             "approvals": ghost_responses[endpoint + "/approvals"],
             "artifacts": ghost_responses[endpoint + "/artifacts?per_page=100"],
-            "compare": {**compare_pages[0], "commits": [page["commits"][0] for page in compare_pages]},
+            "compare": ghost_compares[row["head_sha"]],
             "historical_workflow": ghost_responses[
                 f"repos/example/repo/contents/{row['path']}?ref={row['head_sha']}"],
             "repository": "example/repo", "current_master": source,
@@ -1483,6 +1708,8 @@ with patch.object(m, "gh_api", side_effect=ghost_api), \
         reject(lambda: shared_authority.validate_unmaterialized_run_evidence(**evidence))
         evidence["workflow"] = {**evidence["workflow"], "state": "disabled_manually"}
         assert shared_authority.validate_unmaterialized_run_evidence(**evidence)["runId"] == row["id"]
+        if row["id"] == ghost_rows[0]["id"]:
+            legacy_ghost_evidence = copy.deepcopy(evidence)
     ghost_responses = copy.deepcopy(original_ghost_responses)
     target = "repos/example/repo/actions/runs/610"
     for field, bad in (
@@ -1533,14 +1760,15 @@ with patch.object(m, "gh_api", side_effect=ghost_api), \
     ghost_reread_drift = True
     reject(ghost_history)
     ghost_reread_drift = False
-    for endpoint in [*original_ghost_responses, *original_ghost_compares]:
+    for endpoint in original_ghost_responses:
         ghost_api_failure = endpoint
         reject(ghost_history)
     ghost_api_failure = ""
     history_clock.time.return_value = int(m.parse_timestamp("2026-10-07T07:09:59Z", "age fixture").timestamp())
     reject(ghost_history)
     history_clock.time.return_value = history_now
-    historical_endpoint = f"repos/example/repo/contents/.github/workflows/oci-live-data-rollout.yml?ref={'a' * 40}"
+    historical_endpoint = (
+        f"repos/example/repo/contents/.github/workflows/oci-live-data-rollout.yml?ref={ghost_sources[0]}")
     original_source = base64.b64decode(original_ghost_responses[historical_endpoint]["content"])
     for old, new in (
         (shared_authority.CURRENT_MASTER_GUARD_LINES[0].encode(), b"# exact source guard removed"),
@@ -1554,26 +1782,32 @@ with patch.object(m, "gh_api", side_effect=ghost_api), \
             ".github/workflows/oci-live-data-rollout.yml", original_source.replace(old, new))
         reject(ghost_history)
     ghost_responses = copy.deepcopy(original_ghost_responses)
-    compare_endpoint = f"repos/example/repo/compare/{'a' * 40}...{source}?per_page=100"
     for mutation in ("truncated", "inconsistent", "duplicate", "wrong-head", "wrong-base",
                      "diverged", "behind", "empty", "malformed", "bool-metadata"):
-        ghost_compares = copy.deepcopy(original_ghost_compares)
-        pages = ghost_compares[compare_endpoint]
-        if mutation == "truncated": pages.pop()
-        elif mutation == "inconsistent": pages[1]["total_commits"] = 3
-        elif mutation == "duplicate": pages[0]["commits"] = copy.deepcopy(pages[1]["commits"])
-        elif mutation == "wrong-head": pages[1]["commits"][0]["sha"] = "e" * 40
-        elif mutation == "wrong-base":
-            for page in pages: page["base_commit"] = {"sha": "e" * 40}
-        elif mutation == "diverged":
-            for page in pages: page["status"] = "diverged"
-        elif mutation == "behind":
-            for page in pages: page["behind_by"] = 1
-        elif mutation == "empty": pages.clear()
-        elif mutation == "malformed": pages[1]["commits"] = {}
-        else: pages[1]["behind_by"] = False
+        compare = copy.deepcopy(original_ghost_compares[ghost_sources[0]])
+        if mutation == "truncated": compare["commits"].pop()
+        elif mutation == "inconsistent": compare["total_commits"] += 1
+        elif mutation == "duplicate": compare["commits"].append(copy.deepcopy(compare["commits"][0]))
+        elif mutation == "wrong-head": compare["commits"][-1]["sha"] = "e" * 40
+        elif mutation == "wrong-base": compare["base_commit"] = {"sha": "e" * 40}
+        elif mutation == "diverged": compare["status"] = "diverged"
+        elif mutation == "behind": compare["behind_by"] = 1
+        elif mutation == "empty": compare["commits"] = []
+        elif mutation == "malformed": compare["commits"] = {}
+        else: compare["behind_by"] = False
+        legacy_ghost_evidence["compare"] = compare
+        reject(lambda: shared_authority.validate_unmaterialized_run_evidence(**legacy_ghost_evidence))
+    for bad_source in (source, divergent_source, descendant_source, "e" * 40):
+        ghost_rows = copy.deepcopy(original_ghost_rows)
+        ghost_responses = copy.deepcopy(original_ghost_responses)
+        ghost_rows[0]["head_sha"] = bad_source
+        ghost_responses[target]["head_sha"] = bad_source
+        ghost_responses[
+            f"repos/example/repo/contents/{ghost_rows[0]['path']}?ref={bad_source}"
+        ] = ghost_responses.pop(historical_endpoint)
         reject(ghost_history)
-    ghost_compares = copy.deepcopy(original_ghost_compares)
+    ghost_rows = copy.deepcopy(original_ghost_rows)
+    ghost_responses = copy.deepcopy(original_ghost_responses)
     with patch.object(m.importlib.util, "spec_from_file_location", return_value=None):
         reject(ghost_history)
         ghost_rows = []
@@ -2166,17 +2400,13 @@ with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as i
             elif mutation == "drift":
                 cancelled_drift = cancelled_workflow_endpoint
             elif mutation == "ancestry":
-                ancestor = "a" * 40
+                ancestor = divergent_source
                 for run in (cancelled_rows[0], cancelled_responses[cancelled_endpoint],
                             cancelled_responses[cancelled_endpoint + "/attempts/1"]):
                     run.update(head_sha=ancestor, display_title=f"oci-live-data apply-slip-index {ancestor}")
                 cancelled_pages[cancelled_job_endpoint][0]["jobs"][0]["head_sha"] = ancestor
                 cancelled_responses[f"repos/example/repo/contents/{cancelled_path}?ref={ancestor}"] = (
                     cancelled_responses.pop(cancelled_source_endpoint))
-                endpoint = f"repos/example/repo/compare/{ancestor}...{source}?per_page=100"
-                cancelled_pages[endpoint] = copy.deepcopy(original_ghost_compares[endpoint])
-                for page in cancelled_pages[endpoint]:
-                    page["status"] = "diverged"
             elif mutation.startswith("other-"):
                 cancelled_rows.append({
                     **cancelled_run, "id": 91,
@@ -2312,35 +2542,24 @@ with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as i
             cancelled_path, original_source.replace(old_guard, replacement))
         reject(cancelled_history)
     reset_cancelled()
-    ancestor = "a" * 40
+    ancestor = ghost_sources[0]
     for run in (cancelled_rows[0], cancelled_responses[cancelled_endpoint],
                 cancelled_responses[cancelled_endpoint + "/attempts/1"]):
         run.update(head_sha=ancestor, display_title=f"oci-live-data apply-slip-index {ancestor}")
     cancelled_pages[cancelled_job_endpoint][0]["jobs"][0]["head_sha"] = ancestor
     cancelled_responses[f"repos/example/repo/contents/{cancelled_path}?ref={ancestor}"] = cancelled_responses.pop(cancelled_source_endpoint)
-    compare_endpoint = f"repos/example/repo/compare/{ancestor}...{source}?per_page=100"
-    cancelled_pages[compare_endpoint] = copy.deepcopy(original_ghost_compares[compare_endpoint])
     assert cancelled_history() == cancelled_proof
-    complete_compare = copy.deepcopy(cancelled_pages[compare_endpoint])
-    for mutation in ("truncated", "inconsistent", "duplicate", "wrong-head", "wrong-base",
-                     "diverged", "behind", "empty", "malformed", "bool-metadata"):
-        pages = copy.deepcopy(complete_compare)
-        if mutation == "truncated": pages.pop()
-        elif mutation == "inconsistent": pages[1]["total_commits"] += 1
-        elif mutation == "duplicate": pages[0]["commits"] = copy.deepcopy(pages[1]["commits"])
-        elif mutation == "wrong-head": pages[1]["commits"][0]["sha"] = "e" * 40
-        elif mutation == "wrong-base":
-            for page in pages: page["base_commit"] = {"sha": "e" * 40}
-        elif mutation == "diverged":
-            for page in pages: page["status"] = "diverged"
-        elif mutation == "behind":
-            for page in pages: page["behind_by"] = 1
-        elif mutation == "empty": pages.clear()
-        elif mutation == "malformed": pages[1]["commits"] = {}
-        else: pages[1]["behind_by"] = False
-        cancelled_pages[compare_endpoint] = pages
+    assert not any("/compare/" in endpoint for endpoint in cancelled_reads)
+    for bad_source in (divergent_source, descendant_source, "e" * 40):
+        reset_cancelled()
+        for run in (cancelled_rows[0], cancelled_responses[cancelled_endpoint],
+                    cancelled_responses[cancelled_endpoint + "/attempts/1"]):
+            run.update(head_sha=bad_source, display_title=f"oci-live-data apply-slip-index {bad_source}")
+        cancelled_pages[cancelled_job_endpoint][0]["jobs"][0]["head_sha"] = bad_source
+        cancelled_responses[f"repos/example/repo/contents/{cancelled_path}?ref={bad_source}"] = (
+            cancelled_responses.pop(cancelled_source_endpoint))
         reject(cancelled_history)
-    cancelled_pages[compare_endpoint] = complete_compare
+    reset_cancelled()
     with patch.object(m.importlib.util, "spec_from_file_location", return_value=None):
         reject(cancelled_history)
     assert cancelled_history() == cancelled_proof

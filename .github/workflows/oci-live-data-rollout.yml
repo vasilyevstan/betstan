@@ -1672,7 +1672,7 @@ jobs:
                   CANDIDATE_IMAGES_FILE=artifacts/oci-live-data-rollout/images.tsv \
                   CHECKPOINT_FILE=artifacts/disk-checkpoint/checkpoint.json \
                   WORK_DIR="$RUNNER_TEMP/held-pre-transfer-disk-checkpoint" \
-                  SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" CONTROL_SHA="$SOURCE_SHA" \
+                  CONTROL_SHA="$SOURCE_SHA" SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
                   GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
                   REVALIDATION_PROFILE=held \
                     ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
