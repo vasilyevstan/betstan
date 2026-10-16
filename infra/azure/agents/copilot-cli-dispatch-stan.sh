@@ -15,6 +15,8 @@ set -euo pipefail
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --retire-preflight-read-only-failure
 
 umask 077
+unset BETSTAN_HELD_DISPATCH_OWNER BETSTAN_BINDING_COMMAND_OWNER \
+  BETSTAN_BINDING_BOUNDARY BETSTAN_BOUND_RECEIVER_RUN_ID
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
@@ -905,7 +907,7 @@ materialize_record() {
       rm -f "$prerequisite_error_file"
       if ! (
         revalidate_control &&
-          validate_protected_prerequisites "$bound_successor_run_id" &&
+          validate_protected_prerequisites "$bound_successor_run_id" "$run_id" &&
           revalidate_control
       ) >"$prerequisite_error_file" 2>&1; then
         chmod 600 "$prerequisite_error_file"
@@ -1014,6 +1016,8 @@ validate_upstream_run_bindings() {
   # shared validator with the same policy bindings, so the two paths cannot
   # drift.
   local dispatch_inputs
+  local binding_boundary=dispatch
+  [[ -z "${2:-}" ]] || binding_boundary=materialization
   local successor_args=()
   if [[ -n "${1:-}" &&
     ( "$operation" = "oci-live-data-continue-held-handoff" ||
@@ -1029,7 +1033,9 @@ validate_upstream_run_bindings() {
   dispatch_inputs="$(jq -c '.dispatchInputs' "$normalized_file")"
   [[ -n "$dispatch_inputs" && "$dispatch_inputs" != "null" ]] ||
     fail "normalized request does not expose dispatch inputs"
-  "$UPSTREAM_BINDING_VALIDATOR" validate-all \
+  BETSTAN_HELD_DISPATCH_OWNER="$$" BETSTAN_BINDING_COMMAND_OWNER="$$" \
+  BETSTAN_BINDING_BOUNDARY="$binding_boundary" BETSTAN_BOUND_RECEIVER_RUN_ID="${2:-}" \
+    "$UPSTREAM_BINDING_VALIDATOR" validate-all \
     --repository "$repository" \
     --policy-json "$policy_json" \
     --subject-sha "$subject_sha" \
@@ -1164,7 +1170,7 @@ PY
 validate_protected_prerequisites() {
   validate_common_package_prerequisites
   validate_runtime_mode_binding
-  validate_upstream_run_bindings "${1:-}"
+  validate_upstream_run_bindings "${1:-}" "${2:-}"
 }
 
 revalidate_transition_target() {

@@ -93,6 +93,13 @@ validate_local_context
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-cli-approval.XXXXXX")"
 chmod 700 "$tmp_dir"
+bytes_dir="$tmp_dir/immutable-binding-bytes"
+mkdir -m 700 "$bytes_dir"
+(umask 077; printf '%s' "$$" >"$bytes_dir/owner")
+exec 9<"$bytes_dir"
+unset BETSTAN_APPROVAL_BYTES_OWNER BETSTAN_BINDING_BYTES_CACHE_DIR
+unset BETSTAN_BINDING_COMMAND_OWNER BETSTAN_BINDING_BOUNDARY BETSTAN_BOUND_RECEIVER_RUN_ID
+binding_revalidation_count=0
 run_file="$tmp_dir/run.json"
 pending_file="$tmp_dir/pending.json"
 jobs_file="$tmp_dir/jobs.json"
@@ -118,9 +125,13 @@ cleanup() {
     "$approvals_file" \
     "$promotion_file" \
     "$upstream_run_file"
+  exec 9<&-
+  rm -rf "$bytes_dir"
   rmdir "$tmp_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 # Discover only from the verified script checkout, not ambient CWD/GH_REPO.
 # Keep that same context for Python subprocesses and nested shell validators.
@@ -455,7 +466,10 @@ revalidate_upstream_bindings() {
       fail "held-handoff exclusion requires this exact bound dispatch authority"
     continuation_args=(--successor-run-id "$authority_run_id")
   fi
-  "$BINDING_VALIDATOR" validate-all \
+  binding_revalidation_count=$(( ${binding_revalidation_count:-0} + 1 ))
+  BETSTAN_APPROVAL_BYTES_OWNER="$$" BETSTAN_BINDING_COMMAND_OWNER="$$" \
+  BETSTAN_BINDING_BOUNDARY="approval-$binding_revalidation_count" \
+  BETSTAN_BOUND_RECEIVER_RUN_ID="$RUN_ID" "$BINDING_VALIDATOR" validate-all \
     --repository "$repository" \
     --policy-json "$policy_json" \
     --subject-sha "$subject_sha" \

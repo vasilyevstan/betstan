@@ -2845,11 +2845,18 @@ def consume_fixture_approval(d, run_id):
         "approval_operation": policy["operation"], "environment_id": 91,
         "gate_key": hashlib.sha256(str(run_id).encode()).hexdigest(),
     }
-    version = int(invoke("claim-approval", {
-        **approval, "expected_version": record["version"], "reviewer": "fixture",
-        "approval_comment": "fixture canonical approval", "approval_count_before": 0,
-    }))
-    invoke("complete-approval", {**approval, "expected_version": version})
+    # Keep synthetic approval chronology independent of cross-process clock steps.
+    approval_time = a.parse_utc(record["createdAt"], "fixture authority creation")
+    previous_clock = a.utc_now
+    a.utc_now = lambda: approval_time
+    try:
+        version = int(invoke("claim-approval", {
+            **approval, "expected_version": record["version"], "reviewer": "fixture",
+            "approval_comment": "fixture canonical approval", "approval_count_before": 0,
+        }))
+        invoke("complete-approval", {**approval, "expected_version": version})
+    finally:
+        a.utc_now = previous_clock
     invoke("release-lock", common)
     return a.load_record(d / "authority", run_id)
 
@@ -2890,7 +2897,15 @@ def zero_fixture(count=5):
 
 
 for count in (1, 5):
-    d, original, observation = zero_fixture(count)
+    if count == 1:
+        original_clock = a.utc_now
+        a.utc_now = lambda: original_clock() - a.dt.timedelta(seconds=10)
+        try:
+            d, original, observation = zero_fixture(count)
+        finally:
+            a.utc_now = original_clock
+    else:
+        d, original, observation = zero_fixture(count)
     old_intent = intent(d)
     intent_path = next((d / "authority").glob("request-*.json"))
     old_intent_bytes = intent_path.read_bytes()
@@ -3010,6 +3025,10 @@ for mutate in (
     lambda value: value.update(approvals=[]),
     lambda value: value["approvals"][0].update(runId=1),
     lambda value: value["approvals"][0].update(operation="another-operation"),
+    lambda value: value["approvals"][0].update(approvedAt=a.utc_text(
+        a.parse_utc(value["createdAt"], "fixture authority creation")
+        - a.dt.timedelta(microseconds=1)
+    )),
     lambda value: value.update(inflightApproval={}),
     lambda value: value.update(inputHash="0" * 64),
     lambda value: value.update(workflowBlobSha="c" * 40),
@@ -5941,6 +5960,10 @@ def pages(endpoint):
                                updated_at="2026-01-01T00:10:00Z")]
     return [{"total_count": len(rows), "workflow_runs": copy.deepcopy(rows)}]
 b.gh_api_pages = pages
+b.native_api_batch = lambda requests: [
+    b.gh_api_pages(endpoint) if paginated else b.gh_api(endpoint)
+    for endpoint, paginated in requests
+]
 collections = []
 def collect(*args):
     collections.append(args)

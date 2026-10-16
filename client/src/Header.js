@@ -5,6 +5,11 @@ import getRouteIdentity from './routeIdentity';
 const Header = ({ currentUser, uiVariant, theme }) => {
     const location = useLocation();
     const routeIdentity = getRouteIdentity(location.pathname);
+    const variantOptions = [
+       { value: 'v1', label: 'Standard' },
+       { value: 'v2', label: 'Compact' },
+       { value: 'v3', label: 'Spacious' },
+    ];
     const themeOptions = ['dark', 'light'];
     const explicitRouteIdentities = new Set([
        '/backoffice', '/bets', '/login', '/logout', '/signup', '/telemetry',
@@ -13,12 +18,12 @@ const Header = ({ currentUser, uiVariant, theme }) => {
 
     const links = [
        { label: 'Events', href: '/', current: isEventsRoute },
-       { label: 'Backoffice', href: '/backoffice', icon: '/icons/backoffice.svg' },
-       { label: 'Telemetry', href: '/telemetry', icon: '/icons/telemetry.svg' },
-       !currentUser && { label: 'Create account', href: '/signup', icon: '/icons/signup.svg' },
-       !currentUser && { label: 'Log in', href: '/login', icon: '/icons/login.svg', kind: 'primary' },
-       currentUser && { label: 'My bets', href: '/bets', icon: '/icons/bets.svg' },
-       currentUser && { label: 'Log out', href: '/logout', icon: '/icons/logout.svg' }
+       { label: 'Backoffice', href: '/backoffice' },
+       { label: 'Telemetry', href: '/telemetry' },
+       !currentUser && { label: 'Create account', href: '/signup' },
+       !currentUser && { label: 'Log in', href: '/login', kind: 'primary' },
+       currentUser && { label: 'My bets', href: '/bets' },
+       currentUser && { label: 'Log out', href: '/logout' }
      ]
      .filter(Boolean);
 
@@ -49,6 +54,10 @@ const Header = ({ currentUser, uiVariant, theme }) => {
        pathname: location.pathname,
        search: buildSearch({ theme: nextTheme }),
     });
+    const variantLink = (nextVariant) => ({
+       pathname: location.pathname,
+       search: buildSearch({ ui: nextVariant }),
+    });
     const brandSource = theme === 'dark'
         ? '/brand/betstan-wordmark-dark.svg'
         : '/brand/betstan-wordmark-light.svg';
@@ -71,6 +80,22 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                    )}
                </div>
                <div className="app-navbar__workspace">
+                   <div className="presentation-control" role="group" aria-label="Layout">
+                       <span className="presentation-control__label">Layout</span>
+                       <div className="presentation-control__options">
+                           {variantOptions.map(({ value, label }) => (
+                               <Link
+                                   aria-current={uiVariant === value ? 'true' : undefined}
+                                   className={`presentation-option${uiVariant === value ? ' presentation-option--active' : ''}`}
+                                   key={value}
+                                   to={variantLink(value)}
+                               >
+                                   {uiVariant === value ? <span className="state-mark" aria-hidden="true" /> : null}
+                                   {label}
+                               </Link>
+                           ))}
+                       </div>
+                   </div>
                    <div className="presentation-control" role="group" aria-label="Theme">
                        <span className="presentation-control__label">Theme</span>
                        <div className="presentation-control__options">
@@ -81,7 +106,6 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                                to={themeLink(themeOption)}
                                className={`presentation-option${theme === themeOption ? ' presentation-option--active' : ''}`}
                            >
-                               <img className="nav-icon" src={`/icons/theme-${themeOption}.svg`} alt="" />
                                {theme === themeOption ? <span className="state-mark" aria-hidden="true" /> : null}
                                {themeOption === 'dark' ? 'Dark' : 'Light'}
                            </Link>
@@ -89,7 +113,7 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                        </div>
                    </div>
                    <ul className="navbar-nav app-navbar__links">
-                       {links.map(({ label, href, icon, kind, current }) => {
+                       {links.map(({ label, href, kind, current }) => {
                            const isCurrent = current ?? routeIdentity === getRouteIdentity(href);
                            return <li key={href} className="nav-item">
                                <Link
@@ -98,7 +122,6 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                                    title={label}
                                    to={linkTo(href)}
                                >
-                                   {icon ? <img className="nav-icon" src={icon} alt="" /> : null}
                                    <span className="app-nav-link__label">{label}</span>
                                </Link>
                            </li>;

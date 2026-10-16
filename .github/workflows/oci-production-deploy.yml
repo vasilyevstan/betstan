@@ -509,9 +509,22 @@ jobs:
       - name: Verify transferred database lock and maintenance fence
         id: handoff
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           STATE_FILE: artifacts/oci-deploy/unused-maintenance-state.tsv
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, json, os
+          spec = importlib.util.spec_from_file_location(
+              "upstream_binding", "infra/oci/scripts/upstream_run_binding_stan.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          result = module.validate_receiver_handoff_timing(
+              os.environ["REPOSITORY"], os.environ["DATA_RUN_ID"], os.environ["SOURCE_SHA"],
+              "startup-snapshot", os.environ["GITHUB_RUN_ID"])
+          print("handoff_timing=" + json.dumps(result, sort_keys=True))
+          PY
           ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
@@ -552,8 +565,8 @@ jobs:
           CHECKPOINT_FILE: artifacts/disk-checkpoint/checkpoint.json
           WORK_DIR: ${{ runner.temp }}/pre-deploy-disk-checkpoint
         run: |
-          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           CONTROL_SHA="$SOURCE_SHA" \
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" \
           DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
           REVALIDATION_PROFILE=held \
@@ -618,13 +631,82 @@ jobs:
 
       - name: Renew exact transferred database lock
         id: renew_lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          set -euo pipefail
+          timing="$(
+            python3 - <<'PY'
+          import importlib.util, json, os
+          spec = importlib.util.spec_from_file_location(
+              "upstream_binding", "infra/oci/scripts/upstream_run_binding_stan.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          result = module.validate_receiver_handoff_timing(
+              os.environ["REPOSITORY"], os.environ["DATA_RUN_ID"], os.environ["SOURCE_SHA"],
+              "receiver-renewal", os.environ["GITHUB_RUN_ID"])
+          print(json.dumps(result, sort_keys=True))
+          PY
+          )"
+          renewal_started="$(date +%s)"
+          result="$(
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
           OPERATION_ID="live-data-apply-slip-index" \
           LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
+          )"
+          [[ "$result" =~ ^shared_mongo_lock=renew\ status=PASS\ lease_until_epoch=([1-9][0-9]*)\ fencing_generation=([1-9][0-9]*)$ ]] ||
+            { echo "receiver renewal acknowledgement is missing, ambiguous or malformed" >&2; exit 1; }
+          renewed_deadline="${BASH_REMATCH[1]}"
+          renewed_generation="${BASH_REMATCH[2]}"
+          if [ "$timing" = null ]; then
+            printf '%s\n' "$result"
+            exit 0
+          fi
+          producer_deadline="$(jq -er '.deadline' <<<"$timing")"
+          producer_generation="$(jq -er '.generation' <<<"$timing")"
+          handoff_lease_seconds="$(jq -er '.lease_seconds | select(. == 1800 or . == 3600)' <<<"$timing")"
+          handoff_execution_seconds="$(jq -er '.execution_seconds | select(. == 1200 or . == 3000)' <<<"$timing")"
+          [ "$(jq -er '.reserve_seconds' <<<"$timing")" = 600 ]
+          (( handoff_lease_seconds == handoff_execution_seconds + 600 ))
+          [ "$renewed_generation" = "$((producer_generation + 1))" ]
+          renewed_at="$(date +%s)"
+          if ! (( renewed_at < producer_deadline - 600 &&
+             renewed_at - (producer_deadline - handoff_lease_seconds) <= handoff_execution_seconds &&
+             renewed_deadline >= renewal_started + 10800 &&
+             renewed_deadline <= renewed_at + 10800 )); then
+            echo "actual receiver renewal exhausted the authentic handoff deadline or reserve" >&2
+            exit 1
+          fi
+          if [ "$handoff_lease_seconds" = 3600 ]; then
+            python3 - "$timing" <<'PY'
+          import json, sys, time
+          timing = json.loads(sys.argv[1])
+          now = time.time()
+          if (
+              timing["profile"] != "live-betting-data-resume-v4"
+              or timing["phase"] != "receiver-renewal"
+              or now >= timing["deadline"] - 600
+              or now - (timing["deadline"] - 3600) > 3000
+              or now > timing["renewal_stage_deadline"]
+          ):
+              raise SystemExit("actual receiver renewal exhausted its authenticated v4 phase or reserve")
+          PY
+          fi
+          kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json |
+            jq -e --arg holder "live-data-${DATA_RUN_ID}-1" --arg source "$SOURCE_SHA" \
+              --arg until "$renewed_deadline" --arg generation "$renewed_generation" '
+              .data.state == "active" and .data.holder == $holder and
+              .data["operation-id"] == "live-data-apply-slip-index" and
+              .data["source-sha"] == $source and .data["lease-duration-seconds"] == "10800" and
+              .data["lease-until-epoch"] == $until and .data["fencing-generation"] == $generation
+            ' >/dev/null
+          printf '%s\n' "$result"
+          printf 'handoff_receiver_renewal=PASS whole_elapsed_seconds=%s reserve_remaining_seconds=%s\n' \
+            "$((renewed_at - (producer_deadline - handoff_lease_seconds)))" "$((producer_deadline - renewed_at))"
 
       - name: Deploy immutable images sequentially
         id: apply
@@ -701,8 +783,8 @@ jobs:
           CHECKPOINT_FILE: artifacts/disk-checkpoint/checkpoint.json
           WORK_DIR: ${{ runner.temp }}/post-deploy-disk-checkpoint
         run: |
-          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           CONTROL_SHA="$SOURCE_SHA" \
+          SOURCE_SHA="$CHECKPOINT_SOURCE_SHA" \
           GHCR_BUILD_RUN_ID="$BUILD_RUN_ID" \
           DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
           REVALIDATION_PROFILE=held \

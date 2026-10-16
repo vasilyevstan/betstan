@@ -407,13 +407,19 @@ Fresh physical admission precedes snapshot-bound release and `acquire-released`.
 Checksummed transition evidence distinguishes unconfirmed and confirmed results;
 an ambiguous response or partial transfer stops without replay or fallback
 acquisition, retaining maintenance. The successor executes the full data phase and
-emits complete v6 evidence with additive `live-betting-data-resume-v3` authority,
-binding the actual old checksum-manifest bytes and all three lineage roles.
-The incomplete predecessor remains inadmissible for ordinary deployment. After
-v3 emission, rollback must retain correct native numbering, semantic pre-handoff
-history validation, v3, earlier evidence capabilities, and the existing retirement
-profiles. Once relied upon, bound-successor materialization and portable native
-no-execution history must also be retained, or use a reviewed forward correction.
+emits complete v6 evidence with `live-betting-data-resume-v4` authority, retaining
+the v3 key set and binding the actual old checksum-manifest bytes and all three
+lineage roles. Each predecessor keeps its own authenticated timing profile;
+earlier v2/v3 records are never reinterpreted or extended. The incomplete
+predecessor remains inadmissible for ordinary deployment. Compatible non-emitting
+control-plane promotion and separate pre-arm timing qualification precede the
+first explicit v4 continuation. The canonical timing and rollback contract is in
+[`Release-Orchestration.md`](../../../docs/wiki/Release-Orchestration.md).
+After emission, rollback must retain v4 readers, correct native numbering,
+semantic pre-handoff history validation, earlier evidence capabilities, and the
+existing retirement profiles. Once relied upon, bound-successor materialization
+and portable native no-execution history must also be retained, or use a reviewed
+forward correction.
 
 `"$request" --retire-preflight-read-only-failure` is a separate retirement-only
 exception for `oci-live-data-resume-deploy`, not its released-runtime twin or

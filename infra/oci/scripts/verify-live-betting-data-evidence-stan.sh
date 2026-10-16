@@ -335,9 +335,11 @@ if resume_authority_path.exists():
             fail("historical resume authority key set is invalid")
         if schema_version == "live-betting-v6":
             fail("v6 data evidence requires resume authority v2")
-    elif resume_version in {"live-betting-data-resume-v2", "live-betting-data-resume-v3"}:
+    elif resume_version in {
+        "live-betting-data-resume-v2", "live-betting-data-resume-v3", "live-betting-data-resume-v4",
+    }:
         if set(resume_authority) != (
-            resume_v3_keys if resume_version == "live-betting-data-resume-v3" else resume_v2_keys
+            resume_v2_keys if resume_version == "live-betting-data-resume-v2" else resume_v3_keys
         ):
             fail("current resume authority key set is invalid")
         if schema_version != "live-betting-v6":
@@ -376,7 +378,7 @@ if resume_authority_path.exists():
         fail("resume authority application change scope is invalid")
     if resume_authority["status"] != "PASS":
         fail("resume authority did not complete successfully")
-    if resume_version == "live-betting-data-resume-v3":
+    if resume_version in {"live-betting-data-resume-v3", "live-betting-data-resume-v4"}:
         import importlib.util
         if (
             not re.fullmatch(r"[1-9][0-9]*", resume_authority["held_handoff_run_id"])
@@ -442,7 +444,9 @@ if resume_authority_path.exists():
             fail("retained-hold resume authority has an invalid outcome tuple")
     elif mode == "pre-runtime-hold":
         if (
-            resume_version not in {"live-betting-data-resume-v2", "live-betting-data-resume-v3"}
+            resume_version not in {
+                "live-betting-data-resume-v2", "live-betting-data-resume-v3", "live-betting-data-resume-v4",
+            }
             or outcome != ("failure", "skipped", "skipped", "skipped", "skipped")
             or failed_activation_run_id != "0"
         ):
@@ -498,7 +502,7 @@ if resume_baseline_dir:
         runtime = "oke" if checkpoint_expected["disk_checkpoint_disposition"] == "NOT_APPLICABLE" else "k3s"
     if sys.argv[18]:
         if schema_version != "live-betting-v6" or resume_authority_path.exists():
-            fail("qualified expired resume requires the envelope-free v6 prerequisite")
+            fail("qualified resume requires the envelope-free v6 prerequisite")
 
         def unique_pairs(pairs):
             values = {}
@@ -512,13 +516,20 @@ if resume_baseline_dir:
             dispatch = json.loads(sys.argv[18], object_pairs_hook=unique_pairs)
         except (ValueError, TypeError):
             fail("qualified resume dispatch inputs are malformed")
-        dispatch = module.live_data_native_inputs(dispatch, {
+        held_continuation = (
+            isinstance(dispatch, dict)
+            and dispatch.get("confirmation") == module.HELD_HANDOFF_CONFIRMATION
+        )
+        input_names = {
             "approved_sha", "resume_source_sha", "build_run_id",
             "infrastructure_run_id", "checkpoint_source_sha", "disk_checkpoint_run_id",
             "phase", "prerequisite_run_id", "baseline_recovery_run_id",
             "baseline_recovery_source_sha", "failed_deploy_run_id",
             "failed_activation_run_id", "failed_activation_user_id", "confirmation",
-        })
+        }
+        if held_continuation:
+            input_names.update({"held_handoff_run_id", "held_handoff_source_sha"})
+        dispatch = module.live_data_native_inputs(dispatch, input_names)
         bindings = {
             "resume_source_sha": expected["source_sha"],
             "prerequisite_run_id": expected["workflow_run_id"],
@@ -533,19 +544,36 @@ if resume_baseline_dir:
         }
         if any(dispatch[key] != value for key, value in bindings.items()):
             fail("qualified resume dispatch inputs differ from the prerequisite")
-        native = module.validate_expired_handoff_resume(
-            sys.argv[17], dispatch["failed_deploy_run_id"], dispatch["resume_source_sha"],
-            dispatch, runtime, "local expired resume",
-            successor_run_id=sys.argv[19],
-        )
+        if held_continuation:
+            qualified = module.validate_held_handoff_artifact(
+                sys.argv[17], dispatch["held_handoff_run_id"],
+                dispatch["held_handoff_source_sha"], dispatch["approved_sha"],
+                dispatch, runtime, "local held continuation",
+                successor_run_id=sys.argv[19],
+            )
+            native = dict(qualified["resume"], _baseline_files=qualified["baselineFiles"])
+        else:
+            native = module.validate_expired_handoff_resume(
+                sys.argv[17], dispatch["failed_deploy_run_id"], dispatch["resume_source_sha"],
+                dispatch, runtime, "local expired resume",
+                successor_run_id=sys.argv[19],
+            )
         if (
             not isinstance(native, dict)
-            or native.get("no_takeover_handoff_qualification") != "expired-own-handoff"
+            or (
+                not held_continuation
+                and native.get("no_takeover_handoff_qualification") != "expired-own-handoff"
+            )
+            or held_continuation and (
+                native.get("held_handoff_run_id") != dispatch["held_handoff_run_id"]
+                or native.get("held_handoff_source_sha") != dispatch["held_handoff_source_sha"]
+                or "no_takeover_handoff_qualification" in native
+            )
             or native.get("resume_maintenance_mode") != "pre-runtime-hold"
             or native.get("baseline_capture_run_id") != expected["workflow_run_id"]
             or native.get("baseline_sha256") != provenance["baseline_sha256"]
         ):
-            fail("native expired-handoff qualification is missing or contradictory")
+            fail("native resume qualification is missing or contradictory")
         baseline_files = {
             path.relative_to(baseline_root).as_posix(): path.read_bytes()
             for path in baseline_root.rglob("*") if path.is_file()

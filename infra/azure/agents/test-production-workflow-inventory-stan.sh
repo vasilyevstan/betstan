@@ -1560,6 +1560,11 @@ changes = {
     ),
 }
 old, new = changes[mutation]
+prefix = suffix = ""
+if mutation in {"commented-validator", "wrong-policy", "both-successor-bindings"}:
+    start = text.index("      - name: Validate exact SHA phase and trusted upstream runs\n")
+    end = text.index("\n      - name:", start + 1)
+    prefix, text, suffix = text[:start], text[start:end], text[end:]
 expected_count = 2 if mutation == "both-successor-bindings" else 1
 assert text.count(old) == expected_count, (mutation, text.count(old))
 text = text.replace(old, new)
@@ -1569,6 +1574,7 @@ elif mutation == "resume-successor-binding":
     assert '              --successor-run-id "$GITHUB_RUN_ID"\n' in text
 elif mutation == "both-successor-bindings":
     assert '--successor-run-id "$GITHUB_RUN_ID"' not in text
+text = prefix + text + suffix
 if mutation == "wrong-policy":
     text += '\n# --policy-json "$policy_json"\n'
 path.write_text(text)

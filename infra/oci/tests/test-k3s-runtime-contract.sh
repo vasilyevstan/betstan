@@ -814,12 +814,40 @@ cp "$DEPLOY_FIXTURE/queues.txt" "$OUTPUT_DIR/rabbitmq-baseline.txt"
 PY
 cp "$ROOT_DIR/infra/azure/agents/live-betting-readiness-lib.sh" \
   "$deploy_fixture/infra/azure/agents/"
+# This source-role fixture uses an untimed legacy producer. The real timing
+# reader and complete native renewal are exercised by the upstream/live suites.
+cat >"$deploy_fixture/infra/oci/scripts/upstream_run_binding_stan.py" <<'PY'
+import os
+from pathlib import Path
+
+
+def validate_receiver_handoff_timing(repository, data_run, source, boundary, receiver_run):
+    assert (repository, data_run, source, boundary, receiver_run) == (
+        "example/repo", "43", os.environ["EXPECTED_CONTROL_SHA"], "receiver-renewal", "99"
+    )
+    with (Path(os.environ["DEPLOY_FIXTURE"]) / "roles.log").open("a") as handle:
+        print(f"legacy_timing_source_sha={source}", file=handle)
+    return None
+PY
 cat >"$deploy_fixture/infra/oci/scripts/shared-mongo-operation-lock-stan.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$SOURCE_SHA" == "$EXPECTED_CONTROL_SHA" ]]
 [[ "$LOCK_TOKEN" == live-data-43-1 && "$OPERATION_ID" == live-data-apply-slip-index ]]
 printf 'lock_%s_source_sha=%s\n' "$1" "$SOURCE_SHA" >>"$DEPLOY_FIXTURE/roles.log"
+if [[ "$1" == renew ]]; then
+  printf 'shared_mongo_lock=renew status=PASS lease_until_epoch=%s fencing_generation=2\n' \
+    "$(( $(date +%s) + LOCK_LEASE_SECONDS ))"
+fi
+SH
+cat >"$deploy_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == revalidate && "$REVALIDATION_PROFILE" == held ]]
+[[ "$SOURCE_SHA" == "$EXPECTED_CHECKPOINT_SHA" && "$CONTROL_SHA" == "$EXPECTED_CONTROL_SHA" ]]
+[[ "$GHCR_BUILD_RUN_ID" == 42 && "$DISK_CHECKPOINT_RUN_ID" == 45 ]]
+printf 'checkpoint_source_sha=%s control_source_sha=%s\n' \
+  "$SOURCE_SHA" "$CONTROL_SHA" >>"$DEPLOY_FIXTURE/checkpoint-roles.log"
 SH
 cat >"$deploy_fixture/bin/oci" <<'SH'
 #!/usr/bin/env bash
@@ -869,7 +897,28 @@ steps = workflow.fetch("steps")
 %w[renew_lock release_lock].each do |id|
   File.write(File.join(ARGV[1], "#{id}.sh"), steps.find { |step| step["id"] == id }.fetch("run"))
 end
+[
+  "Revalidate held release disk checkpoint before lock renewal",
+  "Revalidate held release disk checkpoint after protected health"
+].each_with_index do |name, index|
+  matches = steps.select { |step| step["name"] == name }
+  abort "checkpoint revalidation step is not unique" unless matches.length == 1
+  File.write(File.join(ARGV[1], "checkpoint-#{index}.sh"), matches.fetch(0).fetch("run"))
+end
 RUBY
+for checkpoint in "$control_source" "$infrastructure_source"; do
+  for boundary in 0 1; do
+    (
+      cd "$deploy_fixture"
+      SOURCE_SHA="$control_source" EXPECTED_CONTROL_SHA="$control_source" \
+      CHECKPOINT_SOURCE_SHA="$checkpoint" EXPECTED_CHECKPOINT_SHA="$checkpoint" \
+      BUILD_RUN_ID=42 DISK_CHECKPOINT_RUN_ID=45 DEPLOY_FIXTURE="$deploy_fixture" \
+        bash "checkpoint-$boundary.sh"
+    ) || fail "checkpoint $boundary confused original checkpoint and current control sources"
+  done
+done
+[[ "$(wc -l <"$deploy_fixture/checkpoint-roles.log" | tr -d ' ')" == 4 ]] ||
+  fail "checkpoint source roles did not execute both original workflow boundaries"
 run_deploy_source_fixture() {
   local checkpoint="$1" infra="$2" instance_source="$3"
   cat >"$deploy_fixture/infrastructure.env" <<EOF
@@ -916,7 +965,7 @@ EOF
     export OUTPUT_DIR="$deploy_fixture/output" PATH="$deploy_fixture/bin:$PATH"
     bash "$deploy_fixture/infra/oci/scripts/deploy.sh" || exit "$?"
     cd "$deploy_fixture"
-    export DATA_RUN_ID=43 SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS=3600
+    export REPOSITORY=example/repo DATA_RUN_ID=43 SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS=3600
     bash renew_lock.sh || exit "$?"
     bash release_lock.sh
   )
@@ -928,7 +977,7 @@ run_deploy_source_fixture "$infrastructure_source" "$infrastructure_source" "$in
   fail "checkpoint-source deployment failed: $(tail -n 4 "$deploy_fixture/ancestor.out")"
 grep -Fxq "source_sha=$control_source" "$deploy_fixture/output/provenance.txt" ||
   fail "deployment provenance advanced to the infrastructure source"
-for role in lock_renew lock_release lock_verify-released; do
+for role in legacy_timing lock_renew lock_release lock_verify-released; do
   grep -Fxq "${role}_source_sha=$control_source" "$deploy_fixture/roles.log" ||
     fail "$role lost the current control source"
 done
