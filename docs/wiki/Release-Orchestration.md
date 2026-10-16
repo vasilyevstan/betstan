@@ -630,11 +630,25 @@ and exact shared-helper identity within the existing command-owned context,
 rehashes bytes, and repeats parsing and validation. Current source,
 workflow/policy identity and state, run status/attempt, complete artifact
 inventory, ownership and expiry, authority state, pending gates, exclusivity
-and receiver absence remain fresh at every authority boundary. At most four
-independent read-only bindings may run concurrently after serial input checks.
-Every result must be joined and every failure propagated before complete-map
-chronology and dependency checks or acceptance; recursive history remains serial
-within each binding. This adds no persistent cache, workflow, schema or bypass.
+and receiver absence remain fresh at every authority boundary. After serial
+input checks, the unchanged `min(4, binding_count)` binding workers each allow
+at most four active authentic native `gh` read children. One enforced
+process-wide `min(16, 4 * binding_count)` budget covers JSON, paginated and binary
+reads, including every retry attempt. Only independent workflow-history
+enumerations and existing one-run state leaves may overlap within a collection;
+row qualification and recursive history remain serial. Opening identities
+precede leaves, closing rereads follow their completion and validation, and the
+full first observation finishes before the second starts. Known failure stops
+new admission; owned children are cancelled as needed, drained and reaped before
+permit release or failure propagation. Main-thread interruption cancels children
+before joining the binding pool. All results are joined before complete-map
+chronology, dependency checks or acceptance. No additional thread or executor
+pool, native-response coalescing or caching, transport or credential change is
+introduced. The three approval revalidations remain sequential in the existing
+private workspace. Native freshness, current-clock, ownership, compare-and-swap,
+fence, data and baseline safeguards are unchanged. The resource cap proves no
+speedup, timing bound or operational readiness; stage values remain unchanged.
+This adds no persistent cache, workflow, schema or bypass.
 
 Older nonterminal records remain counted and untouched. Only records last
 updated strictly before the held handoff's creation may use the existing

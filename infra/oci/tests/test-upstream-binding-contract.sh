@@ -121,6 +121,313 @@ PY
 ok "bounded binding pool joins SystemExit and defers all acceptance"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import argparse, concurrent.futures, contextlib, fcntl, importlib.util, io, json
+import os, signal, subprocess, sys, threading, time
+from pathlib import Path
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("native_windows", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+root = Path(sys.argv[2]) / "native-windows"
+root.mkdir()
+binary = root / "bin"
+binary.mkdir()
+state_file = root / "state.json"
+gate = root / "gate"
+release = root / "release"
+stub = binary / "gh"
+stub.write_text(r'''#!/usr/bin/env python3
+import fcntl, json, os, re, sys, time
+from pathlib import Path
+path = sys.argv[2]
+state_file = Path(os.environ["NATIVE_STUB_STATE"])
+gate = Path(os.environ["NATIVE_STUB_GATE"])
+release = Path(os.environ["NATIVE_STUB_RELEASE"])
+mode = os.environ.get("NATIVE_STUB_MODE", "")
+match = re.fullmatch(r"repos/example/repo/actions/artifacts/([0-9]+)/zip", path)
+worker = "run_" + str(int(match[1]) - 100) if match else path.split("/")[1]
+kind = "binary" if match else "pages" if "--slurp" in sys.argv else "json"
+def update(start):
+    with state_file.open("r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        state = json.load(handle)
+        if start:
+            state["active"][str(os.getpid())] = worker
+            state["pids"].append(os.getpid())
+            state["calls"][path] = state["calls"].get(path, 0) + 1
+            state["kinds"].append(kind)
+            state["peak"] = max(state["peak"], len(state["active"]))
+            state["workers_peak"] = max(state["workers_peak"], len(set(state["active"].values())))
+            for name in set(state["active"].values()):
+                count = list(state["active"].values()).count(name)
+                state["per_worker"][name] = max(state["per_worker"].get(name, 0), count)
+                if count == 4:
+                    Path(str(gate) + "." + name).touch()
+            if len(state["active"]) >= int(os.environ["NATIVE_STUB_TARGET"]):
+                gate.touch()
+        else:
+            del state["active"][str(os.getpid())]
+        attempt = state["calls"][path]
+        handle.seek(0)
+        json.dump(state, handle)
+        handle.truncate()
+        handle.flush()
+    return attempt
+attempt = update(True)
+try:
+    deadline = time.monotonic() + 15
+    while (
+        not gate.exists()
+        or mode == "hold" and not release.exists()
+        or mode == "retry" and kind != "binary"
+            and not Path(str(gate) + "." + worker).exists()
+    ):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("stub admission gate timed out")
+        time.sleep(.002)
+    if "hang" in path:
+        time.sleep(30)
+    if "fail-" in path:
+        time.sleep(.08 if "slow" in path else .005)
+        sys.stderr.write("synthetic native failure")
+        raise SystemExit(1)
+    if kind == "binary":
+        if worker == "run_0" and attempt == 1 and mode == "retry":
+            sys.stderr.write("gh: HTTP 502\n")
+            raise SystemExit(1)
+        sys.stdout.buffer.write(b"native-binary")
+    elif "bad-json" in path:
+        sys.stdout.write("{")
+    else:
+        value = {"endpoint": path, "payload": "p" * 200000}
+        sys.stderr.write("e" * 200000)
+        sys.stderr.flush()
+        sys.stdout.write(json.dumps([value] if kind == "pages" else value))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.close(1)
+    os.close(2)
+    time.sleep(.08)
+finally:
+    update(False)
+''')
+stub.chmod(0o700)
+
+def state():
+    with state_file.open() as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH)
+        return json.load(handle)
+
+def reset(target=0, mode=""):
+    state_file.write_text(json.dumps(dict(
+        active={}, pids=[], calls={}, kinds=[], peak=0, workers_peak=0, per_worker={},
+    )))
+    gate.unlink(missing_ok=True)
+    release.unlink(missing_ok=True)
+    for path in root.glob("gate.*"):
+        path.unlink()
+    os.environ.update(NATIVE_STUB_TARGET=str(target), NATIVE_STUB_MODE=mode)
+
+def gone(pids):
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        raise AssertionError(f"native child {pid} was not reaped")
+
+def arguments(count):
+    bindings = [
+        dict(input=f"run_{i}", workflow="test.yml",
+             titleTemplates={"workflow_dispatch": "test {subject_sha}"},
+             artifactTemplate="test-{subject_sha}-{run_id}")
+        for i in range(count)
+    ]
+    return argparse.Namespace(
+        repository="example/repo", policy_json=json.dumps({"upstreamRunBindings": bindings}),
+        manifest="", operation="", subject_sha="1" * 40,
+        dispatch_inputs=json.dumps({b["input"]: str(i + 1) for i, b in enumerate(bindings)}),
+        runtime_mode="", successor_run_id="", result_json="", baseline_dir="", held_history_file="",
+    )
+
+def read_binding(*values):
+    name = values[1]["input"]
+    native = m.NATIVE_CONTEXT.get()
+    assert native is not None and native.limit == cap
+    scope_ids.add(id(native))
+    requests = [(f"native/{name}/{index}", index % 2 == 1) for index in range(5)]
+    results = m.native_api_batch(requests)
+    assert [(value[0] if paged else value)["endpoint"]
+            for value, (_, paged) in zip(results, requests)] == [path for path, _ in requests]
+    assert m.download_api_bytes(
+        f"repos/example/repo/actions/artifacts/{100 + int(name[4:])}/zip",
+    ) == b"native-binary"
+    return dict(artifactName="native-fixture")
+
+environment = dict(
+    PATH=str(binary) + os.pathsep + os.environ["PATH"],
+    NATIVE_STUB_STATE=str(state_file), NATIVE_STUB_GATE=str(gate),
+    NATIVE_STUB_RELEASE=str(release),
+)
+with patch.dict(os.environ, environment):
+    for count in (0, 1, 2, 3, 4, 6):
+        cap = min(16, 4 * count)
+        scope_ids = set()
+        reset(cap, "retry")
+        with patch.object(m, "validate_binding", side_effect=read_binding), \
+                patch.object(m, "time", wraps=m.time) as clock, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            clock.sleep.return_value = None
+            m.command_validate_all(arguments(count))
+        observed = state()
+        assert len(scope_ids) == min(1, count)
+        assert observed["peak"] == cap, (count, observed)
+        assert observed["workers_peak"] <= min(4, count)
+        assert all(peak == 4 for peak in observed["per_worker"].values())
+        assert not observed["active"]
+        gone(observed["pids"])
+        if count:
+            assert set(observed["kinds"]) == {"json", "pages", "binary"}
+            assert observed["calls"]["repos/example/repo/actions/artifacts/100/zip"] == 2
+        print(f"native_child_caps bindings={count} global={cap} per_worker=4 status=PASS")
+
+    reset()
+    with m.NativeReadCommand(1) as native:
+        outcomes = m.native_window([
+            (["gh", "api", "native/run_0/0"], None),
+            ([str(root / "missing-native-executable")], None),
+            (["gh", "api", "native/run_0/unadmitted"], None),
+        ])
+        assert isinstance(outcomes[1], FileNotFoundError) and outcomes[2] is None
+        assert native.active == 0
+    assert "native/run_0/unadmitted" not in state()["calls"]
+    gone(state()["pids"])
+
+    reset()
+    with m.NativeReadCommand(1) as native, contextlib.redirect_stderr(io.StringIO()) as errors:
+        try:
+            m.native_api_batch([
+                ("native/run_0/fail-slow", False), ("native/run_0/fail-fast", False),
+                ("native/run_0/2", False), ("native/run_0/3", False),
+                ("native/run_0/unadmitted", False),
+            ])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("failed window accepted")
+        assert native.active == 0 and "fail-slow" in errors.getvalue()
+    assert "native/run_0/unadmitted" not in state()["calls"]
+    gone(state()["pids"])
+
+    reset()
+    with m.NativeReadCommand(1) as native, contextlib.redirect_stderr(io.StringIO()):
+        try:
+            m.native_api_batch([("native/run_0/bad-json", False)] + [
+                (f"native/run_0/{index}", False) for index in range(1, 5)
+            ])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("malformed native response accepted")
+        assert native.active == 0
+    gone(state()["pids"])
+
+    reset()
+    with m.NativeReadCommand(1) as native:
+        try:
+            m._native_run(["gh", "api", "native/run_0/hang"], timeout=.1)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("native timeout accepted")
+        assert native.active == 0
+    gone(state()["pids"])
+
+    reset(4, "hold")
+    with m.NativeReadCommand(1) as native, concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        def occupy():
+            token = m.NATIVE_CONTEXT.set(native)
+            try:
+                return m.native_api_batch([(f"native/run_0/{i}", False) for i in range(4)])
+            finally:
+                m.NATIVE_CONTEXT.reset(token)
+        future = pool.submit(occupy)
+        deadline = time.monotonic() + 10
+        while len(state()["pids"]) != 4:
+            assert time.monotonic() < deadline, "native saturation did not start"
+            time.sleep(.01)
+        timer = threading.Timer(1, release.touch)
+        timer.start()
+        started = time.monotonic()
+        try:
+            try:
+                m._native_run(["gh", "api", "native/run_1/unadmitted"], timeout=.05)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                raise AssertionError("permit waiting reset the native timeout")
+            assert time.monotonic() - started < .5
+            assert "native/run_1/unadmitted" not in state()["calls"]
+        finally:
+            release.touch()
+            timer.cancel()
+            timer.join()
+        future.result(timeout=10)
+        assert native.active == 0
+    gone(state()["pids"])
+
+    driver = r'''
+import argparse, importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("native_signal_driver", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+bindings = [dict(input=f"run_{i}", workflow="test.yml",
+                titleTemplates={"workflow_dispatch": "test {subject_sha}"},
+                artifactTemplate="test-{subject_sha}-{run_id}") for i in range(4)]
+def read(*values):
+    m.native_api_batch([(f"native/{values[1]['input']}/hang-{i}", False) for i in range(4)])
+    return dict(artifactName="unexpected")
+m.validate_binding = read
+m.command_validate_all(argparse.Namespace(
+    repository="example/repo", policy_json=json.dumps({"upstreamRunBindings": bindings}),
+    manifest="", operation="", subject_sha="1"*40,
+    dispatch_inputs=json.dumps({b["input"]: str(i+1) for i,b in enumerate(bindings)}),
+    runtime_mode="", successor_run_id="", result_json="", baseline_dir="", held_history_file="",
+))
+'''
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        reset(16)
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", driver, sys.argv[1]],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while len(state()["pids"]) != 16:
+                assert process.poll() is None, process.communicate()
+                assert time.monotonic() < deadline, "signal fixture did not admit children"
+                time.sleep(.01)
+            os.kill(process.pid, signum)
+            stdout, stderr = process.communicate(timeout=10)
+            assert process.returncode in (-signum, 128 + signum), (process.returncode, stderr)
+            assert b"upstream_binding=" not in stdout and b"upstream_bindings_validated=" not in stdout
+            gone(state()["pids"])
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+            for pid in state()["pids"]:
+                try:
+                    if os.getpgid(pid) == process.pid:
+                        os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+print("native_window_lifecycle=PASS")
+PY
+ok "native read windows enforce real-child caps, shared budgets and cancellation cleanup"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import concurrent.futures, contextlib, hashlib, importlib.util, io, os, sys
 from pathlib import Path
 from unittest.mock import patch
@@ -952,7 +1259,7 @@ def transport(argv, **kwargs):
         result = json.dumps([value] if "--slurp" in argv else value).encode()
     return subprocess.CompletedProcess(argv, 0, result, b"")
 def proof(runtime="k3s"):
-    with patch.object(m.subprocess, "run", side_effect=transport):
+    with patch.object(m, "_native_run", side_effect=transport):
         return m.expired_handoff_native_inputs("example/repo", "77", runtime, "frozen native fixture")
 def reject():
     with contextlib.redirect_stderr(io.StringIO()):
@@ -2663,7 +2970,7 @@ for failed_index in range(4):
             patch.object(m, "parse_checkpoint_artifact", transported(reads_in_order[0], m.parse_checkpoint_artifact)), \
             patch.object(m, "parse_live_v6_artifact", transported(reads_in_order[1], m.parse_live_v6_artifact)), \
             patch.object(m, "parse_infrastructure_provenance", transported(reads_in_order[3], m.parse_infrastructure_provenance)), \
-            patch.object(m.subprocess, "run", side_effect=transport), \
+            patch.object(m, "_native_run", side_effect=transport), \
             patch.object(m.time, "sleep") as sleep, \
             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         print("preceding binding status=OK\n" * 4, end="")
@@ -3486,7 +3793,7 @@ def failure(attempt, diagnostic, output=valid_archive):
 
 def invoke(accepted, calls, sleeps, expected=valid_archive, expected_kind="artifact-zip"):
     stdout, stderr = io.StringIO(), io.StringIO()
-    with patch.object(module.subprocess, "run", wraps=subprocess.run) as run, \
+    with patch.object(module, "_native_run", wraps=module._native_run) as run, \
             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         try:
             value = module.gh_api_bytes(endpoint)
@@ -3637,7 +3944,7 @@ with patch.object(module, "time", wraps=module.time) as clock:
         for code in (-15, 2, 4, 130, 143, 99)
     ] + [OSError(f"{secret} {signed_url}")]:
         reset_download()
-        with patch.object(module.subprocess, "run", side_effect=[result]) as run:
+        with patch.object(module, "_native_run", side_effect=[result]) as run:
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
                 try:

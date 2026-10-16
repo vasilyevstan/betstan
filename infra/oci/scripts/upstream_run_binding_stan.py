@@ -17,6 +17,7 @@ import argparse
 import base64
 import binascii
 import concurrent.futures
+import contextlib
 import contextvars
 import datetime as dt
 import hashlib
@@ -26,6 +27,8 @@ import ipaddress
 import json
 import os
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -74,6 +77,7 @@ ARTIFACT_DOWNLOAD_ATTEMPTS = 3
 ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS = 120
 ARTIFACT_DOWNLOAD_BACKOFF_SECONDS = (1, 2)
 BYTE_CONTEXT = contextvars.ContextVar("binding_immutable_bytes", default=None)
+NATIVE_CONTEXT = contextvars.ContextVar("binding_native_reads", default=None)
 HANDOFF_STAGE_CEILINGS = {
     "packaging": 120, "admission": 180, "queue": 120, "approval": 240,
     "native-validation": 180, "startup-snapshot": 240, "receiver-renewal": 120,
@@ -449,41 +453,261 @@ def collect_provenance_read_observation(repository, run_id, observation=None):
     return observation
 
 
+class NativeReadCommand:
+    def __init__(self, binding_count):
+        if type(binding_count) is not int or binding_count < 0:
+            raise ValueError("native binding count is invalid")
+        self.limit = min(16, 4 * binding_count)
+        self.active = 0
+        self.lock = threading.Lock()
+        self.cancelled = threading.Event()
+        self.interruption = None
+        self.handlers = {}
+
+    def __enter__(self):
+        self.token = NATIVE_CONTEXT.set(self)
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                self.handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, self.interrupt)
+        return self
+
+    def __exit__(self, error_type, error, traceback):
+        for signum, handler in self.handlers.items():
+            signal.signal(signum, handler)
+        NATIVE_CONTEXT.reset(self.token)
+        if self.active:
+            if error is None:
+                raise RuntimeError("native command left active child reservations")
+            print("native command cleanup left active child reservations", file=sys.stderr)
+        if self.interruption is not None:
+            raise self.interruption
+
+    def interrupt(self, signum, frame):
+        # Raising here could interrupt Popen before its child is registered.
+        if self.interruption is None:
+            self.interruption = (
+                KeyboardInterrupt() if signum == signal.SIGINT else SystemExit(128 + signum)
+            )
+
+    def check_cancelled(self):
+        if self.interruption is not None:
+            self.cancelled.set()
+        if self.cancelled.is_set():
+            if self.interruption is not None and threading.current_thread() is threading.main_thread():
+                raise self.interruption
+            raise concurrent.futures.CancelledError("native read command was interrupted")
+
+    def acquire(self):
+        with self.lock:
+            if self.active >= self.limit:
+                return False
+            self.active += 1
+            return True
+
+    def release(self):
+        with self.lock:
+            if self.active < 1:
+                raise RuntimeError("native child reservation was already released")
+            self.active -= 1
+
+
+def native_window(requests):
+    started = time.monotonic()
+    current = NATIVE_CONTEXT.get()
+    scope = contextlib.nullcontext(current) if current is not None else NativeReadCommand(1)
+    with scope as native:
+        if requests and native.limit == 0:
+            raise RuntimeError("native reads require a nonempty binding budget")
+        outcomes = [None] * len(requests)
+        active = {}
+        next_request = 0
+        failed = False
+        with selectors.DefaultSelector() as ready:
+            try:
+                while active or next_request < len(requests) and not failed:
+                    native.check_cancelled()
+                    while not failed and next_request < len(requests) and len(active) < 4:
+                        command, timeout = requests[next_request]
+                        if timeout is not None and time.monotonic() - started >= timeout:
+                            outcomes[next_request] = subprocess.TimeoutExpired(command, timeout)
+                            failed = True
+                            break
+                        if not native.acquire():
+                            break
+                        try:
+                            process = subprocess.Popen(
+                                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                            )
+                        except BaseException as error:
+                            native.release()
+                            if not isinstance(error, OSError):
+                                raise
+                            outcomes[next_request] = error
+                            failed = True
+                            break
+                        child = {
+                            "process": process, "command": command, "timeout": timeout,
+                            "stdout": bytearray(), "stderr": bytearray(),
+                            "streams": {"stdout", "stderr"}, "timed_out": False,
+                        }
+                        active[next_request] = child
+                        for name in ("stdout", "stderr"):
+                            pipe = getattr(process, name)
+                            os.set_blocking(pipe.fileno(), False)
+                            ready.register(pipe, selectors.EVENT_READ, (next_request, name))
+                        next_request += 1
+                    if not active:
+                        if failed or next_request == len(requests):
+                            break
+                        native.cancelled.wait(0.01)
+                        continue
+                    for key, _ in ready.select(0.01):
+                        index, name = key.data
+                        try:
+                            chunk = os.read(key.fd, 65536)
+                        except BlockingIOError:
+                            continue
+                        if chunk:
+                            active[index][name].extend(chunk)
+                        else:
+                            ready.unregister(key.fileobj)
+                            active[index]["streams"].remove(name)
+                    now = time.monotonic()
+                    for index, child in list(active.items()):
+                        process = child["process"]
+                        returncode = process.poll()
+                        if (
+                            child["timeout"] is not None
+                            and now - started >= child["timeout"]
+                            and not child["timed_out"]
+                        ):
+                            child["timed_out"] = True
+                            failed = True
+                            if returncode is None:
+                                process.kill()
+                        if returncode is not None and returncode != 0:
+                            failed = True
+                        if returncode is None or child["streams"]:
+                            continue
+                        stdout, stderr = bytes(child["stdout"]), bytes(child["stderr"])
+                        if child["timed_out"]:
+                            outcomes[index] = subprocess.TimeoutExpired(
+                                child["command"], child["timeout"], output=stdout, stderr=stderr,
+                            )
+                        else:
+                            outcomes[index] = subprocess.CompletedProcess(
+                                child["command"], returncode, stdout, stderr,
+                            )
+                        process.stdout.close()
+                        process.stderr.close()
+                        native.release()
+                        del active[index]
+            finally:
+                original = sys.exc_info()[1]
+                cleanup_errors = []
+                for child in active.values():
+                    process = child["process"]
+                    if process.poll() is None:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        except OSError as error:
+                            cleanup_errors.append(error)
+                for child in active.values():
+                    process = child["process"]
+                    try:
+                        process.communicate()
+                    except OSError as error:
+                        cleanup_errors.append(error)
+                    finally:
+                        for pipe in (process.stdout, process.stderr):
+                            if not pipe.closed:
+                                pipe.close()
+                        if process.poll() is not None:
+                            native.release()
+                        else:
+                            cleanup_errors.append(RuntimeError("native child was not reaped"))
+                if cleanup_errors:
+                    if original is None:
+                        raise cleanup_errors[0]
+                    print("native child cleanup failed", file=sys.stderr)
+        return outcomes
+
+
+def _native_text(raw):
+    if isinstance(raw, str):
+        return raw
+    with io.TextIOWrapper(io.BytesIO(raw)) as stream:
+        return stream.read()
+
+
+def _native_run(command, *, capture_output=True, text=False, check=False, timeout=None):
+    if capture_output is not True or check is not False:
+        raise ValueError("native reads require captured, explicitly checked outcomes")
+    outcome = native_window([(command, timeout)])[0]
+    if isinstance(outcome, BaseException):
+        raise outcome
+    if outcome is None:
+        raise RuntimeError("native singleton read did not complete")
+    if text:
+        return subprocess.CompletedProcess(
+            outcome.args, outcome.returncode,
+            _native_text(outcome.stdout), _native_text(outcome.stderr),
+        )
+    return outcome
+
+
+def _native_json(outcome, path, paginated=False):
+    if isinstance(outcome, BaseException):
+        raise outcome
+    if outcome is None:
+        fail(f"native read collection is incomplete for {path}")
+    if outcome.returncode != 0:
+        fail(f"unable to read {'all pages of ' if paginated else ''}{path}")
+    try:
+        payload = json.loads(_native_text(outcome.stdout))
+    except json.JSONDecodeError:
+        fail(f"malformed {'paginated response' if paginated else 'response'} for {path}")
+    if not paginated:
+        return payload
+    if isinstance(payload, dict):
+        return [payload]
+    if not isinstance(payload, list) or not all(isinstance(page, dict) for page in payload):
+        fail(f"unexpected paginated response for {path}")
+    return payload
+
+
+def native_api_batch(requests):
+    outcomes = native_window([
+        (["gh", "api", path] + (["--paginate", "--slurp"] if paginated else []), None)
+        for path, paginated in requests
+    ])
+    return [
+        _native_json(outcome, path, paginated)
+        for (path, paginated), outcome in zip(requests, outcomes)
+    ]
+
+
 def gh_api(path):
-    result = subprocess.run(
+    result = _native_run(
         ["gh", "api", path],
         capture_output=True,
         text=True,
         check=False,
     )
-    if result.returncode != 0:
-        fail(f"unable to read {path}")
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        fail(f"malformed response for {path}")
+    return _native_json(result, path)
 
 
 def gh_api_pages(path):
-    result = subprocess.run(
+    result = _native_run(
         ["gh", "api", path, "--paginate", "--slurp"],
         capture_output=True,
         text=True,
         check=False,
     )
-    if result.returncode != 0:
-        fail(f"unable to read all pages of {path}")
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        fail(f"malformed paginated response for {path}")
-    if isinstance(payload, dict):
-        return [payload]
-    if not isinstance(payload, list) or not all(
-        isinstance(page, dict) for page in payload
-    ):
-        fail(f"unexpected paginated response for {path}")
-    return payload
+    return _native_json(result, path, True)
 
 
 def _classify_artifact_download_failure(returncode, stderr):
@@ -589,7 +813,7 @@ def command_owner_is_ancestor(owner):
     for _ in range(3):
         if parent == int(owner):
             return True
-        result = subprocess.run(
+        result = _native_run(
             ["ps", "-o", "ppid=", "-p", str(parent)],
             capture_output=True, text=True, check=False,
         )
@@ -1047,6 +1271,10 @@ def artifact_inventory(repository, run_id, label):
     pages = gh_api_pages(
         f"repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100"
     )
+    return artifacts_from_pages(pages, label)
+
+
+def artifacts_from_pages(pages, label):
     total_counts = {page.get("total_count") for page in pages}
     if (
         len(total_counts) != 1
@@ -1817,6 +2045,10 @@ def jobs_for_run(repository, run_id, label):
     pages = gh_api_pages(
         f"repos/{repository}/actions/runs/{run_id}/attempts/1/jobs?per_page=100"
     )
+    return jobs_from_pages(pages, label)
+
+
+def jobs_from_pages(pages, label):
     total_counts = {page.get("total_count") for page in pages}
     if (
         len(total_counts) != 1
@@ -3539,17 +3771,6 @@ def held_handoff_history(
         for _ in range(2):
             latest = gh_api(endpoint)
             first = gh_api(endpoint + "/attempts/1")
-            workflow_metadata = gh_api(
-                f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml"
-            )
-            if (
-                not isinstance(workflow_metadata, dict)
-                or type(workflow_metadata.get("id")) is not int
-                or workflow_metadata["id"] != row["workflow_id"]
-                or workflow_metadata.get("path") != path
-                or workflow_metadata.get("state") not in {"active", "disabled_manually"}
-            ):
-                fail(f"{label} workflow identity is invalid")
             windows = []
             for run in (latest, first):
                 if (
@@ -3574,7 +3795,22 @@ def held_handoff_history(
                 for key in (*expected, "created_at", "run_started_at", "updated_at")
             ):
                 fail(f"{label} native details differ from the complete inventory")
-            jobs = jobs_for_run(repository, str(row["id"]), label)
+            workflow_metadata, job_pages, pending, approvals, artifact_pages = native_api_batch([
+                (f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml", False),
+                (endpoint + "/attempts/1/jobs?per_page=100", True),
+                (endpoint + "/pending_deployments", False),
+                (endpoint + "/approvals", False),
+                (endpoint + "/artifacts?per_page=100", True),
+            ])
+            if (
+                not isinstance(workflow_metadata, dict)
+                or type(workflow_metadata.get("id")) is not int
+                or workflow_metadata["id"] != row["workflow_id"]
+                or workflow_metadata.get("path") != path
+                or workflow_metadata.get("state") not in {"active", "disabled_manually"}
+            ):
+                fail(f"{label} workflow identity is invalid")
+            jobs = jobs_from_pages(job_pages, label)
             if len(jobs) != 1:
                 fail(f"{label} must have exactly one cancelled rollout job")
             job = exact_job(jobs, "rollout", label)
@@ -3599,9 +3835,7 @@ def held_handoff_history(
             if not all(window[1] <= job_times[0] <= job_times[1] <= job_times[2] <= window[2]
                        for window in windows):
                 fail(f"{label} job is outside an authenticated endpoint window")
-            pending = gh_api(endpoint + "/pending_deployments")
-            approvals = gh_api(endpoint + "/approvals")
-            artifacts = artifact_inventory(repository, str(row["id"]), label)
+            artifacts = artifacts_from_pages(artifact_pages, label)
             if pending != [] or approvals != [] or artifacts:
                 fail(f"{label} has pending, approved, or artifact evidence")
             historical = gh_api(
@@ -3750,12 +3984,15 @@ def held_handoff_history(
                 fail("held-handoff successor cutoff chronology is invalid")
         elif first.get("status") not in {"queued", "waiting", "requested", "pending"}:
             fail("held-handoff successor state is invalid")
-    counts = {}
+    history_requests = []
     for workflow in workflows:
         endpoint = f"repos/{repository}/actions/workflows/{workflow}/runs?per_page=100"
         if cutoff is not None and not active_inventory:
             endpoint += "&created=%3C%3D" + cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
-        pages = gh_api_pages(endpoint)
+        history_requests.append((endpoint, True))
+    inventories = native_api_batch(history_requests)
+    counts = {}
+    for workflow, pages in zip(workflows, inventories):
         totals = {page.get("total_count") for page in pages}
         if len(totals) != 1 or any(type(n) is not int or not 0 <= n < 1000 for n in totals):
             fail("held-handoff historical inventory is incomplete or exceeds its bound")
@@ -3852,18 +4089,7 @@ def held_handoff_history(
                     fail(f"{label} inventory cannot bind unmaterialized evidence")
                 run_endpoint = f"repos/{repository}/actions/runs/{row['id']}"
                 native = gh_api(run_endpoint)
-                workflow_metadata = gh_api(
-                    f"repos/{repository}/actions/workflows/{row['workflow_id']}"
-                )
-                jobs = gh_api(run_endpoint + "/jobs?filter=all&per_page=100")
-                pending = gh_api(run_endpoint + "/pending_deployments")
-                approvals = gh_api(run_endpoint + "/approvals")
-                artifacts = gh_api(run_endpoint + "/artifacts?per_page=100")
-                historical = gh_api(
-                    f"repos/{repository}/contents/{row['path']}?ref={row['head_sha']}"
-                )
-                compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
-                for observed in (native, gh_api(run_endpoint)):
+                def validate_opening_identity(observed):
                     if (
                         not isinstance(observed, dict)
                         or any(
@@ -3874,6 +4100,18 @@ def held_handoff_history(
                         or observed["head_repository"].get("full_name") != repository
                     ):
                         fail(f"{label} native details drifted from the complete inventory")
+                validate_opening_identity(native)
+                workflow_metadata, jobs, pending, approvals, artifacts = native_api_batch([
+                    (f"repos/{repository}/actions/workflows/{row['workflow_id']}", False),
+                    (run_endpoint + "/jobs?filter=all&per_page=100", False),
+                    (run_endpoint + "/pending_deployments", False),
+                    (run_endpoint + "/approvals", False),
+                    (run_endpoint + "/artifacts?per_page=100", False),
+                ])
+                historical = gh_api(
+                    f"repos/{repository}/contents/{row['path']}?ref={row['head_sha']}"
+                )
+                compare = held_raw_ancestry(authority, repository, row, subject_sha, label)
                 try:
                     authority.validate_unmaterialized_run_evidence(
                         run=native, workflow=workflow_metadata, jobs=jobs, pending=pending,
@@ -3887,6 +4125,7 @@ def held_handoff_history(
                     )
                 except SystemExit:
                     fail(f"{label} is not an authenticated unmaterialized run")
+                validate_opening_identity(gh_api(run_endpoint))
         if workflow == "oci-live-data-rollout.yml":
             required_ids = {held["id"]}
             if successor_run_id:
@@ -7308,18 +7547,20 @@ def command_validate(args):
     dispatch_inputs = json.loads(args.dispatch_inputs)
     if not isinstance(dispatch_inputs, dict):
         fail("dispatch inputs must be an object")
-    facts = validate_binding(
-        args.repository,
-        binding,
-        args.subject_sha,
-        args.run_id,
-        dispatch_inputs,
-        args.runtime_mode,
-    )
-    print(
-        f"upstream_binding={binding['input']} run={args.run_id} "
-        f"artifact={facts['artifactName']}"
-    )
+    with NativeReadCommand(1) as native:
+        facts = validate_binding(
+            args.repository,
+            binding,
+            args.subject_sha,
+            args.run_id,
+            dispatch_inputs,
+            args.runtime_mode,
+        )
+        native.check_cancelled()
+        print(
+            f"upstream_binding={binding['input']} run={args.run_id} "
+            f"artifact={facts['artifactName']}"
+        )
 
 
 def resolve_bindings(args):
@@ -7431,6 +7672,14 @@ def command_validate_all(args):
             or FULL_SHA.fullmatch(inputs[expected_head]) is None
         ):
             fail(f"dispatch input {expected_head} must be a complete source SHA")
+    operation = policy.get("operation", "") if args.policy_json and not args.manifest else args.operation
+    with NativeReadCommand(len(bindings)) as native:
+        return validate_all_bindings(
+            args, inputs, bindings, chronology_inputs, operation, native,
+        )
+
+
+def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, native):
     validated = {}
     failures = []
     if bindings:
@@ -7446,6 +7695,7 @@ def command_validate_all(args):
         })
         def read_binding(binding):
             token = BYTE_CONTEXT.set(byte_context)
+            native_token = NATIVE_CONTEXT.set(native)
             try:
                 return validate_binding(
                     args.repository, binding, args.subject_sha,
@@ -7453,6 +7703,7 @@ def command_validate_all(args):
                     getattr(args, "successor_run_id", ""),
                 )
             finally:
+                NATIVE_CONTEXT.reset(native_token)
                 BYTE_CONTEXT.reset(token)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(4, len(bindings))
@@ -7468,7 +7719,12 @@ def command_validate_all(args):
                 try:
                     validated[binding["input"]] = future.result()
                 except BaseException as error:
+                    if isinstance(error, KeyboardInterrupt):
+                        if native.interruption is None:
+                            native.interruption = error
+                        native.cancelled.set()
                     failures.append(error)
+        native.check_cancelled()
         if failures:
             raise failures[0]
     for binding in bindings:
@@ -7492,7 +7748,6 @@ def command_validate_all(args):
                     f"binding {name} began before {after_input} completed"
                 )
     timing = None
-    operation = policy.get("operation", "") if args.policy_json and not args.manifest else args.operation
     if operation in {"oci-production-deploy", "oci-production-deploy-recovered"}:
         if not bindings or "data_run_id" not in validated:
             fail("receiver handoff timing requires its authenticated data binding")
@@ -7519,6 +7774,7 @@ def command_validate_all(args):
             )
         finally:
             BYTE_CONTEXT.reset(token)
+    native.check_cancelled()
     histories = [facts["heldHistory"] for facts in validated.values() if "heldHistory" in facts]
     baselines = [facts["baselineFiles"] for facts in validated.values() if "baselineFiles" in facts]
     if getattr(args, "held_history_file", "") and (
