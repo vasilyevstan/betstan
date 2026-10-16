@@ -7338,16 +7338,15 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
     for result in (held155, failed_root):
         assert "no_takeover_handoff_qualification" not in result["resume"]
     canonical_result = native_authority_dir / "live-data-upstream-result.json"
-    with contextlib.redirect_stdout(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()) as canonical_output:
         complete_reader.command_validate_all(argparse.Namespace(
             repository=repo, policy_json=json.dumps(held_policy), manifest="", operation="",
             subject_sha=native_source, dispatch_inputs=json.dumps(continuation), runtime_mode="oke",
             successor_run_id="156", result_json=str(canonical_result), baseline_dir="",
             held_history_file=""))
     canonical = json.loads(canonical_result.read_text())
-    assert set(canonical) == {
-        "build_run_id", "infrastructure_run_id", "disk_checkpoint_run_id",
-        "prerequisite_run_id", "failed_deploy_run_id", "held_handoff_run_id"}
+    assert "upstream_bindings_validated=6" in canonical_output.getvalue().splitlines()
+    assert set(canonical) == {"failed_deploy_run_id", "held_handoff_run_id"}
     header = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
                   if step.get("name") == "Validate exact SHA phase and trusted upstream runs")
     start = header.index("result_binding=failed_deploy_run_id")
@@ -7471,7 +7470,11 @@ else:
     kubectl.chmod(0o755)
     native_env = dict(producer_env, SOURCE_SHA=native_source, RUNNER_TEMP=str(native_authority_dir),
         OCI_K8S_NAMESPACE=namespace, PREREQUISITE_RUN_ID="53", RESUME_SOURCE_SHA=expired_source,
-        BASELINE_RECOVERY_RUN_ID="0", NO_TAKEOVER_HANDOFF_QUALIFICATION="none",
+        BASELINE_RECOVERY_RUN_ID="0",
+        RESUME_MAINTENANCE_MODE=output_values["resume_maintenance_mode"],
+        RESOLVED_APPLIED_DATA_RUN_ID=output_values["applied_data_run_id"],
+        RESOLVED_APPLIED_SOURCE_SHA=output_values["applied_source_sha"],
+        NO_TAKEOVER_HANDOFF_QUALIFICATION=output_values.get("no_takeover_handoff_qualification", "none"),
         BASELINE_CAPTURE_RUN_ID=output_values["baseline_capture_run_id"],
         BASELINE_CAPTURE_SOURCE_SHA=output_values["baseline_capture_source_sha"],
         HELD_HANDOFF_RUN_ID="155", HELD_HANDOFF_SOURCE_SHA=native_source,

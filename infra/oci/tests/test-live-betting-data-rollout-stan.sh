@@ -287,6 +287,7 @@ run_resume_context() {
     STUB_RESUME_CONTEXT_LOG="$resume_context_log" \
     RESUME_NATIVE_DISPATCH_INPUTS=untrusted-inherited-context RESUME_SUCCESSOR_RUN_ID=999 \
     DISPATCH_INPUTS='{"prerequisite_run_id":"53","failed_deploy_run_id":"54"}' \
+    HELD_HANDOFF_RUN_ID="${RESUME_CONTEXT_HELD_RUN_ID:-0}" \
     GITHUB_RUN_ID=55 RUNNER_TEMP="$resume_fixture" \
     prior_source_sha=2222222222222222222222222222222222222222 \
     prior_build_run_id=2001 prior_infrastructure_run_id=3001 \
@@ -298,8 +299,10 @@ run_resume_context() {
       bash -euo pipefail -c "$resume_context_script"
   )
 }
-for qualification in expired-own-handoff ordinary none; do
-  if [[ "$qualification" == none ]]; then
+for qualification in expired-own-handoff ordinary none held; do
+  RESUME_CONTEXT_HELD_RUN_ID=0
+  [[ "$qualification" != held ]] || RESUME_CONTEXT_HELD_RUN_ID=155
+  if [[ "$qualification" == none || "$qualification" == held ]]; then
     printf '%s\n' '{"failed_deploy_run_id":{}}'
   else
     printf '{"failed_deploy_run_id":{"no_takeover_handoff_qualification":"%s"}}\n' \
@@ -312,23 +315,24 @@ import json
 import pathlib
 import sys
 calls = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-assert len(calls) == 3
+assert len(calls) == 4
 for index, call in enumerate(calls):
     assert call["VERIFY_RESUME_APPLIED_RUN"] == "true"
     assert call["EXPECTED_SOURCE_SHA"] == "2" * 40
     assert call["EXPECTED_CHECKPOINT_SOURCE_SHA"] == "1" * 40
-    assert call["RESUME_SUCCESSOR_RUN_ID"] == ("55" if index == 0 else "")
+    assert call["RESUME_SUCCESSOR_RUN_ID"] == ("55" if index in (0, 3) else "")
     assert call["RESUME_NATIVE_DISPATCH_INPUTS"] == (
-        '{"prerequisite_run_id":"53","failed_deploy_run_id":"54"}' if index == 0 else "")
+        '{"prerequisite_run_id":"53","failed_deploy_run_id":"54"}' if index in (0, 3) else "")
 print("PASS exact workflow resume context: qualified only, native successor, inherited values cleared, no public inputs")
 PY
+RESUME_CONTEXT_HELD_RUN_ID=0
 for invalid_result in '[]' '{}' '{"failed_deploy_run_id":null}' '{"failed_deploy_run_id":"expired-own-handoff"}'; do
   printf '%s\n' "$invalid_result" >"$resume_fixture/live-data-upstream-result.json"
   if run_resume_context >/dev/null 2>&1; then
     fail "malformed upstream result selected a resume context"
   fi
 done
-[[ "$(wc -l <"$resume_context_log" | tr -d ' ')" == 3 ]] ||
+[[ "$(wc -l <"$resume_context_log" | tr -d ' ')" == 4 ]] ||
   fail "invalid context reached the verifier"
 
 demotion_script="$(
@@ -3649,6 +3653,9 @@ run_resume_fixture() {
     PREREQUISITE_RUN_ID="${RESUME_PREREQUISITE_RUN_ID:-4007}" \
     RESUME_SOURCE_SHA="${RESUME_PREREQUISITE_SOURCE_SHA:-1111111111111111111111111111111111111111}" \
     RESUME_MAINTENANCE_MODE="$mode" \
+    FAILED_ACTIVATION_RUN_ID=0 \
+    BASELINE_CAPTURE_RUN_ID="${RESUME_PREREQUISITE_RUN_ID:-4007}" \
+    BASELINE_CAPTURE_SOURCE_SHA=1111111111111111111111111111111111111111 \
     BASELINE_RECOVERY_SOURCE_SHA=none \
     RESOLVED_APPLIED_DATA_RUN_ID=4007 \
     RESOLVED_APPLIED_SOURCE_SHA=1111111111111111111111111111111111111111 \
