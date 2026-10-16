@@ -1191,11 +1191,6 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("upstream_binding", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-# Logical-proof fixtures inject fresh API responses; real-child coverage is above.
-m.native_api_batch = lambda requests: [
-    (m.gh_api_pages if paginated else m.gh_api)(path)
-    for path, paginated in requests
-]
 source, prefix = "3" * 40, "repos/example/repo"
 native = dict(approved_sha=source, build_run_id="21", infrastructure_run_id="22", data_run_id="23",
               checkpoint_source_sha="1" * 40, disk_checkpoint_run_id="24",
@@ -1339,6 +1334,11 @@ spec.loader.exec_module(m)
 native_byte_reader = m.gh_api_bytes
 native_jobs_inventory = m.jobs_for_run
 native_artifacts_inventory = m.artifact_inventory
+# Logical-proof fixtures inject fresh API responses; real-child coverage is above.
+m.native_api_batch = lambda requests: [
+    (m.gh_api_pages if paginated else m.gh_api)(path)
+    for path, paginated in requests
+]
 source = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", "HEAD"], text=True).strip()
 source_tree = subprocess.check_output([
     "git", "-C", sys.argv[2], "rev-parse", source + "^{tree}",
