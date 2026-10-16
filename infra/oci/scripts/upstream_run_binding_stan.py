@@ -3265,6 +3265,82 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
         authority.validate_run_against_record(successor, owned_successor)
         if authority.parse_utc(owned_successor["expiresAt"], label).timestamp() <= time.time():
             fail(f"{label} successor owned authority has expired")
+    historical_issued = {}
+    def validate_historical_issued(record):
+        if record["state"] != "issued" or record["inflightApproval"] is not None:
+            fail(f"{label} competing owned authority is not a historical issued record")
+        if ({str(held["id"]), successor_run_id} - {""}) & {str(value) for value in record["inputs"].values()}:
+            fail(f"{label} historical issued transport binds the current handoff")
+        source = record["controlSha"]
+        raw = held_source_bytes(
+            repository, source, f".github/workflows/{record['workflow']}", label,
+        ).encode()
+        authority.verify_record(
+            record, policy_at(source, record["operation"]), repository, source,
+            record["workflowId"], hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest(),
+            retirement_only=True,
+        )
+        cutoff = parse_timestamp(held.get("created_at"), label)
+        endpoint = f"repos/{repository}/actions/runs/{record['runId']}"
+        keys = (
+            "id", "workflow_id", "path", "head_sha", "head_branch", "event", "run_attempt",
+            "display_title", "html_url", "status", "conclusion",
+            "created_at", "run_started_at", "updated_at",
+        )
+        terminal = {"success", "failure", "cancelled", "skipped"}
+        observations = []
+        for _ in range(2):
+            latest, first = gh_api(endpoint), gh_api(endpoint + "/attempts/1")
+            for run in (latest, first):
+                authority.validate_run_against_record(run, record)
+                if (
+                    any(key not in run for key in keys)
+                    or type(run["id"]) is not int or type(run["workflow_id"]) is not int
+                    or type(run["run_attempt"]) is not int or run["run_attempt"] != 1
+                    or run["html_url"] != record["runUrl"]
+                    or run["status"] != "completed" or run["conclusion"] not in terminal
+                ):
+                    fail(f"{label} historical issued run is not an exact terminal first attempt")
+                created, started, ended = (
+                    parse_timestamp(run[key], label)
+                    for key in ("created_at", "run_started_at", "updated_at")
+                )
+                if not created <= started <= ended < cutoff:
+                    fail(f"{label} issued run did not finish strictly before the held producer")
+            if any(type(latest[key]) is not type(first[key]) or latest[key] != first[key] for key in keys):
+                fail(f"{label} historical issued first-attempt observations disagree")
+            jobs = jobs_for_run(repository, str(record["runId"]), label)
+            for job in jobs:
+                if (
+                    type(job.get("run_id")) is not int or job["run_id"] != record["runId"]
+                    or type(job.get("run_attempt")) is not int or job["run_attempt"] != 1
+                    or job.get("head_sha") != source or job.get("head_branch") != "master"
+                    or job.get("status") != "completed" or job.get("conclusion") not in terminal
+                ):
+                    fail(f"{label} historical issued job is not an exact terminal first attempt")
+                job_created = parse_timestamp(job.get("created_at"), label)
+                job_ended = parse_timestamp(job.get("completed_at"), label)
+                if not created <= job_created <= job_ended <= ended or not job_ended < cutoff:
+                    fail(f"{label} historical issued job completion is outside its native window")
+                if job.get("started_at") is None:
+                    if job["conclusion"] not in {"cancelled", "skipped"} or job["steps"] != []:
+                        fail(f"{label} historical issued job has ambiguous execution evidence")
+                elif not job_created <= parse_timestamp(job["started_at"], label) <= job_ended:
+                    fail(f"{label} historical issued job chronology is inconsistent")
+                if any(step.get("status") != "completed" or step.get("conclusion") not in terminal
+                       for step in job["steps"]):
+                    fail(f"{label} historical issued job retains nonterminal or unknown steps")
+            pending = gh_api(endpoint + "/pending_deployments")
+            if pending != []:
+                fail(f"{label} historical issued run retains pending deployment authority")
+            if authority.load_record(directory, str(record["runId"])) != record:
+                fail(f"{label} historical issued authority changed during native qualification")
+            observations.append(({key: latest[key] for key in keys},
+                                 {key: first[key] for key in keys}, jobs))
+        if observations[0] != observations[1]:
+            fail(f"{label} historical issued native evidence changed between complete collections")
+        historical_issued[record["runId"]] = record
+
     entries = sorted(directory.glob("*.json"))
     if len(entries) > 1000:
         fail(f"{label} private authority inventory exceeds its complete bound")
@@ -3276,7 +3352,7 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
             }:
                 continue
             if record["state"] not in {"consumed", "retired"}:
-                fail(f"{label} competing unresolved owned authority prevents receiver absence")
+                validate_historical_issued(record)
         else:
             match = re.fullmatch(r"(?:request-|spent-)([0-9a-f]{64})(?:-dispatch-[0-9a-f]{32})?", path.stem)
             if match is None:
@@ -3289,6 +3365,8 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
                 if record["runId"] in {held["id"], int(successor_run_id or "0")} or record["state"] in {
                     "consumed", "retired",
                 }:
+                    continue
+                if historical_issued.get(record["runId"]) == record:
                     continue
             elif not successor_run_id and intent["state"] in {"prepared", "dispatching"}:
                 owner = os.environ.get("BETSTAN_HELD_DISPATCH_OWNER", "")
@@ -3419,8 +3497,6 @@ def held_handoff_history(
                 ))
                 if not window[0] <= window[1] <= window[2]:
                     fail(f"{label} endpoint chronology is invalid")
-                if cutoff is not None and not active_inventory and window[2] > cutoff:
-                    fail(f"{label} terminalized after the immutable successor cutoff")
                 windows.append(window)
             if windows[0][:2] != windows[1][:2]:
                 fail(f"{label} latest and first-attempt start windows disagree")
@@ -3607,6 +3683,7 @@ def held_handoff_history(
             fail("held-handoff successor attempt state differs")
         if first.get("status") == "completed" and first.get("conclusion") != "success":
             fail("held-handoff completed successor is not successful")
+        active_inventory = fresh or first.get("status") != "completed"
         if parse_timestamp(held.get("updated_at"), "held handoff") > parse_timestamp(
             first.get("created_at"), "successor",
         ):
@@ -4219,9 +4296,7 @@ def validate_held_handoff_artifact(
             )
         except (OSError, KeyError, TypeError, ValueError):
             fail("complete held handoff owned authority is missing, malformed or inconsistent")
-    history = held_handoff_history(
-        repository, held, subject_sha, successor_run_id, **({"fresh": True} if complete else {}),
-    )
+    history = held_handoff_history(repository, held, subject_sha, successor_run_id)
     return {
         "artifactName": f"oci-live-data-rollout-{run_id}-1",
         "createdAt": held["created_at"], "completedAt": held["updated_at"],

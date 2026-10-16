@@ -602,11 +602,11 @@ full checksum coverage, provenance, schema, journal, reports and the original
 root evidence. The recorded image hash must match the independently validated
 original build manifest; no historical artifact is reconstructed or made
 deployable. Complete bounded, paginated native history must exclude intervening
-deployments or incompatible transitions. Completed lineage retains its immutable
-successor cutoff; later legitimate deployment cannot invalidate that interval.
-Current-producer admission additionally authenticates consumed-owner authority
-and, while its successor is unfinished, reads the full current history rather
-than hiding later receivers behind that cutoff. Missing records never prove
+deployments or incompatible transitions. Completed lineage retains its
+authenticated successor's native admission cutoff; later legitimate receivers
+cannot invalidate that historical interval. Current admission with no successor
+or an unfinished successor still scans full current history and authenticates
+consumed-owner authority. Missing records never prove
 absence; incomplete inventories, unresolved authority or dispatch, reruns and
 unexplained history block admission. Current receiver absence and production
 exclusivity must be freshly established at dispatch, materialization, all three
@@ -646,13 +646,26 @@ records must show a completed, cancelled first attempt. The complete job
 inventory must contain exactly one cancelled `rollout` job with a positive
 native identity, an explicitly unassigned runner and explicitly empty steps;
 pending gates, approvals and artifacts must also be empty with complete
-inventories. Endpoint-local chronology must hold, with no terminalization after
-an established immutable successor cutoff. The row remains counted and
-untouched; other post-held transitions still block. This portable proof
+inventories. Endpoint-local chronology must hold. A pre-cutoff run may finish
+cancellation after the immutable successor cutoff only when that complete native
+proof still establishes non-execution. The row remains counted and untouched;
+other post-held transitions still block. This portable proof
 establishes only native non-execution, not request ownership, inputs or canonical
 retirement, and requires no private dispatcher authority records. It grants no
 current exclusivity, approval, adoption or lease authority. The older pre-held
 unmaterialized-run classifier remains unchanged.
+
+The existing receiver-absence validator treats an older issued record only as
+read-only historical evidence, never as consumed or retired authority. This
+requires an unchanged, valid record with no in-flight approval, source-bound
+policy, workflow and input-hash validation, matching native latest/first-attempt
+identity, complete terminal jobs, run and job completion strictly before the
+held producer began, no pending gates, and two consistent fresh collections.
+Its transport must not bind the held producer or successor; only the same
+fully bound intent may share the qualification. Independent unresolved intents,
+claimed or in-flight records, and any record that fails qualification remain
+blocking. No ownership or approval is retrofitted, and this grants no active-run
+exclusivity or unmaterialized-run exception.
 
 Physical admission uses the actual held owner, not the root tuple: a fresh
 baseline, verified fence, seven quiescent writers, exact images and supporting
