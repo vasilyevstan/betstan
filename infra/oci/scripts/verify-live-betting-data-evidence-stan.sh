@@ -335,9 +335,11 @@ if resume_authority_path.exists():
             fail("historical resume authority key set is invalid")
         if schema_version == "live-betting-v6":
             fail("v6 data evidence requires resume authority v2")
-    elif resume_version in {"live-betting-data-resume-v2", "live-betting-data-resume-v3"}:
+    elif resume_version in {
+        "live-betting-data-resume-v2", "live-betting-data-resume-v3", "live-betting-data-resume-v4",
+    }:
         if set(resume_authority) != (
-            resume_v3_keys if resume_version == "live-betting-data-resume-v3" else resume_v2_keys
+            resume_v2_keys if resume_version == "live-betting-data-resume-v2" else resume_v3_keys
         ):
             fail("current resume authority key set is invalid")
         if schema_version != "live-betting-v6":
@@ -376,7 +378,7 @@ if resume_authority_path.exists():
         fail("resume authority application change scope is invalid")
     if resume_authority["status"] != "PASS":
         fail("resume authority did not complete successfully")
-    if resume_version == "live-betting-data-resume-v3":
+    if resume_version in {"live-betting-data-resume-v3", "live-betting-data-resume-v4"}:
         import importlib.util
         if (
             not re.fullmatch(r"[1-9][0-9]*", resume_authority["held_handoff_run_id"])
@@ -442,7 +444,9 @@ if resume_authority_path.exists():
             fail("retained-hold resume authority has an invalid outcome tuple")
     elif mode == "pre-runtime-hold":
         if (
-            resume_version not in {"live-betting-data-resume-v2", "live-betting-data-resume-v3"}
+            resume_version not in {
+                "live-betting-data-resume-v2", "live-betting-data-resume-v3", "live-betting-data-resume-v4",
+            }
             or outcome != ("failure", "skipped", "skipped", "skipped", "skipped")
             or failed_activation_run_id != "0"
         ):

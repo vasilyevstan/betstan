@@ -136,7 +136,7 @@ jobs:
       SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}
       SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}
       SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"
-      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"
+      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ${{ inputs.held_handoff_run_id != '0' && inputs.held_handoff_run_id != '' && '3600' || '1800' }}
 
     steps:
       - name: Initialize isolated OCI data paths
@@ -1168,6 +1168,11 @@ jobs:
             elif [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
               previous_holder_run="$HELD_HANDOFF_RUN_ID"
               previous_holder_source="$HELD_HANDOFF_SOURCE_SHA"
+              previous_lease_seconds="$(
+                jq -er '.held_handoff_run_id.held_handoff_lease_seconds |
+                  select(type == "string" and test("^(1800|3600)$"))' \
+                  "$RUNNER_TEMP/live-data-upstream-result.json"
+              )"
             fi
             python3 - "$previous_lock_snapshot" \
               "$OCI_K8S_NAMESPACE" "$previous_holder_run" \
@@ -1286,7 +1291,7 @@ jobs:
 
           mkdir -p artifacts/oci-live-data-rollout/evidence
           resume_schema=live-betting-data-resume-v2
-          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v3
+          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v4
           cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
           schema_version=$resume_schema
           applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
@@ -1739,7 +1744,8 @@ jobs:
               json.loads((temporary / "pods.json").read_bytes()),
               baseline_files, authority, namespace, held_run, held_source, run, source,
               fresh.get("held_handoff_lease_until_epoch", ""),
-              fresh.get("held_handoff_fencing_generation", ""))
+              fresh.get("held_handoff_fencing_generation", ""),
+              fresh["held_handoff_lease_seconds"])
           PY
               fi
               record_transfer release unconfirmed

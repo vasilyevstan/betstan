@@ -58,11 +58,15 @@ if os.environ.get("RECEIVER_TEST_FIXTURE"):
     _fixture = json.loads(Path(os.environ["RECEIVER_TEST_FIXTURE"]).read_text())
     _stamp = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
     time.time = lambda: _fixture["now"]
-    current_held_source = lambda *a, **k: ""
+    current_held_source = lambda *a, **k: (
+        '      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ' + HANDOFF_V4_LEASE_EXPRESSION +
+        '\\n          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v4\\n'
+        if _fixture["profile"] == "live-betting-data-resume-v4" else
+        '      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"\\n')
     require_fixed_run = lambda *a, **k: {"updated_at": _stamp(_fixture["packaged"])}
     parse_live_v6_artifact = lambda *a, **k: (
         {"source_sha": "2" * 40, "workflow_run_id": "77"}, None, {})
-    parse_resume_authority = lambda *a, **k: {"schema_version": "live-betting-data-resume-v3"}
+    parse_resume_authority = lambda *a, **k: {"schema_version": _fixture["profile"]}
     native_handoff_renewal = lambda *a, **k: (_fixture["deadline"], 11)
     def gh_api(path):
         if "/workflows/" in path:
@@ -77,11 +81,13 @@ if os.environ.get("RECEIVER_TEST_FIXTURE"):
         if run == "77":
             return [{"run_id": 77, "name": "rollout", "steps": [],
                      "status": "completed", "conclusion": "success"}]
-        return [{"run_id": 78, "name": "deploy", "status": "in_progress",
+        return [{"run_id": 78, "name": "deploy", "status": "in_progress", "conclusion": None,
                  "started_at": _stamp(_fixture["started"]), "steps": [
-            {"name": "Validate exact SHA and trusted upstream runs", "conclusion": "success",
+            {"name": "Validate exact SHA and trusted upstream runs", "status": "completed",
+             "conclusion": "success", "started_at": _stamp(_fixture["started"]),
              "completed_at": _stamp(_fixture["validated"])},
             {"name": "Verify transferred database lock and maintenance fence",
+             "status": "in_progress", "conclusion": None, "completed_at": None,
              "started_at": _stamp(_fixture["verified"])}]}]
 ''')
 lock_helper = scripts / "shared-mongo-operation-lock-stan.sh"
@@ -135,7 +141,8 @@ renew = steps["Renew exact transferred database lock"]
 now = int(time.time())
 state = dict(now=now, after=now, deadline=now + 1500, packaged=now - 260,
              created=now - 220, started=now - 190, validated=now - 150,
-             verified=now - 100, attempt=1, workflow_state="disabled_manually", mode="success")
+             verified=now - 100, attempt=1, workflow_state="disabled_manually", mode="success",
+             profile="live-betting-data-resume-v3")
 env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
            RECEIVER_TEST_FIXTURE=str(root / "state.json"), REPOSITORY="example/repo",
            DATA_RUN_ID="77", SOURCE_SHA="2" * 40, GITHUB_RUN_ID="78",
@@ -182,6 +189,44 @@ for mode in (
     else:
         assert "handoff_receiver_renewal=PASS" not in result.stdout
 print("real_yaml_receiver_timing_native_recheck_and_exact_renewal=PASS cases=12 no_acquire_fallback=true")
+for mode in (
+    "success", "phase-exhausted-after-physical-renewal", "reserve-exhausted-after-physical-renewal",
+    "completed-prestart-overrun", "completed-startup-overrun",
+):
+    now = int(time.time())
+    current = dict(state, now=now, after=now, deadline=now + 3300,
+                   packaged=now - 265, created=now - 240, started=now - 180,
+                   validated=now - 140, verified=now - 40, mode=mode,
+                   profile="live-betting-data-resume-v4")
+    if mode == "phase-exhausted-after-physical-renewal":
+        current.update(now=now - 3, after=now - 2, verified=now - 121,
+                       validated=now - 141, started=now - 241, created=now - 341,
+                       packaged=now - 391, deadline=now + 3174)
+    elif mode == "reserve-exhausted-after-physical-renewal":
+        current["after"] = current["deadline"] - 600
+    elif mode == "completed-prestart-overrun":
+        current.update(created=now - 1381, packaged=now - 1431, deadline=now + 2134)
+    elif mode == "completed-startup-overrun":
+        current.update(validated=now - 401, started=now - 501, created=now - 601,
+                       packaged=now - 651, deadline=now + 2914)
+    for name in ("events", "renewed", "lock.json"):
+        (root / name).unlink(missing_ok=True)
+    (root / "state.json").write_text(json.dumps(current))
+    checked = subprocess.run(["bash"], input=verify, cwd=root, env=env,
+                             text=True, capture_output=True, timeout=30)
+    if mode in {"completed-prestart-overrun", "completed-startup-overrun"}:
+        assert checked.returncode != 0, (mode, checked.stdout)
+        assert not (root / "events").exists(), mode
+        continue
+    assert checked.returncode == 0, (mode, checked.stderr)
+    result = subprocess.run(["bash"], input=renew, cwd=root, env=env,
+                            text=True, capture_output=True, timeout=30)
+    assert (result.returncode == 0) == (mode == "success"), (mode, result.stdout, result.stderr)
+    assert (root / "events").read_text().splitlines() == ["verify", "renew"]
+    assert ("handoff_receiver_renewal=PASS" in result.stdout) == (mode == "success")
+    if mode == "phase-exhausted-after-physical-renewal":
+        assert "exhausted its authenticated v4 phase or reserve" in result.stderr
+print("real_yaml_receiver_v4_phase_completion_and_legacy_profile_isolation=PASS cases=5")
 PY
 
 successor_preflight="$(
@@ -3111,7 +3156,7 @@ original, output = map(Path, sys.argv[2:4])
 source, checkpoint_source, workflow, images = sys.argv[4:]
 authority = m.parse_env((original / "resume-authority.env").read_bytes(), "fixture")
 authority.update(
-    schema_version="live-betting-data-resume-v3", resume_maintenance_mode="pre-runtime-hold",
+    schema_version="live-betting-data-resume-v4", resume_maintenance_mode="pre-runtime-hold",
     failed_deploy_job_conclusion="failure", public_validate_job_conclusion="skipped",
     lock_release_step_conclusion="skipped", fence_release_step_conclusion="skipped",
     rehold_step_conclusion="skipped", checkpoint_source_sha=checkpoint_source,
@@ -3173,50 +3218,57 @@ packed = io.BytesIO()
 with zipfile.ZipFile(packed, "w") as archive:
     for path in sorted(root.rglob("*")):
         if path.is_file(): archive.writestr(path.relative_to(root).as_posix(), path.read_bytes())
-files = m.zip_files(packed.getvalue(), "actual v3 producer upload")
+files = m.zip_files(packed.getvalue(), "actual v4 producer upload")
 def consume(selected):
-    m.validate_checksum_manifest(selected, "actual v3 producer upload")
-    provenance = m.parse_env(selected["provenance.env"], "actual v3 provenance")
-    authority = m.parse_resume_authority(selected, provenance, "actual v3 producer upload")
+    m.validate_checksum_manifest(selected, "held producer upload")
+    provenance = m.parse_env(selected["provenance.env"], "held provenance")
+    authority = m.parse_resume_authority(selected, provenance, "held producer upload")
     m.validate_held_handoff_reports(selected, provenance)
     return authority
 authority = consume(files)
-assert authority["schema_version"] == "live-betting-data-resume-v3"
+assert authority["schema_version"] == "live-betting-data-resume-v4"
 assert authority["applied_source_sha"] != authority["checkpoint_source_sha"]
 assert files["resume-images.tsv"] == images.read_bytes()
 assert authority["runtime_images_sha256"] == hashlib.sha256(images.read_bytes()).hexdigest()
-for mutation in (
-    "missing-images", "missing-history", "missing-transfer", "unconfirmed-release",
-    "unconfirmed-acquire", "unconfirmed-verify", "root-holder", "holder-source",
-    "successor-source", "cutoff-missing", "unknown-authority-key",
-):
-    changed = dict(files)
-    if mutation.startswith("missing-"):
-        name = {"missing-images": "resume-images.tsv", "missing-history": "held-handoff-history.json",
-                "missing-transfer": "held-handoff-transfer.json"}[mutation]
-        changed.pop(name)
-    elif mutation.startswith("unconfirmed-"):
-        record = json.loads(changed["held-handoff-transfer.json"])
-        record[mutation.removeprefix("unconfirmed-") + "_result"] = "unconfirmed"
-        changed["held-handoff-transfer.json"] = json.dumps(record).encode()
-    elif mutation == "cutoff-missing":
-        record = json.loads(changed["held-handoff-history.json"]); record["cutoff_at"] = None
-        changed["held-handoff-history.json"] = json.dumps(record).encode()
-    else:
-        updated = dict(authority)
-        if mutation == "root-holder": updated["held_handoff_run_id"] = updated["applied_data_run_id"]
-        elif mutation == "holder-source": updated["held_handoff_source_sha"] = "a" * 40
-        elif mutation == "successor-source": updated["current_source_sha"] = "b" * 40
-        else: updated["unknown"] = "value"
-        changed["resume-authority.env"] = "".join(f"{k}={v}\n" for k, v in updated.items()).encode()
-    changed["SHA256SUMS"] = "".join(
-        f"{hashlib.sha256(raw).hexdigest()}  {name}\n" for name, raw in sorted(changed.items())
+for version in ("live-betting-data-resume-v3", "live-betting-data-resume-v4"):
+    authority["schema_version"] = version
+    files["resume-authority.env"] = "".join(f"{k}={v}\n" for k, v in authority.items()).encode()
+    files["SHA256SUMS"] = "".join(
+        f"{hashlib.sha256(raw).hexdigest()}  {name}\n" for name, raw in sorted(files.items())
         if name != "SHA256SUMS").encode()
-    with contextlib.redirect_stderr(io.StringIO()):
-        try: consume(changed)
-        except SystemExit: pass
-        else: raise AssertionError(f"v3 consumer accepted {mutation}")
-print("held_handoff_real_producer_v3_consumers=PASS negative_cases=11")
+    assert consume(files) == authority
+    for mutation in (
+        "missing-images", "missing-history", "missing-transfer", "unconfirmed-release",
+        "unconfirmed-acquire", "unconfirmed-verify", "root-holder", "holder-source",
+        "successor-source", "cutoff-missing", "unknown-authority-key",
+    ):
+        changed = dict(files)
+        if mutation.startswith("missing-"):
+            name = {"missing-images": "resume-images.tsv", "missing-history": "held-handoff-history.json",
+                    "missing-transfer": "held-handoff-transfer.json"}[mutation]
+            changed.pop(name)
+        elif mutation.startswith("unconfirmed-"):
+            record = json.loads(changed["held-handoff-transfer.json"])
+            record[mutation.removeprefix("unconfirmed-") + "_result"] = "unconfirmed"
+            changed["held-handoff-transfer.json"] = json.dumps(record).encode()
+        elif mutation == "cutoff-missing":
+            record = json.loads(changed["held-handoff-history.json"]); record["cutoff_at"] = None
+            changed["held-handoff-history.json"] = json.dumps(record).encode()
+        else:
+            updated = dict(authority)
+            if mutation == "root-holder": updated["held_handoff_run_id"] = updated["applied_data_run_id"]
+            elif mutation == "holder-source": updated["held_handoff_source_sha"] = "a" * 40
+            elif mutation == "successor-source": updated["current_source_sha"] = "b" * 40
+            else: updated["unknown"] = "value"
+            changed["resume-authority.env"] = "".join(f"{k}={v}\n" for k, v in updated.items()).encode()
+        changed["SHA256SUMS"] = "".join(
+            f"{hashlib.sha256(raw).hexdigest()}  {name}\n" for name, raw in sorted(changed.items())
+            if name != "SHA256SUMS").encode()
+        with contextlib.redirect_stderr(io.StringIO()):
+            try: consume(changed)
+            except SystemExit: pass
+            else: raise AssertionError(f"{version} consumer accepted {mutation}")
+print("held_handoff_real_producer_v3_v4_consumers=PASS negative_cases=22")
 PY
 valid_images_file="$images_file"
 for mutation in missing-images tampered-images authority-hash conflicting-destination; do
@@ -4044,6 +4096,8 @@ authority = {
     "held_handoff_evidence_sha256": "a" * 64,
 }
 (root / "fresh-authority.json").write_text(json.dumps(authority))
+(root / "live-data-upstream-result.json").write_text(json.dumps({
+    "held_handoff_run_id": {"held_handoff_lease_seconds": "1800"}}))
 (root / "artifacts/prerequisite/provenance.env").write_text(
     f'baseline_sha256={authority["baseline_sha256"]}\n')
 (root / "artifacts/oci-live-data-rollout/evidence/resume-authority.env").write_text(
@@ -4092,7 +4146,8 @@ entry = '''if __name__ == "__main__":
         facts = json.loads((root / "fresh-authority.json").read_text())
         lock = json.loads((root / "pre-runtime-lock.json").read_text())["data"]
         facts.update(held_handoff_lease_until_epoch=lock["lease-until-epoch"],
-                     held_handoff_fencing_generation=lock["fencing-generation"])
+                     held_handoff_fencing_generation=lock["fencing-generation"],
+                     held_handoff_lease_seconds=lock["lease-duration-seconds"])
         with Path(arguments["--result-json"]).open("x") as output:
             json.dump({"held_handoff_run_id": facts}, output)
 '''
@@ -4175,22 +4230,26 @@ run_held_acquire() {
       bash "$resume_fixture/acquire-step.sh"
   )
 }
+for predecessor_seconds in 1800 3600; do
 for lease in expired live; do
   for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation authority receiver workflow master policy disk; do
     rm -rf "$resume_fixture/held-pre-transfer"
     rm -f "$resume_fixture/pre-runtime-lock.json" \
       "$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
-    python3 - "$resume_fixture/lock.json" "$lease" <<'PY'
+    python3 - "$resume_fixture/lock.json" "$lease" "$predecessor_seconds" <<'PY'
 import json, pathlib, sys, time
 path = pathlib.Path(sys.argv[1]); value = json.loads(path.read_text())
 start = 1000 if sys.argv[2] == "expired" else int(time.time()) - 20
+duration = int(sys.argv[3])
 value["metadata"].update(uid="fixture-original-uid", resourceVersion="42")
 value["data"].update(
     state="active", holder="live-data-4008-1",
     **{"source-sha": "3" * 40, "acquired-at-epoch": str(start),
-       "lease-duration-seconds": "1800", "lease-until-epoch": str(start + 1800),
+       "lease-duration-seconds": str(duration), "lease-until-epoch": str(start + duration),
        "fencing-generation": "11", "released-at-epoch": "0"})
 path.write_text(json.dumps(value))
+(path.parent / "live-data-upstream-result.json").write_text(json.dumps({
+    "held_handoff_run_id": {"held_handoff_lease_seconds": str(duration)}}))
 PY
     reset_resume_fixture
     cp "$resume_fixture/pre-runtime-images.tsv" "$resume_fixture/actual-images.tsv"
@@ -4274,6 +4333,7 @@ PY
     fi
   done
 done
+done
 rm "$resume_fixture/pre-runtime-lock.json"
 python3 - "$resume_fixture/lock.json" <<'PY'
 import json, pathlib, sys
@@ -4287,7 +4347,7 @@ fi
 [[ ! -e "$resume_fixture/pre-runtime-lock.json" ]] ||
   fail "root-owner rejection persisted transfer authority"
 unset RESUME_HELD_RUN_ID RESUME_HELD_SOURCE_SHA RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
-echo "held_handoff_workflow_transfer_contract=PASS cases=34 root_owner=REJECTED fresh_native_authority=REQUIRED"
+echo "held_handoff_workflow_transfer_contract=PASS cases=66 predecessor_profiles=1800,3600 root_owner=REJECTED fresh_native_authority=REQUIRED"
 
 ruby -ryaml -rjson - "$WORKFLOW" "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" \
   >"$resume_fixture/retained-workflow.json" <<'RUBY'
@@ -4607,7 +4667,7 @@ for literal in \
   'validate-rollback-baseline-stan.sh' \
   'SSE_REQUIREMENT: deployed-source' \
   'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' \
-  'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' \
+  'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ${{ inputs.held_handoff_run_id' \
   '(failure() || cancelled())' \
   "steps.maintenance_enter.outcome == 'success'" \
   'Require executed data-step evidence' \

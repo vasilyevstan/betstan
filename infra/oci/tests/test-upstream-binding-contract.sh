@@ -1713,7 +1713,8 @@ def api(path):
 with patch.object(m, "require_fixed_run", return_value=producer), \
         patch.object(m, "parse_live_v6_artifact", return_value=(package, None, {})), \
         patch.object(m, "parse_resume_authority", return_value={"schema_version": "live-betting-data-resume-v3"}), \
-        patch.object(m, "current_held_source") as closure, \
+        patch.object(m, "current_held_source",
+                     return_value='      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"\n') as closure, \
         patch.object(m, "native_handoff_renewal", return_value=(deadline, 11)), \
         patch.object(m, "jobs_for_run", side_effect=lambda repo, run, label: [physical if run == producer_run else job]), \
         patch.object(m, "gh_api", side_effect=api):
@@ -1781,6 +1782,158 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
             "example/repo", producer_run, source, "dispatch"))
 PY
 ok "authentic new-capture budget shrinks at all boundaries, equality and renewal reject, legacy evidence clock unchanged"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib, copy, datetime as dt, importlib.util, io, sys
+from pathlib import Path
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("upstream_timing_v4", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+def reject(action):
+    with contextlib.redirect_stderr(io.StringIO()):
+        try: action()
+        except SystemExit: return
+    raise AssertionError("unsafe v4 phase, profile or physical handoff budget passed")
+base, source, producer_run, receiver_run = 1800000000, "1" * 40, "77", "78"
+deadline = base + 3600
+stages = m.HANDOFF_V4_STAGE_CEILINGS
+assert sum(stages.values()) == m.HANDOFF_V4_EXECUTION_SECONDS == 3000
+assert m.HANDOFF_V4_LEASE_SECONDS == 3600 and m.HANDOFF_RESERVE_SECONDS == 600
+elapsed = {"packaging": 35, "admission": 250}
+assert m.handoff_remaining_guard_v4(deadline, base + 285, "admission", elapsed) == 2630
+assert deadline - (base + 285) == 3315 > 2630 + 600
+all_elapsed = dict(elapsed, approval=400, **{
+    "native-validation": 200, "startup-snapshot": 100, "receiver-renewal": 30})
+tails = {"admission": 2630, "approval": 1880, "native-validation": 760,
+         "startup-snapshot": 380, "receiver-renewal": 90}
+selected = {"packaging": 35}
+for phase, tail in tails.items():
+    selected[phase] = all_elapsed[phase]
+    now = base + sum(selected.values())
+    assert m.handoff_remaining_guard_v4(deadline, now, phase, selected) == tail
+    equality = now + tail + 600
+    reject(lambda: m.handoff_remaining_guard_v4(equality, now, phase, selected))
+    assert m.handoff_remaining_guard_v4(equality + 1, now, phase, selected) == tail
+    for spent in (-1, stages[phase], stages[phase] + 0.1, float("nan"), float("inf"), True):
+        reject(lambda: m.handoff_remaining_guard_v4(
+            deadline, now, phase, dict(selected, **{phase: spent})))
+    reject(lambda: m.handoff_remaining_guard_v4(
+        deadline, now, phase, dict(selected, packaging=121)))
+    reject(lambda: m.handoff_remaining_guard_v4(
+        deadline, now, phase, {key: value for key, value in selected.items() if key != "packaging"}))
+for phase in ("approval-1", "caller-zero-tail", None, []):
+    reject(lambda: m.handoff_remaining_guard_v4(deadline, base, phase, elapsed))
+for changed in (dict(stages, packaging=0), dict(stages, approval=True), dict(stages, approval=1201)):
+    with patch.object(m, "HANDOFF_V4_STAGE_CEILINGS", changed):
+        reject(lambda: m.handoff_remaining_guard_v4(deadline, base + 285, "admission", elapsed))
+root = Path(sys.argv[1]).parents[3]
+producer_workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+receiver_workflow = (root / ".github/workflows/oci-production-deploy.yml").read_text()
+assert m.held_handoff_source_version(producer_workflow, "fixture") == "live-betting-data-resume-v4"
+legacy_workflow = producer_workflow.replace(m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"')
+assert m.held_handoff_source_version(legacy_workflow, "fixture") == "live-betting-data-resume-v3"
+assert 'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' in producer_workflow
+assert 'SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS: "10800"' in receiver_workflow
+for changed in (
+    producer_workflow.replace("'3600'", "'3601'"),
+    producer_workflow.replace("resume_schema=live-betting-data-resume-v4",
+                              "resume_schema=live-betting-data-resume-v3"),
+    producer_workflow + '\n      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"\n',
+):
+    reject(lambda: m.held_handoff_source_version(changed, "fixture"))
+stamp = lambda seconds: dt.datetime.fromtimestamp(base + seconds, dt.timezone.utc).isoformat()
+producer = {"updated_at": stamp(35)}
+workflow = dict(id=8, path=".github/workflows/oci-production-deploy.yml", state="active")
+receiver = dict(
+    id=78, workflow_id=8, path=workflow["path"], run_attempt=1, head_sha=source,
+    event="workflow_dispatch", head_branch="master", head_repository={"full_name": "example/repo"},
+    display_title=f"oci-deploy {source}", status="waiting", conclusion=None, created_at=stamp(285))
+validation = dict(name="Validate exact SHA and trusted upstream runs",
+                  status="in_progress", conclusion=None, started_at=stamp(1000), completed_at=None)
+handoff = dict(name="Verify transferred database lock and maintenance fence",
+               status="queued", conclusion=None, started_at=None, completed_at=None)
+job = dict(run_id=78, name="deploy", status="in_progress", conclusion=None,
+           started_at=stamp(1000), steps=[validation, handoff])
+physical = dict(run_id=77, name="rollout", status="completed", conclusion="success", steps=[])
+package = dict(source_sha=source, workflow_run_id=producer_run)
+def api(path):
+    return copy.deepcopy(workflow if "/workflows/" in path else receiver)
+def read(boundary, now, run=receiver_run):
+    workflow["state"] = "active" if boundary in ("dispatch", "materialization") else "disabled_manually"
+    with patch.object(m.time, "time", return_value=base + now):
+        return m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, boundary, run)
+with patch.object(m, "require_fixed_run", return_value=producer), \
+        patch.object(m, "parse_live_v6_artifact", return_value=(package, None, {})), \
+        patch.object(m, "parse_resume_authority", return_value={"schema_version": "live-betting-data-resume-v4"}), \
+        patch.object(m, "current_held_source", return_value=producer_workflow), \
+        patch.object(m, "native_handoff_renewal", return_value=(deadline, 11)) as renewal, \
+        patch.object(m, "jobs_for_run", side_effect=lambda repo, run, label:
+                     [physical if run == producer_run else job]) as jobs, \
+        patch.object(m, "gh_api", side_effect=api):
+    result = read("dispatch", 285, "")
+    assert result["phase"] == "admission" and result["unfinished_seconds"] == 2630
+    renewal.assert_called_once_with(
+        "example/repo", producer_run, physical, "receiver handoff timing", lease_seconds=3600)
+    for boundary in ("materialization", "approval-1", "approval-2", "approval-3"):
+        jobs.reset_mock()
+        result = read(boundary, 885)
+        assert result["phase"] == "approval" and result["unfinished_seconds"] == 1680
+        assert result["stage_elapsed_seconds"]["admission"] == 250
+        assert result["stage_elapsed_seconds"]["approval"] == 600
+        jobs.assert_called_once_with("example/repo", producer_run, "receiver handoff timing")
+    reject(lambda: read("approval-3", 1485))
+    reject(lambda: read("native-validation", 1200))
+    receiver["status"] = "in_progress"
+    jobs.reset_mock()
+    reject(lambda: read("approval-1", 1200))
+    jobs.assert_called_once_with("example/repo", producer_run, "receiver handoff timing")
+    result = read("native-validation", 1200)
+    assert result["phase"] == "native-validation" and result["unfinished_seconds"] == 760
+    reject(lambda: read("native-validation", 1480))
+    with patch.dict(job, started_at=stamp(1485)), \
+            patch.dict(validation, started_at=stamp(1485)):
+        assert read("native-validation", 1486)["stage_elapsed_seconds"]["approval"] == 1200
+    with patch.dict(job, started_at=stamp(1485.1)), \
+            patch.dict(validation, started_at=stamp(1485.1)):
+        reject(lambda: read("native-validation", 1486))
+    validation.update(status="completed", conclusion="success", completed_at=stamp(1300))
+    jobs.reset_mock()
+    result = read("native-validation", 1400)
+    assert result["phase"] == "startup-snapshot" and result["unfinished_seconds"] == 380
+    assert jobs.call_count == 2
+    handoff.update(status="in_progress", started_at=stamp(1500))
+    result = read("startup-snapshot", 1540)
+    assert result["phase"] == "receiver-renewal" and result["unfinished_seconds"] == 80
+    assert result["renewal_stage_deadline"] == base + 1620
+    assert read("receiver-renewal", 1540)["unfinished_seconds"] == 80
+    reject(lambda: read("receiver-renewal", 1620))
+    original_job = copy.deepcopy(job)
+    for mutate in (
+        lambda: validation.update(completed_at=stamp(1481)),
+        lambda: handoff.update(started_at=stamp(1661)),
+        lambda: handoff.update(status="completed", conclusion="failure"),
+        lambda: handoff.update(completed_at=stamp(1530)),
+        lambda: job.update(started_at=stamp(1486)),
+        lambda: job.update(run_id=True),
+        lambda: job.update(conclusion="success"),
+    ):
+        mutate()
+        reject(lambda: read("receiver-renewal", 1700))
+        job.clear(); job.update(copy.deepcopy(original_job))
+        validation, handoff = job["steps"]
+    for key, value in (("run_attempt", 2), ("head_sha", "2" * 40), ("created_at", stamp(636))):
+        with patch.dict(receiver, {key: value}):
+            reject(lambda: read("receiver-renewal", 1540))
+    with patch.object(m, "current_held_source", return_value=legacy_workflow):
+        reject(lambda: read("dispatch", 285, ""))
+    with patch.object(m, "parse_resume_authority", return_value={"schema_version": "live-betting-data-resume-v3"}):
+        reject(lambda: read("dispatch", 285, ""))
+    with patch.object(m.time, "time", side_effect=[base + 285, base + 284]):
+        reject(lambda: m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, "dispatch"))
+PY
+ok "v4 source-bound profiles, spent-phase residuals, actual phase transitions, strict exhaustion and unchanged read positions"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import contextlib, copy, datetime as dt, hashlib, importlib.util, io, json, os, shutil, subprocess, sys
@@ -2656,6 +2809,34 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
         reject(held_native)
     with patch.object(m, "failed_deploy_native_inputs", return_value=dict(values, build_run_id="99")):
         reject(held_native)
+    modern_workflow = (m.Path(sys.argv[2]) / ".github/workflows/oci-live-data-rollout.yml").read_text()
+    assert re.findall(r"(?m)^      - name: (.+)$", modern_workflow) == current_names
+    legacy_profile_workflow = modern_workflow.replace(
+        m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"').replace(
+        "resume_schema=live-betting-data-resume-v4", "resume_schema=live-betting-data-resume-v3")
+    for executed_workflow in (legacy_profile_workflow, modern_workflow):
+        for continuation in (False, True):
+            native = dict(values)
+            if continuation:
+                native.update(
+                    confirmation=m.HELD_HANDOFF_CONFIRMATION,
+                    held_handoff_run_id="76", held_handoff_source_sha="2" * 40)
+            expected_schema = (
+                m.held_handoff_source_version(executed_workflow, "fixture") if continuation
+                else "live-betting-data-resume-v2")
+            duration = 3600 if expected_schema == "live-betting-data-resume-v4" else 1800
+            with patch.object(m, "current_held_source", return_value=executed_workflow), \
+                    patch.object(m, "failed_deploy_native_inputs", return_value=native):
+                for observed_duration in (1800, 3600):
+                    with patch.object(m, "gh_api_bytes",
+                                      return_value=renewal_log(renewal_epoch + observed_duration)):
+                        if observed_duration != duration:
+                            reject(held_native)
+                        else:
+                            observed = held_native()
+                            assert observed["_handoff_lease_seconds"] == duration
+                            assert observed["_handoff_resume_schema"] == expected_schema
+                            assert observed["_handoff_deadline"] == renewal_epoch + duration
 tree = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", source + "^{tree}"], text=True).strip()
 with patch.object(m, "gh_api", return_value={"sha": source, "tree": {"sha": tree}}):
     assert m.current_held_source("example/repo", source, "fixture") == current_workflow
@@ -4099,7 +4280,8 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
         for name, raw in sorted(complete_members.items()) if name != "SHA256SUMS").encode()
     current_held = dict(
         held_metadata, _held_complete=True, _held_native_inputs=resume_requests["25"],
-        _handoff_deadline=1234567890,
+        _handoff_deadline=1234567890, _handoff_lease_seconds=1800,
+        _handoff_resume_schema="live-betting-data-resume-v2",
     )
     held_files = complete_members
     with patch.object(m, "validate_held_handoff_native", return_value=current_held), \
@@ -4160,6 +4342,26 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
                 dict(held_request) if run == "40" else saved_native_parser(repo, run, *args, **kwargs))):
         consume_successor = lambda: m.validate_pre_runtime_resume_chain("example/repo", "40", "oke")
         assert consume_successor() == ("23", source)
+        legacy_successor_package = copy.deepcopy(successor_files)
+        successor_files["resume-authority.env"] = "".join(
+            f"{key}={value}\n" for key, value in dict(
+                successor_authority, schema_version="live-betting-data-resume-v4").items()).encode()
+        successor_files["SHA256SUMS"] = "".join(
+            f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
+            for name, raw in sorted(successor_files.items()) if name != "SHA256SUMS").encode()
+        source_reader = m.held_source_bytes
+        for declared_workflow in (modern_workflow, legacy_profile_workflow):
+            def successor_source_bytes(repository, sha, path, label):
+                if path == ".github/workflows/oci-live-data-rollout.yml" and label == "held-handoff successor":
+                    return declared_workflow
+                return source_reader(repository, sha, path, label)
+            with patch.object(m, "held_source_bytes", side_effect=successor_source_bytes):
+                if declared_workflow == modern_workflow:
+                    assert consume_successor() == ("23", source)
+                else:
+                    reject(consume_successor)
+        successor_files.clear(); successor_files.update(legacy_successor_package)
+        print("PASS v4 successor keeps its v2 predecessor and rejects an incompatible current source profile")
         transition_successor = dict(successor, id=40, status="in_progress", conclusion=None)
         transition_job = dict(cutoff_job, run_id=40, status="in_progress")
         transition_reads = []

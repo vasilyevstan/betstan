@@ -26,6 +26,7 @@ import importlib.util
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import selectors
@@ -85,7 +86,20 @@ HANDOFF_STAGE_CEILINGS = {
     "packaging": 120, "admission": 180, "queue": 120, "approval": 240,
     "native-validation": 180, "startup-snapshot": 240, "receiver-renewal": 120,
 }
+HANDOFF_V4_STAGE_CEILINGS = {
+    "packaging": 120, "admission": 600, "queue": 120, "approval": 1200,
+    "native-validation": 480, "startup-snapshot": 360, "receiver-renewal": 120,
+}
 HANDOFF_RESERVE_SECONDS = 600
+HANDOFF_V4_EXECUTION_SECONDS = sum(HANDOFF_V4_STAGE_CEILINGS.values())
+HANDOFF_V4_LEASE_SECONDS = HANDOFF_V4_EXECUTION_SECONDS + HANDOFF_RESERVE_SECONDS
+HELD_HANDOFF_AUTHORITY_VERSIONS = {
+    "live-betting-data-resume-v3", "live-betting-data-resume-v4",
+}
+HANDOFF_V4_LEASE_EXPRESSION = (
+    "${{ inputs.held_handoff_run_id != '0' && "
+    "inputs.held_handoff_run_id != '' && '3600' || '1800' }}"
+)
 EXPIRED_HANDOFF_TREE = "03381913c7ba16a9c9faf8699740e892564a6628"
 EXPIRED_HANDOFF_CLOSURE = {
     ".github/workflows/oci-production-deploy.yml":
@@ -2714,12 +2728,12 @@ def parse_resume_authority(files, predecessor, label):
     authority = parse_env(matches[0], f"{label} resume authority")
     version = authority.get("schema_version")
     required_keys = (
-        LIVE_RESUME_AUTHORITY_V3_KEYS if version == "live-betting-data-resume-v3"
+        LIVE_RESUME_AUTHORITY_V3_KEYS if version in HELD_HANDOFF_AUTHORITY_VERSIONS
         else LIVE_RESUME_AUTHORITY_V2_KEYS
     )
-    if set(authority) != required_keys or version not in {
-        "live-betting-data-resume-v2", "live-betting-data-resume-v3",
-    }:
+    if set(authority) != required_keys or version not in (
+        HELD_HANDOFF_AUTHORITY_VERSIONS | {"live-betting-data-resume-v2"}
+    ):
         fail(f"{label} resume authority version or key set is invalid")
     expected = {
         "schema_version": version,
@@ -2742,7 +2756,7 @@ def parse_resume_authority(files, predecessor, label):
             fail(f"{label} resume authority has an invalid {key}")
     if FULL_SHA.fullmatch(authority["applied_source_sha"]) is None:
         fail(f"{label} resume authority applied source is invalid")
-    if version == "live-betting-data-resume-v3":
+    if version in HELD_HANDOFF_AUTHORITY_VERSIONS:
         if (
             POSITIVE_INTEGER.fullmatch(authority["held_handoff_run_id"]) is None
             or FULL_SHA.fullmatch(authority["held_handoff_source_sha"]) is None
@@ -3199,6 +3213,21 @@ def held_raw_ancestry(authority, repository, row, subject_sha, label):
     return carrier(row["head_sha"], subject_sha, raw)
 
 
+def held_handoff_source_version(workflow, label):
+    leases = re.findall(
+        r"(?m)^      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: (.+)$", workflow,
+    )
+    if leases == ['"1800"']:
+        return "live-betting-data-resume-v3"
+    if (
+        leases == [HANDOFF_V4_LEASE_EXPRESSION]
+        and '[ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v4'
+        in workflow
+    ):
+        return "live-betting-data-resume-v4"
+    fail(f"{label} source does not bind its fixed handoff profile to the continuation branch")
+
+
 def current_held_source(repository, source_sha, label, *, native_sources=None):
     commit = gh_api(f"repos/{repository}/git/commits/{source_sha}")
     local = subprocess.run(
@@ -3227,6 +3256,7 @@ def current_held_source(repository, source_sha, label, *, native_sources=None):
     sources = {path: held_source_bytes(repository, source_sha, path, label) for path in sorted(paths)}
     workflow = sources[".github/workflows/oci-live-data-rollout.yml"]
     producer = sources["infra/oci/scripts/live-betting-data-rollout-stan.sh"]
+    held_handoff_source_version(workflow, label)
     if native_sources is not None:
         for observed, raw in zip(native_sources, (workflow.encode(), producer.encode())):
             if (
@@ -3242,7 +3272,6 @@ def current_held_source(repository, source_sha, label, *, native_sources=None):
             "oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58",
             "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
         }
-        or 'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' not in workflow
         or any(token not in producer for token in (
             'destination = root / "resume-images.tsv"',
             'hashlib.sha256(images).hexdigest() != expected[0]',
@@ -3253,7 +3282,9 @@ def current_held_source(repository, source_sha, label, *, native_sources=None):
     return workflow
 
 
-def native_handoff_renewal(repository, run_id, job, label):
+def native_handoff_renewal(repository, run_id, job, label, *, lease_seconds=1800):
+    if type(lease_seconds) is not int or lease_seconds not in {1800, HANDOFF_V4_LEASE_SECONDS}:
+        fail(f"{label} native handoff profile is unsupported")
     steps = [
         step for step in job["steps"]
         if step.get("name") == "Restore runtime or verify final deploy handoff"
@@ -3293,7 +3324,7 @@ def native_handoff_renewal(repository, run_id, job, label):
     )
     if verified is None or renewed is None or int(renewed[2]) != int(verified[2]) + 1:
         fail(f"{label} native final renewal is not a confirmed owner-bound transition")
-    renewal_epoch = int(renewed[1]) - 1800
+    renewal_epoch = int(renewed[1]) - lease_seconds
     if not (
         parse_timestamp(steps[0]["started_at"], label).timestamp() - 1
         <= renewal_epoch
@@ -3335,6 +3366,193 @@ def handoff_remaining_guard(deadline, now, boundary):
     return tail
 
 
+def handoff_remaining_guard_v4(deadline, now, phase, elapsed):
+    stages = HANDOFF_V4_STAGE_CEILINGS
+    futures = {
+        "admission": ("queue", "approval", "native-validation", "startup-snapshot", "receiver-renewal"),
+        "approval": ("queue", "native-validation", "startup-snapshot", "receiver-renewal"),
+        "native-validation": ("startup-snapshot", "receiver-renewal"),
+        "startup-snapshot": ("receiver-renewal",),
+        "receiver-renewal": (),
+    }
+    completed = ["packaging", "admission", "approval", "native-validation", "startup-snapshot", "receiver-renewal"]
+    if (
+        set(stages) != set(HANDOFF_STAGE_CEILINGS)
+        or any(type(value) is not int or value <= 0 for value in stages.values())
+        or sum(stages.values()) != HANDOFF_V4_EXECUTION_SECONDS
+        or HANDOFF_V4_EXECUTION_SECONDS != 3000 or HANDOFF_RESERVE_SECONDS != 600
+        or HANDOFF_V4_LEASE_SECONDS != HANDOFF_V4_EXECUTION_SECONDS + HANDOFF_RESERVE_SECONDS
+        or HANDOFF_V4_LEASE_SECONDS != 3600
+        or type(phase) is not str or phase not in futures
+        or type(deadline) is not int or deadline <= 0
+        or type(now) not in (int, float) or not math.isfinite(now)
+    ):
+        fail("v4 handoff timing profile, phase or physical deadline is unsupported")
+    if not isinstance(elapsed, dict) or set(elapsed) != set(completed[:completed.index(phase) + 1]):
+        fail("v4 handoff timing has incomplete or inconsistent authenticated phase evidence")
+    for stage, duration in elapsed.items():
+        if (
+            type(duration) not in (int, float) or not math.isfinite(duration)
+            or duration < 0 or duration > stages[stage]
+        ):
+            fail(f"receiver handoff {stage} elapsed stage exceeds its strict source ceiling")
+    residual = stages[phase] - elapsed[phase]
+    if residual <= 0:
+        fail("v4 handoff current allocation is exhausted while work remains")
+    tail = residual + sum(stages[stage] for stage in futures[phase])
+    if deadline - now <= tail + HANDOFF_RESERVE_SECONDS:
+        fail("authentic physical handoff deadline cannot cover the unfinished path plus reserve")
+    return tail
+
+
+def receiver_handoff_run(repository, source, boundary, receiver_run, label):
+    if POSITIVE_INTEGER.fullmatch(receiver_run) is None:
+        fail("receiver timing run ID is malformed")
+    if boundary in ("dispatch", "materialization"):
+        expected_workflow_state = "active"
+    elif boundary in (
+        "approval-1", "approval-2", "approval-3", "native-validation",
+        "startup-snapshot", "receiver-renewal",
+    ):
+        expected_workflow_state = "disabled_manually"
+    else:
+        fail("receiver timing workflow boundary is unsupported")
+    endpoint = f"repos/{repository}/actions/runs/{receiver_run}"
+    latest, first = gh_api(endpoint), gh_api(endpoint + "/attempts/1")
+    workflow = gh_api(f"repos/{repository}/actions/workflows/oci-production-deploy.yml")
+    if (
+        not isinstance(workflow, dict) or type(workflow.get("id")) is not int or workflow["id"] < 1
+        or workflow.get("path") != ".github/workflows/oci-production-deploy.yml"
+        or workflow.get("state") != expected_workflow_state
+    ):
+        fail("receiver timing workflow identity or lifecycle state changed")
+    for run in (latest, first):
+        if (
+            not isinstance(run, dict) or type(run.get("id")) is not int
+            or run["id"] != int(receiver_run) or type(run.get("run_attempt")) is not int
+            or run["run_attempt"] != 1 or run.get("head_sha") != source
+            or run.get("workflow_id") != workflow["id"] or run.get("path") != workflow["path"]
+            or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "master"
+            or (run.get("head_repository") or {}).get("full_name") != repository
+            or run.get("display_title") != f"oci-deploy {source}"
+            or run.get("status") not in {"queued", "waiting", "requested", "pending", "in_progress"}
+            or run.get("conclusion") is not None
+        ):
+            fail("receiver timing identity, first attempt or mutable state differs")
+    if any(latest.get(key) != first.get(key) for key in ("created_at", "status", "conclusion")):
+        fail("receiver timing first-attempt observations drifted")
+    return first
+
+
+def validate_receiver_handoff_timing_v4(
+    repository, source, producer, deadline, generation, boundary, receiver_run,
+):
+    label = "receiver v4 handoff timing"
+    renewal = deadline - HANDOFF_V4_LEASE_SECONDS
+    observed_at = time.time()
+    packaged = parse_timestamp(producer.get("updated_at"), label).timestamp()
+    elapsed = {"packaging": packaged - renewal}
+    phase, phase_started = "admission", packaged
+    if boundary != "dispatch" and not receiver_run:
+        fail("receiver timing boundary has no exact native receiving run")
+    if receiver_run:
+        first = receiver_handoff_run(repository, source, boundary, receiver_run, label)
+        created = parse_timestamp(first.get("created_at"), label).timestamp()
+        elapsed["admission"] = created - packaged
+        phase, phase_started = "approval", created
+        prestart = boundary in ("dispatch", "materialization", "approval-1", "approval-2", "approval-3")
+        if prestart:
+            if first["status"] == "in_progress":
+                fail("receiver timing cannot infer an executing job's phase from a pre-start observation")
+        else:
+            if first["status"] != "in_progress":
+                fail("receiver timing native deploy job is not executing")
+            current_jobs = jobs_for_run(repository, receiver_run, label)
+            receiving = exact_job(current_jobs, "deploy", label)
+            if (
+                type(receiving.get("run_id")) is not int or receiving["run_id"] != int(receiver_run)
+                or receiving.get("status") != "in_progress" or receiving.get("conclusion") is not None
+            ):
+                fail("receiver timing native deploy job is not executing")
+            started = parse_timestamp(receiving.get("started_at"), label).timestamp()
+            # Pre-start work consumes approval; queue is an additional future allowance until job start.
+            elapsed["approval"] = started - created
+            validation = [
+                step for step in receiving["steps"]
+                if step.get("name") == "Validate exact SHA and trusted upstream runs"
+            ]
+            handoff = [
+                step for step in receiving["steps"]
+                if step.get("name") == "Verify transferred database lock and maintenance fence"
+            ]
+            if len(validation) != 1 or len(handoff) != 1:
+                fail("receiver timing native phase inventory is ambiguous")
+            validation, handoff = validation[0], handoff[0]
+            phase, phase_started = "native-validation", started
+            if validation.get("status") in {"queued", "in_progress"} and validation.get("conclusion") is None:
+                if (
+                    handoff.get("status") != "queued" or handoff.get("conclusion") is not None
+                    or handoff.get("started_at") is not None
+                    or validation.get("completed_at") is not None
+                    or validation["status"] == "queued" and validation.get("started_at") is not None
+                ):
+                    fail("receiver timing native validation and startup states are inconsistent")
+                if validation.get("started_at") is not None:
+                    validation_started = parse_timestamp(validation["started_at"], label).timestamp()
+                    if not started <= validation_started <= observed_at:
+                        fail("receiver timing native validation chronology is invalid")
+                elif validation["status"] == "in_progress":
+                    fail("receiver timing executing native validation has no start timestamp")
+            elif validation.get("status") == "completed" and validation.get("conclusion") == "success":
+                validation_started = parse_timestamp(validation.get("started_at"), label).timestamp()
+                validated_at = parse_timestamp(validation.get("completed_at"), label).timestamp()
+                if not started <= validation_started <= validated_at <= observed_at:
+                    fail("receiver timing completed native validation chronology is invalid")
+                elapsed["native-validation"] = validated_at - started
+                phase, phase_started = "startup-snapshot", validated_at
+                if handoff.get("started_at") is None:
+                    if handoff.get("status") != "queued" or handoff.get("conclusion") is not None:
+                        fail("receiver timing startup phase is inconsistent")
+                else:
+                    if (
+                        handoff.get("status") not in {"in_progress", "completed"}
+                        or (handoff["status"] == "in_progress" and handoff.get("conclusion") is not None)
+                        or (handoff["status"] == "completed" and handoff.get("conclusion") != "success")
+                    ):
+                        fail("receiver timing verification phase is inconsistent")
+                    verify_started = parse_timestamp(handoff["started_at"], label).timestamp()
+                    if not validated_at <= verify_started <= observed_at:
+                        fail("receiver timing verification chronology is invalid")
+                    if handoff["status"] == "completed":
+                        verified_at = parse_timestamp(handoff.get("completed_at"), label).timestamp()
+                        if not verify_started <= verified_at <= observed_at:
+                            fail("receiver timing completed verification chronology is invalid")
+                    elif handoff.get("completed_at") is not None:
+                        fail("receiver timing executing verification has a completion timestamp")
+                    elapsed["startup-snapshot"] = verify_started - validated_at
+                    phase, phase_started = "receiver-renewal", verify_started
+            else:
+                fail("receiver timing native validation has an unsupported outcome")
+    now = time.time()
+    if now < observed_at:
+        fail("receiver timing clock moved backward during its native observation")
+    elapsed[phase] = now - phase_started
+    tail = handoff_remaining_guard_v4(deadline, now, phase, elapsed)
+    if now - renewal > HANDOFF_V4_EXECUTION_SECONDS:
+        fail("receiver handoff whole renewal-to-renewal ceiling was exhausted")
+    return {
+        "profile": "live-betting-data-resume-v4",
+        "lease_seconds": HANDOFF_V4_LEASE_SECONDS, "execution_seconds": HANDOFF_V4_EXECUTION_SECONDS,
+        "reserve_seconds": HANDOFF_RESERVE_SECONDS,
+        "deadline": deadline, "generation": generation, "boundary": boundary, "phase": phase,
+        "unfinished_seconds": tail, "remaining_seconds": int(deadline - now),
+        "elapsed_seconds": int(now - renewal),
+        "stage_elapsed_seconds": {key: int(value) for key, value in elapsed.items()},
+        **({"renewal_stage_deadline": phase_started + HANDOFF_V4_STAGE_CEILINGS["receiver-renewal"]}
+           if phase == "receiver-renewal" else {}),
+    }
+
+
 def validate_receiver_handoff_timing(repository, data_run, source, boundary, receiver_run=""):
     label = "receiver handoff timing"
     producer = require_fixed_run(
@@ -3347,7 +3565,11 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
         return None
     if evidence["source_sha"] != source or evidence["workflow_run_id"] != data_run:
         fail("receiver handoff timing producer differs from its authenticated package")
-    current_held_source(repository, source, label)
+    workflow = current_held_source(repository, source, label)
+    if held_handoff_source_version(workflow, label) != authority["schema_version"]:
+        fail("receiver handoff source and resume authority profiles differ")
+    v4 = authority["schema_version"] == "live-betting-data-resume-v4"
+    lease_seconds = HANDOFF_V4_LEASE_SECONDS if v4 else 1800
     jobs = jobs_for_run(repository, data_run, label)
     job = exact_job(jobs, "rollout", label)
     if (
@@ -3355,7 +3577,13 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
         or job.get("status") != "completed" or job.get("conclusion") != "success"
     ):
         fail("receiver handoff timing requires its whole-success physical producer")
-    deadline, generation = native_handoff_renewal(repository, data_run, job, label)
+    deadline, generation = native_handoff_renewal(
+        repository, data_run, job, label, lease_seconds=lease_seconds,
+    )
+    if v4:
+        return validate_receiver_handoff_timing_v4(
+            repository, source, producer, deadline, generation, boundary, receiver_run,
+        )
     renewal = deadline - 1800
     now = time.time()
     packaged = parse_timestamp(producer.get("updated_at"), label).timestamp()
@@ -3363,41 +3591,7 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     if boundary != "dispatch" and not receiver_run:
         fail("receiver timing boundary has no exact native receiving run")
     if receiver_run:
-        if POSITIVE_INTEGER.fullmatch(receiver_run) is None:
-            fail("receiver timing run ID is malformed")
-        if boundary in ("dispatch", "materialization"):
-            expected_workflow_state = "active"
-        elif boundary in (
-            "approval-1", "approval-2", "approval-3", "native-validation",
-            "startup-snapshot", "receiver-renewal",
-        ):
-            expected_workflow_state = "disabled_manually"
-        else:
-            fail("receiver timing workflow boundary is unsupported")
-        endpoint = f"repos/{repository}/actions/runs/{receiver_run}"
-        latest, first = gh_api(endpoint), gh_api(endpoint + "/attempts/1")
-        workflow = gh_api(f"repos/{repository}/actions/workflows/oci-production-deploy.yml")
-        if (
-            not isinstance(workflow, dict) or type(workflow.get("id")) is not int or workflow["id"] < 1
-            or workflow.get("path") != ".github/workflows/oci-production-deploy.yml"
-            or workflow.get("state") != expected_workflow_state
-        ):
-            fail("receiver timing workflow identity or lifecycle state changed")
-        for run in (latest, first):
-            if (
-                not isinstance(run, dict) or type(run.get("id")) is not int
-                or run["id"] != int(receiver_run) or type(run.get("run_attempt")) is not int
-                or run["run_attempt"] != 1 or run.get("head_sha") != source
-                or run.get("workflow_id") != workflow["id"] or run.get("path") != workflow["path"]
-                or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "master"
-                or (run.get("head_repository") or {}).get("full_name") != repository
-                or run.get("display_title") != f"oci-deploy {source}"
-                or run.get("status") not in {"queued", "waiting", "requested", "pending", "in_progress"}
-                or run.get("conclusion") is not None
-            ):
-                fail("receiver timing identity, first attempt or mutable state differs")
-        if any(latest.get(key) != first.get(key) for key in ("created_at", "status", "conclusion")):
-            fail("receiver timing first-attempt observations drifted")
+        first = receiver_handoff_run(repository, source, boundary, receiver_run, label)
         created = parse_timestamp(first.get("created_at"), label).timestamp()
         elapsed["admission"] = created - packaged
         if boundary.startswith("approval-") or boundary == "materialization":
@@ -3452,6 +3646,8 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     if now - renewal > 1200:
         fail("receiver handoff whole renewal-to-renewal ceiling was exhausted")
     return {
+        "profile": authority["schema_version"], "lease_seconds": 1800,
+        "execution_seconds": 1200, "reserve_seconds": HANDOFF_RESERVE_SECONDS,
         "deadline": deadline, "generation": generation, "boundary": boundary,
         "unfinished_seconds": tail, "remaining_seconds": int(deadline - now),
         "elapsed_seconds": int(now - renewal),
@@ -3556,10 +3752,19 @@ def validate_held_handoff_native(
         }
     ):
         fail(f"{label} complete held producer substituted its original root tuple")
-    deadline, generation = native_handoff_renewal(repository, run_id, job, label)
+    resume_schema = (
+        held_handoff_source_version(workflow, label)
+        if native["confirmation"] == HELD_HANDOFF_CONFIRMATION
+        else "live-betting-data-resume-v2"
+    )
+    lease_seconds = HANDOFF_V4_LEASE_SECONDS if resume_schema == "live-betting-data-resume-v4" else 1800
+    deadline, generation = native_handoff_renewal(
+        repository, run_id, job, label, lease_seconds=lease_seconds,
+    )
     return {
         **metadata, "_held_complete": True, "_held_native_inputs": native,
         "_handoff_deadline": deadline, "_handoff_generation": generation,
+        "_handoff_lease_seconds": lease_seconds, "_handoff_resume_schema": resume_schema,
     }
 
 
@@ -4556,8 +4761,11 @@ def validate_held_handoff_transfer(transfer, authority, current):
 def validate_held_transfer_runtime(
     snapshot, current, deployments, pods, baseline_files, resume_authority,
     namespace, held_run, held_source, successor_run, successor_source, deadline="", generation="",
+    lease_seconds="1800",
 ):
     label = "fresh held-handoff physical transfer"
+    if type(lease_seconds) is not str or lease_seconds not in {"1800", "3600"}:
+        fail(f"{label} authenticated predecessor profile is unsupported")
     if (
         not isinstance(snapshot, dict) or not isinstance(current, dict)
         or current.get("kind") != "ConfigMap" or current.get("apiVersion") != "v1"
@@ -4575,7 +4783,7 @@ def validate_held_transfer_runtime(
         data.get("holder") != f"live-data-{held_run}-1"
         or data.get("source-sha") != held_source or data.get("state") != "active"
         or data.get("operation-id") != "live-data-apply-slip-index"
-        or data.get("lease-duration-seconds") != "1800" or data.get("released-at-epoch") != "0"
+        or data.get("lease-duration-seconds") != lease_seconds or data.get("released-at-epoch") != "0"
         or len({held_run, successor_run, resume_authority.get("applied_data_run_id"),
                 resume_authority.get("failed_deploy_run_id")}) != 4
         or resume_authority.get("current_source_sha") != successor_source
@@ -4591,7 +4799,7 @@ def validate_held_transfer_runtime(
         if type(value) is not str or re.fullmatch(pattern, value) is None:
             fail(f"{label} lock metadata is malformed")
     if (
-        not int(data["acquired-at-epoch"]) <= int(data["lease-until-epoch"]) - 1800 <= time.time()
+        not int(data["acquired-at-epoch"]) <= int(data["lease-until-epoch"]) - int(lease_seconds) <= time.time()
         or deadline and data["lease-until-epoch"] != deadline
         or generation and data["fencing-generation"] != generation
     ):
@@ -4777,8 +4985,10 @@ def validate_held_handoff_artifact(
         authority = parse_resume_authority(files, evidence, label)
         if authority is None:
             fail("complete held handoff has no resume authority")
+        if authority["schema_version"] != held["_handoff_resume_schema"]:
+            fail("complete held handoff source, native branch and authority profiles differ")
         package.add("resume-images.tsv")
-        if authority["schema_version"] == "live-betting-data-resume-v3":
+        if authority["schema_version"] in HELD_HANDOFF_AUTHORITY_VERSIONS:
             package.update({"held-handoff-history.json", "held-handoff-transfer.json"})
         if set(files) != package:
             fail("complete held handoff does not have its exact checksummed package")
@@ -4794,7 +5004,7 @@ def validate_held_handoff_artifact(
     root, predecessor = None, None
     if complete:
         native = held["_held_native_inputs"]
-        if authority["schema_version"] == "live-betting-data-resume-v3":
+        if authority["schema_version"] in HELD_HANDOFF_AUTHORITY_VERSIONS:
             if native.get("confirmation") != HELD_HANDOFF_CONFIRMATION:
                 fail("complete held handoff substituted its prior physical producer")
             predecessor = validate_held_handoff_artifact(
@@ -4852,7 +5062,7 @@ def validate_held_handoff_artifact(
     if complete:
         if files["resume-images.tsv"] != image_bytes:
             fail("complete held handoff substituted the authenticated original image bytes")
-        if authority["schema_version"] == "live-betting-data-resume-v3":
+        if authority["schema_version"] in HELD_HANDOFF_AUTHORITY_VERSIONS:
             expected_authority.update({
                 key: predecessor["resume"][key] for key in (
                     "held_handoff_run_id", "held_handoff_source_sha", "held_handoff_evidence_sha256",
@@ -4883,6 +5093,7 @@ def validate_held_handoff_artifact(
         "resume": {
             **root, "held_handoff_run_id": run_id, "held_handoff_source_sha": source_sha,
             "held_handoff_evidence_sha256": manifest_sha,
+            "held_handoff_lease_seconds": str(held["_handoff_lease_seconds"] if complete else 1800),
             **({"held_handoff_lease_until_epoch": str(held["_handoff_deadline"])} if complete else {}),
             **({"held_handoff_fencing_generation": str(held["_handoff_generation"])}
                if complete and "_handoff_generation" in held else {}),
@@ -4911,7 +5122,7 @@ def validate_pre_runtime_resume_chain(
              "baseline_capture_run_id": run_id}
             if include_capture else (run_id, evidence["source_sha"])
         )
-    if authority["schema_version"] == "live-betting-data-resume-v3":
+    if authority["schema_version"] in HELD_HANDOFF_AUTHORITY_VERSIONS:
         current = require_fixed_run(
             repository, run_id, "oci-live-data-rollout.yml", "success", evidence["source_sha"],
             f"oci-live-data apply-slip-index {evidence['source_sha']}", "held-handoff successor",
@@ -4937,6 +5148,13 @@ def validate_pre_runtime_resume_chain(
             or any(request[key] != value for key, value in expected_request.items())
         ):
             fail("held-handoff successor substituted its native root or previous physical holder")
+        if authority["schema_version"] == "live-betting-data-resume-v4":
+            workflow = held_source_bytes(
+                repository, evidence["source_sha"], ".github/workflows/oci-live-data-rollout.yml",
+                "held-handoff successor",
+            )
+            if held_handoff_source_version(workflow, "held-handoff successor") != authority["schema_version"]:
+                fail("held-handoff successor source and resume authority profiles differ")
         result = validate_held_handoff_artifact(
             repository, authority["held_handoff_run_id"], authority["held_handoff_source_sha"],
             evidence["source_sha"], request, runtime_mode, "held-handoff predecessor",
