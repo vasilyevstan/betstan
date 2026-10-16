@@ -4012,7 +4012,7 @@ for boundary in none approval-1 approval-2 approval-3 interrupt; do
     [[ "$(cat "$post_count_file")" = "$before" ]]
     ! grep -qF status=APPROVED "$output_file"
   fi
-  python3 - "$trace" "$boundary" "${TMPDIR:?}" "$tmp_dir/caller-cache-must-not-exist" <<'PY'
+  python3 - "$trace" "$boundary" "${TMPDIR:-/tmp}" "$tmp_dir/caller-cache-must-not-exist" <<'PY'
 from pathlib import Path
 import sys
 trace, boundary, temporary, caller = sys.argv[1:]
