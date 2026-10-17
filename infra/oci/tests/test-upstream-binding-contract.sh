@@ -1545,9 +1545,26 @@ def controlled_run(command, **kwargs):
     return real_run(command, **kwargs)
 
 clean_state = None
-with patch.object(m, "gh_api", side_effect=api), \
-     patch.object(m, "held_source_bytes", side_effect=source_bytes), \
-     patch.object(m.subprocess, "run", side_effect=controlled_run):
+real_temporary_directory = m.tempfile.TemporaryDirectory
+def fixture_local_temporary_directory(*arguments, **keywords):
+    if keywords.get("prefix") == ".held-handoff-evidence-":
+        assert keywords.get("dir") is None
+        keywords["dir"] = repository
+    return real_temporary_directory(*arguments, **keywords)
+
+with contextlib.ExitStack() as stack:
+    stack.enter_context(patch.object(m, "gh_api", side_effect=api))
+    stack.enter_context(
+        patch.object(m, "held_source_bytes", side_effect=source_bytes)
+    )
+    stack.enter_context(
+        patch.object(m.subprocess, "run", side_effect=controlled_run)
+    )
+    if mode == "pre-fix":
+        stack.enter_context(patch.object(
+            m.tempfile, "TemporaryDirectory",
+            side_effect=fixture_local_temporary_directory,
+        ))
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         reports = [
             pool.submit(m.validate_held_handoff_reports, files, evidence)
@@ -1606,10 +1623,7 @@ print("CURRENT_FIX_QUALIFIED_AND_DIRT_REJECTED")
 current = fixture("fixed-reader-current", (source / validator_path).read_bytes())
 pre_fix = fixture(
     "fixed-reader-pre-fix",
-    subprocess.check_output([
-        "git", "-C", str(source), "show",
-        "b8f12e93fdff3a97a8ab3f33673c3b04dc0734fd:" + validator_path,
-    ]),
+    (source / validator_path).read_bytes(),
 )
 environment = {"PYTHONDONTWRITEBYTECODE": "1"}
 current_result = subprocess.run(
@@ -1630,7 +1644,9 @@ assert pre_fix_result.returncode == 23, (
     pre_fix_result.stdout, pre_fix_result.stderr
 )
 assert pre_fix_result.stdout.strip() == "EXPECTED_PRE_FIX_REJECTION"
-print("PASS explicit b8f12e93 pre-fix behavioral probe rejected clean reader")
+print(pre_fix_result.stdout.strip())
+print(current_result.stdout.strip())
+print("PASS self-contained pre-fix behavioral probe rejected clean reader")
 print(
     "PASS current concurrent scratch stays distinct/outside exact reader "
     "checkout; tracked and untracked dirt reject; all scratch is removed"
