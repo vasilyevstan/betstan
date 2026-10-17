@@ -442,9 +442,10 @@ The upstream binding language remains declarative: it can select an expected
 head SHA, expected `success`, one fixed disk-checkpoint validator, or one of
 the three fixed failure-recovery profiles, plus one purpose-specific
 successful-held-handoff continuation profile. It cannot carry arbitrary commands,
-modules, plugins, or job expressions. Dispatcher, approver, and workflows read
-the protected operation environment's authoritative `OCI_RUNTIME_MODE` again
-at each prerequisite-decay boundary before intent, claim, or approval.
+modules, plugins, or job expressions. Dispatcher and approver re-read the
+authoritative protected-environment mode at prerequisite boundaries; the
+protected workflow uses its immutable injected `OCI_RUNTIME_MODE`, binds it
+through complete upstream validation, and verifies the physical runtime before transfer.
 
 Failed deployment recovery is classified exactly. Provenance verification uses
 step-local default workflow authentication without expanded permissions. The

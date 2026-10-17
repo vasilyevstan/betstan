@@ -38,6 +38,9 @@ fail() {
   exit 1
 }
 
+[[ "$(grep -Fc '/variables/OCI_RUNTIME_MODE' "$WORKFLOW")" == "0" ]] ||
+  fail "data workflow must not call the OCI_RUNTIME_MODE environment endpoint"
+
 ruby -ryaml -rjson - "$DEPLOY_WORKFLOW" >"$work_dir/receiver-steps.json" <<'RUBY'
 steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("deploy").fetch("steps")
 puts JSON.generate(steps.select { |step|
@@ -4163,7 +4166,8 @@ case "$2" in
     [[ "${RESUME_LOCK_FAILURE:-}" != master ]] || exit 1
     printf '%s\n' "$SOURCE_SHA" ;;
   repos/example/repo/environments/oci-migration/variables/OCI_RUNTIME_MODE)
-    printf '%s\n' k3s ;;
+    echo 'unexpected_runtime_mode_endpoint=invoked' >&2
+    exit 1 ;;
   repos/example/repo/actions/workflows/oci-live-data-rollout.yml)
     if [[ "${RESUME_LOCK_FAILURE:-}" = workflow ]]; then
       echo active

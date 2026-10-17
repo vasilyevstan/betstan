@@ -1687,7 +1687,6 @@ jobs:
                   ./infra/oci/scripts/validate-rollback-baseline-stan.sh
                 ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
                 [ "$(gh api "repos/$REPO/commits/master" --jq .sha)" = "$SOURCE_SHA" ]
-                [ "$(gh api "repos/$REPO/environments/oci-migration/variables/OCI_RUNTIME_MODE" --jq .value)" = "$OCI_RUNTIME_MODE" ]
                 [ "$(gh api "repos/$REPO/actions/workflows/oci-live-data-rollout.yml" --jq .state)" = disabled_manually ]
                 for path in .github/workflows/oci-live-data-rollout.yml \
                   infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh; do
