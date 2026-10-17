@@ -568,6 +568,9 @@ diagnostic evidence directory as that authority.
 
 The single `oci-live-data-continue-held-handoff` operation uses the existing
 data workflow, `apply-slip-index` phase and `oci-migration` environment.
+Its `oci-successful-held-handoff-v1` profile, inputs and confirmation remain
+unchanged; authenticated evidence, not a caller-selected mode, determines
+which producer qualification applies.
 Hash-covered `held_handoff_run_id` and `held_handoff_source_sha` identify the
 actual successful held owner, separately from the original applied-data and
 failed-deployment rollback root. Original root inputs and historical request
@@ -584,17 +587,82 @@ remain in complete history and require their separate, double-observed native
 no-execution proof against a frozen reviewed workflow source. These caller and
 source-profile capabilities ship together; rollback retains them or fails closed.
 
-Before intent/approval and in workflow preflight, this operation admits only
-the reviewed historical producer's missing `resume-images.tsv`. Complete
-first-attempt success and held-work proof, safe inventory, full checksum
-coverage, provenance, schema, journal, reports and original root evidence remain
-mandatory. The native step sequence retains slots 1–37, 74 and 75 without
-renumbering. The recorded image hash must match the independently validated
+An ancestor's expired-receiver classification is historical provenance, not
+current held-transfer authority. The original applied root, authenticated baseline
+capture and actual held owner remain distinct. Current continuation must use its
+own fully qualified held-owner evidence, not an inherited expired-resume
+classification; native baseline-source validation remains bound to the
+authenticated capture.
+
+Before intent/approval and in workflow preflight, historical qualification
+retains only the frozen reviewed producer's packaging omission, including
+missing `resume-images.tsv`, with unchanged source pins and native step slots
+1–37, 74 and 75. A separate current-producer qualification requires complete
+checksummed v6 packaging, authenticated executed source/tree closure, complete
+native chronology and final renewal, whole first-attempt success, and positive
+proof that no receiver took ownership. Its `resume-images.tsv` bytes must match
+the authenticated runtime-image checksum. Malformed current evidence cannot
+fall back to the historical omission.
+
+Both qualifications retain held-work proof, safe complete artifact inventory,
+full checksum coverage, provenance, schema, journal, reports and the original
+root evidence. The recorded image hash must match the independently validated
 original build manifest; no historical artifact is reconstructed or made
-deployable. Complete bounded history must exclude intervening deployments or
-incompatible transitions up to an immutable successor cutoff bound to native
-creation/execution evidence. Later legitimate deployment cannot invalidate
-that interval; fresh current exclusivity remains mandatory.
+deployable. Complete bounded, paginated native history must exclude intervening
+deployments or incompatible transitions. Completed lineage retains its
+authenticated successor's native admission cutoff; later legitimate receivers
+cannot invalidate that historical interval. Current admission with no successor
+or an unfinished successor still scans full current history and authenticates
+consumed-owner authority. Missing records never prove
+absence; incomplete inventories, unresolved authority or dispatch, reruns and
+unexplained history block admission. Current receiver absence and production
+exclusivity must be freshly established at dispatch, materialization, all three
+approval revalidations and immediately before physical transfer; only the exact
+authenticated owned successor may be excluded.
+
+Validation may reuse verified immutable artifact ZIP, exact source and bounded
+raw Git commit-object bytes, never admission or ancestry verdicts or mutable
+observations. Across the three approval
+revalidations, reuse is private to that approval command's temporary workspace,
+removed on exit; dispatch and native validation remain independent. Reuse binds
+the full repository, run/attempt, artifact/digest, source/blob, validator/policy
+and exact shared-helper identity within the existing command-owned context,
+rehashes bytes, and repeats parsing and validation. Current source,
+workflow/policy identity and state, run status/attempt, complete artifact
+inventory, ownership and expiry, authority state, pending gates, exclusivity
+and receiver absence remain fresh at every authority boundary. After serial
+input checks, binding coordinators remain `min(4, original_binding_count)`.
+Each authentic native `gh` read window allows at most four children under one
+shared `min(16, 4 * original_binding_count)` budget across JSON, paginated and
+binary reads, including every retry attempt. Existing independent workflow-history
+and one-run state batching is preserved. One command-global four-worker executor
+owns at most four reserved, queued or running offloads in total, only for
+nonrecursive cancelled/unstarted and unmaterialized row proofs. Unavailable
+nonblocking admission uses the same complete proof inline in its binding
+coordinator. Helper initialization stays serial and lazy; proofs receive fixed,
+explicit inputs and contexts. Recursive, dependency and owner qualifications
+retain serial collection barriers. Unmaterialized proofs keep opening checks,
+required leaves/history/raw validation and pure proof before closing rereads,
+with no extra reads after failure. Cancelled proofs complete the full first
+observation, including proof, before the fresh second observation and equality
+comparison. Proof workers cannot enumerate workflow history, recurse, submit
+or await futures. An atomic collection failure latch stops new row admission;
+all admitted work joins on every path, preserving the earliest original-row-order
+failure without ordinary row errors cancelling other bindings.
+Ownership precedes submission: ambiguity retains its reservation and original
+failure and disables offloads without cancelling other bindings' full inline
+proofs; all acknowledged work must finish naturally, awaited outside all locks,
+before shutdown may discard unstarted ambiguous work, followed by verified
+cleanup or atomic late-entry-safe retirement and exactly-once release.
+Main-thread interruption requests cancellation before pool joins; all native
+children are drained and reaped, with permits restored before exit. All binding
+results join before complete-map chronology, dependency checks or acceptance.
+The three approval revalidations remain sequential fresh processes with private
+immutable-byte reuse only. Native-response coalescing or caching, transport,
+credentials, freshness, current-clock, ownership, compare-and-swap, fence, data
+and baseline safeguards are unchanged. Resource caps prove no speedup, timing
+bound or operational readiness; stage values remain unchanged.
+This adds no persistent cache, workflow, schema or bypass.
 
 Older nonterminal records remain counted and untouched. Only records last
 updated strictly before the held handoff's creation may use the existing
@@ -606,6 +674,19 @@ history-only proof may validate an active workflow; it neither enables the
 workflow nor grants dispatch, approval or current exclusivity. Current serialized
 admission and disabled-workflow safeguards remain independent and unchanged.
 
+For the cancelled and unmaterialized held-history ancestry readers, proof uses
+complete authenticated raw Git commit objects at exact endpoints authenticated
+by fresh native history checks. Git is an untrusted enumerator: replacements are
+disabled and full history is required. Every use reauthenticates object type,
+exact size and SHA-1, parses ordered parents, proves complete parent closure,
+and recomputes endpoint reachability, strict ancestry and the full
+target-minus-base set. Incomplete history, missing parents or exhausted bounds
+fail closed rather than truncate. Converted readers have no raw-to-API fallback;
+genuine legacy GitHub dictionary callers retain their unchanged validation
+branch. Reader and shared helper must ship together at the same exact source
+SHA. This changes no wire profile, schema, lease, timer, compare-and-swap,
+freshness, history or concurrency rule.
+
 A separate history-only case admits an otherwise blocking post-held terminal
 `apply-slip-index` data run only when two complete authenticated native
 collections agree without drift on non-execution. Exact repository, workflow,
@@ -615,24 +696,144 @@ records must show a completed, cancelled first attempt. The complete job
 inventory must contain exactly one cancelled `rollout` job with a positive
 native identity, an explicitly unassigned runner and explicitly empty steps;
 pending gates, approvals and artifacts must also be empty with complete
-inventories. Endpoint-local chronology must hold, with no terminalization after
-an established immutable successor cutoff. The row remains counted and
-untouched; other post-held transitions still block. This portable proof
+inventories. Endpoint-local chronology must hold. A pre-cutoff run may finish
+cancellation after the immutable successor cutoff only when that complete native
+proof still establishes non-execution. The row remains counted and untouched;
+other post-held transitions still block. This portable proof
 establishes only native non-execution, not request ownership, inputs or canonical
 retirement, and requires no private dispatcher authority records. It grants no
 current exclusivity, approval, adoption or lease authority. The older pre-held
-unmaterialized-run classifier remains unchanged.
+unmaterialized-run eligibility rules remain unchanged.
+
+The existing receiver-absence validator treats an older issued record only as
+read-only historical evidence, never as consumed or retired authority. This
+requires an unchanged, valid record with no in-flight approval, source-bound
+policy, workflow and input-hash validation, matching native latest/first-attempt
+identity, complete terminal jobs, run and job completion strictly before the
+held producer began, no pending gates, and two consistent fresh collections.
+Its transport must not bind the held producer or successor; only the same
+fully bound intent may share the qualification. Independent unresolved intents,
+claimed or in-flight records, and any record that fails qualification remain
+blocking. No ownership or approval is retrofitted, and this grants no active-run
+exclusivity or unmaterialized-run exception.
 
 Physical admission uses the actual held owner, not the root tuple: a fresh
 baseline, verified fence, seven quiescent writers, exact images and supporting
 state, held checkpoint and fresh owner/source-bound lock snapshot are required.
+Immediately before transfer, reobserve the exact holder/source, lock identity
+and generation, lease, fence, dark state, writer quiescence, disk/residency and
+original rollback baseline. The historical failed receiver, current physical
+producer, fresh capture/successor and original applied root stay distinct;
+neither a fresh capture nor newer application build replaces the original
+build, infrastructure, checkpoint, image or rollback tuple.
+
+Retained restoration keeps the existing application-scope guard: control-source
+changes are limited to GitHub configuration, infrastructure and Markdown while
+the original application images and release tuple remain authoritative. A fresh
+capture does not deliver newer application or UI changes, even if already
+reviewed. Keep that delivery separate from recovery, staging an ordinary forward
+application release after restoration with a fresh exact-current-`master` build
+and matching infrastructure, checkpoint, data and deployment evidence. This adds
+no workflow or exception to recovery admission.
+
 Strict snapshot-bound own release and released-only acquisition retain the
 same UID and exact released generation, even for an expired lease; expiry
 grants no authority. These two compare-and-swap transitions are not atomic.
-Partial or ambiguous failure retains maintenance, records confirmed ownership
-honestly and permits no blind replay, fallback or false successful handoff.
+Partial or ambiguous failure retains maintenance, fencing and dark state,
+records confirmed and unconfirmed stages in the existing transfer journal, and
+permits no blind replay, fallback, writer restoration or false successful handoff.
 Success requires real new `apply-slip-index` execution and complete validation
 under the successor lock, never skipping work because the prior phase succeeded.
+
+An expired retained producer may supply authenticated evidence for a new
+authorized operation and capture; it is not itself a live receiver handoff.
+The new operation must perform real data execution. For legacy v2/v3 profiles,
+its own final native renewal starts a new, unchanged 1,800-second handoff clock.
+This does not revive or extend the old producer's lease. Artifact upload,
+dispatch and approval cannot reset the new deadline either. The separate
+10,800-second retained/deployment operation duration is not a handoff extension.
+
+The receiving deployment for a fresh continuation handoff enforces
+source-defined stage ceilings and a strictly shrinking remaining-path budget
+against that handoff's authentic native deadline. Before starting a timed
+handoff, require supported whole renewal-to-renewal timing under the selected
+profile. Legacy v2/v3 retains its literal 1,200-second execution, 600-second
+reserve and 1,800-second lease, including its existing stage arithmetic.
+
+The prospective `live-betting-data-resume-v4` profile has exactly the v3 keys and
+applies only to new executions of the existing successful-held continuation
+branch. Selection is fixed by authenticated executed source, not a new input,
+toggle, operation, workflow or gate. Source, schema and native renewal duration
+must agree. Each predecessor is validated under its own profile: a v2-to-v4
+continuation still validates the predecessor's original 1,800-second clock.
+No existing artifact, authority or lease is converted or extended.
+
+| Stage policy ceiling (seconds) | Legacy v2/v3 | Prospective v4 |
+| --- | ---: | ---: |
+| Packaging | 120 | 120 |
+| Admission | 180 | 600 |
+| Queue/materialization allowance | 120 | 120 |
+| Approval, including three fresh validations | 240 | 1,200 |
+| Independent native validation | 180 | 480 |
+| Startup/snapshot | 240 | 360 |
+| Verification through actual receiver renewal | 120 | 120 |
+| Execution total | 1,200 | 3,000 |
+| Reserve | 600 | 600 |
+| Handoff lease | 1,800 | 3,600 |
+
+These are policy ceilings, not empirical completion bounds or operational
+approval. The clock starts at the new producer's authentic final owner-bound
+renewal, derived from its native deadline minus the selected duration, never
+dispatch or upload. Preparation and physical transfer before that renewal are
+not free work: qualify their costs separately. Normal operation and receiving
+deployment durations remain 14,400 and 10,800 seconds respectively.
+
+At dispatch, materialization, each of the three approval revalidations and
+native receiving boundaries, remaining time
+must be strictly greater than the unfinished-path bound plus that reserve.
+The bound shrinks only as this fresh receiving path advances; it is not an
+admission deadline for the expired producer used as retained evidence.
+For v4, that bound is the unused authenticated current-phase allocation plus
+the full allowances for every future phase. Unknown or inconsistent phase
+evidence, invalid chronology, completed-stage overruns, exhausted current-phase
+allocations while work remains, and reserve equality reject. No approval-ordinal
+tail credits apply.
+Completed admission is checked and removed when receiver creation is
+authenticated. Before native job start, elapsed pre-start time consumes the
+approval allocation while the full future queue allowance remains reserved;
+these are not one combined allocation. Completed pre-start time must also fit
+the approval ceiling. Native validation retains its unused 480 seconds plus
+360 for startup and 120 for renewal. Startup progress may use only existing
+authenticated job observations, retaining its unused 360 plus 120; no new
+startup read or checkpoint is added. Verification-step entry checks and removes
+completed startup. Timing-prefix calls, verification and actual renewal then
+consume the 120-second renewal allocation; actual renewal checks the phase end
+and strictly more than 600 seconds of reserve using full clock precision.
+
+Packaging and whole-run success, admission, queue/materialization, approval,
+native validation/startup/snapshot, and actual receiver verification and
+exact-owner renewal are included. All seven full native validations remain:
+two dispatch-admission checks, one materialization check, three sequential
+approval revalidations and one independent receiver validation, plus two direct
+timing prefixes. Complete positive-cost, source-bound pre-arm qualification must
+also cover shell, control, POST and provider costs before the new continuation
+is armed. No cache or proof elision substitutes for those checks.
+Renewal has no acquire fallback, and its acknowledgement and live lock must
+confirm the exact owner, source, generation
+and operation duration before acceptance. Configured ceilings, fixtures or a
+successful dispatch request do not prove production timing, timely takeover
+or service restoration; unsupported timing withholds operational readiness.
+The separate expired-handoff and fenced rollback routes still require their
+genuinely qualifying failed receiver; no receiver may be fabricated or
+substituted to obtain recovery eligibility.
+Compatible producer, native authenticator, receiver and CLI readers may promote
+together in one pull request, provided promotion itself emits no v4. Verify that
+compatible non-emitting control-plane baseline before a later explicit governed
+continuation; no mandatory second pull request is introduced. Older readers
+reject v4 rather than reinterpret it. After v4 emission, retain v4-capable
+control-plane readers even during application-image rollback. Rollback must
+preserve emitted evidence, original-root rollback and strict transfer semantics;
+an older reader's fail-closed rejection is not recovery authority.
 
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this
 operation-specific check at the actual selected fresh or imported baseline.
@@ -705,9 +906,9 @@ successors and deployments require v6. The cleanup command still has no
 rollback phase, so release rollback continues to use the protected baseline,
 fence, lock, and recovery model described below.
 
-Successful-held-handoff successors emit `live-betting-data-resume-v3` alongside
-v6 evidence, distinguishing the original root, previous held owner and new
-successor. `held_handoff_evidence_sha256` binds the actual prior checksum-manifest
+Earlier successful-held-handoff evidence uses `live-betting-data-resume-v3`
+alongside v6 evidence, distinguishing the original root, previous held owner and
+new successor. `held_handoff_evidence_sha256` binds the actual prior checksum-manifest
 bytes; ownership-transition and cutoff evidence join the new checksummed bundle.
 The producer copies the actual validated `IMAGE_PROVENANCE_FILE` bytes into
 `resume-images.tsv`, verifies their authority-bound hash and includes the file
