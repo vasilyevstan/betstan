@@ -6137,7 +6137,7 @@ def validate_held_transfer_runtime(
 
 
 def validate_held_handoff_reports(files, evidence):
-    with tempfile.TemporaryDirectory(prefix=".held-handoff-evidence-", dir=Path.cwd()) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".held-handoff-evidence-") as temporary:
         directory = Path(temporary)
         for relative, raw in files.items():
             destination = directory / relative
@@ -7827,7 +7827,6 @@ def validate_legacy_build_artifact(
     evidence = artifact_sibling_files(files, names, label)
     with tempfile.TemporaryDirectory(
         prefix=".upstream-binding-legacy-build-",
-        dir=Path.cwd(),
     ) as temporary:
         root = Path(temporary)
         for name, raw in evidence.items():
@@ -7935,7 +7934,6 @@ def validate_current_build_artifact(
         fail(f"{label} build chain is invalid")
     with tempfile.TemporaryDirectory(
         prefix=".upstream-binding-current-build-",
-        dir=Path.cwd(),
     ) as temporary:
         root = Path(temporary)
         for name, raw in evidence.items():
@@ -8762,7 +8760,6 @@ def validate_partial_recovery_artifact(
         fail(f"{label} artifact has an unexpected file set")
     with tempfile.TemporaryDirectory(
         prefix=".upstream-binding-recovery-",
-        dir=Path.cwd(),
     ) as temporary:
         root = Path(temporary)
         for path, raw in files.items():

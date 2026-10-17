@@ -1394,6 +1394,187 @@ os.close(9)
 PY
 ok "immutable bytes full-context isolation, single fetch, rehash and unsafe workspace rejection"
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$ROOT_DIR" "$WORK" <<'PY'
+import concurrent.futures
+import contextlib
+import importlib.util
+import io
+import os
+import shutil
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from unittest.mock import patch
+
+source = Path(sys.argv[1]).resolve()
+repository = Path(sys.argv[2]).resolve() / "fixed-reader-concurrency"
+paths = (
+    ".github/workflows/oci-live-data-rollout.yml",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
+    "infra/azure/agents/copilot_cli_authority_stan.py",
+    "infra/oci/scripts/upstream_run_binding_stan.py",
+)
+for relative in paths:
+    destination = repository / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / relative, destination)
+subprocess.run(
+    ["git", "init", "--quiet", "--initial-branch=master"],
+    cwd=repository, check=True,
+)
+subprocess.run(
+    ["git", "config", "user.name", "Sanitized Fixture"],
+    cwd=repository, check=True,
+)
+subprocess.run(
+    ["git", "config", "user.email", "fixture@example.invalid"],
+    cwd=repository, check=True,
+)
+subprocess.run(["git", "add", *paths], cwd=repository, check=True)
+subprocess.run(
+    ["git", "commit", "--quiet", "-m", "Create clean fixed-reader fixture"],
+    cwd=repository, check=True,
+)
+subject = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"], cwd=repository, text=True,
+).strip()
+tree_sha = subprocess.check_output(
+    ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True,
+).strip()
+spec = importlib.util.spec_from_file_location(
+    "fixed_reader_concurrency",
+    repository / "infra/oci/scripts/upstream_run_binding_stan.py",
+)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+profile = m._failed_held_continuation_profile()
+current_workflow = (
+    repository / ".github/workflows/oci-live-data-rollout.yml"
+).read_text()
+historical_workflow = (
+    "      " + profile["protected_read"] + "\n" + current_workflow
+)
+tree_entries = []
+for line in subprocess.check_output(
+    ["git", "ls-tree", "-r", "HEAD"], cwd=repository, text=True,
+).splitlines():
+    metadata, path = line.split("\t", 1)
+    mode, kind, sha = metadata.split()
+    tree_entries.append({
+        "path": path, "mode": mode, "type": kind, "sha": sha,
+    })
+
+def api(path):
+    if path.endswith("/git/ref/heads/master"):
+        return {
+            "ref": "refs/heads/master",
+            "object": {"type": "commit", "sha": subject},
+        }
+    if path.endswith(f"/git/commits/{subject}"):
+        return {"sha": subject, "tree": {"sha": tree_sha}}
+    if path.endswith(f"/git/trees/{tree_sha}?recursive=1"):
+        return {"sha": tree_sha, "truncated": False, "tree": tree_entries}
+    raise AssertionError(path)
+
+def source_bytes(repo, control, path, label):
+    assert path == ".github/workflows/oci-live-data-rollout.yml"
+    return historical_workflow if control == profile["control"] else current_workflow
+
+def reject(action):
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            action()
+    except SystemExit:
+        return
+    raise AssertionError("genuine dirty fixed-reader checkout passed")
+
+evidence = {
+    "workflow_run_id": "71",
+    "source_sha": "1" * 40,
+    "build_run_id": "72",
+    "infrastructure_run_id": "73",
+    "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none",
+    "checkpoint_source_sha": "2" * 40,
+    "disk_checkpoint_run_id": "74",
+    "disk_checkpoint_sha256": "3" * 64,
+    "disk_checkpoint_disposition": "READY_NO_RECLAIM",
+}
+files = {"sanitized-report.json": b'{"status":"PASS"}\n'}
+populated = threading.Barrier(2, timeout=15)
+release = threading.Barrier(2, timeout=15)
+temporary = []
+real_run = subprocess.run
+
+def controlled_run(command, **kwargs):
+    if (
+        len(command) == 1
+        and str(command[0]).endswith("verify-live-betting-data-evidence-stan.sh")
+    ):
+        directory = Path(kwargs["env"]["EVIDENCE_DIR"]).resolve()
+        temporary.append(directory)
+        assert repository not in directory.parents
+        assert (directory / "sanitized-report.json").read_bytes() == files[
+            "sanitized-report.json"
+        ]
+        populated.wait()
+        release.wait()
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+    return real_run(command, **kwargs)
+
+with patch.object(m, "gh_api", side_effect=api), \
+     patch.object(m, "held_source_bytes", side_effect=source_bytes), \
+     patch.object(m.subprocess, "run", side_effect=controlled_run):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        report = pool.submit(
+            m.validate_held_handoff_reports, files, evidence,
+        )
+        populated.wait()
+        assert not any(repository.glob(".held-handoff-evidence-*"))
+        reader = pool.submit(
+            m._failed_held_current_reader,
+            profile["repository"], subject, profile,
+        )
+        qualified = reader.result(timeout=15)
+        assert qualified["control"] == subject
+        dirty = repository / "bounded-synthetic-dirty-check"
+        dirty.write_text("genuine untracked state\n")
+        try:
+            reject(lambda: m._failed_held_current_reader(
+                profile["repository"], subject, profile,
+            ))
+        finally:
+            dirty.unlink()
+            release.wait()
+        report.result(timeout=15)
+
+assert temporary and all(not path.exists() for path in temporary)
+assert subprocess.check_output(
+    ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+    cwd=repository, text=True,
+) == ""
+validator_source = (
+    repository / "infra/oci/scripts/upstream_run_binding_stan.py"
+).read_text()
+assert "dir=Path.cwd()" not in validator_source
+assert not any(
+    path
+    for pattern in (
+        ".held-handoff-evidence-*",
+        ".upstream-binding-legacy-build-*",
+        ".upstream-binding-current-build-*",
+        ".upstream-binding-recovery-*",
+    )
+    for path in repository.glob(pattern)
+)
+print(
+    "PASS concurrent held report scratch stays outside clean fixed-reader "
+    "checkout while genuine dirty state rejects and cleanup completes"
+)
+PY
+ok "held report temporary isolation and strict concurrent fixed-reader cleanliness"
+
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
 import contextlib, dataclasses, hashlib, importlib.util, io, os, subprocess, sys
 from pathlib import Path
