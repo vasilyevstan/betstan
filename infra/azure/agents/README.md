@@ -403,6 +403,19 @@ This portable no-execution proof needs no private authority directory and neithe
 retires nor replays a local generation. Canonical cancellation and retirement keep
 their separate durable record and authorization requirements.
 
+### Frozen failed held-handoff continuation history
+
+`oci-failed-continue-held-handoff-no-domain-mutation-v1` is a read-only,
+exact-run history profile; qualification grants no dispatch, approval, lock,
+mutation, deployment, activation, or rollback authority. It admits only the
+reviewed pre-transfer failure after proving the temporary access lifecycle
+closed successfully, and artifact expiry is a hard stop. Recovery still
+requires a fresh first-attempt continuation from clean exact current `master`.
+The existing expired-receiver classifier is unchanged and unrelated failures
+remain rejected. Keep the compatible reader forward-only; replace it through a
+reviewed forward correction rather than reinterpreting or extending the frozen
+record.
+
 Fresh physical admission precedes snapshot-bound release and `acquire-released`.
 Checksummed transition evidence distinguishes unconfirmed and confirmed results;
 an ambiguous response or partial transfer stops without replay or fallback

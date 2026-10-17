@@ -111,6 +111,254 @@ EXPIRED_HANDOFF_CLOSURE = {
     "infra/azure/agents/shared-mongo-operation-lock-stan.sh":
         "1bcf7a3a922ad80b83a9170bfaaef3dcf1b2dc63",
 }
+FAILED_HELD_CONTINUATION_PROFILE = (
+    "oci-failed-continue-held-handoff-no-domain-mutation-v1"
+)
+FAILED_HELD_CONTINUATION_RUN_ID = 39018383213
+FAILED_HELD_CONTINUATION_HELD_RUN_ID = 38635983420
+FAILED_HELD_CONTINUATION_HELD_SOURCE = (
+    "7b6c9767e55d356ef1d119fa423d6a876c2e28d0"
+)
+FAILED_HELD_CONTINUATION_CONTROL = "ab32b31e363254abb5ab4b1d48408a1609fe63a9"
+FAILED_HELD_CONTINUATION_TREE = "74a38702e349d111b9a48356203cc32e210fbdcd"
+FAILED_HELD_CONTINUATION_WORKFLOW_ID = 339733789
+FAILED_HELD_CONTINUATION_REPOSITORY_ID = 753130566
+FAILED_HELD_CONTINUATION_REPOSITORY_NODE_ID = "R_kgDOLOPcRg"
+FAILED_HELD_CONTINUATION_POLICY_SHA256 = (
+    "45ce069efd5532836b079c8059f9a17e439e312bd82aadf0188c286b62865cc8"
+)
+FAILED_HELD_CONTINUATION_INPUT_SHA256 = (
+    "0f2c2591b12405a9f0e8937018cd8776150bd26243a81cb0af86a74e47c231aa"
+)
+FAILED_HELD_CONTINUATION_LINEAGE_SHA256 = (
+    "7798863f33dfc0ade4893c8f3cbc6fe9edb1b0b02bb49134ee70f54da0167d9c"
+)
+FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB = (
+    "92038ee7bd21ddc2b888242f2ee91a7bd5571aba"
+)
+FAILED_HELD_CONTINUATION_INPUT_NAMES = (
+    "approved_sha",
+    "resume_source_sha",
+    "build_run_id",
+    "infrastructure_run_id",
+    "checkpoint_source_sha",
+    "disk_checkpoint_run_id",
+    "phase",
+    "prerequisite_run_id",
+    "baseline_recovery_run_id",
+    "baseline_recovery_source_sha",
+    "failed_deploy_run_id",
+    "failed_activation_run_id",
+    "failed_activation_user_id",
+    "confirmation",
+    "held_handoff_run_id",
+    "held_handoff_source_sha",
+)
+FAILED_HELD_CONTINUATION_ACTIONS = (
+    "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+    "oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58",
+)
+FAILED_HELD_CONTINUATION_CLOSURE = (
+    (
+        ".github/workflows/oci-live-data-rollout.yml",
+        "1855c6443f0e32e2ab306ab23c159ad9d19312bf",
+    ),
+    (
+        "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
+        "d5afe224080abecda336f1b3d190c83674835ebf",
+    ),
+    (
+        "infra/azure/agents/copilot_cli_authority_stan.py",
+        "3393e632c7f26ca2f98fd56a230985766db4ec91",
+    ),
+    (
+        "infra/azure/agents/live-betting-readiness-lib.sh",
+        "4d2cbbe86590b47b3af9509a2d477cc5c4fa3b64",
+    ),
+    (
+        "infra/azure/agents/production-run-exclusivity-stan.sh",
+        "c662964a633690da8e3ce460a07f78484db3a7a8",
+    ),
+    (
+        "infra/azure/agents/shared-mongo-operation-lock-stan.sh",
+        "1bcf7a3a922ad80b83a9170bfaaef3dcf1b2dc63",
+    ),
+    (
+        "infra/oci/agents/live-betting-readiness-stan.sh",
+        "d5829645475d8907e0d4d172749785b8095ca1b9",
+    ),
+    (
+        "infra/oci/scripts/authorize-github-runner.sh",
+        "0a56854ca4e284e291beb471a61f4381afdc7b5a",
+    ),
+    (
+        "infra/oci/scripts/baseline-capture-stan.sh",
+        "f5d0a97080637880173e817807c38443c35af748",
+    ),
+    (
+        "infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+        "6f3486bb980dc8f791c2f139c4e3f4aaa097f0ab",
+    ),
+    (
+        "infra/oci/scripts/configure-k3s-access.sh",
+        "a95bd1cc58ee8fe72b8a429a4d32c09f6ceecea3",
+    ),
+    (
+        "infra/oci/scripts/install-cli.sh",
+        "d939372bd9e3e6268e5f935685c554c742549e11",
+    ),
+    (
+        "infra/oci/scripts/k3s-node-disk-recovery-stan.sh",
+        "e4c7798fe66b05735bb906932a266db4a2523f87",
+    ),
+    (
+        "infra/oci/scripts/k3s_disk_recovery_stan.py",
+        "a1f21fe3f3b538ec6965b353c08bbac8738a8b19",
+    ),
+    (
+        "infra/oci/scripts/lib.sh",
+        "caabac06cc16147e12ac536112d3aa5f14d54a34",
+    ),
+    (
+        "infra/oci/scripts/live-betting-data-rollout-stan.sh",
+        "6019ae3d3105170396ddcc2e4f5e703e62ac7488",
+    ),
+    (
+        "infra/oci/scripts/live-data-maintenance-stan.sh",
+        "7de9fee1d1f08323b04ef44ce8f58066f88e12ae",
+    ),
+    (
+        "infra/oci/scripts/revoke-github-runner.sh",
+        "7d4e33b0824c46af88c5d5cdfb7998e9a5cb0641",
+    ),
+    (
+        "infra/oci/scripts/upstream_run_binding_stan.py",
+        "95d5e216e3908abd6968497e9f2db4f5e3426580",
+    ),
+    (
+        "infra/oci/scripts/validate-partial-recovery-authority-stan.sh",
+        "bf089777892d70d13b4bcf880d7e5311e26c00b9",
+    ),
+    (
+        "infra/oci/scripts/validate-rollback-baseline-stan.sh",
+        "15db4c58cdf7849b0bf0193a54315b54ec411d55",
+    ),
+    (
+        "infra/oci/scripts/verify-images.sh",
+        "77ff8ecdcf9b8f86ed5be3550a3cd9f91c57a514",
+    ),
+    (
+        "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
+        "87ba39e6cabf84ce62aa75cf4e342b3b510850d4",
+    ),
+)
+FAILED_HELD_CONTINUATION_STEPS = (
+    (1, "Set up job", "success", "2026-10-17T10:21:18Z", "2026-10-17T10:21:20Z"),
+    (2, "Initialize isolated OCI data paths", "success", "2026-10-17T10:21:20Z", "2026-10-17T10:21:20Z"),
+    (3, "Checkout approved current master commit", "success", "2026-10-17T10:21:20Z", "2026-10-17T10:21:22Z"),
+    (4, "Validate exact SHA phase and trusted upstream runs", "success", "2026-10-17T10:21:22Z", "2026-10-17T10:24:07Z"),
+    (5, "Reject competing production activity", "success", "2026-10-17T10:24:07Z", "2026-10-17T10:25:00Z"),
+    (6, "Download exact OCI image provenance", "success", "2026-10-17T10:25:00Z", "2026-10-17T10:25:00Z"),
+    (7, "Download exact OCI infrastructure provenance", "success", "2026-10-17T10:25:00Z", "2026-10-17T10:25:01Z"),
+    (8, "Download exact release disk checkpoint", "success", "2026-10-17T10:25:01Z", "2026-10-17T10:25:02Z"),
+    (9, "Download prerequisite data evidence", "success", "2026-10-17T10:25:02Z", "2026-10-17T10:25:03Z"),
+    (10, "Download failed deploy protected baseline", "skipped", "2026-10-17T10:25:03Z", "2026-10-17T10:25:03Z"),
+    (11, "Download explicitly selected recovery baseline authority", "skipped", "2026-10-17T10:25:03Z", "2026-10-17T10:25:03Z"),
+    (12, "Bind historical recovery source through its exact artifact", "skipped", "2026-10-17T10:25:03Z", "2026-10-17T10:25:03Z"),
+    (13, "Verify immutable release and phase provenance", "success", "2026-10-17T10:25:03Z", "2026-10-17T10:28:20Z"),
+    (14, "Install pinned OCI CLI", "success", "2026-10-17T10:28:20Z", "2026-10-17T10:28:44Z"),
+    (15, "Verify OKE identity", "skipped", "2026-10-17T10:28:44Z", "2026-10-17T10:28:44Z"),
+    (16, "Verify k3s identity", "success", "2026-10-17T10:28:44Z", "2026-10-17T10:28:45Z"),
+    (17, "Reconcile expired and authorize current runner IPv4", "skipped", "2026-10-17T10:28:45Z", "2026-10-17T10:28:45Z"),
+    (18, "Configure kubectl from exact cluster OCID", "skipped", "2026-10-17T10:28:45Z", "2026-10-17T10:28:45Z"),
+    (19, "Open ephemeral OCI Bastion access to k3s", "success", "2026-10-17T10:28:45Z", "2026-10-17T10:33:36Z"),
+    (20, "Verify exact failed-deploy resume state", "success", "2026-10-17T10:33:36Z", "2026-10-17T10:34:11Z"),
+    (21, "Capture and validate pre-mutation rollback baseline", "success", "2026-10-17T10:34:11Z", "2026-10-17T10:34:11Z"),
+    (22, "Verify reader-qualified released activation state", "skipped", "2026-10-17T10:34:11Z", "2026-10-17T10:34:11Z"),
+    (23, "Revalidate exact release disk checkpoint before lock mutation", "success", "2026-10-17T10:34:11Z", "2026-10-17T10:34:14Z"),
+    (24, "Acquire database operation lock", "failure", "2026-10-17T10:34:14Z", "2026-10-17T10:35:26Z"),
+    (25, "Enter or re-establish live data maintenance", "skipped", "2026-10-17T10:35:26Z", "2026-10-17T10:35:26Z"),
+    (26, "Demote and verify exact retained live-acceptance account", "skipped", "2026-10-17T10:35:26Z", "2026-10-17T10:35:26Z"),
+    (27, "Delete exact orphaned live-acceptance slips", "skipped", "2026-10-17T10:35:26Z", "2026-10-17T10:35:26Z"),
+    (28, "Execute exact-digest live data phase", "skipped", "2026-10-17T10:35:26Z", "2026-10-17T10:35:26Z"),
+    (29, "Restore runtime or verify final deploy handoff", "skipped", "2026-10-17T10:35:26Z", "2026-10-17T10:35:26Z"),
+    (30, "Capture post-phase runtime baseline", "skipped", "2026-10-17T10:35:26Z", "2026-10-17T10:35:26Z"),
+    (31, "Require executed data-step evidence", "skipped", "2026-10-17T10:35:26Z", "2026-10-17T10:35:26Z"),
+    (32, "Upload exact sanitized data evidence", "success", "2026-10-17T10:35:26Z", "2026-10-17T10:35:27Z"),
+    (33, "Upload protected rollout baselines", "success", "2026-10-17T10:35:27Z", "2026-10-17T10:35:28Z"),
+    (34, "Restore runtime or retain hold if final handoff packaging failed", "skipped", "2026-10-17T10:35:28Z", "2026-10-17T10:35:28Z"),
+    (35, "Release database operation lock unless handed to deploy", "skipped", "2026-10-17T10:35:28Z", "2026-10-17T10:35:28Z"),
+    (36, "Revoke exact runner rule", "skipped", "2026-10-17T10:35:28Z", "2026-10-17T10:35:28Z"),
+    (37, "Close ephemeral OCI Bastion access", "success", "2026-10-17T10:35:28Z", "2026-10-17T10:35:40Z"),
+    (38, "Remove isolated OCI client state", "success", "2026-10-17T10:35:40Z", "2026-10-17T10:35:55Z"),
+    (76, "Post Checkout approved current master commit", "success", "2026-10-17T10:35:55Z", "2026-10-17T10:35:55Z"),
+    (77, "Complete job", "success", "2026-10-17T10:35:55Z", "2026-10-17T10:35:55Z"),
+)
+FAILED_HELD_CONTINUATION_ARTIFACTS = (
+    (
+        12098621291,
+        "MDg6QXJ0aWZhY3QxMjA5ODYyMTI5MQ==",
+        "oci-live-data-baselines-39018383213-1",
+        11677,
+        "fc564f016b2cdf6232c7b01ea2ea58c278905f24b0fd9869483762d5c5a8d6c2",
+        "2026-10-17T10:35:28Z",
+        "2026-10-17T10:35:28Z",
+        "2026-11-16T10:35:27Z",
+    ),
+    (
+        12097894204,
+        "MDg6QXJ0aWZhY3QxMjA5Nzg5NDIwNA==",
+        "oci-live-data-rollout-39018383213-1",
+        1301,
+        "6b725d166f3663fe65bcccd451d7c3d4f92234414eb448e5595d54f97d22e01b",
+        "2026-10-17T10:35:27Z",
+        "2026-10-17T10:35:27Z",
+        "2026-11-16T10:35:26Z",
+    ),
+)
+FAILED_HELD_CONTINUATION_BASELINE_MEMBERS = (
+    ("betstan/betstan/artifacts/oci-data-baseline-before/SHA256SUMS", "cfc3ffabb3d124b7f2481f6a2baa6016d04cc652edd6667fd0067c496c9adbea"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/baseline-provenance.env", "e73836cf9c6ae9d71b0cbf6ecaa997d53514e12398339418ed17ea2acd958ae5"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/deployments.tsv", "02fd54cd8f41f551660d8d887ee430269c38976c54ed4166d8ea3f4acaa91455"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/images.tsv", "b87ed96c3ce8c9e7f7c222d58de29e58424da29215e5b2f9fb3e7caa2356c43b"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/live-images.tsv", "88c9b61467eb249f5cff3b757537cd0dac5e671dfb9c971c1167204c3e8afaed"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/migration-backup-references.tsv", "77a7f8a3c8236cedcb01f985876b85a155c5423f8f5404d8b6302ef1d44161ee"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/migration-journal.json", "4f7dd24ab7c55ab6587c8a88f6a57030ce91133605b683ec601bd6311c2589c9"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/migration-lock.json", "b4fa456e1270539e95ee5ace1c162a5128d926dda39aa576ac9b6082a157c77e"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/pod-images.tsv", "1c576a1405d675b442d19d2455183d4b05752e8d96208ea764b44ee1adb519e4"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/public-http.tsv", "50d53c1b595dd747bdc38d981bc0022f43e4ada484b2808b6b6a40ca1b27011d"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/queues.tsv", "72f5237567b7ad59098f4289b3dd6f7f7fcb9dd65ce0dd90e58451edd76dfe22"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/sse.tsv", "88e2120e4df6bf562a6715005cd953ca675e9439fac52a80a3854dc979a16ce4"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/telemetry-pre-run.env", "13a305704ca02cd725e3ed1f1acc168479085872ba702b4d10bac54324be2390"),
+    ("betstan/betstan/artifacts/oci-data-baseline-before/trusted-deploy-provenance.txt", "49b1bc8b6acce7a3d36a9404e4533ec2113b7bf6a7ec1df1809f2348482dc4ba"),
+    ("_temp/pre-runtime-lock.json", "4abf8aa57f2580cf3cd46941813e426c73148ddd88cc140616bee0c39d278e7e"),
+)
+FAILED_HELD_CONTINUATION_ROLLOUT_MEMBERS = (
+    ("held-handoff-history.json", "4bb01bec81d822777d3a22c3176e35ca35f237bc731a2e43e2a4c53068d9092f"),
+    ("resume-authority.env", "b01110bf539809099cd5b2902de91c41239dc220485c9fd4edb7930aece545bc"),
+)
+FAILED_HELD_CONTINUATION_LOG_MEMBERS = (
+    ("0_rollout.txt", "2272fdd95c15465f91eb93de94920146b71dff6457aa563508e899e78555c89d"),
+    ("rollout/system.txt", "a7cb468c620e6e0178566937ad229e7f62590f0e4a252eb9e8dacc1114ebf7b2"),
+)
+FAILED_HELD_CONTINUATION_LOCK_SOURCE_SHA256 = (
+    "46ef900dc73520f0c17981eb29a8b0570b9880e6718a93a93dbed891e9a96059"
+)
+FAILED_HELD_CONTINUATION_LOCK_OUTSIDE_SHA256 = (
+    "48427d6ddc8f8289b909ebde12d26af3b3985988e37a61cebe43c8d6a3d66d4c"
+)
+FAILED_HELD_CONTINUATION_CLEANUP_OUTSIDE_SHA256 = (
+    "e0a94dcbaabcf5b8e50a59d12dc3c879fbbe5bee1de90b1ec197ce49bff8ddc8"
+)
+FAILED_HELD_CONTINUATION_DENIAL = (
+    "gh: Resource not accessible by integration (HTTP 403)"
+)
+FAILED_HELD_CONTINUATION_PROTECTED_READ = (
+    '[ "$(gh api "repos/$REPO/environments/oci-migration/variables/'
+    'OCI_RUNTIME_MODE" --jq .value)" = "$OCI_RUNTIME_MODE" ]'
+)
 LIVE_V6_KEYS = {
     "schema_version",
     "source_sha",
@@ -1097,7 +1345,8 @@ def gh_api_bytes(path):
         path,
     ):
         return cache.read(
-            ("native-attempt-one-zip", path), lambda: download_api_bytes(path), share=False,
+            ("native-attempt-one-zip", path), lambda: download_api_bytes(path),
+            share=False, reuse=False,
         )
     return download_api_bytes(path)
 
@@ -1168,16 +1417,21 @@ class ImmutableBindingBytes:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(raw)
 
-    def read(self, identity, loader, *, expected_sha256=None, expected_blob=None, share=True):
+    def read(
+        self, identity, loader, *, expected_sha256=None, expected_blob=None,
+        share=True, reuse=True,
+    ):
+        if type(share) is not bool or type(reuse) is not bool:
+            fail("immutable binding byte reuse mode is invalid")
         key = hashlib.sha256(json.dumps(
             [self.context, identity], sort_keys=True, separators=(",", ":"),
         ).encode()).hexdigest()
         with self.lock:
             entry_lock = self.locks.setdefault(key, threading.Lock())
         with entry_lock:
-            entry = self.entries.get(key)
+            entry = self.entries.get(key) if reuse else None
             try:
-                if entry is None and self.workspace is not None and share:
+                if entry is None and reuse and self.workspace is not None and share:
                     try:
                         raw = self._read_file(key + ".bin", MAX_ARTIFACT_ARCHIVE_BYTES)
                     except FileNotFoundError:
@@ -1196,11 +1450,12 @@ class ImmutableBindingBytes:
                         fail("immutable binding bytes have an invalid size")
                     entry = (raw, hashlib.sha256(raw).hexdigest())
                     self._verify(entry, expected_sha256, expected_blob)
-                    if self.workspace is not None and share:
+                    if reuse and self.workspace is not None and share:
                         self._write_file(key + ".bin", raw)
                         self._write_file(key + ".sha256", entry[1].encode())
                 self._verify(entry, expected_sha256, expected_blob)
-                self.entries[key] = entry
+                if reuse:
+                    self.entries[key] = entry
                 return entry[0]
             except (OSError, UnicodeError):
                 fail("approval byte workspace is incomplete or unsafe")
@@ -2846,6 +3101,7 @@ def native_step_log_lines(raw, step, label):
 def failed_deploy_native_inputs(
     repository, run_id, source_sha, label, *, resume_dispatch=False,
     expected_step_conclusion="failure", prove_expired_handoff=False,
+    native_jobs=None, native_log_files=None,
 ):
     """Read only runner-generated environment in the exact failed step log.
 
@@ -2858,9 +3114,15 @@ def failed_deploy_native_inputs(
         or prove_expired_handoff and (
             resume_dispatch or expected_step_conclusion != "success"
         )
+        or (native_jobs is None) != (native_log_files is None)
     ):
         fail(f"{label} native deployment step expectation is invalid")
-    jobs = jobs_for_run(repository, run_id, label)
+    jobs = (
+        jobs_for_run(repository, run_id, label)
+        if native_jobs is None else native_jobs
+    )
+    if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
+        fail(f"{label} native job inventory is malformed")
     deploy = exact_job(jobs, "rollout" if resume_dispatch else "deploy", label)
     job_id = deploy.get("id")
     if type(job_id) is not int or job_id < 1 or deploy.get("run_id") != int(run_id):
@@ -2879,10 +3141,19 @@ def failed_deploy_native_inputs(
         "success" if resume_dispatch else expected_step_conclusion
     ):
         fail(f"{label} native input step outcome differs")
-    files = zip_files(
-        gh_api_bytes(f"repos/{repository}/actions/runs/{run_id}/attempts/1/logs"),
-        label, require_original_names=True,
+    files = (
+        zip_files(
+            gh_api_bytes(f"repos/{repository}/actions/runs/{run_id}/attempts/1/logs"),
+            label, require_original_names=True,
+        )
+        if native_log_files is None else native_log_files
     )
+    if (
+        not isinstance(files, dict)
+        or not all(isinstance(name, str) and isinstance(raw, bytes)
+                   for name, raw in files.items())
+    ):
+        fail(f"{label} native log inventory is malformed")
     matches = [
         raw for name, raw in files.items()
         if re.fullmatch(r"-?[0-9]+_" + re.escape(deploy["name"]) + r"\.txt", name)
@@ -4357,9 +4628,981 @@ def _validate_unmaterialized_history(
     validate_opening_identity(gh_api(run_endpoint))
 
 
+def _failed_held_continuation_profile():
+    return {
+        "name": FAILED_HELD_CONTINUATION_PROFILE,
+        "repository": "vasilyevstan/betstan",
+        "repository_id": FAILED_HELD_CONTINUATION_REPOSITORY_ID,
+        "repository_node_id": FAILED_HELD_CONTINUATION_REPOSITORY_NODE_ID,
+        "run_id": FAILED_HELD_CONTINUATION_RUN_ID,
+        "held_run_id": FAILED_HELD_CONTINUATION_HELD_RUN_ID,
+        "held_source": FAILED_HELD_CONTINUATION_HELD_SOURCE,
+        "control": FAILED_HELD_CONTINUATION_CONTROL,
+        "tree": FAILED_HELD_CONTINUATION_TREE,
+        "workflow_id": FAILED_HELD_CONTINUATION_WORKFLOW_ID,
+        "workflow_blob": dict(FAILED_HELD_CONTINUATION_CLOSURE)[
+            ".github/workflows/oci-live-data-rollout.yml"
+        ],
+        "current_workflow_blob": FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB,
+        "policy_blob": dict(FAILED_HELD_CONTINUATION_CLOSURE)[
+            "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+        ],
+        "authority_blob": dict(FAILED_HELD_CONTINUATION_CLOSURE)[
+            "infra/azure/agents/copilot_cli_authority_stan.py"
+        ],
+        "input_names": FAILED_HELD_CONTINUATION_INPUT_NAMES,
+        "policy_sha256": FAILED_HELD_CONTINUATION_POLICY_SHA256,
+        "input_sha256": FAILED_HELD_CONTINUATION_INPUT_SHA256,
+        "lineage_sha256": FAILED_HELD_CONTINUATION_LINEAGE_SHA256,
+        "actions": FAILED_HELD_CONTINUATION_ACTIONS,
+        "closure": dict(FAILED_HELD_CONTINUATION_CLOSURE),
+        "steps": FAILED_HELD_CONTINUATION_STEPS,
+        "artifacts": FAILED_HELD_CONTINUATION_ARTIFACTS,
+        "baseline_members": dict(FAILED_HELD_CONTINUATION_BASELINE_MEMBERS),
+        "rollout_members": dict(FAILED_HELD_CONTINUATION_ROLLOUT_MEMBERS),
+        "log_members": dict(FAILED_HELD_CONTINUATION_LOG_MEMBERS),
+        "protected_read": FAILED_HELD_CONTINUATION_PROTECTED_READ,
+        "denial": FAILED_HELD_CONTINUATION_DENIAL,
+        "lock_source_sha256": FAILED_HELD_CONTINUATION_LOCK_SOURCE_SHA256,
+        "lock_outside_sha256": FAILED_HELD_CONTINUATION_LOCK_OUTSIDE_SHA256,
+        "cleanup_outside_sha256": FAILED_HELD_CONTINUATION_CLEANUP_OUTSIDE_SHA256,
+    }
+
+
+def _failed_held_git(label, *arguments):
+    root = Path(__file__).resolve().parents[3]
+    environment = {
+        name: value for name, value in os.environ.items()
+        if not name.startswith("GIT_")
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            capture_output=True, check=False, env=environment, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        fail(f"{label} immutable Git source is unavailable")
+    if result.returncode:
+        fail(f"{label} immutable Git source is unavailable")
+    return result.stdout
+
+
+def _failed_held_tree_blobs(value, expected_sha, label):
+    if (
+        not isinstance(value, dict) or value.get("sha") != expected_sha
+        or value.get("truncated") is not False
+        or not isinstance(value.get("tree"), list)
+    ):
+        fail(f"{label} authenticated tree is incomplete")
+    blobs = {}
+    for entry in value["tree"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            fail(f"{label} authenticated tree entry is malformed")
+        path = entry["path"]
+        if path in blobs:
+            fail(f"{label} authenticated tree contains a duplicate path")
+        if entry.get("type") == "blob":
+            if (
+                entry.get("mode") not in {"100644", "100755"}
+                or not isinstance(entry.get("sha"), str)
+                or FULL_SHA.fullmatch(entry["sha"]) is None
+            ):
+                fail(f"{label} authenticated blob entry is malformed")
+            blobs[path] = entry["sha"]
+    return blobs
+
+
+def _failed_held_current_reader(repository, subject_sha, profile):
+    label = f"{profile['name']} current reader"
+    if (
+        repository != profile["repository"]
+        or not isinstance(subject_sha, str)
+        or FULL_SHA.fullmatch(subject_sha) is None
+        or subject_sha == profile["control"]
+    ):
+        fail(f"{label} repository or current subject is invalid")
+    root = Path(__file__).resolve().parents[3]
+    validator_path = "infra/oci/scripts/upstream_run_binding_stan.py"
+    workflow_path = ".github/workflows/oci-live-data-rollout.yml"
+    policy_path = "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+    authority_path = "infra/azure/agents/copilot_cli_authority_stan.py"
+    head = _failed_held_git(label, "rev-parse", "HEAD").decode().strip()
+    status = _failed_held_git(
+        label, "status", "--porcelain=v1", "--untracked-files=all",
+    )
+    tree_sha = _failed_held_git(
+        label, "rev-parse", f"{subject_sha}^{{tree}}",
+    ).decode().strip()
+    local = {
+        path: _failed_held_git(
+            label, "rev-parse", f"{subject_sha}:{path}",
+        ).decode().strip()
+        for path in (workflow_path, policy_path, authority_path, validator_path)
+    }
+    try:
+        validator_raw = (root / validator_path).read_bytes()
+    except OSError:
+        fail(f"{label} executing validator is unavailable")
+    validator_blob = hashlib.sha1(
+        f"blob {len(validator_raw)}\0".encode() + validator_raw
+    ).hexdigest()
+    if (
+        Path(__file__).is_symlink() or head != subject_sha or status
+        or FULL_SHA.fullmatch(tree_sha) is None
+        or local[workflow_path] != profile["current_workflow_blob"]
+        or local[policy_path] != profile["policy_blob"]
+        or local[authority_path] != profile["authority_blob"]
+        or local[validator_path] != validator_blob
+    ):
+        fail(f"{label} is not the clean exact current-master source")
+    reference = gh_api(f"repos/{repository}/git/ref/heads/master")
+    commit = gh_api(f"repos/{repository}/git/commits/{subject_sha}")
+    tree = gh_api(f"repos/{repository}/git/trees/{tree_sha}?recursive=1")
+    if (
+        not isinstance(reference, dict)
+        or reference.get("ref") != "refs/heads/master"
+        or not isinstance(reference.get("object"), dict)
+        or reference["object"].get("type") != "commit"
+        or reference["object"].get("sha") != subject_sha
+        or not isinstance(commit, dict) or commit.get("sha") != subject_sha
+        or not isinstance(commit.get("tree"), dict)
+        or commit["tree"].get("sha") != tree_sha
+    ):
+        fail(f"{label} is no longer exact current master")
+    native_blobs = _failed_held_tree_blobs(tree, tree_sha, label)
+    if any(native_blobs.get(path) != blob for path, blob in local.items()):
+        fail(f"{label} authenticated source tree differs from local execution")
+    historical_workflow = held_source_bytes(
+        repository, profile["control"], workflow_path, label,
+    )
+    current_workflow = held_source_bytes(
+        repository, subject_sha, workflow_path, label,
+    )
+    historical_lines = historical_workflow.splitlines(keepends=True)
+    removed = [
+        index for index, line in enumerate(historical_lines)
+        if line.strip() == profile["protected_read"]
+    ]
+    if (
+        len(removed) != 1
+        or "".join(
+            line for index, line in enumerate(historical_lines)
+            if index != removed[0]
+        ) != current_workflow
+    ):
+        fail(f"{label} corrected workflow is not the reviewed forward-compatible reader")
+    return {
+        "control": subject_sha,
+        "tree": tree_sha,
+        "workflowBlob": local[workflow_path],
+        "policyBlob": local[policy_path],
+        "authorityBlob": local[authority_path],
+        "validatorBlob": validator_blob,
+    }
+
+
+def _collect_failed_held_continuation_observation(repository, profile):
+    run_id = str(profile["run_id"])
+    endpoint = f"repos/{repository}/actions/runs/{run_id}"
+    job_pages = gh_api_pages(endpoint + "/attempts/1/jobs?per_page=100")
+    artifact_pages = gh_api_pages(endpoint + "/artifacts?per_page=100")
+    artifacts = artifacts_from_pages(
+        artifact_pages, f"{profile['name']} artifacts",
+    )
+    archives = {}
+    for artifact_id, _, _, _, _, _, _, _ in profile["artifacts"]:
+        matches = [
+            artifact for artifact in artifacts
+            if artifact.get("id") == artifact_id
+        ]
+        if len(matches) != 1:
+            fail(f"{profile['name']} exact artifact identity is absent or ambiguous")
+        archives[str(artifact_id)] = artifact_archive(
+            repository, matches[0], profile["name"],
+        )
+    return {
+        "run": gh_api(endpoint),
+        "attempt": gh_api(endpoint + "/attempts/1"),
+        "workflow": gh_api(
+            f"repos/{repository}/actions/workflows/{profile['workflow_id']}"
+        ),
+        "jobPages": job_pages,
+        "pending": gh_api(endpoint + "/pending_deployments?per_page=100"),
+        "approvals": gh_api(endpoint + "/approvals?per_page=100"),
+        "artifactPages": artifact_pages,
+        "commit": gh_api(
+            f"repos/{repository}/git/commits/{profile['control']}"
+        ),
+        "tree": gh_api(
+            f"repos/{repository}/git/trees/{profile['tree']}?recursive=1"
+        ),
+        "attemptLog": gh_api_bytes(endpoint + "/attempts/1/logs"),
+        "archives": archives,
+    }
+
+
+def _failed_held_project_run(run):
+    if not isinstance(run, dict):
+        return None
+    repository = run.get("repository")
+    head_repository = run.get("head_repository")
+    return {
+        key: run.get(key) for key in (
+            "id", "node_id", "workflow_id", "run_attempt", "path", "event",
+            "display_title", "head_branch", "head_sha", "status", "conclusion",
+            "created_at", "run_started_at", "updated_at", "html_url",
+        )
+    } | {
+        "repository": {
+            key: repository.get(key) if isinstance(repository, dict) else None
+            for key in ("id", "node_id", "full_name")
+        },
+        "head_repository": {
+            key: head_repository.get(key) if isinstance(head_repository, dict) else None
+            for key in ("id", "node_id", "full_name")
+        },
+    }
+
+
+def _failed_held_step_lines(raw, step, label, source_header):
+    lines = native_step_log_lines(raw, step, label)
+    starts = [
+        index for index, line in enumerate(lines)
+        if line == source_header
+    ]
+    if len(starts) != 1:
+        fail(f"{label} native shell source group is absent or ambiguous")
+    depth = 0
+    source_end = None
+    for index in range(starts[0], len(lines)):
+        line = lines[index]
+        if line.startswith("##[group]"):
+            depth += 1
+        elif line == "##[endgroup]":
+            depth -= 1
+            if depth == 0:
+                source_end = index
+                break
+    if source_end is None:
+        fail(f"{label} native shell source group is incomplete")
+    outside, depth = [], 0
+    for line in lines:
+        if line.startswith("##[group]"):
+            depth += 1
+        elif line == "##[endgroup]":
+            if depth < 1:
+                fail(f"{label} native log grouping is inconsistent")
+            depth -= 1
+        elif depth == 0:
+            outside.append(line)
+    if depth:
+        fail(f"{label} native log grouping is incomplete")
+    return lines[starts[0] + 1:source_end], outside
+
+
+def _failed_held_artifact_proof(
+    files, expected_members, historical, held, profile, semantic, label, *,
+    baseline,
+):
+    observed = {
+        path: hashlib.sha256(raw).hexdigest()
+        for path, raw in files.items()
+    }
+    if observed != expected_members:
+        fail(f"{label} exact member inventory or checksum differs")
+    semantic_keys = {
+        "rootRunId", "rootSourceSha", "baselineFiles", "imageBytes",
+        "checkpoint", "heldEvidenceSha256", "lockHolder",
+        "lockFencingGeneration", "lockLeaseUntilEpoch", "lockLeaseSeconds",
+        "lockNamespace",
+    }
+    if (
+        not isinstance(semantic, dict) or set(semantic) != semantic_keys
+        or not isinstance(semantic["baselineFiles"], dict)
+        or not all(
+            isinstance(path, str) and isinstance(raw, bytes)
+            for path, raw in semantic["baselineFiles"].items()
+        )
+        or not isinstance(semantic["imageBytes"], bytes)
+        or not semantic["imageBytes"]
+        or not isinstance(semantic["checkpoint"], dict)
+        or set(semantic["checkpoint"]) != {
+            "sourceSha", "contentChecksumSha256", "disposition",
+        }
+        or POSITIVE_INTEGER.fullmatch(semantic["rootRunId"]) is None
+        or FULL_SHA.fullmatch(semantic["rootSourceSha"]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", semantic["heldEvidenceSha256"]) is None
+        or semantic["lockHolder"] != f"live-data-{profile['held_run_id']}-1"
+        or POSITIVE_INTEGER.fullmatch(semantic["lockFencingGeneration"]) is None
+        or POSITIVE_INTEGER.fullmatch(semantic["lockLeaseUntilEpoch"]) is None
+        or semantic["lockLeaseSeconds"] not in {"1800", "3600"}
+        or not isinstance(semantic["lockNamespace"], str)
+        or not semantic["lockNamespace"]
+    ):
+        fail(f"{label} authenticated predecessor semantic context differs")
+    if baseline:
+        prefix = "betstan/betstan/artifacts/oci-data-baseline-before/"
+        selected = {
+            path.removeprefix(prefix): raw
+            for path, raw in files.items() if path.startswith(prefix)
+        }
+        if set(files) - set(path for path in files if path.startswith(prefix)) != {
+            "_temp/pre-runtime-lock.json"
+        }:
+            fail(f"{label} baseline archive has an unexpected outer member")
+        validate_checksum_manifest(selected, label)
+        if selected != semantic["baselineFiles"]:
+            fail(f"{label} baseline bytes differ from the authenticated held producer")
+        provenance = parse_env(
+            selected["baseline-provenance.env"], label, BASELINE_PROVENANCE_KEYS,
+        )
+        if (
+            provenance["baseline_capture_run_id"]
+                != historical["prerequisite_run_id"]
+            or provenance["baseline_capture_run_attempt"] != "1"
+            or provenance["baseline_recovery_run_id"]
+                != historical["baseline_recovery_run_id"]
+            or provenance["baseline_recovery_run_attempt"]
+                != ("0" if historical["baseline_recovery_run_id"] == "0" else "1")
+            or provenance["registry_provider"] != "ghcr"
+            or provenance["registry_host"] != "ghcr.io"
+            or provenance["registry_repository"] != APPLICATION_REPOSITORY
+            or provenance["registry_public_anonymous"] != "true"
+        ):
+            fail(f"{label} baseline provenance substituted its release lineage")
+        try:
+            lock = json.loads(files["_temp/pre-runtime-lock.json"])
+        except (ValueError, UnicodeError):
+            fail(f"{label} pre-mutation lock snapshot is malformed")
+        data = lock.get("data") if isinstance(lock, dict) else None
+        metadata = lock.get("metadata") if isinstance(lock, dict) else None
+        lock_keys = {
+            "state", "holder", "operation-id", "source-sha",
+            "acquired-at-epoch", "lease-duration-seconds",
+            "lease-until-epoch", "released-at-epoch", "fencing-generation",
+        }
+        if (
+            lock.get("apiVersion") != "v1" or lock.get("kind") != "ConfigMap"
+            or not isinstance(metadata, dict)
+            or metadata.get("name") != "gaming-mongo-migration-lock"
+            or metadata.get("namespace") != semantic["lockNamespace"]
+            or not isinstance(metadata.get("uid"), str) or not metadata["uid"]
+            or POSITIVE_INTEGER.fullmatch(str(metadata.get("resourceVersion", ""))) is None
+            or not isinstance(data, dict) or set(data) != lock_keys
+            or data.get("state") != "active"
+            or data.get("source-sha") != held["head_sha"]
+            or data.get("operation-id") != "live-data-apply-slip-index"
+            or data.get("holder") != semantic["lockHolder"]
+            or data.get("fencing-generation")
+                != semantic["lockFencingGeneration"]
+            or data.get("lease-until-epoch") != semantic["lockLeaseUntilEpoch"]
+            or data.get("lease-duration-seconds") != semantic["lockLeaseSeconds"]
+            or any(
+                not isinstance(data.get(key), str)
+                or re.fullmatch(r"[0-9]+", data[key]) is None
+                for key in (
+                    "acquired-at-epoch", "lease-until-epoch",
+                    "fencing-generation", "released-at-epoch",
+                )
+            )
+            or int(data["released-at-epoch"]) != 0
+            or int(data["acquired-at-epoch"]) >= int(data["lease-until-epoch"])
+        ):
+            fail(f"{label} pre-mutation lock snapshot is not the held owner's active baseline")
+        return {
+            "members": observed,
+            "baselineManifest": hashlib.sha256(
+                selected["SHA256SUMS"]
+            ).hexdigest(),
+            "captureRun": provenance["baseline_capture_run_id"],
+            "lockSource": data["source-sha"],
+            "lockState": data["state"],
+        }
+    try:
+        history = json.loads(files["held-handoff-history.json"])
+    except (ValueError, UnicodeError):
+        fail(f"{label} held history is malformed")
+    expected_history_keys = {
+        "schema_version", "repository", "held_handoff_run_id",
+        "held_handoff_source_sha", "successor_run_id", "successor_source_sha",
+        "start_at", "cutoff_at", "workflow_counts",
+    }
+    if (
+        not isinstance(history, dict) or set(history) != expected_history_keys
+        or history["schema_version"] != "live-betting-held-handoff-history-v1"
+        or history["repository"] != profile["repository"]
+        or history["held_handoff_run_id"] != str(profile["held_run_id"])
+        or history["held_handoff_source_sha"] != profile["held_source"]
+        or history["successor_run_id"] != str(profile["run_id"])
+        or history["successor_source_sha"] != profile["control"]
+        or history["start_at"] != held.get("created_at")
+        or history["cutoff_at"] != profile["steps"][3][3]
+        or not isinstance(history["workflow_counts"], dict)
+        or not history["workflow_counts"]
+        or any(
+            not isinstance(name, str) or not name.endswith(".yml")
+            or type(count) is not int or count < 0
+            for name, count in history["workflow_counts"].items()
+        )
+    ):
+        fail(f"{label} held history substituted its exact owner or successor")
+    authority = parse_env(
+        files["resume-authority.env"], label, LIVE_RESUME_AUTHORITY_V3_KEYS,
+    )
+    expected_authority = {
+        "schema_version": "live-betting-data-resume-v4",
+        "applied_data_run_id": semantic["rootRunId"],
+        "applied_source_sha": semantic["rootSourceSha"],
+        "failed_deploy_run_id": historical["failed_deploy_run_id"],
+        "resume_maintenance_mode": "pre-runtime-hold",
+        "failed_deploy_job_conclusion": "failure",
+        "public_validate_job_conclusion": "skipped",
+        "lock_release_step_conclusion": "skipped",
+        "fence_release_step_conclusion": "skipped",
+        "rehold_step_conclusion": "skipped",
+        "failed_activation_run_id": "0",
+        "current_source_sha": profile["control"],
+        "baseline_sha256": validate_checksum_manifest(
+            semantic["baselineFiles"], label,
+        ),
+        "runtime_images_sha256": hashlib.sha256(
+            semantic["imageBytes"],
+        ).hexdigest(),
+        "checkpoint_source_sha": historical["checkpoint_source_sha"],
+        "disk_checkpoint_run_id": historical["disk_checkpoint_run_id"],
+        "disk_checkpoint_sha256":
+            semantic["checkpoint"]["contentChecksumSha256"],
+        "disk_checkpoint_disposition": semantic["checkpoint"]["disposition"],
+        "application_change_scope": "github-infra-docs-only",
+        "status": "PASS",
+        "held_handoff_run_id": str(profile["held_run_id"]),
+        "held_handoff_source_sha": profile["held_source"],
+        "held_handoff_evidence_sha256": semantic["heldEvidenceSha256"],
+    }
+    if (
+        semantic["checkpoint"]["sourceSha"] != historical["checkpoint_source_sha"]
+        or authority != expected_authority
+    ):
+        fail(f"{label} resume authority substituted its no-mutation held lineage")
+    return {
+        "members": observed,
+        "history": history,
+        "authority": {
+            key: authority[key] for key in sorted(expected_authority)
+        },
+    }
+
+
+def _validate_failed_held_continuation_observation(
+    repository, row, held, subject_sha, dispatch_inputs, cutoff,
+    active_inventory, profile, current_reader, observation, semantic,
+):
+    label = profile["name"]
+    observation_keys = {
+        "run", "attempt", "workflow", "jobPages", "pending", "approvals",
+        "artifactPages", "commit", "tree", "attemptLog", "archives",
+    }
+    if (
+        history_worker_context() is not None
+        or repository != profile["repository"]
+        or type(row.get("id")) is not int or row["id"] != profile["run_id"]
+        or type(held.get("id")) is not int
+        or held["id"] != profile["held_run_id"]
+        or held.get("head_sha") != profile["held_source"]
+        or not isinstance(dispatch_inputs, dict)
+        or not isinstance(observation, dict)
+        or set(observation) != observation_keys
+        or not isinstance(observation["jobPages"], list)
+        or not isinstance(observation["artifactPages"], list)
+        or not isinstance(observation["attemptLog"], bytes)
+        or not 0 < len(observation["attemptLog"]) <= MAX_ARTIFACT_ARCHIVE_BYTES
+        or not isinstance(observation["archives"], dict)
+        or set(observation["archives"]) != {
+            str(item[0]) for item in profile["artifacts"]
+        }
+    ):
+        fail(f"{label} exact run, outer owner, or proof context differs")
+    if (
+        not isinstance(current_reader, dict)
+        or set(current_reader) != {
+            "control", "tree", "workflowBlob", "policyBlob",
+            "authorityBlob", "validatorBlob",
+        }
+        or current_reader["control"] != subject_sha
+        or not isinstance(current_reader["tree"], str)
+        or FULL_SHA.fullmatch(current_reader["tree"]) is None
+        or current_reader["workflowBlob"] != profile["current_workflow_blob"]
+        or current_reader["policyBlob"] != profile["policy_blob"]
+        or current_reader["authorityBlob"] != profile["authority_blob"]
+        or not isinstance(current_reader["validatorBlob"], str)
+        or FULL_SHA.fullmatch(current_reader["validatorBlob"]) is None
+    ):
+        fail(f"{label} current exact-reader proof differs")
+    expected_run = {
+        "id": profile["run_id"],
+        "node_id": "WFR_kwLOLOPcRs8AAAAJFa1HbQ",
+        "workflow_id": profile["workflow_id"],
+        "run_attempt": 1,
+        "path": ".github/workflows/oci-live-data-rollout.yml",
+        "event": "workflow_dispatch",
+        "display_title": f"oci-live-data apply-slip-index {profile['control']}",
+        "head_branch": "master",
+        "head_sha": profile["control"],
+        "status": "completed",
+        "conclusion": "failure",
+        "created_at": "2026-10-17T08:42:38Z",
+        "run_started_at": "2026-10-17T08:42:38Z",
+        "updated_at": "2026-10-17T10:35:57Z",
+        "html_url": (
+            f"https://github.com/{repository}/actions/runs/{profile['run_id']}"
+        ),
+        "repository": {
+            "id": profile["repository_id"],
+            "node_id": profile["repository_node_id"],
+            "full_name": repository,
+        },
+        "head_repository": {
+            "id": profile["repository_id"],
+            "node_id": profile["repository_node_id"],
+            "full_name": repository,
+        },
+    }
+    latest = _failed_held_project_run(observation.get("run"))
+    first = _failed_held_project_run(observation.get("attempt"))
+    if latest != expected_run or first != expected_run:
+        fail(f"{label} is not the exact terminal first attempt")
+    row_keys = (
+        "id", "workflow_id", "path", "head_sha", "head_branch", "event",
+        "run_attempt", "status", "conclusion", "display_title",
+        "created_at", "run_started_at", "updated_at", "html_url",
+    )
+    if (
+        any(
+            key not in row or type(row[key]) is not type(expected_run[key])
+            or row[key] != expected_run[key]
+            for key in row_keys
+        )
+        or not isinstance(row.get("head_repository"), dict)
+        or row["head_repository"].get("id") != profile["repository_id"]
+        or row["head_repository"].get("node_id") != profile["repository_node_id"]
+        or row["head_repository"].get("full_name") != repository
+    ):
+        fail(f"{label} complete history row differs from native identity")
+    if (
+        cutoff is not None
+        and parse_timestamp(expected_run["updated_at"], label) >= cutoff
+    ):
+        fail(f"{label} terminalized after the immutable successor cutoff")
+    workflow = observation.get("workflow")
+    if (
+        not isinstance(workflow, dict)
+        or workflow.get("id") != profile["workflow_id"]
+        or workflow.get("node_id") != "W_kwDOLOPcRs4UP-0d"
+        or workflow.get("name") != "oci-live-data-rollout"
+        or workflow.get("path") != ".github/workflows/oci-live-data-rollout.yml"
+        or workflow.get("state") not in {"active", "disabled_manually"}
+    ):
+        fail(f"{label} workflow identity is invalid")
+    jobs = jobs_from_pages(observation.get("jobPages"), label)
+    if len(jobs) != 1:
+        fail(f"{label} must have exactly one rollout job")
+    job = exact_job(jobs, "rollout", label)
+    expected_job = {
+        "id": 117355071855,
+        "node_id": "CR_kwDOLOPcRs8AAAAbUuhJbw",
+        "run_id": profile["run_id"],
+        "run_attempt": 1,
+        "head_sha": profile["control"],
+        "head_branch": "master",
+        "name": "rollout",
+        "status": "completed",
+        "conclusion": "failure",
+        "created_at": "2026-10-17T08:42:39Z",
+        "started_at": "2026-10-17T10:21:17Z",
+        "completed_at": "2026-10-17T10:35:57Z",
+        "runner_id": 1000033152,
+        "runner_name": "GitHub Actions 1000033152",
+    }
+    if any(job.get(key) != value for key, value in expected_job.items()):
+        fail(f"{label} rollout job identity or terminal state differs")
+    observed_steps = tuple(
+        (
+            step.get("number"), step.get("name"), step.get("conclusion"),
+            step.get("started_at"), step.get("completed_at"),
+        )
+        for step in job["steps"]
+    )
+    if (
+        observed_steps != profile["steps"]
+        or any(step.get("status") != "completed" for step in job["steps"])
+    ):
+        fail(f"{label} exact ordered step outcomes differ")
+    created = parse_timestamp(expected_run["created_at"], label)
+    started = parse_timestamp(expected_job["started_at"], label)
+    completed = parse_timestamp(expected_job["completed_at"], label)
+    updated = parse_timestamp(expected_run["updated_at"], label)
+    previous = started
+    if not created <= parse_timestamp(expected_job["created_at"], label) <= started <= completed <= updated:
+        fail(f"{label} job chronology differs")
+    for step in job["steps"]:
+        began = parse_timestamp(step["started_at"], label)
+        ended = parse_timestamp(step["completed_at"], label)
+        if not previous <= began <= ended <= completed:
+            fail(f"{label} ordered step chronology differs")
+        previous = ended
+    if observation.get("pending") != []:
+        fail(f"{label} retains a pending environment gate")
+    approvals = observation.get("approvals")
+    expected_approval = {
+        "state": "approved",
+        "comment": (
+            "Copilot CLI exact-run approval: "
+            "oci-live-data-continue-held-handoff"
+        ),
+        "submitted_at": None,
+        "user": {
+            "id": 75614529,
+            "node_id": "MDQ6VXNlcjc1NjE0NTI5",
+            "login": "vasilyevstan",
+            "type": "User",
+        },
+        "environments": [{
+            "id": 19134286823,
+            "node_id": "EN_kwDOLOPcRs8AAAAEdH4L5w",
+            "name": "oci-migration",
+        }],
+    }
+    if not isinstance(approvals, list) or len(approvals) != 1:
+        fail(f"{label} exact approval receipt is incomplete or extended")
+    review = approvals[0]
+    projected_review = {
+        key: review.get(key) for key in ("state", "comment", "submitted_at")
+    } | {
+        "user": {
+            key: (review.get("user") or {}).get(key)
+            for key in ("id", "node_id", "login", "type")
+        },
+        "environments": [
+            {
+                key: environment.get(key)
+                for key in ("id", "node_id", "name")
+            }
+            for environment in review.get("environments", [])
+            if isinstance(environment, dict)
+        ] if isinstance(review.get("environments"), list) else None,
+    }
+    if projected_review != expected_approval:
+        fail(f"{label} exact approval receipt differs")
+    commit = observation.get("commit")
+    if (
+        not isinstance(commit, dict) or commit.get("sha") != profile["control"]
+        or not isinstance(commit.get("tree"), dict)
+        or commit["tree"].get("sha") != profile["tree"]
+    ):
+        fail(f"{label} historical control or corrected tree differs")
+    blobs = _failed_held_tree_blobs(observation.get("tree"), profile["tree"], label)
+    if any(blobs.get(path) != blob for path, blob in profile["closure"].items()):
+        fail(f"{label} authenticated semantic source closure differs")
+    for path, blob in profile["closure"].items():
+        local = _failed_held_git(
+            label, "rev-parse", f"{profile['control']}:{path}",
+        ).decode().strip()
+        if local != blob:
+            fail(f"{label} local historical semantic source closure differs")
+    workflow_source = held_source_bytes(
+        repository, profile["control"],
+        ".github/workflows/oci-live-data-rollout.yml", label,
+    )
+    actions = tuple(sorted(set(re.findall(
+        r"(?m)^[ \t]+uses: ([^\s#]+)", workflow_source,
+    ))))
+    if actions != tuple(sorted(profile["actions"])):
+        fail(f"{label} historical immutable action pins differ")
+    policy_source = held_source_bytes(
+        repository, profile["control"],
+        "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
+        label,
+    )
+    try:
+        policy_result = subprocess.run(
+            ["bash", "-s", "--", "get", "oci-live-data-continue-held-handoff"],
+            input=policy_source, capture_output=True, text=True,
+            check=False, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        fail(f"{label} historical operation policy is unavailable")
+    try:
+        policy = json.loads(policy_result.stdout)
+    except (ValueError, UnicodeError):
+        fail(f"{label} historical operation policy is malformed")
+    policy_digest = hashlib.sha256(json.dumps(
+        policy, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    if (
+        policy_result.returncode
+        or policy_digest != profile["policy_sha256"]
+        or tuple(policy.get("inputNames", ())) != profile["input_names"]
+        or policy.get("operation") != "oci-live-data-continue-held-handoff"
+        or policy.get("environment") != "oci-migration"
+        or policy.get("event") != "workflow_dispatch"
+        or policy.get("approvalWorkflowState") != "disabled_manually"
+        or policy.get("subjectInput") != "approved_sha"
+        or policy.get("subjectRelation") != "current"
+        or policy.get("targetInput") is not None
+        or policy.get("targetRelation") != "none"
+    ):
+        fail(f"{label} historical operation policy differs")
+    log_files = zip_files(
+        observation.get("attemptLog"), label, require_original_names=True,
+    )
+    log_members = {
+        path: hashlib.sha256(raw).hexdigest()
+        for path, raw in log_files.items()
+    }
+    if log_members != profile["log_members"]:
+        fail(f"{label} bounded first-attempt log inventory differs")
+    historical = failed_deploy_native_inputs(
+        repository, str(profile["run_id"]), profile["control"], label,
+        resume_dispatch=True, native_jobs=jobs, native_log_files=log_files,
+    )
+    authority = provenance_read_authority()
+    fresh = live_data_native_inputs(dispatch_inputs, profile["input_names"])
+    historical_ordered = {
+        name: historical[name] for name in profile["input_names"]
+    }
+    fresh_ordered = {
+        name: fresh[name] for name in profile["input_names"]
+    }
+    if (
+        historical_ordered["approved_sha"] != profile["control"]
+        or fresh_ordered["approved_sha"] != subject_sha
+        or {
+            name for name in profile["input_names"]
+            if historical_ordered[name] != fresh_ordered[name]
+        } != {"approved_sha"}
+        or fresh_ordered["held_handoff_run_id"] != str(profile["held_run_id"])
+        or fresh_ordered["held_handoff_source_sha"] != profile["held_source"]
+        or historical_ordered["phase"] != "apply-slip-index"
+        or fresh_ordered["phase"] != "apply-slip-index"
+    ):
+        fail(f"{label} historical and fresh continuation requests do not share one lineage")
+    normalized = []
+    for control, inputs in (
+        (profile["control"], historical_ordered),
+        (subject_sha, fresh_ordered),
+    ):
+        request = {
+            "schemaVersion": authority.REQUEST_SCHEMA,
+            "repository": repository,
+            "operation": "oci-live-data-continue-held-handoff",
+            "controlSha": control, "subjectSha": control,
+            "targetSha": None, "inputs": inputs,
+        }
+        try:
+            value = authority.validate_request_data(
+                request, policy, repository, control,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            fail(f"{label} shared policy/input/hash validation is incompatible")
+        if (
+            value.get("dispatchInputs") != inputs
+            or value.get("inputHash") != authority.canonical_input_hash(inputs)
+        ):
+            fail(f"{label} shared policy/input/hash validation differs")
+        normalized.append(value)
+    if normalized[0]["inputHash"] != profile["input_sha256"]:
+        fail(f"{label} historical canonical transport input hash differs")
+    lineage = [
+        [name, "{subject_sha}" if name == "approved_sha" else historical_ordered[name]]
+        for name in profile["input_names"]
+    ]
+    lineage_digest = hashlib.sha256(json.dumps(
+        lineage, ensure_ascii=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    if lineage_digest != profile["lineage_sha256"]:
+        fail(f"{label} canonical continuation lineage digest differs")
+    lock_step = job["steps"][23]
+    cleanup_step = job["steps"][36]
+    try:
+        job_log = log_files["0_rollout.txt"].decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{label} rollout log is not UTF-8")
+    lock_source, lock_outside = _failed_held_step_lines(
+        job_log, lock_step, label, "##[group]Run set -euo pipefail",
+    )
+    cleanup_source, cleanup_outside = _failed_held_step_lines(
+        job_log, cleanup_step, label,
+        "##[group]Run ./infra/oci/scripts/configure-k3s-access.sh cleanup",
+    )
+    if (
+        hashlib.sha256("\n".join(lock_source).encode()).hexdigest()
+            != profile["lock_source_sha256"]
+        or hashlib.sha256("\n".join(lock_outside).encode()).hexdigest()
+            != profile["lock_outside_sha256"]
+        or hashlib.sha256("\n".join(cleanup_outside).encode()).hexdigest()
+            != profile["cleanup_outside_sha256"]
+    ):
+        fail(f"{label} normalized failure or cleanup log differs")
+    protected = [
+        index for index, line in enumerate(lock_source)
+        if line.strip() == profile["protected_read"]
+    ]
+    workflow_read = [
+        index for index, line in enumerate(lock_source)
+        if "repos/$REPO/actions/workflows/oci-live-data-rollout.yml" in line
+    ]
+    nested_reader = [
+        index for index, line in enumerate(lock_source)
+        if line.strip().startswith(
+            "./infra/oci/scripts/upstream_run_binding_stan.py validate-all"
+        )
+    ]
+    transfer = [
+        index for index, line in enumerate(lock_source)
+        if line.strip() == "record_transfer release unconfirmed"
+    ]
+    if (
+        len(protected) != 1 or len(workflow_read) != 1
+        or len(nested_reader) != 1 or len(transfer) != 1
+        or not protected[0] < workflow_read[0] < nested_reader[0] < transfer[0]
+        or lock_outside.count(profile["denial"]) != 1
+        or "##[error]Process completed with exit code 1." not in lock_outside
+        or lock_outside.index("##[error]Process completed with exit code 1.")
+            != lock_outside.index(profile["denial"]) + 1
+        or cleanup_outside.count("k3s_access_cleanup=PASS") != 1
+        or cleanup_outside[-1] != "k3s_access_cleanup=PASS"
+        or any("unresolved" in line.lower() for line in cleanup_outside)
+    ):
+        fail(f"{label} protected REST denial or temporary access cleanup differs")
+    entire_outside, depth = [], 0
+    for line in job_log.splitlines():
+        match = re.fullmatch(r"\d{4}-\d\d-\d\dT\S+Z (.*)", line)
+        value = re.sub(r"\x1b\[[0-9;]*m", "", match[1] if match else line)
+        if value.startswith("##[group]"):
+            depth += 1
+        elif value == "##[endgroup]":
+            if depth < 1:
+                fail(f"{label} complete native log grouping is inconsistent")
+            depth -= 1
+        elif depth == 0:
+            entire_outside.append(value)
+    if depth:
+        fail(f"{label} complete native log grouping is incomplete")
+    forbidden = (
+        r"shared_mongo_lock=(?:acquire|acquire-released|release|renew) .*status=PASS",
+        r"retained_lock_transfer=",
+        r"live_data_maintenance=(?:enter|hold|restore) .*status=PASS",
+        r"record_transfer",
+        r"live_data_rollout=(?:apply|mutate|deploy|rehold)",
+    )
+    if any(
+        re.search(pattern, line)
+        for pattern in forbidden for line in entire_outside
+    ):
+        fail(f"{label} native log contains a persistent domain transition")
+    artifacts = artifacts_from_pages(observation.get("artifactPages"), label)
+    if len(artifacts) != 2:
+        fail(f"{label} exact artifact inventory differs")
+    artifact_proofs = {}
+    expected_artifacts = {item[0]: item for item in profile["artifacts"]}
+    for artifact in artifacts:
+        artifact_id = artifact.get("id")
+        if artifact_id not in expected_artifacts:
+            fail(f"{label} contains an unexpected artifact")
+        (
+            _, node_id, name, size, digest, created_at, updated_at, expires_at,
+        ) = expected_artifacts[artifact_id]
+        owner = artifact.get("workflow_run")
+        if (
+            artifact.get("node_id") != node_id
+            or artifact.get("name") != name
+            or artifact.get("size_in_bytes") != size
+            or artifact.get("digest") != f"sha256:{digest}"
+            or artifact.get("expired") is not False
+            or artifact.get("created_at") != created_at
+            or artifact.get("updated_at") != updated_at
+            or artifact.get("expires_at") != expires_at
+            or parse_timestamp(expires_at, label).timestamp() <= time.time()
+            or not isinstance(owner, dict)
+            or owner.get("id") != profile["run_id"]
+            or owner.get("repository_id") != profile["repository_id"]
+            or owner.get("head_repository_id") != profile["repository_id"]
+            or owner.get("head_branch") != "master"
+            or owner.get("head_sha") != profile["control"]
+        ):
+            fail(f"{label} artifact metadata is unowned, expired, or substituted")
+        raw = observation.get("archives", {}).get(str(artifact_id))
+        if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != digest:
+            fail(f"{label} exact artifact archive digest differs")
+        files = zip_files(raw, label, require_original_names=True)
+        artifact_proofs[name] = _failed_held_artifact_proof(
+            files,
+            profile["baseline_members"] if name.startswith(
+                "oci-live-data-baselines-"
+            ) else profile["rollout_members"],
+            historical_ordered, held, profile, semantic, label,
+            baseline=name.startswith("oci-live-data-baselines-"),
+        )
+    return {
+        "profile": profile["name"],
+        "currentReader": current_reader,
+        "run": latest,
+        "workflow": {
+            key: workflow.get(key)
+            for key in ("id", "node_id", "name", "path", "state")
+        },
+        "job": {
+            **expected_job,
+            "steps": list(profile["steps"]),
+        },
+        "approval": projected_review,
+        "tree": profile["tree"],
+        "closure": profile["closure"],
+        "actions": list(profile["actions"]),
+        "policySha256": policy_digest,
+        "historicalInputHash": normalized[0]["inputHash"],
+        "freshInputHash": normalized[1]["inputHash"],
+        "lineageSha256": lineage_digest,
+        "logMembers": log_members,
+        "artifactProofs": artifact_proofs,
+    }
+
+
+def validate_failed_held_continuation_history(
+    repository, row, held, subject_sha, dispatch_inputs, cutoff, active_inventory,
+    semantic,
+):
+    profile = _failed_held_continuation_profile()
+    if row.get("id") != profile["run_id"]:
+        fail(f"{profile['name']} cannot classify another run")
+    validate_descendant_scope(profile["control"], subject_sha)
+    proofs = []
+    for _ in range(2):
+        current_reader = _failed_held_current_reader(
+            repository, subject_sha, profile,
+        )
+        observation = _collect_failed_held_continuation_observation(
+            repository, profile,
+        )
+        proofs.append(_validate_failed_held_continuation_observation(
+            repository, row, held, subject_sha, dispatch_inputs, cutoff,
+            active_inventory, profile, current_reader, observation, semantic,
+        ))
+    canonical = [
+        json.dumps(
+            proof, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        )
+        for proof in proofs
+    ]
+    if canonical[0] != canonical[1]:
+        fail(f"{profile['name']} native proof changed between complete collections")
+
+
 def held_handoff_history(
-    repository, held, subject_sha, successor_run_id="", *,
+    repository, held, subject_sha, successor_run_id="", *, dispatch_inputs=None,
     expired_receiver_run_id="", runtime_mode=None, fresh=False,
+    failed_continuation_semantic=None,
 ):
     native = NATIVE_CONTEXT.get()
     with HistoryProofCollection(
@@ -4367,14 +5610,17 @@ def held_handoff_history(
     ) as proofs:
         return _held_handoff_history(
             repository, held, subject_sha, successor_run_id,
+            dispatch_inputs=dispatch_inputs,
             expired_receiver_run_id=expired_receiver_run_id,
             runtime_mode=runtime_mode, fresh=fresh, proofs=proofs,
+            failed_continuation_semantic=failed_continuation_semantic,
         )
 
 
 def _held_handoff_history(
     repository, held, subject_sha, successor_run_id="", *,
-    expired_receiver_run_id="", runtime_mode=None, fresh=False, proofs,
+    dispatch_inputs=None, expired_receiver_run_id="", runtime_mode=None,
+    fresh=False, proofs, failed_continuation_semantic=None,
 ):
     authority = None
     expired_receiver = None
@@ -4448,7 +5694,9 @@ def _held_handoff_history(
             observation = collect_provenance_read_observation(repository, str(row["id"]))
             native = authority.validate_provenance_read_observation(identity, observation)
             for run in (observation["run"], observation["attempts"][0]["run"]):
-                if cutoff is not None and not active_inventory and parse_timestamp(run.get("updated_at"), label) > cutoff:
+                if cutoff is not None and parse_timestamp(
+                    run.get("updated_at"), label,
+                ) >= cutoff:
                     fail(f"{label} terminalized after the immutable successor cutoff")
             latest = observation["run"]
             for key in (
@@ -4609,7 +5857,14 @@ def _held_handoff_history(
                     and row.get("status") == "completed" and row.get("conclusion") == "failure"
                 ):
                     proofs.join()
-                    validate_provenance_read_failure(row)
+                    if row["id"] == FAILED_HELD_CONTINUATION_RUN_ID:
+                        validate_failed_held_continuation_history(
+                            repository, row, held, subject_sha, dispatch_inputs,
+                            cutoff, active_inventory,
+                            failed_continuation_semantic,
+                        )
+                    else:
+                        validate_provenance_read_failure(row)
                 else:
                     validate_cancelled_unstarted(row)
                 continue
@@ -5083,7 +6338,35 @@ def validate_held_handoff_artifact(
             )
         except (OSError, KeyError, TypeError, ValueError):
             fail("complete held handoff owned authority is missing, malformed or inconsistent")
-    history = held_handoff_history(repository, held, subject_sha, successor_run_id)
+    baseline_files = root["_baseline_files"]
+    _, baseline_provenance_raw = unique_artifact_file(
+        baseline_files, "baseline-provenance.env", label,
+    )
+    baseline_provenance = parse_env(
+        baseline_provenance_raw, label, BASELINE_PROVENANCE_KEYS,
+    )
+    failed_continuation_semantic = {
+        "rootRunId": root["applied_data_run_id"],
+        "rootSourceSha": root["applied_source_sha"],
+        "baselineFiles": copy.deepcopy(baseline_files),
+        "imageBytes": image_bytes,
+        "checkpoint": {
+            key: checkpoint[key] for key in (
+                "sourceSha", "contentChecksumSha256", "disposition",
+            )
+        },
+        "heldEvidenceSha256": manifest_sha,
+        "lockHolder": f"live-data-{run_id}-1",
+        "lockFencingGeneration": str(held.get("_handoff_generation", "")),
+        "lockLeaseUntilEpoch": str(held.get("_handoff_deadline", "")),
+        "lockLeaseSeconds": str(held.get("_handoff_lease_seconds", "")),
+        "lockNamespace": baseline_provenance["namespace"],
+    }
+    history = held_handoff_history(
+        repository, held, subject_sha, successor_run_id,
+        dispatch_inputs=dispatch_inputs,
+        failed_continuation_semantic=failed_continuation_semantic,
+    )
     # The expired receiver qualifies the ancestor, not the current physical transfer.
     root.pop("no_takeover_handoff_qualification", None)
     return {
