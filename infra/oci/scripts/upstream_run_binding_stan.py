@@ -122,6 +122,8 @@ FAILED_HELD_CONTINUATION_HELD_SOURCE = (
 )
 FAILED_HELD_CONTINUATION_CONTROL = "ab32b31e363254abb5ab4b1d48408a1609fe63a9"
 FAILED_HELD_CONTINUATION_TREE = "74a38702e349d111b9a48356203cc32e210fbdcd"
+FAILED_HELD_CONTINUATION_CREATED_AT = "2026-10-17T08:42:38Z"
+FAILED_HELD_CONTINUATION_UPDATED_AT = "2026-10-17T10:35:57Z"
 FAILED_HELD_CONTINUATION_WORKFLOW_ID = 339733789
 FAILED_HELD_CONTINUATION_REPOSITORY_ID = 753130566
 FAILED_HELD_CONTINUATION_REPOSITORY_NODE_ID = "R_kgDOLOPcRg"
@@ -374,6 +376,8 @@ FAILED_CLEAN_READER_CONTINUATION_CONTROL = (
 FAILED_CLEAN_READER_CONTINUATION_TREE = (
     "d7b4d3959f105ff65f85af099107a733478b4d1a"
 )
+FAILED_CLEAN_READER_CONTINUATION_CREATED_AT = "2026-10-18T09:19:04Z"
+FAILED_CLEAN_READER_CONTINUATION_UPDATED_AT = "2026-10-18T10:52:21Z"
 FAILED_CLEAN_READER_CONTINUATION_CURRENT_VERIFIER_BLOB = (
     "b258c4f35ba34492cb26b080d41928cdc1e74cf1"
 )
@@ -5353,9 +5357,9 @@ def _validate_failed_held_continuation_observation(
         "head_sha": profile["control"],
         "status": "completed",
         "conclusion": "failure",
-        "created_at": "2026-10-17T08:42:38Z",
-        "run_started_at": "2026-10-17T08:42:38Z",
-        "updated_at": "2026-10-17T10:35:57Z",
+        "created_at": FAILED_HELD_CONTINUATION_CREATED_AT,
+        "run_started_at": FAILED_HELD_CONTINUATION_CREATED_AT,
+        "updated_at": FAILED_HELD_CONTINUATION_UPDATED_AT,
         "html_url": (
             f"https://github.com/{repository}/actions/runs/{profile['run_id']}"
         ),
@@ -5866,9 +5870,9 @@ def _failed_clean_reader_continuation_profile():
             "head_sha": FAILED_CLEAN_READER_CONTINUATION_CONTROL,
             "status": "completed",
             "conclusion": "failure",
-            "created_at": "2026-10-18T09:19:04Z",
-            "run_started_at": "2026-10-18T09:19:04Z",
-            "updated_at": "2026-10-18T10:52:21Z",
+            "created_at": FAILED_CLEAN_READER_CONTINUATION_CREATED_AT,
+            "run_started_at": FAILED_CLEAN_READER_CONTINUATION_CREATED_AT,
+            "updated_at": FAILED_CLEAN_READER_CONTINUATION_UPDATED_AT,
             "html_url": (
                 "https://github.com/vasilyevstan/betstan/actions/runs/"
                 + str(FAILED_CLEAN_READER_CONTINUATION_RUN_ID)
@@ -6756,6 +6760,31 @@ def _held_handoff_history(
                 fail("held-handoff successor cutoff chronology is invalid")
         elif first.get("status") not in {"queued", "waiting", "requested", "pending"}:
             fail("held-handoff successor state is invalid")
+    required_frozen_ids = set()
+    for run_id, owner_id, owner_source, updated_at in (
+        (
+            FAILED_HELD_CONTINUATION_RUN_ID,
+            FAILED_HELD_CONTINUATION_HELD_RUN_ID,
+            FAILED_HELD_CONTINUATION_HELD_SOURCE,
+            FAILED_HELD_CONTINUATION_UPDATED_AT,
+        ),
+        (
+            FAILED_CLEAN_READER_CONTINUATION_RUN_ID,
+            FAILED_CLEAN_READER_CONTINUATION_HELD_RUN_ID,
+            FAILED_CLEAN_READER_CONTINUATION_HELD_SOURCE,
+            FAILED_CLEAN_READER_CONTINUATION_UPDATED_AT,
+        ),
+    ):
+        frozen_updated = parse_timestamp(
+            updated_at, "frozen failed-continuation history",
+        )
+        if (
+            repository == "vasilyevstan/betstan"
+            and held.get("id") == owner_id
+            and held.get("head_sha") == owner_source
+            and (cutoff is None or frozen_updated < cutoff)
+        ):
+            required_frozen_ids.add(run_id)
     history_requests = []
     for workflow in workflows:
         endpoint = f"repos/{repository}/actions/workflows/{workflow}/runs?per_page=100"
@@ -6817,6 +6846,25 @@ def _held_handoff_history(
                 ):
                     fail("expired-handoff historical receiver identity changed")
                 continue
+            if row["id"] in {
+                FAILED_HELD_CONTINUATION_RUN_ID,
+                FAILED_CLEAN_READER_CONTINUATION_RUN_ID,
+            }:
+                proofs.join()
+                if workflow != "oci-live-data-rollout.yml":
+                    fail("frozen failed-continuation run belongs to another workflow")
+                if row["id"] == FAILED_HELD_CONTINUATION_RUN_ID:
+                    validate_failed_held_continuation_history(
+                        repository, row, held, subject_sha, dispatch_inputs,
+                        cutoff, active_inventory,
+                        failed_continuation_semantic,
+                    )
+                else:
+                    validate_failed_clean_reader_continuation_history(
+                        repository, row, held, subject_sha,
+                        dispatch_inputs, cutoff, active_inventory,
+                    )
+                continue
             if row.get("head_branch") != "master":
                 proofs.join()
                 continue
@@ -6826,22 +6874,7 @@ def _held_handoff_history(
                     and row.get("status") == "completed" and row.get("conclusion") == "failure"
                 ):
                     proofs.join()
-                    if row["id"] == FAILED_HELD_CONTINUATION_RUN_ID:
-                        validate_failed_held_continuation_history(
-                            repository, row, held, subject_sha, dispatch_inputs,
-                            cutoff, active_inventory,
-                            failed_continuation_semantic,
-                        )
-                    elif (
-                        row["id"]
-                        == FAILED_CLEAN_READER_CONTINUATION_RUN_ID
-                    ):
-                        validate_failed_clean_reader_continuation_history(
-                            repository, row, held, subject_sha,
-                            dispatch_inputs, cutoff, active_inventory,
-                        )
-                    else:
-                        validate_provenance_read_failure(row)
+                    validate_provenance_read_failure(row)
                 else:
                     validate_cancelled_unstarted(row)
                 continue
@@ -6878,7 +6911,7 @@ def _held_handoff_history(
                 )
         proofs.join()
         if workflow == "oci-live-data-rollout.yml":
-            required_ids = {held["id"]}
+            required_ids = {held["id"], *required_frozen_ids}
             if successor_run_id:
                 required_ids.add(int(successor_run_id))
             if not required_ids <= ids:

@@ -6273,14 +6273,20 @@ route_row = dict(
     row,
     head_repository={"full_name": profile["repository"]},
 )
-route_page = {
-    "total_count": 2,
-    "workflow_runs": [route_held, route_row],
+clean_profile = m._failed_clean_reader_continuation_profile()
+clean_route_row = {
+    key: copy.deepcopy(value)
+    for key, value in clean_profile["run"].items()
+    if key not in {"node_id", "repository"}
 }
 def route(fixed_effect=None, selected_row=route_row):
     page = {
-        "total_count": 2,
-        "workflow_runs": [copy.deepcopy(route_held), copy.deepcopy(selected_row)],
+        "total_count": 3,
+        "workflow_runs": [
+            copy.deepcopy(route_held),
+            copy.deepcopy(selected_row),
+            copy.deepcopy(clean_route_row),
+        ],
     }
     def source_process(command, **kwargs):
         if command[:2] == ["git", "show"]:
@@ -6294,16 +6300,20 @@ def route(fixed_effect=None, selected_row=route_row):
          patch.object(
              m, "validate_failed_held_continuation_history",
              side_effect=fixed_effect,
-         ) as fixed:
+         ) as fixed, \
+         patch.object(
+             m, "validate_failed_clean_reader_continuation_history",
+         ) as clean:
         result = m.held_handoff_history(
             profile["repository"], route_held, subject,
             dispatch_inputs=fresh_inputs,
             failed_continuation_semantic=semantic,
         )
+        assert clean.call_count == 1
         return result, fixed
 
 route_result, fixed = route()
-assert route_result["workflow_counts"] == {"oci-live-data-rollout.yml": 2}
+assert route_result["workflow_counts"] == {"oci-live-data-rollout.yml": 3}
 assert fixed.call_count == 1
 assert fixed.call_args.args[4] == fresh_inputs
 try:
@@ -6391,6 +6401,76 @@ class FixtureAuthority:
 authority = FixtureAuthority()
 subject = "f" * 40
 profile = copy.deepcopy(m._failed_clean_reader_continuation_profile())
+# Canonical full-profile digest sealed from the two reviewed native observations.
+reviewed_observations_profile_sha256 = (
+    "dc0078fd9f004f675c9bcca57672705d316b18428a198bbd373f3b4633710d85"
+)
+
+def assert_golden_profile(candidate):
+    digest = hashlib.sha256(json.dumps(
+        candidate, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    if digest != reviewed_observations_profile_sha256:
+        raise AssertionError("independent clean-reader profile oracle differs")
+
+assert_golden_profile(profile)
+
+def change_step_timestamp(candidate):
+    steps = list(candidate["steps"])
+    step = list(steps[3])
+    step[3] = "2026-10-18T10:49:41Z"
+    steps[3] = tuple(step)
+    candidate["steps"] = tuple(steps)
+
+def change_action_pin(candidate):
+    actions = list(candidate["actions"])
+    actions[0] = (
+        "sanitized/action@0000000000000000000000000000000000000000"
+    )
+    candidate["actions"] = tuple(actions)
+
+golden_mutations = (
+    ("step-timestamp", change_step_timestamp),
+    (
+        "approval",
+        lambda candidate: candidate["approval"].__setitem__(
+            "comment", "sanitized approval drift",
+        ),
+    ),
+    (
+        "closure",
+        lambda candidate: candidate["closure"].__setitem__(
+            sorted(candidate["closure"])[0], "0" * 40,
+        ),
+    ),
+    ("action-pin", change_action_pin),
+    (
+        "log-hash",
+        lambda candidate: candidate["log_members"].__setitem__(
+            sorted(candidate["log_members"])[0], "0" * 64,
+        ),
+    ),
+    (
+        "upload-hash",
+        lambda candidate: candidate["upload_diagnostics"][
+            sorted(candidate["upload_diagnostics"])[0]
+        ].__setitem__("lines", "0" * 64),
+    ),
+)
+for name, mutation in golden_mutations:
+    changed_profile = copy.deepcopy(profile)
+    mutation(changed_profile)
+    try:
+        assert_golden_profile(changed_profile)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"independent oracle accepted {name} drift")
+print(
+    "clean_reader_independent_golden=PASS "
+    f"cases={len(golden_mutations) + 1}"
+)
+
 historical_inputs = {
     "approved_sha": profile["control"],
     "resume_source_sha": "391604c0fb35daa30ac72b92724d147d57d41371",
@@ -6904,14 +6984,29 @@ def route_process(command, **kwargs):
         command, 0, "oci-live-data-rollout.yml\n", "",
     )
 
-def route(rows, new_effect=None, generic_effect=None):
+def route(
+    rows, old_effect=None, new_effect=None, generic_effect=None,
+    qualified_generic=False,
+):
     page = [{
         "total_count": len(rows) + 1,
         "workflow_runs": [copy.deepcopy(held), *copy.deepcopy(rows)],
     }]
+    expired_receiver = {
+        "id": 777,
+        "head_sha": held["head_sha"],
+        "created_at": "2026-10-14T22:07:30Z",
+    }
+    expired_qualification = (
+        {"data_run_id": str(held["id"])},
+        expired_receiver,
+    )
     with patch.object(m.subprocess, "run", side_effect=route_process), \
          patch.object(m, "native_api_batch", return_value=[page]), \
-         patch.object(m, "validate_failed_held_continuation_history") as old, \
+         patch.object(
+             m, "validate_failed_held_continuation_history",
+             side_effect=old_effect,
+         ) as old, \
          patch.object(
              m, "validate_failed_clean_reader_continuation_history",
              side_effect=new_effect,
@@ -6919,10 +7014,18 @@ def route(rows, new_effect=None, generic_effect=None):
          patch.object(
              m, "collect_provenance_read_observation",
              side_effect=generic_effect,
-         ) as generic:
+         ) as generic, \
+         patch.object(m, "provenance_read_authority", return_value=object()), \
+         patch.object(
+             m, "expired_handoff_native_inputs",
+             return_value=expired_qualification,
+         ):
         result = m.held_handoff_history(
             profile["repository"], held, subject,
             dispatch_inputs=fresh_inputs,
+            expired_receiver_run_id=(
+                str(expired_receiver["id"]) if qualified_generic else ""
+            ),
             failed_continuation_semantic={"sanitized": True},
         )
         return result, old, new, generic
@@ -6932,9 +7035,12 @@ assert result["workflow_counts"] == {"oci-live-data-rollout.yml": 3}
 assert old.call_count == 1 and new.call_count == 1
 assert generic.call_count == 0
 
+rejected(lambda: route([route_row]))
+rejected(lambda: route([old_row]))
+
 try:
     route(
-        [route_row],
+        [old_row, route_row],
         new_effect=RuntimeError("sanitized exact-profile rejection"),
     )
 except RuntimeError as error:
@@ -6942,20 +7048,74 @@ except RuntimeError as error:
 else:
     raise AssertionError("new exact-profile rejection fell through")
 
+def exact_route_rejects(name, rows, *, old=False):
+    message = f"sanitized {name} exact-profile rejection"
+    arguments = {
+        "old_effect" if old else "new_effect": RuntimeError(message),
+        "generic_effect": AssertionError(
+            f"sanitized {name} fell through to generic",
+        ),
+    }
+    try:
+        route(rows, **arguments)
+    except RuntimeError as error:
+        assert str(error) == message
+    else:
+        raise AssertionError(f"{name} exact profile was bypassed")
+
+old_non_master = dict(old_row, head_branch="sanitized-non-master")
+new_non_master = dict(route_row, head_branch="sanitized-non-master")
+exact_route_rejects(
+    "old-non-master", [old_non_master, route_row], old=True,
+)
+exact_route_rejects(
+    "new-non-master", [old_row, new_non_master],
+)
+
+def before_held_interval(row):
+    return dict(
+        row,
+        created_at="2026-10-14T20:00:00Z",
+        run_started_at="2026-10-14T20:00:00Z",
+        updated_at="2026-10-14T20:00:01Z",
+    )
+
+exact_route_rejects(
+    "old-interval", [before_held_interval(old_row), route_row], old=True,
+)
+exact_route_rejects(
+    "new-interval", [old_row, before_held_interval(route_row)],
+)
+
+unrelated_non_master = dict(
+    route_row,
+    id=profile["run_id"] + 1,
+    head_branch="sanitized-non-master",
+)
+result, old, new, generic = route(
+    [old_row, route_row, unrelated_non_master],
+)
+assert result["workflow_counts"] == {"oci-live-data-rollout.yml": 4}
+assert old.call_count == 1 and new.call_count == 1
+assert generic.call_count == 0
+
 unrelated = dict(route_row, id=profile["run_id"] + 1)
 try:
     route(
-        [unrelated],
-        generic_effect=SystemExit("sanitized generic expired-receiver rejection"),
+        [old_row, route_row, unrelated],
+        generic_effect=RuntimeError(
+            "sanitized qualified generic expired-receiver route",
+        ),
+        qualified_generic=True,
     )
-except SystemExit:
-    pass
+except RuntimeError as error:
+    assert str(error) == "sanitized qualified generic expired-receiver route"
 else:
-    raise AssertionError("unrelated failed continuation bypassed generic route")
+    raise AssertionError("qualified generic expired receiver was bypassed")
 
 print(
     "PASS second frozen clean-reader profile, zero-artifact proof, drift matrix, "
-    "double observation and non-fallback routing"
+    "double observation and non-fallback routing; critic routing cases=9"
 )
 PY
 ok "second frozen failed-continuation clean-reader profile"
