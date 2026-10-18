@@ -588,18 +588,38 @@ remain in complete history and require their separate, double-observed native
 no-execution proof against a frozen reviewed workflow source. These caller and
 source-profile capabilities ship together; rollback retains them or fails closed.
 
-A separate frozen exact-run profile,
-`oci-failed-continue-held-handoff-no-domain-mutation-v1`, can authenticate one
-already-existing first-attempt failed continuation only as historical evidence
-and only through exact immutable identity, request, source, job, log, artifact,
-and cleanup proof. It is not a claim of zero external activity: temporary
-access was opened and successfully cleaned up. The profile grants no dispatch,
-receiver, lock, data, deployment, or mutation authority. Missing, expired, or
-drifting evidence closes the path; the historical failed run remains terminal
-and is never rerunnable. Forward recovery still requires a fresh first-attempt
-run from exact current `master`, with every physical-state, lease, fence,
-compare-and-swap, and timing check unchanged. The frozen
-expired-receiver route remains separate and unchanged.
+Two separate frozen, exact, read-only no-domain-mutation profiles authenticate
+distinct historical records. `oci-failed-continue-held-handoff-no-domain-mutation-v1`
+covers the prior pre-transfer protected-read failure; it proves that temporary
+access closed and treats artifact expiry as a hard stop rather than claiming
+zero external activity. `oci-failed-continue-held-handoff-clean-reader-v1`
+covers the later first-attempt preflight validation failure, before provider
+access or domain mutation.
+
+The later profile qualifies only when two independently collected complete
+observations agree exactly. It binds the exact failed-step boundary and every
+required skip outcome, an empty pending inventory, complete paginated
+zero-artifact count and list plus both always-run uploads' no-file diagnostics,
+and the source, inputs, lineage, and complete logs. The record must finish
+strictly before the successor cutoff, and the logs may contain no
+domain-mutation or deployment markers. Missing, incomplete, or drifting
+evidence fails closed.
+
+Dynamic authority imports are bytecode-safe inside the history validator and
+in the evidence verifier, so validation does not dirty a writable Linux
+checkout. The internal loader disables bytecode writing while modules are
+constructed and executed, then restores the prior interpreter setting; the
+short-lived verifier enables the same protection before its imports. Genuine
+tracked, untracked, `__pycache__`, `.pyc`, or `.pyo` dirt still rejects.
+
+Neither profile grants dispatch, approval, lock, mutation, deployment,
+activation, rollback, or generic failure authority. The historical failed runs
+remain terminal and are never rerunnable; unrelated failures keep the existing
+expired-receiver route. Forward recovery still requires a fresh first-attempt
+continuation from clean exact current `master`, with every physical-state,
+lease, fence, compare-and-swap, and timing check unchanged. After successful
+reliance, rollback must retain both exact profiles and bytecode-safe loading or
+use a reviewed forward correction.
 
 An ancestor's expired-receiver classification is historical provenance, not
 current held-transfer authority. The original applied root, authenticated baseline
