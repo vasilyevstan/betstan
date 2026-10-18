@@ -37,6 +37,257 @@ ok() {
   printf 'PASS %s\n' "$1"
 }
 
+env -u PYTHONDONTWRITEBYTECODE python3 - \
+  "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
+import concurrent.futures
+import contextlib
+import importlib.util
+import io
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+source_validator = Path(sys.argv[1]).resolve()
+source_authority = Path(sys.argv[2]).resolve()
+work = Path(sys.argv[3]).resolve()
+fixture = work / "authority-loader"
+validator = fixture / "infra/oci/scripts/upstream_run_binding_stan.py"
+authority = fixture / "infra/azure/agents/copilot_cli_authority_stan.py"
+validator.parent.mkdir(parents=True)
+authority.parent.mkdir(parents=True)
+shutil.copy2(source_validator, validator)
+shutil.copy2(source_authority, authority)
+
+assert not sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    spec = importlib.util.spec_from_file_location("authority_loader_fixture", validator)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+finally:
+    sys.dont_write_bytecode = False
+assert not sys.dont_write_bytecode
+
+real_spec = m.importlib.util.spec_from_file_location
+state = {"active": 0, "peak": 0}
+state_lock = threading.Lock()
+
+class SerialLoader:
+    def __init__(self, delegate):
+        self.delegate = delegate
+
+    def create_module(self, spec):
+        return self.delegate.create_module(spec)
+
+    def exec_module(self, module):
+        with state_lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        try:
+            assert sys.dont_write_bytecode
+            time.sleep(.02)
+            return self.delegate.exec_module(module)
+        finally:
+            with state_lock:
+                state["active"] -= 1
+
+def serial_spec(name, path):
+    result = real_spec(name, path)
+    result.loader = SerialLoader(result.loader)
+    return result
+
+with patch.object(m.importlib.util, "spec_from_file_location", side_effect=serial_spec):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        modules = list(pool.map(
+            lambda index: m._load_shared_authority(
+                f"authority_overlap_{index}", "synthetic unavailable",
+            ),
+            range(6),
+        ))
+assert state == {"active": 0, "peak": 1}
+assert len({id(module) for module in modules}) == 6
+assert all(module.__name__ not in sys.modules for module in modules)
+assert not sys.dont_write_bytecode
+
+sys.dont_write_bytecode = True
+try:
+    first = m._load_shared_authority(
+        "authority_initial_true", "synthetic unavailable",
+    )
+    second = m._load_shared_authority(
+        "authority_initial_true", "synthetic unavailable",
+    )
+    assert sys.dont_write_bytecode
+    assert first is not second
+finally:
+    sys.dont_write_bytecode = False
+
+reentrant = threading.local()
+reentrant.seen = []
+
+class ReentrantLoader:
+    def __init__(self, delegate):
+        self.delegate = delegate
+
+    def create_module(self, spec):
+        return self.delegate.create_module(spec)
+
+    def exec_module(self, module):
+        assert sys.dont_write_bytecode
+        reentrant.seen.append(module.__name__)
+        if module.__name__ == "authority_outer":
+            nested = m._load_shared_authority(
+                "authority_inner", "synthetic unavailable",
+            )
+            assert nested.__name__ == "authority_inner"
+            assert sys.dont_write_bytecode
+        return self.delegate.exec_module(module)
+
+def reentrant_spec(name, path):
+    result = real_spec(name, path)
+    result.loader = ReentrantLoader(result.loader)
+    return result
+
+with patch.object(
+    m.importlib.util, "spec_from_file_location", side_effect=reentrant_spec,
+):
+    outer = m._load_shared_authority(
+        "authority_outer", "synthetic unavailable",
+    )
+assert outer.__name__ == "authority_outer"
+assert reentrant.seen == ["authority_outer", "authority_inner"]
+assert not sys.dont_write_bytecode
+
+for initial in (False, True):
+    sys.dont_write_bytecode = initial
+    for failure in (
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SyntaxError("synthetic import failure")
+        ),
+    ):
+        with patch.object(
+            m.importlib.util, "spec_from_file_location", side_effect=failure,
+        ), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            try:
+                m._load_shared_authority(
+                    "authority_error", "caller-specific unavailable",
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("authority import failure passed")
+        assert "caller-specific unavailable" in stderr.getvalue()
+        assert sys.dont_write_bytecode is initial
+sys.dont_write_bytecode = False
+
+shared = m.provenance_read_authority()
+assert callable(shared.validate_provenance_read_observation)
+
+fake = SimpleNamespace(
+    validate_provenance_read_observation=lambda *args: None,
+    UNMATERIALIZED_WORKFLOWS={
+        ".github/workflows/oci-live-data-rollout.yml": {},
+    },
+    validate_unmaterialized_run_evidence=lambda *args: None,
+)
+calls = []
+def routed_loader(name, unavailable):
+    calls.append((name, unavailable))
+    return fake
+
+held = {
+    "id": 10,
+    "head_sha": "1" * 40,
+    "created_at": "2026-01-02T00:00:00Z",
+    "updated_at": "2026-01-02T00:00:01Z",
+    "workflow_id": 1,
+    "run_attempt": 1,
+    "event": "workflow_dispatch",
+    "head_branch": "master",
+    "status": "completed",
+    "conclusion": "success",
+    "display_title": "oci-live-data apply-slip-index " + "1" * 40,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "head_repository": {"full_name": "example/repo"},
+}
+cancelled = {
+    "id": 11,
+    "workflow_id": 1,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "head_sha": "2" * 40,
+    "head_branch": "master",
+    "event": "workflow_dispatch",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "cancelled",
+    "display_title": "oci-live-data apply-slip-index " + "2" * 40,
+    "created_at": "2026-01-03T00:00:00Z",
+    "run_started_at": "2026-01-03T00:00:00Z",
+    "updated_at": "2026-01-03T00:00:01Z",
+    "html_url": "https://example.invalid/cancelled",
+    "head_repository": {"full_name": "example/repo"},
+}
+unmaterialized = dict(
+    cancelled,
+    id=12,
+    status="queued",
+    conclusion=None,
+    created_at="2026-01-01T00:00:00Z",
+    run_started_at="2026-01-01T00:00:00Z",
+    updated_at="2026-01-01T00:00:01Z",
+    html_url="https://example.invalid/unmaterialized",
+)
+
+def process(command, **kwargs):
+    if command[:2] == ["git", "show"]:
+        return subprocess.CompletedProcess(command, 0, "sanitized policy\n", "")
+    assert command == ["bash", "-s", "--", "workflows"]
+    return subprocess.CompletedProcess(
+        command, 0, "oci-live-data-rollout.yml\n", "",
+    )
+
+def history_page(row):
+    return [[{
+        "total_count": 2,
+        "workflow_runs": [dict(held), dict(row)],
+    }]]
+
+with patch.object(m, "_load_shared_authority", side_effect=routed_loader), \
+     patch.object(m.subprocess, "run", side_effect=process), \
+     patch.object(m, "_validate_cancelled_unstarted_history"), \
+     patch.object(m, "_validate_unmaterialized_history"):
+    m.provenance_read_authority()
+    with patch.object(m, "native_api_batch", return_value=history_page(cancelled)):
+        m.held_handoff_history("example/repo", held, "f" * 40)
+    with patch.object(
+        m, "native_api_batch", return_value=history_page(unmaterialized),
+    ):
+        m.held_handoff_history("example/repo", held, "f" * 40)
+
+assert len(calls) == 3
+assert calls[0] == (
+    "provenance_read_authority",
+    "shared provenance-read source validator is unavailable",
+)
+assert calls[1][0] == calls[2][0] == "held_handoff_authority"
+assert "cancelled run 11" in calls[1][1]
+assert calls[2][1] == (
+    "held-handoff shared unmaterialized validator is unavailable"
+)
+assert not any(
+    path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+    for path in fixture.rglob("*")
+)
+assert not sys.dont_write_bytecode
+PY
+ok "shared authority loader serializes, reenters, restores flags and covers all import sites"
+
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import argparse, contextlib, importlib.util, io, json, sys, threading, time
 from pathlib import Path
@@ -1607,6 +1858,17 @@ with contextlib.ExitStack() as stack:
                     require_dirty_rejection()
                 finally:
                     untracked.unlink()
+                bytecode = (
+                    repository / "infra/azure/agents/__pycache__/"
+                    "copilot_cli_authority_stan.cpython-312.pyc"
+                )
+                try:
+                    bytecode.parent.mkdir()
+                    bytecode.write_bytes(b"deliberate bytecode dirt")
+                    require_dirty_rejection()
+                finally:
+                    bytecode.unlink()
+                    bytecode.parent.rmdir()
                 assert reader_result()[0] == "qualified"
             else:
                 assert mode == "pre-fix"
@@ -1661,6 +1923,193 @@ print(
 )
 PY
 ok "red/green held report temporary isolation and strict fixed-reader cleanliness"
+
+env -u PYTHONDONTWRITEBYTECODE python3 - \
+  "$ROOT_DIR" "$WORK" <<'PY'
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+source = Path(sys.argv[1]).resolve()
+work = Path(sys.argv[2]).resolve()
+repository = work / "verifier-clean-reader-order"
+paths = (
+    ".github/workflows/oci-live-data-rollout.yml",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
+    "infra/azure/agents/copilot_cli_authority_stan.py",
+    "infra/oci/scripts/upstream_run_binding_stan.py",
+    "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
+)
+for relative in paths:
+    destination = repository / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / relative, destination)
+subprocess.run(
+    ["git", "init", "--quiet", "--initial-branch=master"],
+    cwd=repository, check=True,
+)
+subprocess.run(
+    ["git", "config", "user.name", "Sanitized Fixture"],
+    cwd=repository, check=True,
+)
+subprocess.run(
+    ["git", "config", "user.email", "fixture@example.invalid"],
+    cwd=repository, check=True,
+)
+subprocess.run(["git", "add", *paths], cwd=repository, check=True)
+subprocess.run(
+    ["git", "commit", "--quiet", "-m", "Create verifier order fixture"],
+    cwd=repository, check=True,
+)
+subject = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"], cwd=repository, text=True,
+).strip()
+tree_sha = subprocess.check_output(
+    ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True,
+).strip()
+
+fake_bin = work / "verifier-clean-reader-bin"
+fake_bin.mkdir()
+fake_python = fake_bin / "python3"
+fake_python.write_text(
+    "#!" + sys.executable + "\n"
+    "import importlib.util, os, sys\n"
+    "source = sys.stdin.read()\n"
+    "assert sys.argv[1] == '-'\n"
+    "assert '-B' not in sys.argv\n"
+    "assert 'PYTHONDONTWRITEBYTECODE' not in os.environ\n"
+    "prefix = 'import sys\\nsys.dont_write_bytecode = True\\nfrom pathlib import Path\\n'\n"
+    "assert prefix in source\n"
+    "assert source.count('spec_from_file_location(\"upstream_binding\"') == 2\n"
+    "sys.dont_write_bytecode = True\n"
+    "path = sys.argv[16]\n"
+    "for _ in range(2):\n"
+    "    spec = importlib.util.spec_from_file_location('upstream_binding', path)\n"
+    "    module = importlib.util.module_from_spec(spec)\n"
+    "    spec.loader.exec_module(module)\n"
+    "assert sys.dont_write_bytecode\n",
+)
+fake_python.chmod(0o755)
+evidence = work / "verifier-clean-reader-evidence"
+evidence.mkdir()
+environment = {
+    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+    "EVIDENCE_DIR": str(evidence),
+    "EXPECTED_SOURCE_SHA": subject,
+    "EXPECTED_BUILD_RUN_ID": "1",
+    "EXPECTED_INFRASTRUCTURE_RUN_ID": "2",
+    "EXPECTED_PHASE": "dry-run",
+    "EXPECTED_RUN_ID": "3",
+    "EXPECTED_RUN_ATTEMPT": "1",
+}
+result = subprocess.run(
+    [str(repository / "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh")],
+    cwd=repository, env=environment, capture_output=True, text=True,
+    check=False, timeout=30,
+)
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert result.stdout.strip() == "live_betting_data_evidence=PASS phase=dry-run"
+assert not any(
+    path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+    for path in repository.rglob("*")
+)
+
+previous = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    validator = repository / "infra/oci/scripts/upstream_run_binding_stan.py"
+    spec = importlib.util.spec_from_file_location("strict_reader_after_verifier", validator)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+finally:
+    sys.dont_write_bytecode = previous
+profile = module._failed_held_continuation_profile()
+current_workflow = (
+    repository / ".github/workflows/oci-live-data-rollout.yml"
+).read_text()
+historical_workflow = "      " + profile["protected_read"] + "\n" + current_workflow
+tree_entries = []
+for line in subprocess.check_output(
+    ["git", "ls-tree", "-r", "HEAD"], cwd=repository, text=True,
+).splitlines():
+    metadata, path = line.split("\t", 1)
+    mode, kind, sha = metadata.split()
+    tree_entries.append({
+        "path": path, "mode": mode, "type": kind, "sha": sha,
+    })
+
+def api(path):
+    if path.endswith("/git/ref/heads/master"):
+        return {
+            "ref": "refs/heads/master",
+            "object": {"type": "commit", "sha": subject},
+        }
+    if path.endswith(f"/git/commits/{subject}"):
+        return {"sha": subject, "tree": {"sha": tree_sha}}
+    if path.endswith(f"/git/trees/{tree_sha}?recursive=1"):
+        return {"sha": tree_sha, "truncated": False, "tree": tree_entries}
+    raise AssertionError(path)
+
+def source_bytes(repo, control, path, label):
+    assert path == ".github/workflows/oci-live-data-rollout.yml"
+    return historical_workflow if control == profile["control"] else current_workflow
+
+with patch.object(module, "gh_api", side_effect=api), \
+     patch.object(module, "held_source_bytes", side_effect=source_bytes):
+    qualified = module._failed_held_current_reader(
+        profile["repository"], subject, profile,
+    )
+assert qualified["control"] == subject
+clean_profile = module._failed_clean_reader_continuation_profile()
+current_verifier = (
+    repository
+    / "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
+).read_text()
+historical_verifier = current_verifier.replace(
+    "import sys\nsys.dont_write_bytecode = True\n",
+    "import sys\n",
+    1,
+)
+assert historical_verifier != current_verifier
+
+def clean_source_bytes(repo, control, path, label):
+    assert path == "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
+    return historical_verifier if control == clean_profile["control"] else current_verifier
+
+with patch.object(module, "gh_api", side_effect=api), \
+     patch.object(module, "held_source_bytes", side_effect=clean_source_bytes):
+    clean_qualified = module._failed_clean_reader_current_reader(
+        clean_profile["repository"], subject, clean_profile,
+    )
+assert clean_qualified["control"] == subject
+assert subprocess.check_output(
+    ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+    cwd=repository, text=True,
+) == ""
+assert not any(
+    path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+    for path in repository.rglob("*")
+)
+PY
+ok "real verifier import order stays bytecode-clean before strict reader without external suppression"
+
+if grep -Eq 'PYTHONDONTWRITEBYTECODE|python(3)?[[:space:]].*-B' \
+  "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"; then
+  fail "live-data workflow introduced interpreter-level bytecode suppression"
+fi
+grep -Fq \
+  './infra/oci/scripts/upstream_run_binding_stan.py validate-all' \
+  "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" ||
+  fail "live-data workflow no longer invokes the upstream reader directly"
+grep -Fq \
+  './infra/oci/scripts/verify-live-betting-data-evidence-stan.sh' \
+  "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" ||
+  fail "live-data workflow no longer invokes the evidence verifier directly"
+ok "workflow keeps direct reader and verifier invocation without suppression"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
 import contextlib, dataclasses, hashlib, importlib.util, io, os, subprocess, sys
@@ -5824,14 +6273,20 @@ route_row = dict(
     row,
     head_repository={"full_name": profile["repository"]},
 )
-route_page = {
-    "total_count": 2,
-    "workflow_runs": [route_held, route_row],
+clean_profile = m._failed_clean_reader_continuation_profile()
+clean_route_row = {
+    key: copy.deepcopy(value)
+    for key, value in clean_profile["run"].items()
+    if key not in {"node_id", "repository"}
 }
 def route(fixed_effect=None, selected_row=route_row):
     page = {
-        "total_count": 2,
-        "workflow_runs": [copy.deepcopy(route_held), copy.deepcopy(selected_row)],
+        "total_count": 3,
+        "workflow_runs": [
+            copy.deepcopy(route_held),
+            copy.deepcopy(selected_row),
+            copy.deepcopy(clean_route_row),
+        ],
     }
     def source_process(command, **kwargs):
         if command[:2] == ["git", "show"]:
@@ -5845,16 +6300,20 @@ def route(fixed_effect=None, selected_row=route_row):
          patch.object(
              m, "validate_failed_held_continuation_history",
              side_effect=fixed_effect,
-         ) as fixed:
+         ) as fixed, \
+         patch.object(
+             m, "validate_failed_clean_reader_continuation_history",
+         ) as clean:
         result = m.held_handoff_history(
             profile["repository"], route_held, subject,
             dispatch_inputs=fresh_inputs,
             failed_continuation_semantic=semantic,
         )
+        assert clean.call_count == 1
         return result, fixed
 
 route_result, fixed = route()
-assert route_result["workflow_counts"] == {"oci-live-data-rollout.yml": 2}
+assert route_result["workflow_counts"] == {"oci-live-data-rollout.yml": 3}
 assert fixed.call_count == 1
 assert fixed.call_args.args[4] == fresh_inputs
 try:
@@ -5877,6 +6336,789 @@ print(
 )
 PY
 ok "frozen failed held-continuation history profile"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+import zipfile
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("clean_reader_profile_fixture", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+assert m.FAILED_HELD_CONTINUATION_RUN_ID == 39018383213
+assert m.FAILED_HELD_CONTINUATION_CONTROL == \
+    "ab32b31e363254abb5ab4b1d48408a1609fe63a9"
+assert m.FAILED_CLEAN_READER_CONTINUATION_PROFILE == \
+    "oci-failed-continue-held-handoff-clean-reader-v1"
+assert m.FAILED_CLEAN_READER_CONTINUATION_RUN_ID == 39114852871
+assert m.FAILED_CLEAN_READER_CONTINUATION_CONTROL == \
+    "610d2dddb59806cf27a892430fd326a8f60a37eb"
+assert m.FAILED_CLEAN_READER_CONTINUATION_TREE == \
+    "d7b4d3959f105ff65f85af099107a733478b4d1a"
+
+def archive(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for name, raw in sorted(files.items()):
+            info = zipfile.ZipInfo(name, (2026, 10, 18, 10, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100600 << 16
+            bundle.writestr(info, raw)
+    return output.getvalue()
+
+class FixtureAuthority:
+    REQUEST_SCHEMA = "sanitized-request-v1"
+
+    @staticmethod
+    def canonical_input_hash(inputs):
+        return hashlib.sha256(json.dumps(
+            inputs, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+
+    @classmethod
+    def validate_request_data(cls, request, policy, repository, control):
+        if (
+            request["repository"] != repository
+            or request["controlSha"] != control
+            or request["subjectSha"] != control
+            or request["operation"] != policy["operation"]
+            or set(request["inputs"]) != set(policy["inputNames"])
+        ):
+            raise ValueError("sanitized request mismatch")
+        return {
+            "dispatchInputs": request["inputs"],
+            "inputHash": cls.canonical_input_hash(request["inputs"]),
+        }
+
+authority = FixtureAuthority()
+subject = "f" * 40
+profile = copy.deepcopy(m._failed_clean_reader_continuation_profile())
+# Canonical full-profile digest sealed from the two reviewed native observations.
+reviewed_observations_profile_sha256 = (
+    "dc0078fd9f004f675c9bcca57672705d316b18428a198bbd373f3b4633710d85"
+)
+
+def assert_golden_profile(candidate):
+    digest = hashlib.sha256(json.dumps(
+        candidate, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    if digest != reviewed_observations_profile_sha256:
+        raise AssertionError("independent clean-reader profile oracle differs")
+
+assert_golden_profile(profile)
+
+def change_step_timestamp(candidate):
+    steps = list(candidate["steps"])
+    step = list(steps[3])
+    step[3] = "2026-10-18T10:49:41Z"
+    steps[3] = tuple(step)
+    candidate["steps"] = tuple(steps)
+
+def change_action_pin(candidate):
+    actions = list(candidate["actions"])
+    actions[0] = (
+        "sanitized/action@0000000000000000000000000000000000000000"
+    )
+    candidate["actions"] = tuple(actions)
+
+golden_mutations = (
+    ("step-timestamp", change_step_timestamp),
+    (
+        "approval",
+        lambda candidate: candidate["approval"].__setitem__(
+            "comment", "sanitized approval drift",
+        ),
+    ),
+    (
+        "closure",
+        lambda candidate: candidate["closure"].__setitem__(
+            sorted(candidate["closure"])[0], "0" * 40,
+        ),
+    ),
+    ("action-pin", change_action_pin),
+    (
+        "log-hash",
+        lambda candidate: candidate["log_members"].__setitem__(
+            sorted(candidate["log_members"])[0], "0" * 64,
+        ),
+    ),
+    (
+        "upload-hash",
+        lambda candidate: candidate["upload_diagnostics"][
+            sorted(candidate["upload_diagnostics"])[0]
+        ].__setitem__("lines", "0" * 64),
+    ),
+)
+for name, mutation in golden_mutations:
+    changed_profile = copy.deepcopy(profile)
+    mutation(changed_profile)
+    try:
+        assert_golden_profile(changed_profile)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"independent oracle accepted {name} drift")
+print(
+    "clean_reader_independent_golden=PASS "
+    f"cases={len(golden_mutations) + 1}"
+)
+
+historical_inputs = {
+    "approved_sha": profile["control"],
+    "resume_source_sha": "391604c0fb35daa30ac72b92724d147d57d41371",
+    "build_run_id": "37576331905",
+    "infrastructure_run_id": "37582984293",
+    "checkpoint_source_sha": "1bf86112ba2458161e6039091b1aa6289fdfce1d",
+    "disk_checkpoint_run_id": "37582984293",
+    "phase": "apply-slip-index",
+    "prerequisite_run_id": "38365002118",
+    "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none",
+    "failed_deploy_run_id": "38373163613",
+    "failed_activation_run_id": "0",
+    "failed_activation_user_id": "0",
+    "confirmation": m.HELD_HANDOFF_CONFIRMATION,
+    "held_handoff_run_id": str(profile["held_run_id"]),
+    "held_handoff_source_sha": profile["held_source"],
+}
+assert set(historical_inputs) == set(profile["input_names"])
+fresh_inputs = dict(historical_inputs, approved_sha=subject)
+policy = {
+    "inputNames": list(profile["input_names"]),
+    "operation": "oci-live-data-continue-held-handoff",
+    "environment": "oci-migration",
+    "event": "workflow_dispatch",
+    "approvalWorkflowState": "disabled_manually",
+    "subjectInput": "approved_sha",
+    "subjectRelation": "current",
+    "targetInput": None,
+    "targetRelation": "none",
+}
+policy_json = json.dumps(
+    policy, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+)
+profile["policy_sha256"] = hashlib.sha256(policy_json.encode()).hexdigest()
+profile["input_sha256"] = authority.canonical_input_hash(historical_inputs)
+profile["lineage_sha256"] = hashlib.sha256(json.dumps(
+    [
+        [
+            name,
+            "{subject_sha}" if name == "approved_sha"
+            else historical_inputs[name],
+        ]
+        for name in profile["input_names"]
+    ],
+    ensure_ascii=True, separators=(",", ":"),
+).encode()).hexdigest()
+
+environment_names = {
+    "approved_sha": "SOURCE_SHA",
+    "resume_source_sha": "RESUME_SOURCE_SHA",
+    "build_run_id": "BUILD_RUN_ID",
+    "infrastructure_run_id": "INFRASTRUCTURE_RUN_ID",
+    "checkpoint_source_sha": "CHECKPOINT_SOURCE_SHA",
+    "disk_checkpoint_run_id": "DISK_CHECKPOINT_RUN_ID",
+    "phase": "PHASE",
+    "prerequisite_run_id": "PREREQUISITE_RUN_ID",
+    "baseline_recovery_run_id": "BASELINE_RECOVERY_RUN_ID",
+    "baseline_recovery_source_sha": "BASELINE_RECOVERY_SOURCE_SHA",
+    "failed_deploy_run_id": "FAILED_DEPLOY_RUN_ID",
+    "failed_activation_run_id": "FAILED_ACTIVATION_RUN_ID",
+    "failed_activation_user_id": "FAILED_ACTIVATION_USER_ID",
+    "confirmation": "CONFIRMATION",
+    "held_handoff_run_id": "HELD_HANDOFF_RUN_ID",
+    "held_handoff_source_sha": "HELD_HANDOFF_SOURCE_SHA",
+}
+
+def logged(at, value):
+    return f"{at} {value}\n"
+
+log_text = ""
+log_text += logged("2026-10-18T10:49:41.0000000Z", "##[group]Run set -euo pipefail")
+log_text += logged("2026-10-18T10:49:41.1000000Z", "env:")
+log_text += logged(
+    "2026-10-18T10:49:41.2000000Z",
+    "  DISPATCH_INPUTS: " + json.dumps(
+        historical_inputs, ensure_ascii=True, separators=(",", ":"),
+    ),
+)
+for name, value in historical_inputs.items():
+    log_text += logged(
+        "2026-10-18T10:49:41.3000000Z",
+        f"  {environment_names[name]}: {value}",
+    )
+log_text += logged("2026-10-18T10:49:41.4000000Z", "##[endgroup]")
+rejection = (
+    "upstream binding rejected: "
+    f"{profile['name']} current reader is not the clean exact current-master source"
+)
+log_text += logged("2026-10-18T10:52:17.1000000Z", rejection)
+log_text += logged("2026-10-18T10:52:17.2000000Z", rejection)
+log_text += logged(
+    "2026-10-18T10:52:17.3000000Z",
+    "##[error]Process completed with exit code 1.",
+)
+log_text += logged(
+    "2026-10-18T10:52:18.1000000Z",
+    "No files were found with the provided path: sanitized-a",
+)
+log_text += logged(
+    "2026-10-18T10:52:18.2000000Z",
+    "No files were found with the provided path: sanitized-b",
+)
+log_files = {
+    "0_rollout.txt": log_text.encode(),
+    "rollout/system.txt": b"sanitized runner metadata\n",
+}
+profile["log_members"] = {
+    name: hashlib.sha256(raw).hexdigest()
+    for name, raw in log_files.items()
+}
+job = {
+    **profile["job"],
+    "steps": [
+        {
+            "number": number,
+            "name": name,
+            "status": "completed",
+            "conclusion": conclusion,
+            "started_at": started,
+            "completed_at": completed,
+        }
+        for number, name, conclusion, started, completed in profile["steps"]
+    ],
+}
+failure_lines = m.native_step_log_lines(
+    log_text, job["steps"][3], "sanitized failure",
+)
+failure_diagnostics = [
+    line for line in failure_lines if "upstream binding rejected:" in line
+]
+profile["failure_lines_sha256"] = hashlib.sha256(
+    "\n".join(failure_lines).encode(),
+).hexdigest()
+profile["failure_diagnostics_sha256"] = hashlib.sha256(
+    "\n".join(failure_diagnostics).encode(),
+).hexdigest()
+profile["upload_diagnostics"] = {}
+for step in job["steps"]:
+    if step["name"] not in {
+        "Upload exact sanitized data evidence",
+        "Upload protected rollout baselines",
+    }:
+        continue
+    lines = m.native_step_log_lines(log_text, step, "sanitized upload")
+    no_files = [
+        line for line in lines
+        if "No files were found with the provided path" in line
+    ]
+    profile["upload_diagnostics"][step["name"]] = {
+        "lines": hashlib.sha256("\n".join(lines).encode()).hexdigest(),
+        "no_files": hashlib.sha256("\n".join(no_files).encode()).hexdigest(),
+    }
+
+row = {
+    key: copy.deepcopy(value)
+    for key, value in profile["run"].items()
+    if key not in {"node_id", "repository"}
+}
+held = {
+    "id": profile["held_run_id"],
+    "head_sha": profile["held_source"],
+    "created_at": "2026-10-14T20:54:25Z",
+    "updated_at": "2026-10-14T22:07:29Z",
+    "workflow_id": profile["workflow_id"],
+    "run_attempt": 1,
+    "event": "workflow_dispatch",
+    "head_branch": "master",
+    "status": "completed",
+    "conclusion": "success",
+    "display_title": f"oci-live-data apply-slip-index {profile['held_source']}",
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "head_repository": {"full_name": profile["repository"]},
+}
+observation = {
+    "run": copy.deepcopy(profile["run"]),
+    "attempt": copy.deepcopy(profile["run"]),
+    "workflow": copy.deepcopy(profile["workflow"]),
+    "jobPages": [{"total_count": 1, "jobs": [job]}],
+    "pending": [],
+    "approvals": [copy.deepcopy(profile["approval"])],
+    "artifactPages": [{"total_count": 0, "artifacts": []}],
+    "commit": {
+        "sha": profile["control"],
+        "tree": {"sha": profile["tree"]},
+    },
+    "tree": {
+        "sha": profile["tree"],
+        "truncated": False,
+        "tree": [
+            {
+                "path": path,
+                "mode": "100755" if path.endswith(".sh") else "100644",
+                "type": "blob",
+                "sha": blob,
+            }
+            for path, blob in sorted(profile["closure"].items())
+        ],
+    },
+    "attemptLog": archive(log_files),
+}
+reader = {
+    "control": subject,
+    "tree": "e" * 40,
+    "workflowBlob": profile["workflow_blob"],
+    "policyBlob": profile["policy_blob"],
+    "authorityBlob": profile["authority_blob"],
+    "validatorBlob": "d" * 40,
+    "verifierBlob": profile["current_verifier_blob"],
+}
+workflow_source = "\n".join(
+    f"      uses: {action}" for action in profile["actions"]
+) + "\n"
+base = {
+    "profile": profile,
+    "row": row,
+    "held": held,
+    "subject": subject,
+    "dispatch": fresh_inputs,
+    "cutoff": m.parse_timestamp("2026-10-18T10:52:22Z", "fixture"),
+    "active": False,
+    "reader": reader,
+    "observation": observation,
+    "workflowSource": workflow_source,
+    "localClosure": dict(profile["closure"]),
+}
+
+@contextlib.contextmanager
+def environment(case):
+    def git_reader(label, *arguments):
+        path = arguments[-1].split(":", 1)[1]
+        return (case["localClosure"][path] + "\n").encode()
+
+    def source_reader(repository, control, path, label):
+        if path == ".github/workflows/oci-live-data-rollout.yml":
+            return case["workflowSource"]
+        if path == (
+            "infra/azure/agents/"
+            "copilot-cli-protected-operation-policy-stan.sh"
+        ):
+            return "sanitized policy source\n"
+        raise AssertionError(path)
+
+    def policy_reader(command, **kwargs):
+        assert command == [
+            "bash", "-s", "--", "get",
+            "oci-live-data-continue-held-handoff",
+        ]
+        return subprocess.CompletedProcess(command, 0, policy_json, "")
+
+    with patch.object(m, "history_worker_context", return_value=None), \
+         patch.object(m, "_failed_held_git", side_effect=git_reader), \
+         patch.object(m, "held_source_bytes", side_effect=source_reader), \
+         patch.object(m, "provenance_read_authority", return_value=authority), \
+         patch.object(m.subprocess, "run", side_effect=policy_reader):
+        yield
+
+def qualify(case):
+    with environment(case):
+        return m._validate_failed_clean_reader_continuation_observation(
+            case["profile"]["repository"], case["row"], case["held"],
+            case["subject"], case["dispatch"], case["cutoff"],
+            case["active"], case["profile"], case["reader"],
+            case["observation"],
+        )
+
+proof = qualify(copy.deepcopy(base))
+assert proof["profile"] == m.FAILED_CLEAN_READER_CONTINUATION_PROFILE
+assert proof["artifactCount"] == 0
+assert proof["historicalInputHash"] == profile["input_sha256"]
+assert set(proof["uploadProofs"]) == set(profile["upload_diagnostics"])
+
+def rejected(action, leak=None):
+    stdout, stderr = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            action()
+    except SystemExit:
+        assert stdout.getvalue() == ""
+        if leak is not None:
+            assert leak not in stderr.getvalue()
+        return
+    raise AssertionError("sanitized clean-reader drift was accepted")
+
+def drift(name, mutation):
+    case = copy.deepcopy(base)
+    mutation(case)
+    try:
+        rejected(lambda: qualify(case), leak="PRIVATE_FIXTURE_CANARY")
+    except AssertionError as error:
+        raise AssertionError(f"{name}: {error}") from error
+
+for name, mutation in (
+    ("row", lambda c: c["row"].__setitem__("id", profile["run_id"] + 1)),
+    ("held", lambda c: c["held"].__setitem__("id", profile["held_run_id"] + 1)),
+    ("held-source", lambda c: c["held"].__setitem__("head_sha", "0" * 40)),
+    ("run-id", lambda c: c["observation"]["run"].__setitem__("id", profile["run_id"] + 1)),
+    ("attempt", lambda c: c["observation"]["attempt"].__setitem__("run_attempt", 2)),
+    ("workflow-id", lambda c: c["observation"]["run"].__setitem__("workflow_id", 1)),
+    ("workflow-path", lambda c: c["observation"]["run"].__setitem__("path", ".github/workflows/other.yml")),
+    ("repository", lambda c: c["observation"]["run"]["repository"].__setitem__("id", 1)),
+    ("branch", lambda c: c["observation"]["run"].__setitem__("head_branch", "dev")),
+    ("title", lambda c: c["observation"]["run"].__setitem__("display_title", "sanitized drift")),
+    ("control", lambda c: c["observation"]["run"].__setitem__("head_sha", "0" * 40)),
+    ("status", lambda c: c["observation"]["run"].__setitem__("status", "in_progress")),
+    ("conclusion", lambda c: c["observation"]["run"].__setitem__("conclusion", "success")),
+    ("timestamp", lambda c: c["observation"]["run"].__setitem__("updated_at", "2026-10-18T10:52:22Z")),
+    ("workflow", lambda c: c["observation"]["workflow"].__setitem__("state", "active")),
+    ("job-count", lambda c: c["observation"]["jobPages"][0].__setitem__("total_count", 2)),
+    ("job", lambda c: c["observation"]["jobPages"][0]["jobs"][0].__setitem__("id", 1)),
+    ("runner", lambda c: c["observation"]["jobPages"][0]["jobs"][0].__setitem__("runner_id", 1)),
+    ("pending", lambda c: c["observation"]["pending"].append({"sanitized": True})),
+    ("approval", lambda c: c["observation"]["approvals"][0].__setitem__("comment", "sanitized drift")),
+    ("artifact-count", lambda c: c["observation"]["artifactPages"][0].__setitem__("total_count", 1)),
+    ("artifact-list", lambda c: (
+        c["observation"]["artifactPages"][0].__setitem__("total_count", 1),
+        c["observation"]["artifactPages"][0]["artifacts"].append({"id": 1}),
+    )),
+    ("commit-tree", lambda c: c["observation"]["commit"]["tree"].__setitem__("sha", "0" * 40)),
+    ("reader", lambda c: c["reader"].__setitem__("verifierBlob", "0" * 40)),
+):
+    drift(name, mutation)
+
+for index in range(len(profile["steps"])):
+    drift(
+        f"step-{index}",
+        lambda c, position=index: c["observation"]["jobPages"][0]["jobs"][0][
+            "steps"
+        ][position].__setitem__(
+            "conclusion",
+            "failure"
+            if c["observation"]["jobPages"][0]["jobs"][0]["steps"][position][
+                "conclusion"
+            ] != "failure" else "success",
+        ),
+    )
+
+for input_name in profile["input_names"]:
+    def change_input(case, key=input_name):
+        current = case["dispatch"][key]
+        case["dispatch"][key] = (
+            "0" * 40 if key.endswith("_sha")
+            else "SANITIZED WRONG CONFIRMATION" if key == "confirmation"
+            else "sanitized-wrong-phase" if key == "phase"
+            else "9" if current != "9" else "8"
+        )
+    drift(f"request-{input_name}", change_input)
+
+for key in ("policy_sha256", "input_sha256", "lineage_sha256"):
+    drift(
+        f"hash-{key}",
+        lambda c, field=key: c["profile"].__setitem__(field, "0" * 64),
+    )
+drift(
+    "source-tree",
+    lambda c: c["observation"]["tree"]["tree"][0].__setitem__("sha", "0" * 40),
+)
+first_path = next(iter(profile["closure"]))
+drift(
+    "source-local",
+    lambda c: c["localClosure"].__setitem__(first_path, "0" * 40),
+)
+first_action = profile["actions"][0]
+drift(
+    "action",
+    lambda c: c.__setitem__(
+        "workflowSource",
+        c["workflowSource"].replace(
+            first_action,
+            "sanitized/action@0000000000000000000000000000000000000000",
+        ),
+    ),
+)
+drift(
+    "log-member",
+    lambda c: c["observation"].__setitem__(
+        "attemptLog",
+        archive({
+            "0_rollout.txt": log_text.encode() + b"\nPRIVATE_FIXTURE_CANARY\n",
+            "rollout/system.txt": log_files["rollout/system.txt"],
+        }),
+    ),
+)
+drift(
+    "cutoff",
+    lambda c: c.__setitem__(
+        "cutoff", m.parse_timestamp(profile["run"]["updated_at"], "fixture"),
+    ),
+)
+
+def rebind_log(case, text):
+    files = {
+        "0_rollout.txt": text.encode(),
+        "rollout/system.txt": log_files["rollout/system.txt"],
+    }
+    case["observation"]["attemptLog"] = archive(files)
+    case["profile"]["log_members"] = {
+        name: hashlib.sha256(raw).hexdigest()
+        for name, raw in files.items()
+    }
+    failed = m.native_step_log_lines(
+        text,
+        case["observation"]["jobPages"][0]["jobs"][0]["steps"][3],
+        "rebound failure",
+    )
+    diagnostics = [
+        line for line in failed if "upstream binding rejected:" in line
+    ]
+    case["profile"]["failure_lines_sha256"] = hashlib.sha256(
+        "\n".join(failed).encode(),
+    ).hexdigest()
+    case["profile"]["failure_diagnostics_sha256"] = hashlib.sha256(
+        "\n".join(diagnostics).encode(),
+    ).hexdigest()
+    for name in case["profile"]["upload_diagnostics"]:
+        step = next(
+            value
+            for value in case["observation"]["jobPages"][0]["jobs"][0]["steps"]
+            if value["name"] == name
+        )
+        lines = m.native_step_log_lines(text, step, "rebound upload")
+        no_files = [
+            line for line in lines
+            if "No files were found with the provided path" in line
+        ]
+        case["profile"]["upload_diagnostics"][name] = {
+            "lines": hashlib.sha256("\n".join(lines).encode()).hexdigest(),
+            "no_files": hashlib.sha256(
+                "\n".join(no_files).encode(),
+            ).hexdigest(),
+        }
+
+drift(
+    "failure-diagnostic",
+    lambda c: rebind_log(c, log_text.replace(logged(
+        "2026-10-18T10:52:17.2000000Z", rejection,
+    ), "", 1)),
+)
+drift(
+    "no-file-diagnostic",
+    lambda c: rebind_log(c, log_text.replace(logged(
+        "2026-10-18T10:52:18.2000000Z",
+        "No files were found with the provided path: sanitized-b",
+    ), "", 1)),
+)
+drift(
+    "domain-marker",
+    lambda c: rebind_log(c, log_text + logged(
+        "2026-10-18T10:52:18.3000000Z",
+        "record_transfer release confirmed",
+    )),
+)
+
+def top_level(observations):
+    case = copy.deepcopy(base)
+    with environment(case), \
+         patch.object(
+             m, "_failed_clean_reader_continuation_profile",
+             return_value=case["profile"],
+         ), \
+         patch.object(m, "validate_descendant_scope"), \
+         patch.object(
+             m, "_failed_clean_reader_current_reader",
+             return_value=case["reader"],
+         ) as current, \
+         patch.object(
+             m, "_collect_failed_clean_reader_continuation_observation",
+             side_effect=observations,
+         ) as collected:
+        m.validate_failed_clean_reader_continuation_history(
+            case["profile"]["repository"], case["row"], case["held"],
+            case["subject"], case["dispatch"], case["cutoff"], case["active"],
+        )
+        assert current.call_count == 2 and collected.call_count == 2
+
+top_level([copy.deepcopy(observation), copy.deepcopy(observation)])
+changed = copy.deepcopy(observation)
+changed["workflow"]["state"] = "active"
+rejected(lambda: top_level([copy.deepcopy(observation), changed]))
+rejected(lambda: top_level([
+    copy.deepcopy(observation),
+    SystemExit("PRIVATE_FIXTURE_CANARY second collection failure"),
+]), leak="PRIVATE_FIXTURE_CANARY")
+
+old_profile = m._failed_held_continuation_profile()
+old_row = {
+    "id": old_profile["run_id"],
+    "workflow_id": old_profile["workflow_id"],
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "head_sha": old_profile["control"],
+    "head_branch": "master",
+    "event": "workflow_dispatch",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "failure",
+    "display_title": f"oci-live-data apply-slip-index {old_profile['control']}",
+    "created_at": "2026-10-17T08:42:38Z",
+    "run_started_at": "2026-10-17T08:42:38Z",
+    "updated_at": "2026-10-17T10:35:57Z",
+    "html_url": "https://example.invalid/old",
+    "head_repository": {"full_name": profile["repository"]},
+}
+route_row = dict(row)
+route_row["head_repository"] = {"full_name": profile["repository"]}
+
+def route_process(command, **kwargs):
+    if command[:2] == ["git", "show"]:
+        return subprocess.CompletedProcess(command, 0, "sanitized policy\n", "")
+    assert command == ["bash", "-s", "--", "workflows"]
+    return subprocess.CompletedProcess(
+        command, 0, "oci-live-data-rollout.yml\n", "",
+    )
+
+def route(
+    rows, old_effect=None, new_effect=None, generic_effect=None,
+    qualified_generic=False,
+):
+    page = [{
+        "total_count": len(rows) + 1,
+        "workflow_runs": [copy.deepcopy(held), *copy.deepcopy(rows)],
+    }]
+    expired_receiver = {
+        "id": 777,
+        "head_sha": held["head_sha"],
+        "created_at": "2026-10-14T22:07:30Z",
+    }
+    expired_qualification = (
+        {"data_run_id": str(held["id"])},
+        expired_receiver,
+    )
+    with patch.object(m.subprocess, "run", side_effect=route_process), \
+         patch.object(m, "native_api_batch", return_value=[page]), \
+         patch.object(
+             m, "validate_failed_held_continuation_history",
+             side_effect=old_effect,
+         ) as old, \
+         patch.object(
+             m, "validate_failed_clean_reader_continuation_history",
+             side_effect=new_effect,
+         ) as new, \
+         patch.object(
+             m, "collect_provenance_read_observation",
+             side_effect=generic_effect,
+         ) as generic, \
+         patch.object(m, "provenance_read_authority", return_value=object()), \
+         patch.object(
+             m, "expired_handoff_native_inputs",
+             return_value=expired_qualification,
+         ):
+        result = m.held_handoff_history(
+            profile["repository"], held, subject,
+            dispatch_inputs=fresh_inputs,
+            expired_receiver_run_id=(
+                str(expired_receiver["id"]) if qualified_generic else ""
+            ),
+            failed_continuation_semantic={"sanitized": True},
+        )
+        return result, old, new, generic
+
+result, old, new, generic = route([old_row, route_row])
+assert result["workflow_counts"] == {"oci-live-data-rollout.yml": 3}
+assert old.call_count == 1 and new.call_count == 1
+assert generic.call_count == 0
+
+rejected(lambda: route([route_row]))
+rejected(lambda: route([old_row]))
+
+try:
+    route(
+        [old_row, route_row],
+        new_effect=RuntimeError("sanitized exact-profile rejection"),
+    )
+except RuntimeError as error:
+    assert str(error) == "sanitized exact-profile rejection"
+else:
+    raise AssertionError("new exact-profile rejection fell through")
+
+def exact_route_rejects(name, rows, *, old=False):
+    message = f"sanitized {name} exact-profile rejection"
+    arguments = {
+        "old_effect" if old else "new_effect": RuntimeError(message),
+        "generic_effect": AssertionError(
+            f"sanitized {name} fell through to generic",
+        ),
+    }
+    try:
+        route(rows, **arguments)
+    except RuntimeError as error:
+        assert str(error) == message
+    else:
+        raise AssertionError(f"{name} exact profile was bypassed")
+
+old_non_master = dict(old_row, head_branch="sanitized-non-master")
+new_non_master = dict(route_row, head_branch="sanitized-non-master")
+exact_route_rejects(
+    "old-non-master", [old_non_master, route_row], old=True,
+)
+exact_route_rejects(
+    "new-non-master", [old_row, new_non_master],
+)
+
+def before_held_interval(row):
+    return dict(
+        row,
+        created_at="2026-10-14T20:00:00Z",
+        run_started_at="2026-10-14T20:00:00Z",
+        updated_at="2026-10-14T20:00:01Z",
+    )
+
+exact_route_rejects(
+    "old-interval", [before_held_interval(old_row), route_row], old=True,
+)
+exact_route_rejects(
+    "new-interval", [old_row, before_held_interval(route_row)],
+)
+
+unrelated_non_master = dict(
+    route_row,
+    id=profile["run_id"] + 1,
+    head_branch="sanitized-non-master",
+)
+result, old, new, generic = route(
+    [old_row, route_row, unrelated_non_master],
+)
+assert result["workflow_counts"] == {"oci-live-data-rollout.yml": 4}
+assert old.call_count == 1 and new.call_count == 1
+assert generic.call_count == 0
+
+unrelated = dict(route_row, id=profile["run_id"] + 1)
+try:
+    route(
+        [old_row, route_row, unrelated],
+        generic_effect=RuntimeError(
+            "sanitized qualified generic expired-receiver route",
+        ),
+        qualified_generic=True,
+    )
+except RuntimeError as error:
+    assert str(error) == "sanitized qualified generic expired-receiver route"
+else:
+    raise AssertionError("qualified generic expired receiver was bypassed")
+
+print(
+    "PASS second frozen clean-reader profile, zero-artifact proof, drift matrix, "
+    "double observation and non-fallback routing; critic routing cases=9"
+)
+PY
+ok "second frozen failed-continuation clean-reader profile"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib

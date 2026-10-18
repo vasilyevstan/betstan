@@ -112,6 +112,7 @@ import hashlib
 import json
 import re
 import sys
+sys.dont_write_bytecode = True
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve(strict=True)

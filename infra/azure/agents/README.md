@@ -416,6 +416,27 @@ remain rejected. Keep the compatible reader forward-only; replace it through a
 reviewed forward correction rather than reinterpreting or extending the frozen
 record.
 
+A second exact frozen profile,
+`oci-failed-continue-held-handoff-clean-reader-v1`, authenticates only the
+reviewed first-attempt continuation that stopped in trusted-upstream validation
+before provider access, lock, data, fence, transfer, deployment, or cleanup
+authority. Its zero-artifact result is accepted only when two fresh complete
+native collections canonically agree on an empty paginated count and list and
+the complete attempt logs prove both always-run upload steps found no files.
+Shared authority modules are loaded fresh under a reentrant process lock with
+bytecode writing disabled only for construction and execution, then the exact
+prior interpreter flag is restored. The short-lived evidence verifier enables
+the same bytecode protection before either dynamic import so a later strict
+reader still sees a genuinely clean checkout. Tracked, untracked,
+`__pycache__`, `.pyc`, and `.pyo` dirt remain rejection conditions.
+
+Neither frozen profile grants new dispatch, approval, mutation, transfer,
+deployment, cleanup, retirement, or rollback authority. Exact routing for the
+earlier profile is unchanged; the second profile is terminal on rejection, and
+every other failure continues through the existing expired-receiver classifier.
+Keep both readers and the bytecode-safe import behavior forward-only after
+reliance, or replace them through another reviewed forward correction.
+
 Fresh physical admission precedes snapshot-bound release and `acquire-released`.
 Checksummed transition evidence distinguishes unconfirmed and confirmed results;
 an ambiguous response or partial transfer stops without replay or fallback
