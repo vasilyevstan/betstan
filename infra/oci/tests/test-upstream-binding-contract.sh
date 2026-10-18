@@ -1451,6 +1451,8 @@ from unittest.mock import patch
 
 mode = sys.argv[1]
 repository = Path.cwd().resolve()
+assert sys.flags.isolated == 1
+assert sys.dont_write_bytecode
 validator = repository / "infra/oci/scripts/upstream_run_binding_stan.py"
 spec = importlib.util.spec_from_file_location("fixed_reader_scenario", validator)
 m = importlib.util.module_from_spec(spec)
@@ -1577,6 +1579,12 @@ with contextlib.ExitStack() as stack:
             directory == repository or repository in directory.parents
             for directory in temporary
         ]
+        import_artifacts = tuple(
+            path.relative_to(repository).as_posix()
+            for path in repository.rglob("*")
+            if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+        )
+        assert import_artifacts == (), import_artifacts
         clean_state, qualified = pool.submit(reader_result).result(timeout=20)
         try:
             if mode == "current":
@@ -1627,7 +1635,7 @@ pre_fix = fixture(
 )
 environment = {"PYTHONDONTWRITEBYTECODE": "1"}
 current_result = subprocess.run(
-    [sys.executable, "-I", "-c", scenario, "current"],
+    [sys.executable, "-I", "-B", "-c", scenario, "current"],
     cwd=current, env=environment, capture_output=True, text=True,
     check=False, timeout=90,
 )
@@ -1636,7 +1644,7 @@ assert current_result.returncode == 0, (
 )
 assert current_result.stdout.strip() == "CURRENT_FIX_QUALIFIED_AND_DIRT_REJECTED"
 pre_fix_result = subprocess.run(
-    [sys.executable, "-I", "-c", scenario, "pre-fix"],
+    [sys.executable, "-I", "-B", "-c", scenario, "pre-fix"],
     cwd=pre_fix, env=environment, capture_output=True, text=True,
     check=False, timeout=90,
 )
