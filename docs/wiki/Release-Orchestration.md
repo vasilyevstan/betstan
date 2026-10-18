@@ -588,6 +588,19 @@ remain in complete history and require their separate, double-observed native
 no-execution proof against a frozen reviewed workflow source. These caller and
 source-profile capabilities ship together; rollback retains them or fails closed.
 
+A separate frozen exact-run profile,
+`oci-failed-continue-held-handoff-no-domain-mutation-v1`, can authenticate one
+already-existing first-attempt failed continuation only as historical evidence
+and only through exact immutable identity, request, source, job, log, artifact,
+and cleanup proof. It is not a claim of zero external activity: temporary
+access was opened and successfully cleaned up. The profile grants no dispatch,
+receiver, lock, data, deployment, or mutation authority. Missing, expired, or
+drifting evidence closes the path; the historical failed run remains terminal
+and is never rerunnable. Forward recovery still requires a fresh first-attempt
+run from exact current `master`, with every physical-state, lease, fence,
+compare-and-swap, and timing check unchanged. The frozen
+expired-receiver route remains separate and unchanged.
+
 An ancestor's expired-receiver classification is historical provenance, not
 current held-transfer authority. The original applied root, authenticated baseline
 capture and actual held owner remain distinct. Current continuation must use its

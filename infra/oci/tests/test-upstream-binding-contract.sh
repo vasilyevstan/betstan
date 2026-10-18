@@ -1394,6 +1394,274 @@ os.close(9)
 PY
 ok "immutable bytes full-context isolation, single fetch, rehash and unsafe workspace rejection"
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$ROOT_DIR" "$WORK" <<'PY'
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).resolve()
+work = Path(sys.argv[2]).resolve()
+validator_path = "infra/oci/scripts/upstream_run_binding_stan.py"
+paths = (
+    ".github/workflows/oci-live-data-rollout.yml",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
+    "infra/azure/agents/copilot_cli_authority_stan.py",
+    validator_path,
+)
+
+def fixture(name, validator):
+    repository = work / name
+    for relative in paths:
+        destination = repository / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if relative == validator_path:
+            destination.write_bytes(validator)
+        else:
+            shutil.copy2(source / relative, destination)
+    subprocess.run(
+        ["git", "init", "--quiet", "--initial-branch=master"],
+        cwd=repository, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Sanitized Fixture"],
+        cwd=repository, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "fixture@example.invalid"],
+        cwd=repository, check=True,
+    )
+    subprocess.run(["git", "add", *paths], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "Create fixed-reader fixture"],
+        cwd=repository, check=True,
+    )
+    return repository
+
+scenario = r'''
+import concurrent.futures
+import contextlib
+import importlib.util
+import io
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from unittest.mock import patch
+
+mode = sys.argv[1]
+repository = Path.cwd().resolve()
+assert sys.flags.isolated == 1
+assert sys.dont_write_bytecode
+validator = repository / "infra/oci/scripts/upstream_run_binding_stan.py"
+spec = importlib.util.spec_from_file_location("fixed_reader_scenario", validator)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+profile = m._failed_held_continuation_profile()
+subject = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"], text=True,
+).strip()
+tree_sha = subprocess.check_output(
+    ["git", "rev-parse", "HEAD^{tree}"], text=True,
+).strip()
+current_workflow = (
+    repository / ".github/workflows/oci-live-data-rollout.yml"
+).read_text()
+historical_workflow = (
+    "      " + profile["protected_read"] + "\n" + current_workflow
+)
+tree_entries = []
+for line in subprocess.check_output(
+    ["git", "ls-tree", "-r", "HEAD"], text=True,
+).splitlines():
+    metadata, path = line.split("\t", 1)
+    file_mode, kind, sha = metadata.split()
+    tree_entries.append({
+        "path": path, "mode": file_mode, "type": kind, "sha": sha,
+    })
+
+def api(path):
+    if path.endswith("/git/ref/heads/master"):
+        return {
+            "ref": "refs/heads/master",
+            "object": {"type": "commit", "sha": subject},
+        }
+    if path.endswith(f"/git/commits/{subject}"):
+        return {"sha": subject, "tree": {"sha": tree_sha}}
+    if path.endswith(f"/git/trees/{tree_sha}?recursive=1"):
+        return {"sha": tree_sha, "truncated": False, "tree": tree_entries}
+    raise AssertionError(path)
+
+def source_bytes(repo, control, path, label):
+    assert path == ".github/workflows/oci-live-data-rollout.yml"
+    return historical_workflow if control == profile["control"] else current_workflow
+
+def reader_result():
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            value = m._failed_held_current_reader(
+                profile["repository"], subject, profile,
+            )
+    except SystemExit:
+        return "rejected", None
+    return "qualified", value
+
+def require_dirty_rejection():
+    state, _ = reader_result()
+    if state != "rejected":
+        raise AssertionError("genuine dirty fixed-reader checkout passed")
+
+evidence = {
+    "workflow_run_id": "71",
+    "source_sha": "1" * 40,
+    "build_run_id": "72",
+    "infrastructure_run_id": "73",
+    "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none",
+    "checkpoint_source_sha": "2" * 40,
+    "disk_checkpoint_run_id": "74",
+    "disk_checkpoint_sha256": "3" * 64,
+    "disk_checkpoint_disposition": "READY_NO_RECLAIM",
+}
+files = {"sanitized-report.json": b'{"status":"PASS"}\n'}
+populated = threading.Barrier(3, timeout=20)
+release = threading.Barrier(3, timeout=20)
+temporary = []
+temporary_lock = threading.Lock()
+real_run = subprocess.run
+
+def controlled_run(command, **kwargs):
+    if (
+        len(command) == 1
+        and str(command[0]).endswith("verify-live-betting-data-evidence-stan.sh")
+    ):
+        directory = Path(kwargs["env"]["EVIDENCE_DIR"]).resolve()
+        assert (directory / "sanitized-report.json").read_bytes() == files[
+            "sanitized-report.json"
+        ]
+        with temporary_lock:
+            temporary.append(directory)
+        populated.wait()
+        release.wait()
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+    return real_run(command, **kwargs)
+
+clean_state = None
+real_temporary_directory = m.tempfile.TemporaryDirectory
+def fixture_local_temporary_directory(*arguments, **keywords):
+    if keywords.get("prefix") == ".held-handoff-evidence-":
+        assert keywords.get("dir") is None
+        keywords["dir"] = repository
+    return real_temporary_directory(*arguments, **keywords)
+
+with contextlib.ExitStack() as stack:
+    stack.enter_context(patch.object(m, "gh_api", side_effect=api))
+    stack.enter_context(
+        patch.object(m, "held_source_bytes", side_effect=source_bytes)
+    )
+    stack.enter_context(
+        patch.object(m.subprocess, "run", side_effect=controlled_run)
+    )
+    if mode == "pre-fix":
+        stack.enter_context(patch.object(
+            m.tempfile, "TemporaryDirectory",
+            side_effect=fixture_local_temporary_directory,
+        ))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        reports = [
+            pool.submit(m.validate_held_handoff_reports, files, evidence)
+            for _ in range(2)
+        ]
+        populated.wait()
+        assert len(temporary) == 2
+        assert len(set(temporary)) == 2
+        inside = [
+            directory == repository or repository in directory.parents
+            for directory in temporary
+        ]
+        import_artifacts = tuple(
+            path.relative_to(repository).as_posix()
+            for path in repository.rglob("*")
+            if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+        )
+        assert import_artifacts == (), import_artifacts
+        clean_state, qualified = pool.submit(reader_result).result(timeout=20)
+        try:
+            if mode == "current":
+                assert inside == [False, False]
+                assert clean_state == "qualified"
+                assert qualified["control"] == subject
+                tracked = (
+                    repository / "infra/azure/agents/"
+                    "copilot-cli-protected-operation-policy-stan.sh"
+                )
+                original = tracked.read_bytes()
+                try:
+                    tracked.write_bytes(original + b"\n# bounded tracked dirt\n")
+                    require_dirty_rejection()
+                finally:
+                    tracked.write_bytes(original)
+                untracked = repository / "bounded-untracked-dirt"
+                try:
+                    untracked.write_text("bounded untracked dirt\n")
+                    require_dirty_rejection()
+                finally:
+                    untracked.unlink()
+                assert reader_result()[0] == "qualified"
+            else:
+                assert mode == "pre-fix"
+                assert inside == [True, True]
+                assert clean_state == "rejected"
+        finally:
+            release.wait()
+        for report in reports:
+            report.result(timeout=20)
+
+assert all(not directory.exists() for directory in temporary)
+assert subprocess.check_output(
+    ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+    text=True,
+) == ""
+if mode == "pre-fix":
+    print("EXPECTED_PRE_FIX_REJECTION")
+    raise SystemExit(23)
+print("CURRENT_FIX_QUALIFIED_AND_DIRT_REJECTED")
+'''
+
+current = fixture("fixed-reader-current", (source / validator_path).read_bytes())
+pre_fix = fixture(
+    "fixed-reader-pre-fix",
+    (source / validator_path).read_bytes(),
+)
+environment = {"PYTHONDONTWRITEBYTECODE": "1"}
+current_result = subprocess.run(
+    [sys.executable, "-I", "-B", "-c", scenario, "current"],
+    cwd=current, env=environment, capture_output=True, text=True,
+    check=False, timeout=90,
+)
+assert current_result.returncode == 0, (
+    current_result.stdout, current_result.stderr
+)
+assert current_result.stdout.strip() == "CURRENT_FIX_QUALIFIED_AND_DIRT_REJECTED"
+pre_fix_result = subprocess.run(
+    [sys.executable, "-I", "-B", "-c", scenario, "pre-fix"],
+    cwd=pre_fix, env=environment, capture_output=True, text=True,
+    check=False, timeout=90,
+)
+assert pre_fix_result.returncode == 23, (
+    pre_fix_result.stdout, pre_fix_result.stderr
+)
+assert pre_fix_result.stdout.strip() == "EXPECTED_PRE_FIX_REJECTION"
+print(pre_fix_result.stdout.strip())
+print(current_result.stdout.strip())
+print("PASS self-contained pre-fix behavioral probe rejected clean reader")
+print(
+    "PASS current concurrent scratch stays distinct/outside exact reader "
+    "checkout; tracked and untracked dirt reject; all scratch is removed"
+)
+PY
+ok "red/green held report temporary isolation and strict fixed-reader cleanliness"
+
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
 import contextlib, dataclasses, hashlib, importlib.util, io, os, subprocess, sys
 from pathlib import Path
@@ -4432,7 +4700,19 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
             transition_job["status"] = "completed"
             assert held_admission()["heldHistory"] == before_completion["heldHistory"]
             assert consume_successor() == ("23", source)
-            assert all(call.kwargs == {} for call in fresh_history.call_args_list)
+            assert all(
+                set(call.kwargs) == {
+                    "dispatch_inputs", "failed_continuation_semantic",
+                }
+                and call.kwargs["dispatch_inputs"] == held_request
+                and set(call.kwargs["failed_continuation_semantic"]) == {
+                    "rootRunId", "rootSourceSha", "baselineFiles", "imageBytes",
+                    "checkpoint", "heldEvidenceSha256", "lockHolder",
+                    "lockFencingGeneration", "lockLeaseUntilEpoch",
+                    "lockLeaseSeconds", "lockNamespace",
+                }
+                for call in fresh_history.call_args_list
+            )
             assert any("&created=" not in endpoint for endpoint in transition_reads)
             assert any("&created=" in endpoint for endpoint in transition_reads)
             assert saved_history_reader(
@@ -4509,6 +4789,1094 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
 print("PASS sole historical omission eligible only for continuation; v3 native roles and immutable history")
 PY
 ok "pre-runtime strict inventory, native private tuple, and original before-baseline"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib
+import copy
+import datetime as dt
+import hashlib
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+import zipfile
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("failed_held_fixture", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+# Production facts stay frozen independently from all sanitized fixture bytes.
+assert m.FAILED_HELD_CONTINUATION_PROFILE == \
+    "oci-failed-continue-held-handoff-no-domain-mutation-v1"
+assert m.FAILED_HELD_CONTINUATION_RUN_ID == 39018383213
+assert m.FAILED_HELD_CONTINUATION_HELD_RUN_ID == 38635983420
+assert m.FAILED_HELD_CONTINUATION_CONTROL == \
+    "ab32b31e363254abb5ab4b1d48408a1609fe63a9"
+assert m.FAILED_HELD_CONTINUATION_TREE == \
+    "74a38702e349d111b9a48356203cc32e210fbdcd"
+assert m.FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB == \
+    "92038ee7bd21ddc2b888242f2ee91a7bd5571aba"
+assert m.FAILED_HELD_CONTINUATION_POLICY_SHA256 == \
+    "45ce069efd5532836b079c8059f9a17e439e312bd82aadf0188c286b62865cc8"
+assert tuple(item[0] for item in m.FAILED_HELD_CONTINUATION_ARTIFACTS) == (
+    12098621291, 12097894204,
+)
+
+def archive(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for name, raw in sorted(files.items()):
+            info = zipfile.ZipInfo(name, (2026, 10, 17, 10, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100600 << 16
+            bundle.writestr(info, raw)
+    return output.getvalue()
+
+def env_bytes(values):
+    return "".join(
+        f"{key}={values[key]}\n" for key in sorted(values)
+    ).encode()
+
+def manifest(files):
+    return "".join(
+        f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
+        for name, raw in sorted(files.items()) if name != "SHA256SUMS"
+    ).encode()
+
+class FixtureAuthority:
+    REQUEST_SCHEMA = "sanitized-request-v1"
+
+    @staticmethod
+    def canonical_input_hash(inputs):
+        return hashlib.sha256(json.dumps(
+            list(inputs.items()), ensure_ascii=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+
+    @classmethod
+    def validate_request_data(cls, request, policy, repository, control):
+        if (
+            request["repository"] != repository
+            or request["controlSha"] != control
+            or request["subjectSha"] != control
+            or request["operation"] != policy["operation"]
+        ):
+            raise ValueError("sanitized request mismatch")
+        return {
+            "dispatchInputs": request["inputs"],
+            "inputHash": cls.canonical_input_hash(request["inputs"]),
+        }
+
+authority = FixtureAuthority()
+subject = "f" * 40
+profile = copy.deepcopy(m._failed_held_continuation_profile())
+input_names = profile["input_names"]
+historical_inputs = {
+    "approved_sha": profile["control"],
+    "resume_source_sha": profile["held_source"],
+    "build_run_id": "7101",
+    "infrastructure_run_id": "7102",
+    "checkpoint_source_sha": "c" * 40,
+    "disk_checkpoint_run_id": "7103",
+    "phase": "apply-slip-index",
+    "prerequisite_run_id": "7104",
+    "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none",
+    "failed_deploy_run_id": "7105",
+    "failed_activation_run_id": "0",
+    "failed_activation_user_id": "0",
+    "confirmation": m.HELD_HANDOFF_CONFIRMATION,
+    "held_handoff_run_id": str(profile["held_run_id"]),
+    "held_handoff_source_sha": profile["held_source"],
+}
+assert tuple(historical_inputs) == input_names
+fresh_inputs = dict(historical_inputs, approved_sha=subject)
+policy = {
+    "inputNames": list(input_names),
+    "operation": "oci-live-data-continue-held-handoff",
+    "environment": "oci-migration",
+    "event": "workflow_dispatch",
+    "approvalWorkflowState": "disabled_manually",
+    "subjectInput": "approved_sha",
+    "subjectRelation": "current",
+    "targetInput": None,
+    "targetRelation": "none",
+}
+policy_json = json.dumps(
+    policy, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+)
+profile["policy_sha256"] = hashlib.sha256(policy_json.encode()).hexdigest()
+profile["input_sha256"] = authority.canonical_input_hash(historical_inputs)
+profile["lineage_sha256"] = hashlib.sha256(json.dumps(
+    [
+        [name, "{subject_sha}" if name == "approved_sha" else historical_inputs[name]]
+        for name in input_names
+    ],
+    ensure_ascii=True, separators=(",", ":"),
+).encode()).hexdigest()
+
+baseline_prefix = "betstan/betstan/artifacts/oci-data-baseline-before/"
+baseline_values = {
+    key: f"synthetic-{index}-{key.replace('_', '-')}"
+    for index, key in enumerate(sorted(m.BASELINE_PROVENANCE_KEYS), 1)
+}
+baseline_values.update(
+    baseline_source_sha="a" * 40,
+    baseline_deploy_run_id="7201",
+    baseline_deploy_run_attempt="1",
+    baseline_build_run_id=historical_inputs["build_run_id"],
+    baseline_build_run_attempt="1",
+    baseline_capture_run_id=historical_inputs["prerequisite_run_id"],
+    baseline_capture_run_attempt="1",
+    baseline_recovery_run_id="0",
+    baseline_recovery_run_attempt="0",
+    namespace="gaming",
+    public_url="https://betstan.example.invalid",
+    redirect_url="https://www.betstan.example.invalid",
+    diagnostic_url="https://diagnostic.example.invalid",
+    http_attempts="3",
+    http_retry_seconds="2",
+    sse_required="true",
+    database_restore="false",
+    registry_provider="ghcr",
+    registry_host="ghcr.io",
+    registry_repository=m.APPLICATION_REPOSITORY,
+    registry_public_anonymous="true",
+)
+baseline_files = {
+    baseline_prefix + "baseline-provenance.env": env_bytes(baseline_values),
+    baseline_prefix + "images.tsv": b"sanitized distinct baseline images\n",
+    "_temp/pre-runtime-lock.json": json.dumps({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "gaming-mongo-migration-lock",
+            "namespace": "gaming",
+            "uid": "sanitized-lock-uid",
+            "resourceVersion": "51",
+        },
+        "data": {
+            "state": "active",
+            "source-sha": profile["held_source"],
+            "operation-id": "live-data-apply-slip-index",
+            "lease-duration-seconds": "1800",
+            "holder": f"live-data-{profile['held_run_id']}-1",
+            "acquired-at-epoch": "100",
+            "lease-until-epoch": "1900",
+            "fencing-generation": "7",
+            "released-at-epoch": "0",
+        },
+    }, sort_keys=True).encode(),
+}
+baseline_selected = {
+    name.removeprefix(baseline_prefix): raw
+    for name, raw in baseline_files.items() if name.startswith(baseline_prefix)
+}
+baseline_files[baseline_prefix + "SHA256SUMS"] = manifest(baseline_selected)
+
+held = {
+    "id": profile["held_run_id"],
+    "head_sha": profile["held_source"],
+    "created_at": "2026-10-16T08:00:00Z",
+    "updated_at": "2026-10-16T09:00:00Z",
+    "workflow_id": profile["workflow_id"],
+    "run_attempt": 1,
+    "event": "workflow_dispatch",
+    "head_branch": "master",
+    "status": "completed",
+    "conclusion": "success",
+    "display_title": f"oci-live-data apply-slip-index {profile['held_source']}",
+    "_handoff_generation": 7,
+    "_handoff_deadline": 1900,
+    "_handoff_lease_seconds": 1800,
+}
+history = {
+    "schema_version": "live-betting-held-handoff-history-v1",
+    "repository": profile["repository"],
+    "held_handoff_run_id": str(profile["held_run_id"]),
+    "held_handoff_source_sha": profile["held_source"],
+    "successor_run_id": str(profile["run_id"]),
+    "successor_source_sha": profile["control"],
+    "start_at": held["created_at"],
+    "cutoff_at": profile["steps"][3][3],
+    "workflow_counts": {"oci-live-data-rollout.yml": 2},
+}
+image_bytes = b"sanitized authenticated candidate image bytes\n"
+checkpoint = {
+    "sourceSha": historical_inputs["checkpoint_source_sha"],
+    "contentChecksumSha256": "8" * 64,
+    "disposition": "READY_NO_RECLAIM",
+}
+baseline_semantic_files = {
+    name.removeprefix(baseline_prefix): raw
+    for name, raw in baseline_files.items() if name.startswith(baseline_prefix)
+}
+baseline_sha256 = hashlib.sha256(
+    baseline_semantic_files["SHA256SUMS"],
+).hexdigest()
+held_evidence_sha256 = "9" * 64
+resume_values = {
+    "schema_version": "live-betting-data-resume-v4",
+    "applied_data_run_id": "7301",
+    "applied_source_sha": "b" * 40,
+    "failed_deploy_run_id": historical_inputs["failed_deploy_run_id"],
+    "resume_maintenance_mode": "pre-runtime-hold",
+    "failed_deploy_job_conclusion": "failure",
+    "public_validate_job_conclusion": "skipped",
+    "lock_release_step_conclusion": "skipped",
+    "fence_release_step_conclusion": "skipped",
+    "rehold_step_conclusion": "skipped",
+    "failed_activation_run_id": "0",
+    "current_source_sha": profile["control"],
+    "baseline_sha256": baseline_sha256,
+    "runtime_images_sha256": hashlib.sha256(image_bytes).hexdigest(),
+    "checkpoint_source_sha": historical_inputs["checkpoint_source_sha"],
+    "disk_checkpoint_run_id": historical_inputs["disk_checkpoint_run_id"],
+    "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+    "disk_checkpoint_disposition": checkpoint["disposition"],
+    "application_change_scope": "github-infra-docs-only",
+    "status": "PASS",
+    "held_handoff_run_id": str(profile["held_run_id"]),
+    "held_handoff_source_sha": profile["held_source"],
+    "held_handoff_evidence_sha256": held_evidence_sha256,
+}
+assert set(resume_values) == m.LIVE_RESUME_AUTHORITY_V3_KEYS
+resume_values.update(
+    # Keep construction visibly complete; no collapsed placeholder fields.
+)
+rollout_files = {
+    "held-handoff-history.json": json.dumps(
+        history, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode(),
+    "resume-authority.env": env_bytes(resume_values),
+}
+
+steps = [
+    {
+        "number": number,
+        "name": name,
+        "status": "completed",
+        "conclusion": conclusion,
+        "started_at": started,
+        "completed_at": completed,
+    }
+    for number, name, conclusion, started, completed in profile["steps"]
+]
+job = {
+    "id": 117355071855,
+    "node_id": "CR_kwDOLOPcRs8AAAAbUuhJbw",
+    "run_id": profile["run_id"],
+    "run_attempt": 1,
+    "head_sha": profile["control"],
+    "head_branch": "master",
+    "name": "rollout",
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-10-17T08:42:39Z",
+    "started_at": "2026-10-17T10:21:17Z",
+    "completed_at": "2026-10-17T10:35:57Z",
+    "runner_id": 1000033152,
+    "runner_name": "GitHub Actions 1000033152",
+    "steps": steps,
+}
+environment_names = {
+    "approved_sha": "SOURCE_SHA",
+    "resume_source_sha": "RESUME_SOURCE_SHA",
+    "build_run_id": "BUILD_RUN_ID",
+    "infrastructure_run_id": "INFRASTRUCTURE_RUN_ID",
+    "checkpoint_source_sha": "CHECKPOINT_SOURCE_SHA",
+    "disk_checkpoint_run_id": "DISK_CHECKPOINT_RUN_ID",
+    "phase": "PHASE",
+    "prerequisite_run_id": "PREREQUISITE_RUN_ID",
+    "baseline_recovery_run_id": "BASELINE_RECOVERY_RUN_ID",
+    "baseline_recovery_source_sha": "BASELINE_RECOVERY_SOURCE_SHA",
+    "failed_deploy_run_id": "FAILED_DEPLOY_RUN_ID",
+    "failed_activation_run_id": "FAILED_ACTIVATION_RUN_ID",
+    "failed_activation_user_id": "FAILED_ACTIVATION_USER_ID",
+    "confirmation": "CONFIRMATION",
+    "held_handoff_run_id": "HELD_HANDOFF_RUN_ID",
+    "held_handoff_source_sha": "HELD_HANDOFF_SOURCE_SHA",
+}
+def logged(at, value):
+    return f"{at} {value}\n"
+
+log_text = ""
+log_text += logged("2026-10-17T10:21:23.0000000Z", "##[group]Run set -euo pipefail")
+log_text += logged("2026-10-17T10:21:23.1000000Z", "env:")
+log_text += logged(
+    "2026-10-17T10:21:23.2000000Z",
+    "  DISPATCH_INPUTS: " + json.dumps(
+        historical_inputs, ensure_ascii=True, separators=(",", ":"),
+    ),
+)
+for name, value in historical_inputs.items():
+    log_text += logged(
+        "2026-10-17T10:21:23.3000000Z",
+        f"  {environment_names[name]}: {value}",
+    )
+log_text += logged("2026-10-17T10:21:23.4000000Z", "##[endgroup]")
+lock_source = [
+    profile["protected_read"],
+    'workflow_state="$(gh api "repos/$REPO/actions/workflows/oci-live-data-rollout.yml")"',
+    "./infra/oci/scripts/upstream_run_binding_stan.py validate-all --sanitized",
+    "record_transfer release unconfirmed",
+]
+log_text += logged("2026-10-17T10:34:15.0000000Z", "##[group]Run set -euo pipefail")
+for line in lock_source:
+    log_text += logged("2026-10-17T10:34:15.1000000Z", line)
+log_text += logged("2026-10-17T10:34:15.2000000Z", "##[endgroup]")
+log_text += logged("2026-10-17T10:34:15.3000000Z", profile["denial"])
+log_text += logged(
+    "2026-10-17T10:34:15.4000000Z",
+    "##[error]Process completed with exit code 1.",
+)
+log_text += logged(
+    "2026-10-17T10:35:29.0000000Z",
+    "##[group]Run ./infra/oci/scripts/configure-k3s-access.sh cleanup",
+)
+log_text += logged("2026-10-17T10:35:29.1000000Z", "sanitized cleanup source")
+log_text += logged("2026-10-17T10:35:29.2000000Z", "##[endgroup]")
+log_text += logged("2026-10-17T10:35:29.3000000Z", "k3s_access_cleanup=PASS")
+log_files = {
+    "0_rollout.txt": log_text.encode(),
+    "rollout/system.txt": b"sanitized runner metadata\n",
+}
+profile["log_members"] = {
+    name: hashlib.sha256(raw).hexdigest() for name, raw in log_files.items()
+}
+lock_body, lock_outside = m._failed_held_step_lines(
+    log_text, steps[23], "sanitized lock", "##[group]Run set -euo pipefail",
+)
+_, cleanup_outside = m._failed_held_step_lines(
+    log_text, steps[36], "sanitized cleanup",
+    "##[group]Run ./infra/oci/scripts/configure-k3s-access.sh cleanup",
+)
+profile["lock_source_sha256"] = hashlib.sha256(
+    "\n".join(lock_body).encode(),
+).hexdigest()
+profile["lock_outside_sha256"] = hashlib.sha256(
+    "\n".join(lock_outside).encode(),
+).hexdigest()
+profile["cleanup_outside_sha256"] = hashlib.sha256(
+    "\n".join(cleanup_outside).encode(),
+).hexdigest()
+
+baseline_raw = archive(baseline_files)
+rollout_raw = archive(rollout_files)
+baseline_artifact = (
+    9101, "SANITIZED_BASELINE_NODE", "oci-live-data-baselines-sanitized-1",
+    len(baseline_raw), hashlib.sha256(baseline_raw).hexdigest(),
+    "2026-10-17T10:35:28Z", "2026-10-17T10:35:28Z",
+    "2099-11-16T10:35:27Z",
+)
+rollout_artifact = (
+    9102, "SANITIZED_ROLLOUT_NODE", "oci-live-data-rollout-sanitized-1",
+    len(rollout_raw), hashlib.sha256(rollout_raw).hexdigest(),
+    "2026-10-17T10:35:27Z", "2026-10-17T10:35:27Z",
+    "2099-11-16T10:35:26Z",
+)
+profile["artifacts"] = (baseline_artifact, rollout_artifact)
+profile["baseline_members"] = {
+    name: hashlib.sha256(raw).hexdigest() for name, raw in baseline_files.items()
+}
+profile["rollout_members"] = {
+    name: hashlib.sha256(raw).hexdigest() for name, raw in rollout_files.items()
+}
+
+expected_run = {
+    "id": profile["run_id"],
+    "node_id": "WFR_kwLOLOPcRs8AAAAJFa1HbQ",
+    "workflow_id": profile["workflow_id"],
+    "run_attempt": 1,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "event": "workflow_dispatch",
+    "display_title": f"oci-live-data apply-slip-index {profile['control']}",
+    "head_branch": "master",
+    "head_sha": profile["control"],
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-10-17T08:42:38Z",
+    "run_started_at": "2026-10-17T08:42:38Z",
+    "updated_at": "2026-10-17T10:35:57Z",
+    "html_url": (
+        f"https://github.com/{profile['repository']}/actions/runs/{profile['run_id']}"
+    ),
+    "repository": {
+        "id": profile["repository_id"],
+        "node_id": profile["repository_node_id"],
+        "full_name": profile["repository"],
+    },
+    "head_repository": {
+        "id": profile["repository_id"],
+        "node_id": profile["repository_node_id"],
+        "full_name": profile["repository"],
+    },
+}
+row = {
+    key: copy.deepcopy(value)
+    for key, value in expected_run.items()
+    if key not in {"node_id", "repository"}
+}
+def artifact_metadata(item):
+    artifact_id, node, name, size, digest, created, updated, expires = item
+    return {
+        "id": artifact_id,
+        "node_id": node,
+        "name": name,
+        "size_in_bytes": size,
+        "digest": f"sha256:{digest}",
+        "expired": False,
+        "created_at": created,
+        "updated_at": updated,
+        "expires_at": expires,
+        "workflow_run": {
+            "id": profile["run_id"],
+            "repository_id": profile["repository_id"],
+            "head_repository_id": profile["repository_id"],
+            "head_branch": "master",
+            "head_sha": profile["control"],
+        },
+    }
+
+observation = {
+    "run": copy.deepcopy(expected_run),
+    "attempt": copy.deepcopy(expected_run),
+    "workflow": {
+        "id": profile["workflow_id"],
+        "node_id": "W_kwDOLOPcRs4UP-0d",
+        "name": "oci-live-data-rollout",
+        "path": ".github/workflows/oci-live-data-rollout.yml",
+        "state": "disabled_manually",
+    },
+    "jobPages": [{"total_count": 1, "jobs": [job]}],
+    "pending": [],
+    "approvals": [{
+        "state": "approved",
+        "comment": (
+            "Copilot CLI exact-run approval: "
+            "oci-live-data-continue-held-handoff"
+        ),
+        "submitted_at": None,
+        "user": {
+            "id": 75614529,
+            "node_id": "MDQ6VXNlcjc1NjE0NTI5",
+            "login": "vasilyevstan",
+            "type": "User",
+        },
+        "environments": [{
+            "id": 19134286823,
+            "node_id": "EN_kwDOLOPcRs8AAAAEdH4L5w",
+            "name": "oci-migration",
+        }],
+    }],
+    "artifactPages": [{
+        "total_count": 2,
+        "artifacts": [
+            artifact_metadata(baseline_artifact),
+            artifact_metadata(rollout_artifact),
+        ],
+    }],
+    "commit": {
+        "sha": profile["control"],
+        "tree": {"sha": profile["tree"]},
+    },
+    "tree": {
+        "sha": profile["tree"],
+        "truncated": False,
+        "tree": [
+            {
+                "path": path,
+                "mode": "100755" if path.endswith(".sh") else "100644",
+                "type": "blob",
+                "sha": blob,
+            }
+            for path, blob in sorted(profile["closure"].items())
+        ],
+    },
+    "attemptLog": archive(log_files),
+    "archives": {
+        str(baseline_artifact[0]): baseline_raw,
+        str(rollout_artifact[0]): rollout_raw,
+    },
+}
+reader = {
+    "control": subject,
+    "tree": "e" * 40,
+    "workflowBlob": profile["current_workflow_blob"],
+    "policyBlob": profile["policy_blob"],
+    "authorityBlob": profile["authority_blob"],
+    "validatorBlob": "d" * 40,
+}
+semantic = {
+    "rootRunId": resume_values["applied_data_run_id"],
+    "rootSourceSha": resume_values["applied_source_sha"],
+    "baselineFiles": baseline_semantic_files,
+    "imageBytes": image_bytes,
+    "checkpoint": checkpoint,
+    "heldEvidenceSha256": held_evidence_sha256,
+    "lockHolder": f"live-data-{profile['held_run_id']}-1",
+    "lockFencingGeneration": "7",
+    "lockLeaseUntilEpoch": "1900",
+    "lockLeaseSeconds": "1800",
+    "lockNamespace": "gaming",
+}
+workflow_source = "\n".join(
+    f"      uses: {action}" for action in profile["actions"]
+) + "\n"
+base = {
+    "profile": profile,
+    "row": row,
+    "held": held,
+    "subject": subject,
+    "dispatch": fresh_inputs,
+    "cutoff": m.parse_timestamp("2026-10-17T10:35:58Z", "fixture"),
+    "active": False,
+    "reader": reader,
+    "observation": observation,
+    "semantic": semantic,
+    "workflowSource": workflow_source,
+    "localClosure": dict(profile["closure"]),
+}
+now = dt.datetime(2090, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+
+def qualify(case):
+    def git_reader(label, *arguments):
+        path = arguments[-1].split(":", 1)[1]
+        return (case["localClosure"][path] + "\n").encode()
+
+    def source_reader(repository, control, path, label):
+        if path == ".github/workflows/oci-live-data-rollout.yml":
+            return case["workflowSource"]
+        if path == (
+            "infra/azure/agents/"
+            "copilot-cli-protected-operation-policy-stan.sh"
+        ):
+            return "sanitized policy source\n"
+        raise AssertionError(path)
+
+    def policy_reader(command, **kwargs):
+        assert command == [
+            "bash", "-s", "--", "get",
+            "oci-live-data-continue-held-handoff",
+        ]
+        return subprocess.CompletedProcess(command, 0, policy_json, "")
+
+    with patch.object(m, "history_worker_context", return_value=None), \
+         patch.object(m, "_failed_held_git", side_effect=git_reader), \
+         patch.object(m, "held_source_bytes", side_effect=source_reader), \
+         patch.object(m, "provenance_read_authority", return_value=authority), \
+         patch.object(m.subprocess, "run", side_effect=policy_reader), \
+         patch.object(m.time, "time", return_value=now):
+        return m._validate_failed_held_continuation_observation(
+            case["profile"]["repository"], case["row"], case["held"],
+            case["subject"], case["dispatch"], case["cutoff"], case["active"],
+            case["profile"], case["reader"], case["observation"],
+            case["semantic"],
+        )
+
+proof = qualify(copy.deepcopy(base))
+assert proof["profile"] == m.FAILED_HELD_CONTINUATION_PROFILE
+assert proof["historicalInputHash"] == profile["input_sha256"]
+assert set(proof["artifactProofs"]) == {
+    baseline_artifact[2], rollout_artifact[2],
+}
+assert qualify(dict(copy.deepcopy(base), cutoff=None, active=True))["run"]["id"] \
+    == profile["run_id"]
+assert qualify(dict(copy.deepcopy(base), active=True))["run"]["id"] \
+    == profile["run_id"]
+
+def rejected(action, leak=None):
+    stdout, stderr = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            action()
+    except SystemExit:
+        assert stdout.getvalue() == ""
+        if leak is not None:
+            assert leak not in stderr.getvalue()
+        return
+    raise AssertionError("sanitized one-field drift was accepted")
+
+def drift(name, mutation):
+    case = copy.deepcopy(base)
+    mutation(case)
+    try:
+        rejected(lambda: qualify(case), leak="PRIVATE_FIXTURE_CANARY")
+    except AssertionError as error:
+        raise AssertionError(f"{name}: {error}") from error
+
+identity_drifts = (
+    ("row-id", lambda c: c["row"].__setitem__("id", profile["run_id"] + 1)),
+    ("held-owner", lambda c: c["held"].__setitem__("id", profile["held_run_id"] + 1)),
+    ("held-source", lambda c: c["held"].__setitem__("head_sha", "0" * 40)),
+    ("run-workflow", lambda c: c["observation"]["run"].__setitem__("workflow_id", 1)),
+    ("run-path", lambda c: c["observation"]["run"].__setitem__("path", ".github/workflows/other.yml")),
+    ("run-repository", lambda c: c["observation"]["run"]["repository"].__setitem__("id", 1)),
+    ("run-title", lambda c: c["observation"]["run"].__setitem__("display_title", "sanitized drift")),
+    ("run-control", lambda c: c["observation"]["run"].__setitem__("head_sha", "0" * 40)),
+    ("run-attempt", lambda c: c["observation"]["run"].__setitem__("run_attempt", 2)),
+    ("run-event", lambda c: c["observation"]["run"].__setitem__("event", "push")),
+    ("run-status", lambda c: c["observation"]["run"].__setitem__("status", "in_progress")),
+    ("run-conclusion", lambda c: c["observation"]["run"].__setitem__("conclusion", "success")),
+    ("workflow-state", lambda c: c["observation"]["workflow"].__setitem__("state", "disabled_inactivity")),
+    ("job-count", lambda c: c["observation"]["jobPages"][0].__setitem__("total_count", 2)),
+    ("job-id", lambda c: c["observation"]["jobPages"][0]["jobs"][0].__setitem__("id", 1)),
+    ("pending", lambda c: c["observation"]["pending"].append({"environment": "sanitized"})),
+    ("approval", lambda c: c["observation"]["approvals"][0].__setitem__("comment", "sanitized drift")),
+    ("tree", lambda c: c["observation"]["commit"]["tree"].__setitem__("sha", "0" * 40)),
+    ("current-reader", lambda c: c["reader"].__setitem__("workflowBlob", "0" * 40)),
+)
+for name, mutation in identity_drifts:
+    drift(name, mutation)
+
+def different_input(name, value):
+    if name.endswith("_sha"):
+        return "0" * 40
+    if name == "confirmation":
+        return "SANITIZED WRONG CONFIRMATION"
+    if name == "phase":
+        return "sanitized-wrong-phase"
+    return "9" if value != "9" else "8"
+
+for input_name in input_names:
+    drift(
+        f"request-{input_name}",
+        lambda c, key=input_name: c["dispatch"].__setitem__(
+            key, different_input(key, c["dispatch"][key]),
+        ),
+    )
+drift("request-order", lambda c: c["profile"].__setitem__(
+    "input_names", tuple(reversed(c["profile"]["input_names"])),
+))
+for key in ("policy_sha256", "input_sha256", "lineage_sha256"):
+    drift(
+        f"hash-{key}",
+        lambda c, field=key: c["profile"].__setitem__(field, "0" * 64),
+    )
+drift("source-tree", lambda c: c["observation"]["tree"]["tree"][0].__setitem__(
+    "sha", "0" * 40,
+))
+first_closure_path = next(iter(profile["closure"]))
+drift("source-local", lambda c: c["localClosure"].__setitem__(
+    first_closure_path, "0" * 40,
+))
+first_action = profile["actions"][0]
+drift("action-pin", lambda c: c.__setitem__(
+    "workflowSource", c["workflowSource"].replace(first_action, "sanitized/action@0000000000000000000000000000000000000000"),
+))
+for index in range(len(profile["steps"])):
+    drift(
+        f"step-{index}",
+        lambda c, position=index: c["observation"]["jobPages"][0]["jobs"][0][
+            "steps"
+        ][position].__setitem__(
+            "conclusion",
+            "failure"
+            if c["observation"]["jobPages"][0]["jobs"][0]["steps"][position][
+                "conclusion"
+            ] != "failure" else "success",
+        ),
+    )
+
+drift("log-member", lambda c: c["observation"].__setitem__(
+    "attemptLog", archive({
+        "0_rollout.txt": log_text.encode() + b"\nPRIVATE_FIXTURE_CANARY\n",
+        "rollout/system.txt": b"sanitized runner metadata\n",
+    }),
+))
+drift("log-denial", lambda c: c["profile"].__setitem__(
+    "denial", "sanitized different denial",
+))
+drift("log-source-order", lambda c: c["profile"].__setitem__(
+    "protected_read", "sanitized absent protected read",
+))
+drift("cleanup-hash", lambda c: c["profile"].__setitem__(
+    "cleanup_outside_sha256", "0" * 64,
+))
+
+def rebind_log(case, text):
+    files = {
+        "0_rollout.txt": text.encode(),
+        "rollout/system.txt": b"sanitized runner metadata\n",
+    }
+    case["observation"]["attemptLog"] = archive(files)
+    case["profile"]["log_members"] = {
+        name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()
+    }
+    body, outside = m._failed_held_step_lines(
+        text, case["observation"]["jobPages"][0]["jobs"][0]["steps"][23],
+        "sanitized rebind", "##[group]Run set -euo pipefail",
+    )
+    _, cleanup = m._failed_held_step_lines(
+        text, case["observation"]["jobPages"][0]["jobs"][0]["steps"][36],
+        "sanitized rebind",
+        "##[group]Run ./infra/oci/scripts/configure-k3s-access.sh cleanup",
+    )
+    case["profile"]["lock_source_sha256"] = hashlib.sha256(
+        "\n".join(body).encode(),
+    ).hexdigest()
+    case["profile"]["lock_outside_sha256"] = hashlib.sha256(
+        "\n".join(outside).encode(),
+    ).hexdigest()
+    case["profile"]["cleanup_outside_sha256"] = hashlib.sha256(
+        "\n".join(cleanup).encode(),
+    ).hexdigest()
+
+drift("domain-mutation", lambda c: rebind_log(
+    c, log_text + logged(
+        "2026-10-17T10:35:56.0000000Z",
+        "shared_mongo_lock=release sanitized status=PASS",
+    ),
+))
+drift("cleanup-unresolved", lambda c: rebind_log(
+    c, log_text.replace(
+        "k3s_access_cleanup=PASS",
+        "k3s_access_cleanup=PASS\n"
+        "2026-10-17T10:35:29.4000000Z cleanup unresolved",
+    ),
+))
+
+artifact_mutations = (
+    ("artifact-id", lambda a: a.__setitem__("id", 9999)),
+    ("artifact-node", lambda a: a.__setitem__("node_id", "SANITIZED_DRIFT")),
+    ("artifact-name", lambda a: a.__setitem__("name", "sanitized-drift")),
+    ("artifact-size", lambda a: a.__setitem__("size_in_bytes", a["size_in_bytes"] + 1)),
+    ("artifact-digest", lambda a: a.__setitem__("digest", "sha256:" + "0" * 64)),
+    ("artifact-expired", lambda a: a.__setitem__("expired", True)),
+    ("artifact-expiry", lambda a: a.__setitem__("expires_at", "2026-10-17T10:35:27Z")),
+    ("artifact-owner", lambda a: a["workflow_run"].__setitem__("id", profile["run_id"] + 1)),
+)
+for name, mutation in artifact_mutations:
+    drift(
+        name,
+        lambda c, change=mutation: change(
+            c["observation"]["artifactPages"][0]["artifacts"][0],
+        ),
+    )
+drift("artifact-recollection", lambda c: c["observation"]["archives"].__setitem__(
+    str(baseline_artifact[0]), c["observation"]["archives"][
+        str(baseline_artifact[0])
+    ] + b"sanitized drift",
+))
+
+def rebind_artifact(case, index, files, expected_members):
+    raw = archive(files)
+    items = list(case["profile"]["artifacts"])
+    current = list(items[index])
+    current[3] = len(raw)
+    current[4] = hashlib.sha256(raw).hexdigest()
+    items[index] = tuple(current)
+    case["profile"]["artifacts"] = tuple(items)
+    case["profile"][expected_members] = {
+        name: hashlib.sha256(content).hexdigest()
+        for name, content in files.items()
+    }
+    case["observation"]["artifactPages"][0]["artifacts"][index] = \
+        artifact_metadata(items[index])
+    case["observation"]["archives"][str(items[index][0])] = raw
+
+def bad_checksum(case):
+    files = dict(baseline_files)
+    files[baseline_prefix + "SHA256SUMS"] = b"sanitized malformed checksum\n"
+    rebind_artifact(case, 0, files, "baseline_members")
+
+def bad_lock(case):
+    files = dict(baseline_files)
+    value = json.loads(files["_temp/pre-runtime-lock.json"])
+    value["data"]["source-sha"] = "0" * 40
+    files["_temp/pre-runtime-lock.json"] = json.dumps(
+        value, sort_keys=True,
+    ).encode()
+    rebind_artifact(case, 0, files, "baseline_members")
+
+def changed_lock(case, key, value):
+    files = dict(baseline_files)
+    lock = json.loads(files["_temp/pre-runtime-lock.json"])
+    lock["data"][key] = value
+    files["_temp/pre-runtime-lock.json"] = json.dumps(
+        lock, sort_keys=True,
+    ).encode()
+    rebind_artifact(case, 0, files, "baseline_members")
+
+def substituted_baseline(case):
+    files = dict(baseline_files)
+    files[baseline_prefix + "images.tsv"] = b"resealed substituted images\n"
+    selected = {
+        name.removeprefix(baseline_prefix): raw
+        for name, raw in files.items()
+        if name.startswith(baseline_prefix)
+        and not name.endswith("/SHA256SUMS")
+    }
+    files[baseline_prefix + "SHA256SUMS"] = manifest(selected)
+    rebind_artifact(case, 0, files, "baseline_members")
+
+def changed_authority(case, key, value):
+    files = dict(rollout_files)
+    values = dict(resume_values)
+    values[key] = value
+    files["resume-authority.env"] = env_bytes(values)
+    rebind_artifact(case, 1, files, "rollout_members")
+
+def unexpected_outer_member(case):
+    files = dict(baseline_files)
+    files["sanitized/unexpected-member.txt"] = b"sanitized\n"
+    rebind_artifact(case, 0, files, "baseline_members")
+
+def forbidden_rollout_member(case):
+    files = dict(rollout_files)
+    files["transfer-journal.json"] = b'{"sanitized":true}\n'
+    raw = archive(files)
+    items = list(case["profile"]["artifacts"])
+    current = list(items[1])
+    current[3] = len(raw)
+    current[4] = hashlib.sha256(raw).hexdigest()
+    items[1] = tuple(current)
+    case["profile"]["artifacts"] = tuple(items)
+    case["observation"]["artifactPages"][0]["artifacts"][1] = \
+        artifact_metadata(items[1])
+    case["observation"]["archives"][str(items[1][0])] = raw
+
+for name, mutation in (
+    ("checksum", bad_checksum),
+    ("lock", bad_lock),
+    ("baseline-substitution", substituted_baseline),
+    ("lock-holder", lambda c: changed_lock(c, "holder", "live-data-999-1")),
+    ("lock-fencing", lambda c: changed_lock(c, "fencing-generation", "8")),
+    ("member", unexpected_outer_member),
+    ("forbidden-rollout-member", forbidden_rollout_member),
+):
+    drift(name, mutation)
+
+for authority_key, replacement in (
+    ("applied_data_run_id", "7302"),
+    ("applied_source_sha", "0" * 40),
+    ("baseline_sha256", "1" * 64),
+    ("runtime_images_sha256", "2" * 64),
+    ("disk_checkpoint_sha256", "3" * 64),
+    ("disk_checkpoint_disposition", "READY_RECLAIMED"),
+    ("held_handoff_evidence_sha256", "4" * 64),
+):
+    drift(
+        f"authority-{authority_key}",
+        lambda c, key=authority_key, value=replacement:
+            changed_authority(c, key, value),
+    )
+for active, successor_state in ((False, "completed"), (True, "in-progress")):
+    for relation, value in (
+        ("equal", "2026-10-17T10:35:57Z"),
+        ("after", "2026-10-17T10:35:56Z"),
+    ):
+        drift(
+            f"cutoff-{successor_state}-{relation}",
+            lambda c, enabled=active, timestamp=value: (
+                c.__setitem__("active", enabled),
+                c.__setitem__("cutoff", m.parse_timestamp(timestamp, "fixture")),
+            ),
+        )
+with patch.object(m, "history_worker_context", return_value=object()):
+    rejected(lambda: m._validate_failed_held_continuation_observation(
+        base["profile"]["repository"], base["row"], base["held"],
+        base["subject"], base["dispatch"], base["cutoff"], base["active"],
+        base["profile"], base["reader"], base["observation"], base["semantic"],
+    ))
+
+def top_level(observations):
+    case = copy.deepcopy(base)
+    def git_reader(label, *arguments):
+        path = arguments[-1].split(":", 1)[1]
+        return (case["localClosure"][path] + "\n").encode()
+    def source_reader(repository, control, path, label):
+        return (
+            case["workflowSource"]
+            if path == ".github/workflows/oci-live-data-rollout.yml"
+            else "sanitized policy source\n"
+        )
+    with patch.object(m, "_failed_held_continuation_profile", return_value=case["profile"]), \
+         patch.object(m, "validate_descendant_scope"), \
+         patch.object(m, "_failed_held_current_reader", return_value=case["reader"]) as current, \
+         patch.object(
+             m, "_collect_failed_held_continuation_observation",
+             side_effect=observations,
+         ) as collected, \
+         patch.object(m, "history_worker_context", return_value=None), \
+         patch.object(m, "_failed_held_git", side_effect=git_reader), \
+         patch.object(m, "held_source_bytes", side_effect=source_reader), \
+         patch.object(m, "provenance_read_authority", return_value=authority), \
+         patch.object(
+             m.subprocess, "run",
+             return_value=subprocess.CompletedProcess([], 0, policy_json, ""),
+         ), \
+         patch.object(m.time, "time", return_value=now):
+        m.validate_failed_held_continuation_history(
+            case["profile"]["repository"], case["row"], case["held"],
+            case["subject"], case["dispatch"], case["cutoff"], case["active"],
+            case["semantic"],
+        )
+        assert current.call_count == 2 and collected.call_count == 2
+
+top_level([copy.deepcopy(observation), copy.deepcopy(observation)])
+changed_observation = copy.deepcopy(observation)
+changed_observation["workflow"]["state"] = "active"
+rejected(lambda: top_level([
+    copy.deepcopy(observation), changed_observation,
+]))
+
+def real_collector(log_payloads):
+    case = copy.deepcopy(base)
+    attempt_reads = []
+    artifact_reads = []
+    payloads = iter(log_payloads)
+    endpoint = (
+        f"repos/{profile['repository']}/actions/runs/{profile['run_id']}"
+    )
+    def api(path):
+        if path == endpoint:
+            return copy.deepcopy(observation["run"])
+        if path == endpoint + "/attempts/1":
+            return copy.deepcopy(observation["attempt"])
+        if path.endswith(f"/actions/workflows/{profile['workflow_id']}"):
+            return copy.deepcopy(observation["workflow"])
+        if path == endpoint + "/pending_deployments?per_page=100":
+            return []
+        if path == endpoint + "/approvals?per_page=100":
+            return copy.deepcopy(observation["approvals"])
+        if "/git/commits/" in path:
+            return copy.deepcopy(observation["commit"])
+        if "/git/trees/" in path:
+            return copy.deepcopy(observation["tree"])
+        raise AssertionError(path)
+    def pages(path):
+        if path.endswith("/attempts/1/jobs?per_page=100"):
+            return copy.deepcopy(observation["jobPages"])
+        if path.endswith("/artifacts?per_page=100"):
+            return copy.deepcopy(observation["artifactPages"])
+        raise AssertionError(path)
+    def download(path):
+        if path.endswith("/attempts/1/logs"):
+            attempt_reads.append(path)
+            value = next(payloads)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        artifact_reads.append(path)
+        artifact_id = path.rsplit("/", 2)[-2]
+        return observation["archives"][artifact_id]
+    def git_reader(label, *arguments):
+        path = arguments[-1].split(":", 1)[1]
+        return (case["localClosure"][path] + "\n").encode()
+    def source_reader(repository, control, path, label):
+        return (
+            case["workflowSource"]
+            if path == ".github/workflows/oci-live-data-rollout.yml"
+            else "sanitized policy source\n"
+        )
+    cache = m.ImmutableBindingBytes({"fixture": "failed-held-recollection"})
+    token = m.BYTE_CONTEXT.set(cache)
+    try:
+        with patch.object(m, "_failed_held_continuation_profile", return_value=case["profile"]), \
+             patch.object(m, "validate_descendant_scope"), \
+             patch.object(m, "_failed_held_current_reader", return_value=case["reader"]), \
+             patch.object(m, "gh_api", side_effect=api), \
+             patch.object(m, "gh_api_pages", side_effect=pages), \
+             patch.object(m, "download_api_bytes", side_effect=download), \
+             patch.object(m, "history_worker_context", return_value=None), \
+             patch.object(m, "_failed_held_git", side_effect=git_reader), \
+             patch.object(m, "held_source_bytes", side_effect=source_reader), \
+             patch.object(m, "provenance_read_authority", return_value=authority), \
+             patch.object(
+                 m.subprocess, "run",
+                 return_value=subprocess.CompletedProcess([], 0, policy_json, ""),
+             ), \
+             patch.object(m.time, "time", return_value=now):
+            m.validate_failed_held_continuation_history(
+                case["profile"]["repository"], case["row"], case["held"],
+                case["subject"], case["dispatch"], case["cutoff"], case["active"],
+                case["semantic"],
+            )
+    finally:
+        m.BYTE_CONTEXT.reset(token)
+    return attempt_reads, artifact_reads
+
+attempt_reads, artifact_reads = real_collector([
+    observation["attemptLog"], observation["attemptLog"],
+])
+assert len(attempt_reads) == 2 and len(artifact_reads) == 2
+changed_log = archive({
+    "0_rollout.txt": log_text.encode() + b"\nsanitized second collection drift\n",
+    "rollout/system.txt": b"sanitized runner metadata\n",
+})
+rejected(lambda: real_collector([
+    observation["attemptLog"], changed_log,
+]))
+rejected(lambda: real_collector([
+    observation["attemptLog"],
+    SystemExit("PRIVATE_FIXTURE_CANARY second recollection failure"),
+]), leak="PRIVATE_FIXTURE_CANARY")
+
+route_held = dict(
+    held,
+    path=".github/workflows/oci-live-data-rollout.yml",
+    head_repository={"full_name": profile["repository"]},
+)
+route_row = dict(
+    row,
+    head_repository={"full_name": profile["repository"]},
+)
+route_page = {
+    "total_count": 2,
+    "workflow_runs": [route_held, route_row],
+}
+def route(fixed_effect=None, selected_row=route_row):
+    page = {
+        "total_count": 2,
+        "workflow_runs": [copy.deepcopy(route_held), copy.deepcopy(selected_row)],
+    }
+    def source_process(command, **kwargs):
+        if command[:2] == ["git", "show"]:
+            return subprocess.CompletedProcess(command, 0, "sanitized policy\n", "")
+        assert command == ["bash", "-s", "--", "workflows"]
+        return subprocess.CompletedProcess(
+            command, 0, "oci-live-data-rollout.yml\n", "",
+        )
+    with patch.object(m.subprocess, "run", side_effect=source_process), \
+         patch.object(m, "native_api_batch", return_value=[[[page][0]]]), \
+         patch.object(
+             m, "validate_failed_held_continuation_history",
+             side_effect=fixed_effect,
+         ) as fixed:
+        result = m.held_handoff_history(
+            profile["repository"], route_held, subject,
+            dispatch_inputs=fresh_inputs,
+            failed_continuation_semantic=semantic,
+        )
+        return result, fixed
+
+route_result, fixed = route()
+assert route_result["workflow_counts"] == {"oci-live-data-rollout.yml": 2}
+assert fixed.call_count == 1
+assert fixed.call_args.args[4] == fresh_inputs
+try:
+    route(RuntimeError("sanitized fixed-profile rejection"))
+except RuntimeError as error:
+    assert str(error) == "sanitized fixed-profile rejection"
+else:
+    raise AssertionError("fixed-profile rejection fell through to another classifier")
+unrelated = dict(route_row, id=profile["run_id"] + 1)
+try:
+    _, unrelated_fixed = route(selected_row=unrelated)
+except SystemExit:
+    pass
+else:
+    raise AssertionError("unrelated failed continuation was accepted")
+
+print(
+    "PASS sanitized frozen failed-continuation fixture, one-field drift matrix, "
+    "double recollection, cutoff, worker and no-fallback routing"
+)
+PY
+ok "frozen failed held-continuation history profile"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib
