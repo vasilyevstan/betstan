@@ -8037,6 +8037,15 @@ for name, mutation in (
         ),
     ),
     (
+        "pending-deployment",
+        lambda c: c["observation"]["pending"].append({
+            "environment": {
+                "id": 1,
+                "name": "sanitized-pending-environment",
+            },
+        }),
+    ),
+    (
         "approval",
         lambda c: c["observation"]["approvals"][0].__setitem__(
             "comment", "sanitized approval drift",
@@ -8276,9 +8285,11 @@ with observation_environment(
     else:
         raise AssertionError("artifact closure rejection was swallowed")
 
+assert observation_rejections + 1 == 100, \
+    "real observation rejection matrix changed"
 print(
     "pre_cas_real_observation_validator=PASS "
-    f"acceptances=1 rejections={observation_rejections + 1} "
+    "acceptances=1 rejections=100 "
     "inputs=16 all_steps=true artifact_closure=real"
 )
 
