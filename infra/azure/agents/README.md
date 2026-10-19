@@ -430,11 +430,26 @@ the same bytecode protection before either dynamic import so a later strict
 reader still sees a genuinely clean checkout. Tracked, untracked,
 `__pycache__`, `.pyc`, and `.pyo` dirt remain rejection conditions.
 
-Neither frozen profile grants new dispatch, approval, mutation, transfer,
+`oci-failed-continue-held-handoff-pre-cas-no-domain-mutation-v1` freezes the
+reviewed first-attempt continuation that completed provider/runtime reads and
+rollback capture, then rejected the local-versus-fresh authority comparison
+before lock CAS or domain mutation. Each validation performs two uncached,
+canonically equal native collections and authenticates the exact eight-run
+transitive artifact inventory, including the clean-reader run's exact zero
+artifacts and byte-identical held/current rollback baselines. The deadline is
+derived only from those immutable descriptors: the strict earliest expiry is
+`2026-11-06T05:36:55Z`, and equality, expiry drift, or a later retention
+extension blocks. There is no fallback and this executed run is not eligible
+for zero-execution retirement.
+
+None of the three frozen profiles grants new dispatch, approval, mutation, transfer,
 deployment, cleanup, retirement, or rollback authority. Exact routing for the
-earlier profile is unchanged; the second profile is terminal on rejection, and
-every other failure continues through the existing expired-receiver classifier.
-Keep both readers and the bytecode-safe import behavior forward-only after
+earlier profiles is unchanged; the second and third profiles are terminal on
+rejection, and every other failure continues through the existing
+expired-receiver classifier. Recovery requires a fresh exact-current-`master`
+request whose `controlSha`, `subjectSha`, and `inputs.approved_sha` alone move
+to that commit while the authenticated continuation inputs remain fixed. Keep
+all readers and the bytecode-safe import behavior forward-only after
 reliance, or replace them through another reviewed forward correction.
 
 Fresh physical admission precedes snapshot-bound release and `acquire-released`.

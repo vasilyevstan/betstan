@@ -588,22 +588,42 @@ remain in complete history and require their separate, double-observed native
 no-execution proof against a frozen reviewed workflow source. These caller and
 source-profile capabilities ship together; rollback retains them or fails closed.
 
-Two separate frozen, exact, read-only no-domain-mutation profiles authenticate
+Three separate frozen, exact, read-only no-domain-mutation profiles authenticate
 distinct historical records. `oci-failed-continue-held-handoff-no-domain-mutation-v1`
 covers the prior pre-transfer protected-read failure; it proves that temporary
 access closed and treats artifact expiry as a hard stop rather than claiming
 zero external activity. `oci-failed-continue-held-handoff-clean-reader-v1`
 covers the later first-attempt preflight validation failure, before provider
 access or domain mutation.
+`oci-failed-continue-held-handoff-pre-cas-no-domain-mutation-v1` authenticates
+run `39229920454` as an executed first attempt that completed read-only
+provider/runtime checks and rollback capture, then failed before lock
+compare-and-swap or domain mutation.
 
-The later profile qualifies only when two independently collected complete
-observations agree exactly. It binds the exact failed-step boundary and every
-required skip outcome, an empty pending inventory, complete paginated
+The clean-reader profile qualifies only when two independently collected
+complete observations agree exactly. It binds the exact failed-step boundary
+and every required skip outcome, an empty pending inventory, complete paginated
 zero-artifact count and list plus both always-run uploads' no-file diagnostics,
 and the source, inputs, lineage, and complete logs. The record must finish
 strictly before the successor cutoff, and the logs may contain no
 domain-mutation or deployment markers. Missing, incomplete, or drifting
 evidence fails closed.
+
+The pre-CAS profile requires two fresh, complete, uncached collections of its
+selected transitive artifact inventories at each existing preparation and
+pre-dispatch/CAS validation boundary. This includes positive count-and-list
+proof for one historical run with zero artifacts. Exact descriptors include
+`expires_at`; a missing, expired, replaced or copied artifact, an earlier or
+later expiry, or count/list, ownership, digest or content drift blocks. The
+deadline comes only from the immutable selected descriptors and has the current
+hard upper bound `2026-11-06T05:36:55Z`. Equality or a later time blocks, and a
+provider retention refresh cannot extend authority.
+
+The shared validator's seven-field held-resume result now includes its
+already-validated `failed_deploy_run_id`; the unchanged workflow continues to
+compare the complete tuple before transfer. A later fresh request changes only
+`controlSha`, `subjectSha`, and `inputs.approved_sha`; the historical tuple
+remains fixed.
 
 Dynamic authority imports are bytecode-safe inside the history validator and
 in the evidence verifier, so validation does not dirty a writable Linux
@@ -612,14 +632,19 @@ constructed and executed, then restores the prior interpreter setting; the
 short-lived verifier enables the same protection before its imports. Genuine
 tracked, untracked, `__pycache__`, `.pyc`, or `.pyo` dirt still rejects.
 
-Neither profile grants dispatch, approval, lock, mutation, deployment,
-activation, rollback, or generic failure authority. The historical failed runs
-remain terminal and are never rerunnable; unrelated failures keep the existing
-expired-receiver route. Forward recovery still requires a fresh first-attempt
-continuation from clean exact current `master`, with every physical-state,
-lease, fence, compare-and-swap, and timing check unchanged. After successful
-reliance, rollback must retain both exact profiles and bytecode-safe loading or
-use a reviewed forward correction.
+None of the three profiles grants dispatch, approval, lock, mutation,
+deployment, activation, rollback, or generic failure authority. The historical
+failed runs remain terminal and are never rerunnable; unrelated failures keep
+the existing expired-receiver route. Run `39229920454` is immutable executed
+history and has no generic fallback: it must not be deleted, excluded, or
+treated as zero execution, and it is not eligible for zero-execution
+retirement. Forward recovery still requires a fresh first-attempt continuation
+from clean exact current `master`, with every physical-state, lease, fence,
+compare-and-swap, and timing check unchanged. The workflow and dispatcher are
+unchanged; this is forward-only reader/profile behavior. Rollback to a reader
+without the third profile and deadline contract is prohibited; retain all
+three exact profiles and bytecode-safe loading or use a reviewed forward
+correction.
 
 An ancestor's expired-receiver classification is historical provenance, not
 current held-transfer authority. The original applied root, authenticated baseline

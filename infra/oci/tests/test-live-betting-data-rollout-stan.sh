@@ -4083,22 +4083,166 @@ cp "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" \
   "$resume_fixture/infra/oci/scripts/upstream_run_binding_stan.py"
 mkdir -p "$resume_fixture/artifacts/oci-live-data-rollout/evidence"
 python3 - "$resume_fixture" <<'PY'
-import hashlib, json, pathlib, sys
+import hashlib, importlib.util, json, pathlib, sys
+from unittest.mock import patch
+
 root = pathlib.Path(sys.argv[1])
+script = root / "infra/oci/scripts/upstream_run_binding_stan.py"
 baseline = root / "artifacts/oci-data-baseline-before"
+
+spec = importlib.util.spec_from_file_location("real_upstream_binding", script)
+validator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(validator)
+
 (baseline / "live-images.tsv").write_bytes((baseline / "live-images-template.tsv").read_bytes())
+(baseline / "baseline-provenance.env").write_text("".join(
+    f"{key}={'betstan-oci' if key == 'namespace' else 'sanitized-fixture'}\n"
+    for key in sorted(validator.BASELINE_PROVENANCE_KEYS)
+))
 manifest = "".join(
     f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
     for path in sorted(baseline.iterdir()) if path.name != "SHA256SUMS")
 (baseline / "SHA256SUMS").write_text(manifest)
-authority = {
-    "current_source_sha": "2" * 40, "applied_data_run_id": "3999",
-    "applied_source_sha": "1" * 40, "failed_deploy_run_id": "4000",
-    "baseline_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
-    "held_handoff_run_id": "4008", "held_handoff_source_sha": "3" * 40,
-    "held_handoff_evidence_sha256": "a" * 64,
+
+baseline_files = {
+    path.name: path.read_bytes()
+    for path in baseline.iterdir() if path.is_file()
 }
-(root / "fresh-authority.json").write_text(json.dumps(authority))
+image_bytes = baseline_files["images.tsv"]
+checkpoint = {
+    "sourceSha": "1" * 40,
+    "contentChecksumSha256": "8" * 64,
+    "disposition": "READY_NO_RECLAIM",
+}
+dispatch = {
+    "approved_sha": "2" * 40,
+    "resume_source_sha": "1" * 40,
+    "build_run_id": "42",
+    "infrastructure_run_id": "44",
+    "checkpoint_source_sha": checkpoint["sourceSha"],
+    "disk_checkpoint_run_id": "45",
+    "phase": "apply-slip-index",
+    "prerequisite_run_id": "4007",
+    "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none",
+    "failed_deploy_run_id": "4000",
+    "failed_activation_run_id": "0",
+    "failed_activation_user_id": "0",
+    "confirmation": validator.HELD_HANDOFF_CONFIRMATION,
+    "held_handoff_run_id": "4008",
+    "held_handoff_source_sha": "3" * 40,
+}
+resume_values = {
+    "schema_version": "live-betting-data-resume-v2",
+    "applied_data_run_id": "3999",
+    "applied_source_sha": "1" * 40,
+    "failed_deploy_run_id": dispatch["failed_deploy_run_id"],
+    "resume_maintenance_mode": "pre-runtime-hold",
+    "failed_deploy_job_conclusion": "failure",
+    "public_validate_job_conclusion": "skipped",
+    "lock_release_step_conclusion": "skipped",
+    "fence_release_step_conclusion": "skipped",
+    "rehold_step_conclusion": "skipped",
+    "failed_activation_run_id": "0",
+    "current_source_sha": dispatch["held_handoff_source_sha"],
+    "baseline_sha256": validator.validate_checksum_manifest(
+        baseline_files, "real validator fixture",
+    ),
+    "runtime_images_sha256": hashlib.sha256(image_bytes).hexdigest(),
+    "checkpoint_source_sha": checkpoint["sourceSha"],
+    "disk_checkpoint_run_id": dispatch["disk_checkpoint_run_id"],
+    "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+    "disk_checkpoint_disposition": checkpoint["disposition"],
+    "application_change_scope": "github-infra-docs-only",
+    "status": "PASS",
+}
+held_files = {
+    "resume-authority.env": "".join(
+        f"{key}={value}\n" for key, value in resume_values.items()
+    ).encode(),
+    "provenance.env": b"sanitized real-validator fixture\n",
+    "schema.env": b"sanitized real-validator fixture\n",
+    "journal.json": b"{}\n",
+}
+for stage in ("preflight", "apply", "verify"):
+    for service in (
+        "event", "gamemaster", "moderation", "resulting", "bet", "slip",
+    ):
+        held_files[f"reports/{stage}-{service}.json"] = b"{}\n"
+    held_files[
+        f"reports/{stage}-backoffice-pre-september-cleanup.json"
+    ] = b"{}\n"
+for stage in ("preflight", "apply", "verify", "final"):
+    held_files[f"reports/{stage}-slip-index.json"] = b"{}\n"
+held_files["reports/preflight-event-reschedule.json"] = b"{}\n"
+held_files["SHA256SUMS"] = b"sanitized package seal\n"
+evidence = {
+    "checkpoint_source_sha": checkpoint["sourceSha"],
+    "disk_checkpoint_run_id": dispatch["disk_checkpoint_run_id"],
+    "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+    "disk_checkpoint_disposition": checkpoint["disposition"],
+}
+root_resume = {
+    "applied_data_run_id": resume_values["applied_data_run_id"],
+    "applied_source_sha": resume_values["applied_source_sha"],
+    "baseline_capture_run_id": dispatch["prerequisite_run_id"],
+    "_baseline_files": baseline_files,
+}
+held_metadata = {
+    "created_at": "2026-10-19T09:00:00Z",
+    "updated_at": "2026-10-19T09:30:00Z",
+    "_held_complete": False,
+}
+with patch.object(
+    validator, "validate_descendant_scope",
+), patch.object(
+    validator, "validate_held_handoff_native",
+    return_value=held_metadata,
+), patch.object(
+    validator, "parse_live_v6_artifact",
+    return_value=(evidence, "a" * 64, held_files),
+), patch.object(
+    validator, "validate_failed_deploy_jobs",
+    return_value=("skipped", "skipped", "skipped"),
+), patch.object(
+    validator, "validate_failed_deploy_artifacts",
+    return_value=root_resume,
+), patch.object(
+    validator, "parse_checkpoint_artifact",
+    return_value=checkpoint,
+), patch.object(
+    validator, "validate_live_v6_lineage",
+), patch.object(
+    validator, "exact_artifact",
+    return_value={"id": 4200},
+), patch.object(
+    validator, "artifact_member",
+    return_value=image_bytes,
+), patch.object(
+    validator, "validate_held_handoff_reports",
+), patch.object(
+    validator, "held_handoff_history",
+    return_value={"sanitized": "history"},
+):
+    validated = validator.validate_held_handoff_artifact(
+        "example/repo", "4008", dispatch["held_handoff_source_sha"],
+        dispatch["approved_sha"], dispatch, "k3s", "real validator fixture",
+        successor_run_id="901",
+    )
+resume_fields = (
+    "applied_data_run_id", "applied_source_sha", "failed_deploy_run_id",
+    "baseline_sha256", "held_handoff_run_id", "held_handoff_source_sha",
+    "held_handoff_evidence_sha256",
+)
+fresh_authority = {
+    key: validated["resume"][key] for key in resume_fields
+}
+assert tuple(fresh_authority) == resume_fields
+authority = {
+    "current_source_sha": dispatch["approved_sha"],
+    **fresh_authority,
+}
+(root / "fresh-authority.json").write_text(json.dumps(fresh_authority))
 (root / "live-data-upstream-result.json").write_text(json.dumps({
     "held_handoff_run_id": {"held_handoff_lease_seconds": "1800"}}))
 (root / "artifacts/prerequisite/provenance.env").write_text(
@@ -4128,7 +4272,6 @@ for service, _, image, manifest, platform in (
                                               "imageID": "fixture@" + manifest}]}})
 (root / "fresh-deployments.json").write_text(json.dumps({"items": deployments}))
 (root / "fresh-pods.json").write_text(json.dumps({"items": pods}))
-script = root / "infra/oci/scripts/upstream_run_binding_stan.py"
 body = script.read_text()
 entry = '''if __name__ == "__main__":
     if sys.argv[1:2] != ["validate-all"]:
@@ -4144,9 +4287,13 @@ entry = '''if __name__ == "__main__":
         assert arguments["--successor-run-id"] == "901"
         assert json.loads(arguments["--policy-json"])["operation"] == "oci-live-data-continue-held-handoff"
         assert json.loads(arguments["--dispatch-inputs"])["approved_sha"] == "2" * 40
-        if os.environ.get("RESUME_LOCK_FAILURE") in {"authority", "receiver"}:
+        if os.environ.get("RESUME_LOCK_FAILURE") == "authority":
             raise SystemExit("fixture fresh owned-successor authority rejection")
         facts = json.loads((root / "fresh-authority.json").read_text())
+        if os.environ.get("RESUME_LOCK_FAILURE") == "receiver-missing":
+            facts.pop("failed_deploy_run_id")
+        elif os.environ.get("RESUME_LOCK_FAILURE") == "receiver-wrong":
+            facts["failed_deploy_run_id"] = "4999"
         lock = json.loads((root / "pre-runtime-lock.json").read_text())["data"]
         facts.update(held_handoff_lease_until_epoch=lock["lease-until-epoch"],
                      held_handoff_fencing_generation=lock["fencing-generation"],
@@ -4236,7 +4383,7 @@ run_held_acquire() {
 }
 for predecessor_seconds in 1800 3600; do
 for lease in expired live; do
-  for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation authority receiver workflow master policy disk; do
+  for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation authority receiver-missing receiver-wrong workflow master policy disk; do
     rm -rf "$resume_fixture/held-pre-transfer"
     rm -f "$resume_fixture/pre-runtime-lock.json" \
       "$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
@@ -4286,12 +4433,17 @@ if failure != "exclusive":
         expected.extend(["validate-baseline", "maintenance:verify-held"])
         if failure not in {"master", "workflow", "policy"}:
             expected.append("authority:pre-cas")
-early = failure in {"exclusive", "drift", "uid", "generation", "authority", "receiver",
-                    "workflow", "master", "policy", "disk"}
+early = failure in {
+    "exclusive", "drift", "uid", "generation", "authority",
+    "receiver-missing", "receiver-wrong", "workflow", "master", "policy", "disk",
+}
 if not early: expected.append("release")
 if failure in {"none", "acquire", "acquire-ambiguous", "verify"}: expected.append("acquire-released")
 if failure in {"none", "verify"}: expected.append("verify")
 assert events == expected, (failure, events)
+if failure in {"receiver-missing", "receiver-wrong"}:
+    assert events[-1] == "authority:pre-cas"
+    assert not {"release", "acquire-released", "verify"} & set(events)
 record = root / "artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
 if early:
     assert not record.exists()
