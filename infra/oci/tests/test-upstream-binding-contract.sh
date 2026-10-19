@@ -7535,6 +7535,753 @@ with patch.object(
         copy.deepcopy(observation), historical, semantic, synthetic["name"],
     ))
 
+class ObservationAuthority:
+    REQUEST_SCHEMA = "sanitized-request-v1"
+
+    @staticmethod
+    def canonical_input_hash(inputs):
+        return hashlib.sha256(json.dumps(
+            list(inputs.items()), ensure_ascii=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+
+    @classmethod
+    def validate_request_data(cls, request, policy, repository, control):
+        if (
+            request["repository"] != repository
+            or request["controlSha"] != control
+            or request["subjectSha"] != control
+            or request["targetSha"] is not None
+            or request["operation"] != policy["operation"]
+            or list(request["inputs"]) != policy["inputNames"]
+        ):
+            raise ValueError("sanitized request mismatch")
+        return {
+            "dispatchInputs": request["inputs"],
+            "inputHash": cls.canonical_input_hash(request["inputs"]),
+        }
+
+def archive_files(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for name, raw in sorted(files.items()):
+            bundle.writestr(name, raw)
+    return output.getvalue()
+
+def logged(at, value):
+    return f"{at} {value}\n"
+
+authority = ObservationAuthority()
+observation_profile = copy.deepcopy(synthetic)
+observation_subject = "f" * 40
+observation_historical = {
+    "approved_sha": observation_profile["control"],
+    "resume_source_sha": "391604c0fb35daa30ac72b92724d147d57d41371",
+    "build_run_id": "37576331905",
+    "infrastructure_run_id": "37582984293",
+    "checkpoint_source_sha": "1bf86112ba2458161e6039091b1aa6289fdfce1d",
+    "disk_checkpoint_run_id": "37582984293",
+    "phase": "apply-slip-index",
+    "prerequisite_run_id": "38365002118",
+    "baseline_recovery_run_id": "0",
+    "baseline_recovery_source_sha": "none",
+    "failed_deploy_run_id": "38373163613",
+    "failed_activation_run_id": "0",
+    "failed_activation_user_id": "0",
+    "confirmation": m.HELD_HANDOFF_CONFIRMATION,
+    "held_handoff_run_id": str(observation_profile["held_run_id"]),
+    "held_handoff_source_sha": observation_profile["held_source"],
+}
+assert len(observation_profile["input_names"]) == 16
+assert tuple(observation_historical) == observation_profile["input_names"]
+observation_fresh = dict(
+    observation_historical, approved_sha=observation_subject,
+)
+observation_policy = {
+    "inputNames": list(observation_profile["input_names"]),
+    "operation": "oci-live-data-continue-held-handoff",
+    "environment": "oci-migration",
+    "event": "workflow_dispatch",
+    "approvalWorkflowState": "disabled_manually",
+    "subjectInput": "approved_sha",
+    "subjectRelation": "current",
+    "targetInput": None,
+    "targetRelation": "none",
+}
+
+def canonical_json(value):
+    return json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    )
+
+observation_profile["policy_sha256"] = hashlib.sha256(
+    canonical_json(observation_policy).encode(),
+).hexdigest()
+observation_profile["input_sha256"] = authority.canonical_input_hash(
+    observation_historical,
+)
+observation_profile["lineage_sha256"] = hashlib.sha256(json.dumps(
+    [
+        [
+            name,
+            "{subject_sha}" if name == "approved_sha"
+            else observation_historical[name],
+        ]
+        for name in observation_profile["input_names"]
+    ],
+    ensure_ascii=True, separators=(",", ":"),
+).encode()).hexdigest()
+
+observation_steps = [
+    {
+        "number": number,
+        "name": name,
+        "status": "completed",
+        "conclusion": conclusion,
+        "started_at": started,
+        "completed_at": completed,
+    }
+    for number, name, conclusion, started, completed
+    in observation_profile["steps"]
+]
+observation_job = {
+    **copy.deepcopy(observation_profile["job"]),
+    "steps": observation_steps,
+}
+log_text = ""
+log_text += logged(
+    "2026-10-19T10:41:46.1000000Z",
+    "##[group]Run set -euo pipefail",
+)
+log_text += logged(
+    "2026-10-19T10:41:46.2000000Z",
+    "sanitized pre-CAS lock source",
+)
+log_text += logged(
+    "2026-10-19T10:41:46.3000000Z",
+    "##[endgroup]",
+)
+log_text += logged(
+    "2026-10-19T10:46:30.1000000Z",
+    observation_profile["failure"],
+)
+log_text += logged(
+    "2026-10-19T10:46:30.2000000Z",
+    "##[error]Process completed with exit code 1.",
+)
+log_text += logged(
+    "2026-10-19T10:46:33.1000000Z",
+    "##[group]Run ./infra/oci/scripts/configure-k3s-access.sh cleanup",
+)
+log_text += logged(
+    "2026-10-19T10:46:33.2000000Z",
+    "sanitized bastion cleanup source",
+)
+log_text += logged(
+    "2026-10-19T10:46:33.3000000Z",
+    "##[endgroup]",
+)
+log_text += logged(
+    "2026-10-19T10:46:53.1000000Z",
+    "k3s_access_cleanup=PASS",
+)
+log_text += logged(
+    "2026-10-19T10:46:54.1000000Z",
+    '##[group]Run rm -rf "$RUNNER_TEMP/oci-home"',
+)
+log_text += logged(
+    "2026-10-19T10:46:54.2000000Z",
+    "sanitized client cleanup source",
+)
+log_text += logged(
+    "2026-10-19T10:46:54.3000000Z",
+    "##[endgroup]",
+)
+log_text += logged(
+    "2026-10-19T10:46:58.1000000Z",
+    "sanitized isolated client state removed",
+)
+observation_log_files = {
+    "0_rollout.txt": log_text.encode(),
+    "rollout/system.txt": b"sanitized runner metadata\n",
+}
+
+def bind_observation_log(case, text):
+    files = {
+        "0_rollout.txt": text.encode(),
+        "rollout/system.txt": observation_log_files["rollout/system.txt"],
+    }
+    case["observation"]["attemptLog"] = archive_files(files)
+    case["profile"]["log_members"] = {
+        name: hashlib.sha256(raw).hexdigest()
+        for name, raw in files.items()
+    }
+    job = case["observation"]["jobPages"][0]["jobs"][0]
+    lock_source, lock_outside = m._failed_held_step_lines(
+        text, job["steps"][23], "sanitized lock",
+        "##[group]Run set -euo pipefail",
+    )
+    bastion_source, bastion_outside = m._failed_held_step_lines(
+        text, job["steps"][36], "sanitized bastion",
+        "##[group]Run ./infra/oci/scripts/configure-k3s-access.sh cleanup",
+    )
+    client_source, client_outside = m._failed_held_step_lines(
+        text, job["steps"][37], "sanitized client",
+        '##[group]Run rm -rf "$RUNNER_TEMP/oci-home"',
+    )
+    for key, lines in (
+        ("lock_source_sha256", lock_source),
+        ("lock_outside_sha256", lock_outside),
+        ("bastion_source_sha256", bastion_source),
+        ("bastion_outside_sha256", bastion_outside),
+        ("client_source_sha256", client_source),
+        ("client_outside_sha256", client_outside),
+    ):
+        case["profile"][key] = hashlib.sha256(
+            "\n".join(lines).encode(),
+        ).hexdigest()
+
+observation_row = copy.deepcopy(observation_profile["run"])
+observation_row.pop("node_id")
+observation_row.pop("repository")
+observation_held = {
+    "id": observation_profile["held_run_id"],
+    "head_sha": observation_profile["held_source"],
+    "created_at": "2026-10-14T20:54:25Z",
+    "updated_at": "2026-10-14T22:07:29Z",
+    "workflow_id": observation_profile["workflow_id"],
+    "run_attempt": 1,
+    "event": "workflow_dispatch",
+    "head_branch": "master",
+    "status": "completed",
+    "conclusion": "success",
+    "display_title": (
+        f"oci-live-data apply-slip-index "
+        f"{observation_profile['held_source']}"
+    ),
+}
+observation_reader = {
+    "control": observation_subject,
+    "tree": "e" * 40,
+    "workflowBlob": observation_profile["workflow_blob"],
+    "policyBlob": observation_profile["policy_blob"],
+    "authorityBlob": observation_profile["authority_blob"],
+    "validatorBlob": "d" * 40,
+    "verifierBlob": observation_profile["verifier_blob"],
+}
+observation_tree = {
+    "sha": observation_profile["tree"],
+    "truncated": False,
+    "tree": [
+        {
+            "path": path,
+            "mode": "100755" if path.endswith(".sh") else "100644",
+            "type": "blob",
+            "sha": blob,
+        }
+        for path, blob in sorted(observation_profile["closure"].items())
+    ],
+}
+direct_observation = {
+    "run": copy.deepcopy(observation_profile["run"]),
+    "attempt": copy.deepcopy(observation_profile["run"]),
+    "workflow": copy.deepcopy(observation_profile["workflow"]),
+    "jobPages": [{
+        "total_count": 1,
+        "jobs": [observation_job],
+    }],
+    "pending": [],
+    "approvals": [copy.deepcopy(observation_profile["approval"])],
+    "artifactInventories": copy.deepcopy(observation["artifactInventories"]),
+    "commit": {
+        "sha": observation_profile["control"],
+        "tree": {"sha": observation_profile["tree"]},
+    },
+    "tree": observation_tree,
+    "attemptLog": archive_files(observation_log_files),
+    "archives": copy.deepcopy(observation["archives"]),
+}
+observation_semantic = {
+    "rootRunId": "7301",
+    "rootSourceSha": "a" * 40,
+    "baselineFiles": {
+        "SHA256SUMS": b"sanitized held baseline\n",
+    },
+    "imageBytes": b"sanitized authenticated image bytes\n",
+    "checkpoint": {
+        "sourceSha": observation_historical["checkpoint_source_sha"],
+        "contentChecksumSha256": "8" * 64,
+        "disposition": "READY_NO_RECLAIM",
+    },
+    "heldEvidenceSha256": "9" * 64,
+    "lockHolder": f"live-data-{observation_profile['held_run_id']}-1",
+    "lockFencingGeneration": "7",
+    "lockLeaseUntilEpoch": "1900",
+    "lockLeaseSeconds": "1800",
+    "lockNamespace": "gaming",
+}
+observation_workflow_source = "\n".join(
+    f"      uses: {action}" for action in observation_profile["actions"]
+) + "\n"
+observation_base = {
+    "repository": observation_profile["repository"],
+    "profile": observation_profile,
+    "row": observation_row,
+    "held": observation_held,
+    "subject": observation_subject,
+    "dispatch": observation_fresh,
+    "historical": observation_historical,
+    "policy": observation_policy,
+    "cutoff": m.parse_timestamp("2026-10-19T10:47:04Z", "fixture"),
+    "active": False,
+    "reader": observation_reader,
+    "observation": direct_observation,
+    "semantic": observation_semantic,
+    "workflowSource": observation_workflow_source,
+    "localClosure": dict(observation_profile["closure"]),
+}
+bind_observation_log(observation_base, log_text)
+frozen_historical = copy.deepcopy(observation_historical)
+frozen_semantic = copy.deepcopy(observation_semantic)
+frozen_held = copy.deepcopy(observation_held)
+
+@contextlib.contextmanager
+def observation_environment(case):
+    artifact_calls = []
+
+    def git_reader(label, *arguments):
+        path = arguments[-1].split(":", 1)[1]
+        return (case["localClosure"][path] + "\n").encode()
+
+    def source_reader(repository, control, path, label):
+        if path == ".github/workflows/oci-live-data-rollout.yml":
+            return case["workflowSource"]
+        if path == (
+            "infra/azure/agents/"
+            "copilot-cli-protected-operation-policy-stan.sh"
+        ):
+            return "sanitized policy source\n"
+        raise AssertionError(path)
+
+    def policy_reader(command, **kwargs):
+        assert command == [
+            "bash", "-s", "--", "get",
+            "oci-live-data-continue-held-handoff",
+        ]
+        return subprocess.CompletedProcess(
+            command, 0, canonical_json(case["policy"]), "",
+        )
+
+    def historical_reader(
+        repository, run_id, source_sha, label, **kwargs,
+    ):
+        assert repository == case["profile"]["repository"]
+        assert run_id == str(case["profile"]["run_id"])
+        assert source_sha == case["profile"]["control"]
+        assert kwargs["resume_dispatch"] is True
+        assert kwargs["native_jobs"]
+        assert kwargs["native_log_files"]
+        return copy.deepcopy(case["historical"])
+
+    def artifact_member_proof(
+        files, expected_members, historical_inputs, held_owner,
+        selected_profile, selected_semantic, label, *, baseline,
+    ):
+        if (
+            historical_inputs != frozen_historical
+            or held_owner != frozen_held
+            or selected_semantic != frozen_semantic
+            or selected_profile["run_id"]
+                != observation_profile["run_id"]
+            or selected_profile["held_run_id"]
+                != observation_profile["held_run_id"]
+            or label != observation_profile["name"]
+        ):
+            m.fail(
+                "sanitized artifact semantic, receiver, baseline, or "
+                "held-owner binding differs"
+            )
+        artifact_calls.append(baseline)
+        return {"sanitizedBaseline": baseline}
+
+    with patch.object(m, "history_worker_context", return_value=None), \
+         patch.object(m, "_failed_held_git", side_effect=git_reader), \
+         patch.object(m, "held_source_bytes", side_effect=source_reader), \
+         patch.object(m.subprocess, "run", side_effect=policy_reader), \
+         patch.object(
+             m, "failed_deploy_native_inputs",
+             side_effect=historical_reader,
+         ), \
+         patch.object(
+             m, "provenance_read_authority", return_value=authority,
+         ), \
+         patch.object(
+             m, "_failed_pre_cas_utc_now",
+             return_value=m.parse_timestamp(
+                 "2026-11-06T05:36:54Z", "sanitized clock",
+             ),
+         ), \
+         patch.object(
+             m, "_failed_held_artifact_proof",
+             side_effect=artifact_member_proof,
+         ), \
+         patch.object(
+             m, "original_before_baseline",
+             return_value=copy.deepcopy(
+                 frozen_semantic["baselineFiles"],
+             ),
+         ):
+        yield artifact_calls
+
+def qualify_observation(case):
+    with observation_environment(case) as artifact_calls, patch.object(
+        m, "_failed_pre_cas_artifact_closure",
+        wraps=m._failed_pre_cas_artifact_closure,
+    ) as artifact_closure:
+        proof = m._validate_failed_pre_cas_continuation_observation(
+            case["repository"], case["row"], case["held"],
+            case["subject"], case["dispatch"], case["cutoff"],
+            case["active"], case["profile"], case["reader"],
+            case["observation"], case["semantic"],
+        )
+        assert artifact_closure.call_count == 1, \
+            "real observation validator bypassed artifact closure"
+        assert sorted(artifact_calls) == [False, True], \
+            "real observation validator bypassed semantic artifact proofs"
+        return proof
+
+observation_proof = qualify_observation(copy.deepcopy(observation_base))
+assert observation_proof["profile"] == observation_profile["name"]
+assert observation_proof["run"] == observation_profile["run"]
+assert observation_proof["workflow"] == observation_profile["workflow"]
+assert observation_proof["job"]["steps"] == list(
+    observation_profile["steps"],
+)
+assert observation_proof["approval"] == observation_profile["approval"]
+assert observation_proof["currentReader"] == observation_reader
+assert observation_proof["tree"] == observation_profile["tree"]
+assert observation_proof["closure"] == observation_profile["closure"]
+assert observation_proof["actions"] == list(observation_profile["actions"])
+assert observation_proof["historicalInputHash"] == \
+    observation_profile["input_sha256"]
+assert observation_proof["lineageSha256"] == \
+    observation_profile["lineage_sha256"]
+assert observation_proof["logMembers"] == \
+    observation_profile["log_members"]
+assert observation_proof["artifacts"]["baselineIdentitySha256"] == \
+    hashlib.sha256(
+        frozen_semantic["baselineFiles"]["SHA256SUMS"],
+    ).hexdigest()
+
+observation_rejections = 0
+
+def observation_drift(name, mutation):
+    global observation_rejections
+    case = copy.deepcopy(observation_base)
+    mutation(case)
+    try:
+        rejected(lambda: qualify_observation(case))
+    except AssertionError as error:
+        raise AssertionError(f"real observation validator {name}: {error}") \
+            from error
+    observation_rejections += 1
+
+for name, mutation in (
+    (
+        "repository",
+        lambda c: c.__setitem__("repository", "sanitized/other"),
+    ),
+    (
+        "row",
+        lambda c: c["row"].__setitem__(
+            "id", observation_profile["run_id"] + 1,
+        ),
+    ),
+    (
+        "held-owner",
+        lambda c: c["held"].__setitem__(
+            "id", observation_profile["held_run_id"] + 1,
+        ),
+    ),
+    (
+        "held-source",
+        lambda c: c["held"].__setitem__("head_sha", "0" * 40),
+    ),
+    (
+        "run",
+        lambda c: c["observation"]["run"].__setitem__(
+            "id", observation_profile["run_id"] + 1,
+        ),
+    ),
+    (
+        "attempt",
+        lambda c: c["observation"]["attempt"].__setitem__(
+            "run_attempt", 2,
+        ),
+    ),
+    (
+        "run-repository",
+        lambda c: c["observation"]["run"]["repository"].__setitem__(
+            "id", 1,
+        ),
+    ),
+    (
+        "workflow",
+        lambda c: c["observation"]["workflow"].__setitem__(
+            "id", observation_profile["workflow_id"] + 1,
+        ),
+    ),
+    (
+        "job",
+        lambda c: c["observation"]["jobPages"][0]["jobs"][0].__setitem__(
+            "id", observation_profile["job"]["id"] + 1,
+        ),
+    ),
+    (
+        "approval",
+        lambda c: c["observation"]["approvals"][0].__setitem__(
+            "comment", "sanitized approval drift",
+        ),
+    ),
+):
+    observation_drift(name, mutation)
+
+for index in range(len(observation_profile["steps"])):
+    observation_drift(
+        f"step-{index}",
+        lambda c, position=index: c["observation"]["jobPages"][0][
+            "jobs"
+        ][0]["steps"][position].__setitem__(
+            "conclusion",
+            "failure"
+            if c["observation"]["jobPages"][0]["jobs"][0]["steps"][
+                position
+            ]["conclusion"] != "failure"
+            else "success",
+        ),
+    )
+
+for name, field, value in (
+    ("reader-control", "control", "0" * 40),
+    ("reader-tree", "tree", "not-a-sha"),
+    ("reader-workflow", "workflowBlob", "0" * 40),
+    ("reader-policy", "policyBlob", "0" * 40),
+    ("reader-authority", "authorityBlob", "0" * 40),
+    ("reader-validator", "validatorBlob", "not-a-sha"),
+    ("reader-verifier", "verifierBlob", "0" * 40),
+):
+    observation_drift(
+        name,
+        lambda c, key=field, replacement=value: c["reader"].__setitem__(
+            key, replacement,
+        ),
+    )
+
+observation_drift(
+    "historical-tree",
+    lambda c: c["observation"]["commit"]["tree"].__setitem__(
+        "sha", "0" * 40,
+    ),
+)
+observation_drift(
+    "tree-closure",
+    lambda c: c["observation"]["tree"]["tree"][0].__setitem__(
+        "sha", "0" * 40,
+    ),
+)
+first_observation_path = next(iter(observation_profile["closure"]))
+observation_drift(
+    "local-closure",
+    lambda c: c["localClosure"].__setitem__(
+        first_observation_path, "0" * 40,
+    ),
+)
+first_observation_action = observation_profile["actions"][0]
+observation_drift(
+    "action-pin",
+    lambda c: c.__setitem__(
+        "workflowSource",
+        c["workflowSource"].replace(
+            first_observation_action,
+            "sanitized/action@" + "0" * 40,
+        ),
+    ),
+)
+
+def change_policy(case):
+    case["policy"]["environment"] = "sanitized-environment"
+    case["profile"]["policy_sha256"] = hashlib.sha256(
+        canonical_json(case["policy"]).encode(),
+    ).hexdigest()
+
+observation_drift("policy", change_policy)
+
+def different_transport_value(name, value):
+    if name.endswith("_sha"):
+        return "0" * 40
+    if name == "confirmation":
+        return "SANITIZED WRONG CONFIRMATION"
+    if name == "phase":
+        return "sanitized-wrong-phase"
+    return "9" if value != "9" else "8"
+
+for input_name in observation_profile["input_names"]:
+    observation_drift(
+        f"transport-{input_name}",
+        lambda c, key=input_name: c["dispatch"].__setitem__(
+            key, different_transport_value(key, c["dispatch"][key]),
+        ),
+    )
+observation_drift(
+    "input-hash",
+    lambda c: c["profile"].__setitem__("input_sha256", "0" * 64),
+)
+observation_drift(
+    "lineage-hash",
+    lambda c: c["profile"].__setitem__("lineage_sha256", "0" * 64),
+)
+
+def change_shared_lineage(case):
+    case["historical"]["build_run_id"] = "999"
+    case["dispatch"]["build_run_id"] = "999"
+    ordered = {
+        name: case["historical"][name]
+        for name in case["profile"]["input_names"]
+    }
+    case["profile"]["input_sha256"] = authority.canonical_input_hash(
+        ordered,
+    )
+
+observation_drift("one-field-lineage", change_shared_lineage)
+
+def replace_log(case, old, new):
+    bind_observation_log(case, log_text.replace(old, new, 1))
+
+observation_drift(
+    "failure-boundary",
+    lambda c: replace_log(
+        c, observation_profile["failure"],
+        "sanitized different pre-CAS failure",
+    ),
+)
+observation_drift(
+    "error-boundary",
+    lambda c: replace_log(
+        c,
+        logged(
+            "2026-10-19T10:46:30.2000000Z",
+            "##[error]Process completed with exit code 1.",
+        ),
+        logged(
+            "2026-10-19T10:46:30.1500000Z",
+            "sanitized intervening boundary",
+        ) + logged(
+            "2026-10-19T10:46:30.2000000Z",
+            "##[error]Process completed with exit code 1.",
+        ),
+    ),
+)
+observation_drift(
+    "cleanup-boundary",
+    lambda c: replace_log(
+        c, "k3s_access_cleanup=PASS",
+        "sanitized cleanup completed",
+    ),
+)
+observation_drift(
+    "cleanup-unresolved",
+    lambda c: replace_log(
+        c, "sanitized isolated client state removed",
+        "sanitized client cleanup unresolved",
+    ),
+)
+
+for name, marker in (
+    ("forbidden-transfer", "retained_lock_transfer=sanitized"),
+    ("forbidden-cas", "record_transfer sanitized-cas"),
+    (
+        "forbidden-lock",
+        "shared_mongo_lock=acquire sanitized status=PASS",
+    ),
+    (
+        "forbidden-maintenance",
+        "live_data_maintenance=hold sanitized status=PASS",
+    ),
+    (
+        "forbidden-account",
+        "live-acceptance account demote sanitized status=PASS",
+    ),
+    (
+        "forbidden-slip",
+        "slip mutation sanitized status=PASS",
+    ),
+    (
+        "forbidden-data",
+        "database mutation sanitized status=PASS",
+    ),
+    ("forbidden-deploy", "live_data_rollout=deploy"),
+    (
+        "forbidden-activation",
+        "activation commit sanitized status=PASS",
+    ),
+):
+    observation_drift(
+        name,
+        lambda c, value=marker: bind_observation_log(
+            c, log_text + logged(
+                "2026-10-19T10:46:58.2000000Z", value,
+            ),
+        ),
+    )
+
+observation_drift(
+    "failed-receiver-semantic",
+    lambda c: c["historical"].__setitem__(
+        "failed_deploy_run_id", "999",
+    ),
+)
+observation_drift(
+    "root-semantic",
+    lambda c: c["semantic"].__setitem__("rootRunId", "7302"),
+)
+observation_drift(
+    "baseline-semantic",
+    lambda c: c["semantic"]["baselineFiles"].__setitem__(
+        "SHA256SUMS", b"sanitized substituted baseline\n",
+    ),
+)
+observation_drift(
+    "held-owner-semantic",
+    lambda c: c["held"].__setitem__(
+        "created_at", "2026-10-14T20:54:26Z",
+    ),
+)
+
+artifact_rejection = "sanitized artifact closure rejection"
+with observation_environment(
+    copy.deepcopy(observation_base),
+), patch.object(
+    m, "_failed_pre_cas_artifact_closure",
+    side_effect=SystemExit(artifact_rejection),
+):
+    try:
+        case = copy.deepcopy(observation_base)
+        m._validate_failed_pre_cas_continuation_observation(
+            case["repository"], case["row"], case["held"],
+            case["subject"], case["dispatch"], case["cutoff"],
+            case["active"], case["profile"], case["reader"],
+            case["observation"], case["semantic"],
+        )
+    except SystemExit as error:
+        assert str(error) == artifact_rejection
+    else:
+        raise AssertionError("artifact closure rejection was swallowed")
+
+print(
+    "pre_cas_real_observation_validator=PASS "
+    f"acceptances=1 rejections={observation_rejections + 1} "
+    "inputs=16 all_steps=true artifact_closure=real"
+)
+
 row = copy.deepcopy(profile["run"])
 row["head_repository"] = copy.deepcopy(profile["run"]["head_repository"])
 route_held = {
