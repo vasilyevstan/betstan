@@ -6238,7 +6238,17 @@ def _validate_failed_clean_reader_continuation_observation(
         key: workflow.get(key)
         for key in ("id", "node_id", "name", "path", "state")
     } if isinstance(workflow, dict) else None
-    if projected_workflow != profile["workflow"]:
+    if (
+        projected_workflow is None
+        or any(
+            type(projected_workflow[key])
+            is not type(profile["workflow"][key])
+            or projected_workflow[key] != profile["workflow"][key]
+            for key in ("id", "node_id", "name", "path")
+        )
+        or type(projected_workflow["state"]) is not str
+        or projected_workflow["state"] not in ("active", "disabled_manually")
+    ):
         fail(f"{label} workflow identity is invalid")
     jobs = jobs_from_pages(observation.get("jobPages"), label)
     if len(jobs) != 1:

@@ -6742,6 +6742,10 @@ assert proof["profile"] == m.FAILED_CLEAN_READER_CONTINUATION_PROFILE
 assert proof["artifactCount"] == 0
 assert proof["historicalInputHash"] == profile["input_sha256"]
 assert set(proof["uploadProofs"]) == set(profile["upload_diagnostics"])
+assert proof["workflow"]["state"] == "disabled_manually"
+active_case = copy.deepcopy(base)
+active_case["observation"]["workflow"]["state"] = "active"
+assert qualify(active_case)["workflow"]["state"] == "active"
 
 def rejected(action, leak=None):
     stdout, stderr = io.StringIO(), io.StringIO()
@@ -6750,6 +6754,7 @@ def rejected(action, leak=None):
             action()
     except SystemExit:
         assert stdout.getvalue() == ""
+        assert "Traceback" not in stderr.getvalue()
         if leak is not None:
             assert leak not in stderr.getvalue()
         return
@@ -6762,6 +6767,60 @@ def drift(name, mutation):
         rejected(lambda: qualify(case), leak="PRIVATE_FIXTURE_CANARY")
     except AssertionError as error:
         raise AssertionError(f"{name}: {error}") from error
+
+for name, key, value in (
+    ("workflow-id-wrong-integer", "id", profile["workflow"]["id"] + 1),
+    ("workflow-id-bool", "id", True),
+    ("workflow-id-equal-float", "id", float(profile["workflow"]["id"])),
+    ("workflow-id-numeric-string", "id", str(profile["workflow"]["id"])),
+    ("workflow-node-id", "node_id", "sanitized wrong node"),
+    ("workflow-name", "name", "sanitized-wrong-workflow"),
+    ("workflow-path", "path", ".github/workflows/sanitized-wrong.yml"),
+):
+    drift(
+        name,
+        lambda c, field=key, candidate=value: c["observation"]["workflow"].__setitem__(
+            field, candidate,
+        ),
+    )
+
+for name, mutation in (
+    (
+        "workflow-state-unsupported-string",
+        lambda c: c["observation"]["workflow"].__setitem__(
+            "state", "disabled_inactivity",
+        ),
+    ),
+    (
+        "workflow-state-missing",
+        lambda c: c["observation"]["workflow"].pop("state"),
+    ),
+    (
+        "workflow-state-null",
+        lambda c: c["observation"]["workflow"].__setitem__("state", None),
+    ),
+    (
+        "workflow-state-bool",
+        lambda c: c["observation"]["workflow"].__setitem__("state", True),
+    ),
+    (
+        "workflow-state-number",
+        lambda c: c["observation"]["workflow"].__setitem__("state", 1),
+    ),
+    (
+        "workflow-state-list",
+        lambda c: c["observation"]["workflow"].__setitem__(
+            "state", ["PRIVATE_FIXTURE_CANARY"],
+        ),
+    ),
+    (
+        "workflow-state-object",
+        lambda c: c["observation"]["workflow"].__setitem__(
+            "state", {"PRIVATE_FIXTURE_CANARY": True},
+        ),
+    ),
+):
+    drift(name, mutation)
 
 for name, mutation in (
     ("row", lambda c: c["row"].__setitem__("id", profile["run_id"] + 1)),
@@ -6778,7 +6837,6 @@ for name, mutation in (
     ("status", lambda c: c["observation"]["run"].__setitem__("status", "in_progress")),
     ("conclusion", lambda c: c["observation"]["run"].__setitem__("conclusion", "success")),
     ("timestamp", lambda c: c["observation"]["run"].__setitem__("updated_at", "2026-10-18T10:52:22Z")),
-    ("workflow", lambda c: c["observation"]["workflow"].__setitem__("state", "active")),
     ("job-count", lambda c: c["observation"]["jobPages"][0].__setitem__("total_count", 2)),
     ("job", lambda c: c["observation"]["jobPages"][0]["jobs"][0].__setitem__("id", 1)),
     ("runner", lambda c: c["observation"]["jobPages"][0]["jobs"][0].__setitem__("runner_id", 1)),
@@ -6947,9 +7005,17 @@ def top_level(observations):
         assert current.call_count == 2 and collected.call_count == 2
 
 top_level([copy.deepcopy(observation), copy.deepcopy(observation)])
-changed = copy.deepcopy(observation)
-changed["workflow"]["state"] = "active"
-rejected(lambda: top_level([copy.deepcopy(observation), changed]))
+active_observation = copy.deepcopy(observation)
+active_observation["workflow"]["state"] = "active"
+top_level([
+    copy.deepcopy(active_observation), copy.deepcopy(active_observation),
+])
+rejected(lambda: top_level([
+    copy.deepcopy(observation), copy.deepcopy(active_observation),
+]))
+rejected(lambda: top_level([
+    copy.deepcopy(active_observation), copy.deepcopy(observation),
+]))
 rejected(lambda: top_level([
     copy.deepcopy(observation),
     SystemExit("PRIVATE_FIXTURE_CANARY second collection failure"),
