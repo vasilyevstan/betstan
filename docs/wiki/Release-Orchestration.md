@@ -635,16 +635,38 @@ tracked, untracked, `__pycache__`, `.pyc`, or `.pyo` dirt still rejects.
 None of the three profiles grants dispatch, approval, lock, mutation,
 deployment, activation, rollback, or generic failure authority. The historical
 failed runs remain terminal and are never rerunnable; unrelated failures keep
-the existing expired-receiver route. Run `39229920454` is immutable executed
-history and has no generic fallback: it must not be deleted, excluded, or
-treated as zero execution, and it is not eligible for zero-execution
-retirement. Forward recovery still requires a fresh first-attempt continuation
-from clean exact current `master`, with every physical-state, lease, fence,
-compare-and-swap, and timing check unchanged. The workflow and dispatcher are
-unchanged; this is forward-only reader/profile behavior. Rollback to a reader
-without the third profile and deadline contract is prohibited; retain all
-three exact profiles and bytecode-safe loading or use a reviewed forward
-correction.
+the existing expired-receiver route. Frozen routing remains scoped to the
+historical owner tuple for which each profile was reviewed. When a later run
+becomes the physical held owner, the same records are not rebound to the
+specialized profiles. They count as ordinary completed pre-window history only
+when their complete identity, source branch, and chronology match exactly.
+Identity or branch drift, equality with the history-window boundary, and
+in-window placement fail closed before branch-based skipping. The original
+owner still requires the complete frozen set, and a specialized-profile
+rejection cannot fall through to generic handling.
+
+Recursive validation keeps the historical subject and executing reader roles
+distinct. The nested historical subject continues to bind the original request
+and approved source, lineage and evidence, successor relations, and historical
+ancestry. An in-memory command/worker context identifies the exact current
+reader only for its helper collection, returned-control equality, and separate
+ancestry check; bounded copied history-proof work retains that context without
+serializing it. Each frozen profile proves its control is an ancestor of the
+historical subject and, when the current reader differs, separately of that
+reader before native evidence collection. The later run remains the physical
+owner; its historical predecessor is not restored as owner.
+
+Run `39229920454` is immutable executed history and has no generic fallback: it
+must not be deleted, excluded, or treated as zero execution, and it is not
+eligible for zero-execution retirement. Forward recovery still requires a
+fresh first-attempt continuation from clean exact current `master`, with every
+physical-state, lease, fence, compare-and-swap, and timing check unchanged.
+There is no new proof carrier or serialized field, and authority, schemas,
+operation inputs, workflow, dispatcher, timing, retention, locks, fences, and
+mutation behavior are unchanged. This is forward-only reader/profile behavior.
+Rollback to a reader without owner-scoped routing, current-reader separation,
+the third profile, and the deadline contract is prohibited; retain all three
+exact profiles and bytecode-safe loading or use a reviewed forward correction.
 
 An ancestor's expired-receiver classification is historical provenance, not
 current held-transfer authority. The original applied root, authenticated baseline

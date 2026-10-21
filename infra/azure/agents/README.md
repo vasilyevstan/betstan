@@ -444,13 +444,33 @@ for zero-execution retirement.
 
 None of the three frozen profiles grants new dispatch, approval, mutation, transfer,
 deployment, cleanup, retirement, or rollback authority. Exact routing for the
-earlier profiles is unchanged; the second and third profiles are terminal on
-rejection, and every other failure continues through the existing
-expired-receiver classifier. Recovery requires a fresh exact-current-`master`
-request whose `controlSha`, `subjectSha`, and `inputs.approved_sha` alone move
-to that commit while the authenticated continuation inputs remain fixed. Keep
-all readers and the bytecode-safe import behavior forward-only after
-reliance, or replace them through another reviewed forward correction.
+three profiles is scoped to their original held-owner tuple: run
+`38635983420` at its frozen source. The later physical held owner, run
+`39496124184`, does not rebind those rows to frozen validation. They remain
+ordinary completed history only when their exact identity is unchanged and
+their update is strictly before the later owner's history window. Identity or
+branch drift, equality with the lower boundary, or in-window placement rejects
+through the generic rules before branch-based skipping. Missing frozen IDs
+still reject for the original owner, and an exact frozen-profile rejection
+remains terminal.
+
+For recursive successor validation, historical nested subject `S0` continues
+to bind the original request, `approved_sha`, lineage and evidence, successor
+relations, and descendant checks. The executing/current-master reader SHA `X`
+lives only in command context: single-binding validation and each validate-all
+worker install it, and copied history-proof contexts retain it. Current-reader
+helper collection, returned-control equality, and the separate reader-ancestry
+check use `X` without replacing `S0`. Each frozen wrapper proves its control is
+an ancestor of `S0` and, when `X != S0`, separately of `X` before collecting
+reader/native evidence. Run `39496124184` remains the physical held owner;
+run `38635983420` remains historical context. This correction adds no proof
+carrier or serialized field and changes no authority, schema, operation input,
+workflow, dispatcher, timing, retention, lock, fence, or mutation behavior.
+Recovery still requires a fresh exact-current-`master` request whose
+`controlSha`, `subjectSha`, and `inputs.approved_sha` alone move to that commit
+while the authenticated continuation inputs remain fixed. Keep all readers and
+the bytecode-safe import behavior forward-only after reliance, or replace them
+through another reviewed forward correction.
 
 Fresh physical admission precedes snapshot-bound release and `acquire-released`.
 Checksummed transition evidence distinguishes unconfirmed and confirmed results;
