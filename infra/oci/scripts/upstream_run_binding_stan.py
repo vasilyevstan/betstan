@@ -5025,7 +5025,10 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
                     continue
                 if historical_issued.get(record["runId"]) == record:
                     continue
-            elif intent["state"] in {"prepared", "dispatching"}:
+            elif (
+                path.name == f"request-{match[1]}.json"
+                and intent["state"] in {"prepared", "dispatching"}
+            ):
                 current_dispatch_inputs = None
                 byte_context = BYTE_CONTEXT.get()
                 if byte_context is None:

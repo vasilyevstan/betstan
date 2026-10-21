@@ -3021,7 +3021,8 @@ def probe(module):
         context_mode="current",
         owner_mode="current",
         mutation=None,
-        duplicate=False,
+        duplicate_scan=False,
+        relocate_to_spent=False,
     ):
         with tempfile.TemporaryDirectory(
             prefix=f"prepared-self-intent-{state}-",
@@ -3124,9 +3125,8 @@ def probe(module):
             capture = directory / intent["captureFile"]
             if mutation == "capture":
                 capture.write_bytes(b"drift")
-            if duplicate:
-                shutil.copy2(
-                    intent_path,
+            if relocate_to_spent:
+                intent_path.replace(
                     directory / f"spent-{key}-dispatch-{'e' * 32}.json",
                 )
             source_reads = []
@@ -3171,6 +3171,19 @@ def probe(module):
                     "validator": "f" * 64,
                 })
             environment_owner = owner if owner_mode == "current" else "99999999"
+            real_glob = module.Path.glob
+
+            def inventory_glob(candidate, pattern):
+                entries = list(real_glob(candidate, pattern))
+                if duplicate_scan and candidate == directory and pattern == "*.json":
+                    entries.append(intent_path)
+                return entries
+
+            glob_context = (
+                patch.object(module.Path, "glob", new=inventory_glob)
+                if duplicate_scan
+                else contextlib.nullcontext()
+            )
             frozen = {path.name: path.read_bytes() for path in directory.iterdir()}
             rejected = False
             with patch.dict(
@@ -3188,7 +3201,7 @@ def probe(module):
                 module,
                 "held_source_bytes",
                 side_effect=source_bytes,
-            ):
+            ), glob_context:
                 reader_token = module._CURRENT_READER_SHA_CONTEXT.set(reader_sha)
                 byte_token = (
                     module.BYTE_CONTEXT.set(byte_context)
@@ -3224,7 +3237,8 @@ def probe(module):
                 raise AssertionError(
                     f"{state} rejection={rejected} expected={expect_rejection} "
                     f"context={context_mode} owner={owner_mode} "
-                    f"mutation={mutation} duplicate={duplicate}"
+                    f"mutation={mutation} duplicate_scan={duplicate_scan} "
+                    f"relocate_to_spent={relocate_to_spent}"
                 )
             if {path.name: path.read_bytes() for path in directory.iterdir()} != frozen:
                 raise AssertionError("self-intent receiver-absence validation mutated authority bytes")
@@ -3246,7 +3260,9 @@ def probe(module):
     exercise("prepared", expect_rejection=True, mutation="control")
     exercise("prepared", expect_rejection=True, mutation="capture")
     exercise("dispatching", expect_rejection=True, mutation="capture")
-    exercise("prepared", expect_rejection=True, duplicate=True)
+    exercise("prepared", expect_rejection=True, duplicate_scan=True)
+    exercise("prepared", expect_rejection=True, relocate_to_spent=True)
+    exercise("dispatching", expect_rejection=True, relocate_to_spent=True)
 
 
 probe(load_module("base"))
@@ -3272,8 +3288,20 @@ def killed(label, replacements):
 killed(
     "restored-successor-exclusion",
     [(
-        '            elif intent["state"] in {"prepared", "dispatching"}:\n',
-        '            elif not successor_run_id and intent["state"] in {"prepared", "dispatching"}:\n',
+        '                path.name == f"request-{match[1]}.json"\n'
+        '                and intent["state"] in {"prepared", "dispatching"}\n',
+        '                path.name == f"request-{match[1]}.json"\n'
+        '                and not successor_run_id\n'
+        '                and intent["state"] in {"prepared", "dispatching"}\n',
+        1,
+    )],
+)
+killed(
+    "missing-canonical-active-path",
+    [(
+        '                path.name == f"request-{match[1]}.json"\n'
+        '                and intent["state"] in {"prepared", "dispatching"}\n',
+        '                intent["state"] in {"prepared", "dispatching"}\n',
         1,
     )],
 )
@@ -3319,10 +3347,10 @@ killed(
     )],
 )
 
-assert mutant_index == 5
+assert mutant_index == 6
 print(
     "prepared_self_intent_contract=PASS "
-    "states=prepared,dispatching negatives=9 mutants=5"
+    "states=prepared,dispatching negatives=11 mutants=6"
 )
 PY
 ok "recursive receiver absence accepts only the exact current prepared self-intent"
