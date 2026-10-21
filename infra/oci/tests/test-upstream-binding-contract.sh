@@ -2857,6 +2857,476 @@ with patch.dict(os.environ, {"COPILOT_CLI_AUTHORITY_DIR": str(directory), "GITHU
 PY
 ok "fresh private authority and immutable pre-producer issued history; reruns, partial jobs, pending gates, drift and unresolved owners reject without ledger mutation"
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import contextlib
+import datetime as dt
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import types
+from pathlib import Path
+from unittest.mock import patch
+
+original, work = map(Path, sys.argv[1:])
+policy_path = original.parents[2] / "azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+policy_bytes = policy_path.read_text()
+workflow = (original.parents[3] / ".github/workflows/oci-live-data-rollout.yml").read_text()
+workflow_blob = hashlib.sha1(
+    f"blob {len(workflow.encode())}\0".encode() + workflow.encode()
+).hexdigest()
+
+
+def load_module(name, source=None):
+    root = Path(tempfile.mkdtemp(prefix=f"prepared-self-intent-{name}-", dir=work))
+    module_path = root / "infra/oci/scripts/upstream_run_binding_stan.py"
+    module_path.parent.mkdir(parents=True)
+    if source is None:
+        shutil.copy2(original, module_path)
+    else:
+        module_path.write_text(source)
+    helper_path = root / "infra/azure/agents/copilot_cli_authority_stan.py"
+    helper_path.parent.mkdir(parents=True)
+    shutil.copy2(original.parents[2] / "azure/agents/copilot_cli_authority_stan.py", helper_path)
+    spec = importlib.util.spec_from_file_location(f"prepared_self_intent_{name}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def probe(module):
+    authority = module.provenance_read_authority()
+    repository, historical_sha, reader_sha = "example/repo", "1" * 40, "2" * 40
+    policies = {
+        operation: json.loads(subprocess.check_output(
+            ["bash", str(policy_path), "get", operation], text=True,
+        ))
+        for operation in (
+            "oci-live-data-resume-deploy",
+            "oci-live-data-continue-held-handoff",
+        )
+    }
+    common = {
+        "phase": "apply-slip-index",
+        "build_run_id": "21",
+        "infrastructure_run_id": "22",
+        "checkpoint_source_sha": historical_sha,
+        "disk_checkpoint_run_id": "23",
+        "prerequisite_run_id": "24",
+        "resume_source_sha": historical_sha,
+        "failed_deploy_run_id": "25",
+        "failed_activation_run_id": "0",
+        "failed_activation_user_id": "0",
+        "baseline_recovery_run_id": "0",
+        "baseline_recovery_source_sha": "none",
+    }
+    producer_inputs = module.live_data_native_inputs(
+        {
+            **common,
+            "approved_sha": historical_sha,
+            "confirmation": "RESUME APPLIED LIVE DATA EXACT SHA",
+        },
+        policies["oci-live-data-resume-deploy"]["inputNames"],
+    )
+    historical_inputs = module.live_data_native_inputs(
+        {
+            **common,
+            "approved_sha": historical_sha,
+            "held_handoff_run_id": "77",
+            "held_handoff_source_sha": historical_sha,
+            "confirmation": module.HELD_HANDOFF_CONFIRMATION,
+        },
+        policies["oci-live-data-continue-held-handoff"]["inputNames"],
+    )
+    current_inputs = module.live_data_native_inputs(
+        {
+            **common,
+            "approved_sha": reader_sha,
+            "held_handoff_run_id": "77",
+            "held_handoff_source_sha": historical_sha,
+            "confirmation": module.HELD_HANDOFF_CONFIRMATION,
+        },
+        policies["oci-live-data-continue-held-handoff"]["inputNames"],
+    )
+
+    def record(operation, run_id, source_sha, inputs, state):
+        policy = policies[operation]
+        normalized = authority.validate_request_data(
+            {
+                "schemaVersion": authority.REQUEST_SCHEMA,
+                "repository": repository,
+                "operation": operation,
+                "controlSha": source_sha,
+                "subjectSha": source_sha,
+                "targetSha": None,
+                "inputs": inputs,
+            },
+            policy,
+            repository,
+            source_sha,
+        )
+        value = authority.build_dispatch_record(
+            normalized,
+            policy,
+            repository,
+            313,
+            workflow_blob,
+            run_id,
+            f"https://github.com/{repository}/actions/runs/{run_id}",
+        )
+        value["state"] = state
+        if state == "consumed":
+            created = authority.utc_now() - dt.timedelta(
+                seconds=2 * authority.AUTHORITY_TTL_SECONDS,
+            )
+            value.update(
+                createdAt=authority.utc_text(created),
+                expiresAt=authority.utc_text(
+                    created + dt.timedelta(seconds=authority.AUTHORITY_TTL_SECONDS),
+                ),
+            )
+            value["approvals"] = [{
+                "runId": run_id,
+                "operation": operation,
+                "environmentId": 901,
+                "gateKey": "a" * 64,
+                "approvedAt": authority.utc_text(created),
+            }]
+        return value
+
+    def native_run(record, status, conclusion):
+        return {
+            "id": record["runId"],
+            "workflow_id": 313,
+            "path": ".github/workflows/oci-live-data-rollout.yml",
+            "head_sha": record["controlSha"],
+            "head_branch": "master",
+            "event": "workflow_dispatch",
+            "head_repository": {"full_name": repository},
+            "run_attempt": 1,
+            "display_title": record["displayTitle"],
+            "status": status,
+            "conclusion": conclusion,
+        }
+
+    def exercise(
+        state,
+        *,
+        expect_rejection=False,
+        context_mode="current",
+        owner_mode="current",
+        mutation=None,
+        duplicate=False,
+    ):
+        with tempfile.TemporaryDirectory(
+            prefix=f"prepared-self-intent-{state}-",
+            dir=work,
+        ) as temporary:
+            directory = Path(temporary)
+            directory.chmod(0o700)
+            owner = str(os.getppid())
+            policy = policies["oci-live-data-continue-held-handoff"]
+            normalized = authority.validate_request_data(
+                {
+                    "schemaVersion": authority.REQUEST_SCHEMA,
+                    "repository": repository,
+                    "operation": policy["operation"],
+                    "controlSha": reader_sha,
+                    "subjectSha": reader_sha,
+                    "targetSha": None,
+                    "inputs": current_inputs,
+                },
+                policy,
+                repository,
+                reader_sha,
+            )
+            key = authority.request_key(normalized)
+            intent_path = authority.intent_path(directory, key)
+            claim_args = types.SimpleNamespace(
+                repository=repository,
+                current_master=reader_sha,
+                workflow_blob_sha=workflow_blob,
+                owner_pid=int(owner),
+            )
+            request_identity = {
+                "device": 1,
+                "inode": 1,
+                "size": 1,
+                "mtimeNs": 1,
+                "ctimeNs": 1,
+            }
+            candidates = [{
+                "runId": 1,
+                "headSha": historical_sha,
+                "historicalWorkflowBlobSha": workflow_blob,
+                "evidenceSha256": "b" * 64,
+            }]
+            prepared = {
+                "requestSha256": "c" * 64,
+                "requestFile": request_identity,
+                "policySha256": authority.evidence_digest(policy),
+                "inventorySha256": "d" * 64,
+                "candidates": candidates,
+                "candidateSetSha256": authority.evidence_digest(candidates),
+            }
+            with contextlib.redirect_stdout(io.StringIO()):
+                authority.claim_request_under_lock(
+                    claim_args,
+                    policy,
+                    normalized,
+                    directory,
+                    313,
+                    key,
+                    intent_path,
+                    prepared=prepared,
+                )
+            intent = authority.load_intent(directory, key)
+            if state == "dispatching":
+                intent.update(state="dispatching", version=2, ownerPid=int(owner))
+                authority.atomic_replace(intent_path, intent)
+            producer = record(
+                "oci-live-data-resume-deploy",
+                77,
+                historical_sha,
+                producer_inputs,
+                "consumed",
+            )
+            successor_record = record(
+                "oci-live-data-continue-held-handoff",
+                78,
+                historical_sha,
+                historical_inputs,
+                "issued",
+            )
+            for value in (producer, successor_record):
+                record_path = directory / f"{value['runId']}.json"
+                record_path.write_text(json.dumps(value))
+                record_path.chmod(0o600)
+            held = native_run(producer, "completed", "success")
+            held["_held_native_inputs"] = producer_inputs
+            held["created_at"] = "2026-10-07T08:00:00Z"
+            successor = native_run(successor_record, "waiting", None)
+            review = {
+                "state": "approved",
+                "comment": "Copilot CLI exact-run approval: oci-live-data-resume-deploy",
+                "user": {"id": 1, "login": "fixture-cli"},
+                "environments": [{"id": 901, "name": "oci-migration"}],
+            }
+            if mutation == "control":
+                intent = authority.load_intent(directory, key)
+                intent["controlSha"] = historical_sha
+                authority.atomic_replace(intent_path, intent)
+            capture = directory / intent["captureFile"]
+            if mutation == "capture":
+                capture.write_bytes(b"drift")
+            if duplicate:
+                shutil.copy2(
+                    intent_path,
+                    directory / f"spent-{key}-dispatch-{'e' * 32}.json",
+                )
+            source_reads = []
+
+            def api(endpoint):
+                if endpoint.endswith("/pending_deployments"):
+                    return []
+                if endpoint.endswith("/approvals"):
+                    return [review]
+                if endpoint.endswith("/actions/workflows/oci-live-data-rollout.yml"):
+                    return {"id": 313}
+                if endpoint.endswith("/actions/runs/78"):
+                    return successor
+                raise AssertionError(endpoint)
+
+            def source_bytes(_repository, source_sha, source_path, _label):
+                source_reads.append((source_sha, source_path))
+                if source_path.endswith("policy-stan.sh"):
+                    return policy_bytes
+                if source_path == ".github/workflows/oci-live-data-rollout.yml":
+                    return workflow
+                raise AssertionError(source_path)
+
+            byte_context = None
+            if context_mode != "missing":
+                context_subject = (
+                    historical_sha if context_mode == "historical" else reader_sha
+                )
+                context_inputs = (
+                    historical_inputs if context_mode == "historical" else current_inputs
+                )
+                byte_context = module.ImmutableBindingBytes({
+                    "repository": repository,
+                    "subject": context_subject,
+                    "inputs": context_inputs,
+                    "bindings": [],
+                    "runtime": "oke",
+                    "policy": "",
+                    "operation": "oci-live-data-continue-held-handoff",
+                    "successor": "",
+                    "manifest": "",
+                    "validator": "f" * 64,
+                })
+            environment_owner = owner if owner_mode == "current" else "99999999"
+            frozen = {path.name: path.read_bytes() for path in directory.iterdir()}
+            rejected = False
+            with patch.dict(
+                os.environ,
+                {
+                    "COPILOT_CLI_AUTHORITY_DIR": str(directory),
+                    "GITHUB_ACTIONS": "false",
+                    "BETSTAN_HELD_DISPATCH_OWNER": environment_owner,
+                },
+            ), patch.object(
+                module,
+                "gh_api",
+                side_effect=api,
+            ), patch.object(
+                module,
+                "held_source_bytes",
+                side_effect=source_bytes,
+            ):
+                reader_token = module._CURRENT_READER_SHA_CONTEXT.set(reader_sha)
+                byte_token = (
+                    module.BYTE_CONTEXT.set(byte_context)
+                    if byte_context is not None
+                    else None
+                )
+                try:
+                    if mutation == "expired":
+                        expiry = authority.parse_utc(
+                            authority.load_intent(directory, key)["expiresAt"],
+                            "fixture expiry",
+                        ).timestamp()
+                        timer = patch.object(module.time, "time", return_value=expiry)
+                    else:
+                        timer = contextlib.nullcontext()
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with timer:
+                            module.held_handoff_authority(
+                                repository,
+                                held,
+                                historical_sha,
+                                historical_inputs,
+                                "78",
+                                f"recursive {state} self-intent",
+                            )
+                except (OSError, SystemExit):
+                    rejected = True
+                finally:
+                    if byte_token is not None:
+                        module.BYTE_CONTEXT.reset(byte_token)
+                    module._CURRENT_READER_SHA_CONTEXT.reset(reader_token)
+            if rejected != expect_rejection:
+                raise AssertionError(
+                    f"{state} rejection={rejected} expected={expect_rejection} "
+                    f"context={context_mode} owner={owner_mode} "
+                    f"mutation={mutation} duplicate={duplicate}"
+                )
+            if {path.name: path.read_bytes() for path in directory.iterdir()} != frozen:
+                raise AssertionError("self-intent receiver-absence validation mutated authority bytes")
+            if not expect_rejection:
+                for source_path in (
+                    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
+                    ".github/workflows/oci-live-data-rollout.yml",
+                ):
+                    if (reader_sha, source_path) not in source_reads:
+                        raise AssertionError("self-intent source validation rebound to historical S0")
+
+    exercise("prepared")
+    exercise("dispatching")
+    exercise("prepared", expect_rejection=True, context_mode="missing")
+    exercise("prepared", expect_rejection=True, context_mode="historical")
+    exercise("prepared", expect_rejection=True, mutation="expired")
+    exercise("prepared", expect_rejection=True, owner_mode="unrelated")
+    exercise("dispatching", expect_rejection=True, owner_mode="unrelated")
+    exercise("prepared", expect_rejection=True, mutation="control")
+    exercise("prepared", expect_rejection=True, mutation="capture")
+    exercise("dispatching", expect_rejection=True, mutation="capture")
+    exercise("prepared", expect_rejection=True, duplicate=True)
+
+
+probe(load_module("base"))
+source = original.read_text()
+mutant_index = 0
+
+
+def killed(label, replacements):
+    global mutant_index
+    mutant = source
+    for old, new, expected in replacements:
+        count = mutant.count(old)
+        assert count == expected, (label, count, expected, old)
+        mutant = mutant.replace(old, new)
+    mutant_index += 1
+    try:
+        probe(load_module(f"mutant-{mutant_index}", mutant))
+    except (AssertionError, OSError, RuntimeError, SystemExit):
+        return
+    raise AssertionError(f"{label} mutant survived")
+
+
+killed(
+    "restored-successor-exclusion",
+    [(
+        '            elif intent["state"] in {"prepared", "dispatching"}:\n',
+        '            elif not successor_run_id and intent["state"] in {"prepared", "dispatching"}:\n',
+        1,
+    )],
+)
+killed(
+    "historical-subject-self-intent",
+    [
+        (
+            '                    and intent["controlSha"] == current_reader_sha\n',
+            '                    and intent["controlSha"] == subject_sha\n',
+            1,
+        ),
+        (
+            '                    and intent["subjectSha"] == current_reader_sha and intent["targetSha"] is None\n',
+            '                    and intent["subjectSha"] == subject_sha and intent["targetSha"] is None\n',
+            1,
+        ),
+    ],
+)
+killed(
+    "historical-input-self-intent",
+    [(
+        '                    current_dispatch_inputs = byte_context.context["inputs"]\n',
+        '                    current_dispatch_inputs = dispatch_inputs\n',
+        1,
+    )],
+)
+killed(
+    "historical-source-self-intent",
+    [(
+        '                    policy = policy_at(current_reader_sha, intent["operation"])\n',
+        '                    policy = policy_at(subject_sha, intent["operation"])\n',
+        1,
+    )],
+)
+killed(
+    "missing-exact-one-self-intent",
+    [(
+        '                        if current_self_intent is not None:\n'
+        '                            fail(f"{label} multiple current dispatch intents prevent receiver absence")\n'
+        '                        current_self_intent = path.name\n',
+        '                        current_self_intent = path.name\n',
+        1,
+    )],
+)
+
+assert mutant_index == 5
+print(
+    "prepared_self_intent_contract=PASS "
+    "states=prepared,dispatching negatives=9 mutants=5"
+)
+PY
+ok "recursive receiver absence accepts only the exact current prepared self-intent"
+
 # Keep the frozen source and ancestry fixtures offline in depth-one checkouts.
 historical_fixture="$ROOT_DIR/infra/oci/tests/fixtures/upstream-historical-source.pack"
 [[ "$(sha256sum "$historical_fixture" | awk '{print $1}')" = \
