@@ -81,6 +81,9 @@ ARTIFACT_DOWNLOAD_BACKOFF_SECONDS = (1, 2)
 BYTE_CONTEXT = contextvars.ContextVar("binding_immutable_bytes", default=None)
 NATIVE_CONTEXT = contextvars.ContextVar("binding_native_reads", default=None)
 BINDING_CONTEXT = contextvars.ContextVar("binding_input", default=None)
+_CURRENT_READER_SHA_CONTEXT = contextvars.ContextVar(
+    "binding_current_reader_sha", default=None,
+)
 HISTORY_WORKER = threading.local()
 _AUTHORITY_IMPORT_LOCK = threading.RLock()
 HANDOFF_STAGE_CEILINGS = {
@@ -5690,6 +5693,9 @@ def _validate_failed_held_continuation_observation(
     active_inventory, profile, current_reader, observation, semantic,
 ):
     label = profile["name"]
+    current_reader_sha = _CURRENT_READER_SHA_CONTEXT.get()
+    if current_reader_sha is None:
+        current_reader_sha = subject_sha
     observation_keys = {
         "run", "attempt", "workflow", "jobPages", "pending", "approvals",
         "artifactPages", "commit", "tree", "attemptLog", "archives",
@@ -5720,7 +5726,7 @@ def _validate_failed_held_continuation_observation(
             "control", "tree", "workflowBlob", "policyBlob",
             "authorityBlob", "validatorBlob",
         }
-        or current_reader["control"] != subject_sha
+        or current_reader["control"] != current_reader_sha
         or not isinstance(current_reader["tree"], str)
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
         or current_reader["workflowBlob"] != profile["current_workflow_blob"]
@@ -6167,11 +6173,16 @@ def validate_failed_held_continuation_history(
     profile = _failed_held_continuation_profile()
     if row.get("id") != profile["run_id"]:
         fail(f"{profile['name']} cannot classify another run")
+    current_reader_sha = _CURRENT_READER_SHA_CONTEXT.get()
+    if current_reader_sha is None:
+        current_reader_sha = subject_sha
     validate_descendant_scope(profile["control"], subject_sha)
+    if current_reader_sha != subject_sha:
+        validate_descendant_scope(profile["control"], current_reader_sha)
     proofs = []
     for _ in range(2):
         current_reader = _failed_held_current_reader(
-            repository, subject_sha, profile,
+            repository, current_reader_sha, profile,
         )
         observation = _collect_failed_held_continuation_observation(
             repository, profile,
@@ -6549,6 +6560,9 @@ def _validate_failed_clean_reader_continuation_observation(
     active_inventory, profile, current_reader, observation,
 ):
     label = profile["name"]
+    current_reader_sha = _CURRENT_READER_SHA_CONTEXT.get()
+    if current_reader_sha is None:
+        current_reader_sha = subject_sha
     observation_keys = {
         "run", "attempt", "workflow", "jobPages", "pending", "approvals",
         "artifactPages", "commit", "tree", "attemptLog",
@@ -6577,7 +6591,7 @@ def _validate_failed_clean_reader_continuation_observation(
             "control", "tree", "workflowBlob", "policyBlob",
             "authorityBlob", "validatorBlob", "verifierBlob",
         }
-        or current_reader["control"] != subject_sha
+        or current_reader["control"] != current_reader_sha
         or not isinstance(current_reader["tree"], str)
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
         or current_reader["workflowBlob"] != profile["workflow_blob"]
@@ -6947,11 +6961,16 @@ def validate_failed_clean_reader_continuation_history(
     profile = _failed_clean_reader_continuation_profile()
     if row.get("id") != profile["run_id"]:
         fail(f"{profile['name']} cannot classify another run")
+    current_reader_sha = _CURRENT_READER_SHA_CONTEXT.get()
+    if current_reader_sha is None:
+        current_reader_sha = subject_sha
     validate_descendant_scope(profile["control"], subject_sha)
+    if current_reader_sha != subject_sha:
+        validate_descendant_scope(profile["control"], current_reader_sha)
     proofs = []
     for _ in range(2):
         current_reader = _failed_clean_reader_current_reader(
-            repository, subject_sha, profile,
+            repository, current_reader_sha, profile,
         )
         observation = (
             _collect_failed_clean_reader_continuation_observation(
@@ -7417,6 +7436,9 @@ def _validate_failed_pre_cas_continuation_observation(
     active_inventory, profile, current_reader, observation, semantic,
 ):
     label = profile["name"]
+    current_reader_sha = _CURRENT_READER_SHA_CONTEXT.get()
+    if current_reader_sha is None:
+        current_reader_sha = subject_sha
     observation_keys = {
         "run", "attempt", "workflow", "jobPages", "pending", "approvals",
         "artifactInventories", "commit", "tree", "attemptLog", "archives",
@@ -7445,7 +7467,7 @@ def _validate_failed_pre_cas_continuation_observation(
             "control", "tree", "workflowBlob", "policyBlob",
             "authorityBlob", "validatorBlob", "verifierBlob",
         }
-        or current_reader["control"] != subject_sha
+        or current_reader["control"] != current_reader_sha
         or not isinstance(current_reader["tree"], str)
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
         or current_reader["workflowBlob"] != profile["workflow_blob"]
@@ -7821,11 +7843,16 @@ def validate_failed_pre_cas_continuation_history(
     profile = _failed_pre_cas_continuation_profile()
     if row.get("id") != profile["run_id"]:
         fail(f"{profile['name']} cannot classify another run")
+    current_reader_sha = _CURRENT_READER_SHA_CONTEXT.get()
+    if current_reader_sha is None:
+        current_reader_sha = subject_sha
     validate_descendant_scope(profile["control"], subject_sha)
+    if current_reader_sha != subject_sha:
+        validate_descendant_scope(profile["control"], current_reader_sha)
     proofs = []
     for _ in range(2):
         current_reader = _failed_pre_cas_current_reader(
-            repository, subject_sha, profile,
+            repository, current_reader_sha, profile,
         )
         observation = _collect_failed_pre_cas_continuation_observation(
             repository, profile,
@@ -8027,27 +8054,65 @@ def _held_handoff_history(
                 fail("held-handoff successor cutoff chronology is invalid")
         elif first.get("status") not in {"queued", "waiting", "requested", "pending"}:
             fail("held-handoff successor state is invalid")
-    required_frozen_ids = set()
-    for run_id, owner_id, owner_source, updated_at in (
+    frozen_runs = (
         (
             FAILED_HELD_CONTINUATION_RUN_ID,
             FAILED_HELD_CONTINUATION_HELD_RUN_ID,
             FAILED_HELD_CONTINUATION_HELD_SOURCE,
+            FAILED_HELD_CONTINUATION_CONTROL,
+            FAILED_HELD_CONTINUATION_CREATED_AT,
             FAILED_HELD_CONTINUATION_UPDATED_AT,
+            FAILED_HELD_CONTINUATION_WORKFLOW_ID,
+            FAILED_HELD_CONTINUATION_REPOSITORY_ID,
+            FAILED_HELD_CONTINUATION_REPOSITORY_NODE_ID,
         ),
         (
             FAILED_CLEAN_READER_CONTINUATION_RUN_ID,
             FAILED_CLEAN_READER_CONTINUATION_HELD_RUN_ID,
             FAILED_CLEAN_READER_CONTINUATION_HELD_SOURCE,
+            FAILED_CLEAN_READER_CONTINUATION_CONTROL,
+            FAILED_CLEAN_READER_CONTINUATION_CREATED_AT,
             FAILED_CLEAN_READER_CONTINUATION_UPDATED_AT,
+            FAILED_CLEAN_READER_CONTINUATION_WORKFLOW_ID,
+            FAILED_CLEAN_READER_CONTINUATION_REPOSITORY_ID,
+            FAILED_CLEAN_READER_CONTINUATION_REPOSITORY_NODE_ID,
         ),
         (
             FAILED_PRE_CAS_CONTINUATION_RUN_ID,
             FAILED_PRE_CAS_CONTINUATION_HELD_RUN_ID,
             FAILED_PRE_CAS_CONTINUATION_HELD_SOURCE,
+            FAILED_PRE_CAS_CONTINUATION_CONTROL,
+            FAILED_PRE_CAS_CONTINUATION_CREATED_AT,
             FAILED_PRE_CAS_CONTINUATION_UPDATED_AT,
+            FAILED_PRE_CAS_CONTINUATION_WORKFLOW_ID,
+            FAILED_PRE_CAS_CONTINUATION_REPOSITORY_ID,
+            FAILED_PRE_CAS_CONTINUATION_REPOSITORY_NODE_ID,
         ),
-    ):
+    )
+    required_frozen_ids = set()
+    known_frozen_rows = {}
+    for (
+        run_id, owner_id, owner_source, control, created_at, updated_at,
+        workflow_id, repository_id, repository_node_id,
+    ) in frozen_runs:
+        known_frozen_rows[run_id] = ({
+            "id": run_id,
+            "workflow_id": workflow_id,
+            "path": ".github/workflows/oci-live-data-rollout.yml",
+            "head_sha": control,
+            "head_branch": "master",
+            "event": "workflow_dispatch",
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "failure",
+            "display_title": f"oci-live-data apply-slip-index {control}",
+            "created_at": created_at,
+            "run_started_at": created_at,
+            "updated_at": updated_at,
+            "html_url": (
+                f"https://github.com/vasilyevstan/betstan/actions/runs/{run_id}"
+            ),
+        }, repository_id, repository_node_id)
         frozen_updated = parse_timestamp(
             updated_at, "frozen failed-continuation history",
         )
@@ -8119,11 +8184,7 @@ def _held_handoff_history(
                 ):
                     fail("expired-handoff historical receiver identity changed")
                 continue
-            if row["id"] in {
-                FAILED_HELD_CONTINUATION_RUN_ID,
-                FAILED_CLEAN_READER_CONTINUATION_RUN_ID,
-                FAILED_PRE_CAS_CONTINUATION_RUN_ID,
-            }:
+            if row["id"] in required_frozen_ids:
                 proofs.join()
                 if workflow != "oci-live-data-rollout.yml":
                     fail("frozen failed-continuation run belongs to another workflow")
@@ -8145,6 +8206,24 @@ def _held_handoff_history(
                         failed_continuation_semantic,
                     )
                 continue
+            frozen_identity = known_frozen_rows.get(row["id"])
+            if frozen_identity is not None:
+                expected, repository_id, repository_node_id = frozen_identity
+                if updated >= lower:
+                    fail("known frozen failed-continuation run is not pre-window history")
+                if (
+                    any(
+                        key not in row or type(row[key]) is not type(value)
+                        or row[key] != value
+                        for key, value in expected.items()
+                    )
+                    or not isinstance(row.get("head_repository"), dict)
+                    or row["head_repository"].get("id") != repository_id
+                    or row["head_repository"].get("node_id") != repository_node_id
+                    or row["head_repository"].get("full_name")
+                        != "vasilyevstan/betstan"
+                ):
+                    fail("known frozen failed-continuation run identity changed")
             if row.get("head_branch") != "master":
                 proofs.join()
                 continue
@@ -8483,6 +8562,25 @@ def complete_held_artifacts(repository, run_id, source_sha, held, files, label):
 
 
 def validate_held_handoff_artifact(
+    repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
+    *, successor_run_id="",
+):
+    if _CURRENT_READER_SHA_CONTEXT.get() is not None:
+        return _validate_held_handoff_artifact(
+            repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
+            successor_run_id=successor_run_id,
+        )
+    reader_token = _CURRENT_READER_SHA_CONTEXT.set(subject_sha)
+    try:
+        return _validate_held_handoff_artifact(
+            repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
+            successor_run_id=successor_run_id,
+        )
+    finally:
+        _CURRENT_READER_SHA_CONTEXT.reset(reader_token)
+
+
+def _validate_held_handoff_artifact(
     repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
     *, successor_run_id="",
 ):
@@ -11652,14 +11750,18 @@ def command_validate(args):
     if not isinstance(dispatch_inputs, dict):
         fail("dispatch inputs must be an object")
     with NativeReadCommand(1) as native:
-        facts = validate_binding(
-            args.repository,
-            binding,
-            args.subject_sha,
-            args.run_id,
-            dispatch_inputs,
-            args.runtime_mode,
-        )
+        reader_token = _CURRENT_READER_SHA_CONTEXT.set(args.subject_sha)
+        try:
+            facts = validate_binding(
+                args.repository,
+                binding,
+                args.subject_sha,
+                args.run_id,
+                dispatch_inputs,
+                args.runtime_mode,
+            )
+        finally:
+            _CURRENT_READER_SHA_CONTEXT.reset(reader_token)
         native.check_cancelled()
         print(
             f"upstream_binding={binding['input']} run={args.run_id} "
@@ -11801,6 +11903,7 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
             token = BYTE_CONTEXT.set(byte_context)
             native_token = NATIVE_CONTEXT.set(native)
             binding_token = BINDING_CONTEXT.set(binding["input"])
+            reader_token = _CURRENT_READER_SHA_CONTEXT.set(args.subject_sha)
             try:
                 return validate_binding(
                     args.repository, binding, args.subject_sha,
@@ -11808,6 +11911,7 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
                     getattr(args, "successor_run_id", ""),
                 )
             finally:
+                _CURRENT_READER_SHA_CONTEXT.reset(reader_token)
                 BINDING_CONTEXT.reset(binding_token)
                 NATIVE_CONTEXT.reset(native_token)
                 BYTE_CONTEXT.reset(token)

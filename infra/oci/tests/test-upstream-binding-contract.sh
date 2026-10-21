@@ -5329,6 +5329,7 @@ class FixtureAuthority:
 
 authority = FixtureAuthority()
 subject = "f" * 40
+reader_sha = "9" * 40
 profile = copy.deepcopy(m._failed_held_continuation_profile())
 input_names = profile["input_names"]
 historical_inputs = {
@@ -5760,7 +5761,7 @@ observation = {
     },
 }
 reader = {
-    "control": subject,
+    "control": reader_sha,
     "tree": "e" * 40,
     "workflowBlob": profile["current_workflow_blob"],
     "policyBlob": profile["policy_blob"],
@@ -5799,6 +5800,14 @@ base = {
 }
 now = dt.datetime(2090, 1, 1, tzinfo=dt.timezone.utc).timestamp()
 
+@contextlib.contextmanager
+def promoted_reader():
+    token = m._CURRENT_READER_SHA_CONTEXT.set(reader_sha)
+    try:
+        yield
+    finally:
+        m._CURRENT_READER_SHA_CONTEXT.reset(token)
+
 def qualify(case):
     def git_reader(label, *arguments):
         path = arguments[-1].split(":", 1)[1]
@@ -5821,7 +5830,8 @@ def qualify(case):
         ]
         return subprocess.CompletedProcess(command, 0, policy_json, "")
 
-    with patch.object(m, "history_worker_context", return_value=None), \
+    with promoted_reader(), \
+         patch.object(m, "history_worker_context", return_value=None), \
          patch.object(m, "_failed_held_git", side_effect=git_reader), \
          patch.object(m, "held_source_bytes", side_effect=source_reader), \
          patch.object(m, "provenance_read_authority", return_value=authority), \
@@ -5884,6 +5894,8 @@ identity_drifts = (
     ("pending", lambda c: c["observation"]["pending"].append({"environment": "sanitized"})),
     ("approval", lambda c: c["observation"]["approvals"][0].__setitem__("comment", "sanitized drift")),
     ("tree", lambda c: c["observation"]["commit"]["tree"].__setitem__("sha", "0" * 40)),
+    ("current-reader-historical-control", lambda c: c["reader"].__setitem__("control", subject)),
+    ("current-reader-third-control", lambda c: c["reader"].__setitem__("control", "8" * 40)),
     ("current-reader", lambda c: c["reader"].__setitem__("workflowBlob", "0" * 40)),
 )
 for name, mutation in identity_drifts:
@@ -6151,8 +6163,9 @@ def top_level(observations):
             if path == ".github/workflows/oci-live-data-rollout.yml"
             else "sanitized policy source\n"
         )
-    with patch.object(m, "_failed_held_continuation_profile", return_value=case["profile"]), \
-         patch.object(m, "validate_descendant_scope"), \
+    with promoted_reader(), \
+         patch.object(m, "_failed_held_continuation_profile", return_value=case["profile"]), \
+         patch.object(m, "validate_descendant_scope") as ancestry, \
          patch.object(m, "_failed_held_current_reader", return_value=case["reader"]) as current, \
          patch.object(
              m, "_collect_failed_held_continuation_observation",
@@ -6173,6 +6186,13 @@ def top_level(observations):
             case["semantic"],
         )
         assert current.call_count == 2 and collected.call_count == 2
+        assert [item.args for item in current.call_args_list] == [
+            (case["profile"]["repository"], reader_sha, case["profile"]),
+        ] * 2
+        assert [item.args for item in ancestry.call_args_list] == [
+            (case["profile"]["control"], subject),
+            (case["profile"]["control"], reader_sha),
+        ]
 
 top_level([copy.deepcopy(observation), copy.deepcopy(observation)])
 changed_observation = copy.deepcopy(observation)
@@ -6233,7 +6253,8 @@ def real_collector(log_payloads):
     cache = m.ImmutableBindingBytes({"fixture": "failed-held-recollection"})
     token = m.BYTE_CONTEXT.set(cache)
     try:
-        with patch.object(m, "_failed_held_continuation_profile", return_value=case["profile"]), \
+        with promoted_reader(), \
+             patch.object(m, "_failed_held_continuation_profile", return_value=case["profile"]), \
              patch.object(m, "validate_descendant_scope"), \
              patch.object(m, "_failed_held_current_reader", return_value=case["reader"]), \
              patch.object(m, "gh_api", side_effect=api), \
@@ -6416,6 +6437,7 @@ class FixtureAuthority:
 
 authority = FixtureAuthority()
 subject = "f" * 40
+reader_sha = "9" * 40
 profile = copy.deepcopy(m._failed_clean_reader_continuation_profile())
 # Canonical full-profile digest sealed from the two reviewed native observations.
 reviewed_observations_profile_sha256 = (
@@ -6689,7 +6711,7 @@ observation = {
     "attemptLog": archive(log_files),
 }
 reader = {
-    "control": subject,
+    "control": reader_sha,
     "tree": "e" * 40,
     "workflowBlob": profile["workflow_blob"],
     "policyBlob": profile["policy_blob"],
@@ -6713,6 +6735,14 @@ base = {
     "workflowSource": workflow_source,
     "localClosure": dict(profile["closure"]),
 }
+
+@contextlib.contextmanager
+def promoted_reader():
+    token = m._CURRENT_READER_SHA_CONTEXT.set(reader_sha)
+    try:
+        yield
+    finally:
+        m._CURRENT_READER_SHA_CONTEXT.reset(token)
 
 @contextlib.contextmanager
 def environment(case):
@@ -6745,7 +6775,7 @@ def environment(case):
         yield
 
 def qualify(case):
-    with environment(case):
+    with promoted_reader(), environment(case):
         return m._validate_failed_clean_reader_continuation_observation(
             case["profile"]["repository"], case["row"], case["held"],
             case["subject"], case["dispatch"], case["cutoff"],
@@ -6864,6 +6894,8 @@ for name, mutation in (
         c["observation"]["artifactPages"][0]["artifacts"].append({"id": 1}),
     )),
     ("commit-tree", lambda c: c["observation"]["commit"]["tree"].__setitem__("sha", "0" * 40)),
+    ("reader-historical-control", lambda c: c["reader"].__setitem__("control", subject)),
+    ("reader-third-control", lambda c: c["reader"].__setitem__("control", "8" * 40)),
     ("reader", lambda c: c["reader"].__setitem__("verifierBlob", "0" * 40)),
 ):
     drift(name, mutation)
@@ -7000,12 +7032,12 @@ drift(
 
 def top_level(observations):
     case = copy.deepcopy(base)
-    with environment(case), \
+    with promoted_reader(), environment(case), \
          patch.object(
              m, "_failed_clean_reader_continuation_profile",
              return_value=case["profile"],
          ), \
-         patch.object(m, "validate_descendant_scope"), \
+         patch.object(m, "validate_descendant_scope") as ancestry, \
          patch.object(
              m, "_failed_clean_reader_current_reader",
              return_value=case["reader"],
@@ -7019,6 +7051,13 @@ def top_level(observations):
             case["subject"], case["dispatch"], case["cutoff"], case["active"],
         )
         assert current.call_count == 2 and collected.call_count == 2
+        assert [item.args for item in current.call_args_list] == [
+            (case["profile"]["repository"], reader_sha, case["profile"]),
+        ] * 2
+        assert [item.args for item in ancestry.call_args_list] == [
+            (case["profile"]["control"], subject),
+            (case["profile"]["control"], reader_sha),
+        ]
 
 top_level([copy.deepcopy(observation), copy.deepcopy(observation)])
 active_observation = copy.deepcopy(observation)
@@ -7573,6 +7612,7 @@ def logged(at, value):
 authority = ObservationAuthority()
 observation_profile = copy.deepcopy(synthetic)
 observation_subject = "f" * 40
+observation_reader_sha = "9" * 40
 observation_historical = {
     "approved_sha": observation_profile["control"],
     "resume_source_sha": "391604c0fb35daa30ac72b92724d147d57d41371",
@@ -7760,7 +7800,7 @@ observation_held = {
     ),
 }
 observation_reader = {
-    "control": observation_subject,
+    "control": observation_reader_sha,
     "tree": "e" * 40,
     "workflowBlob": observation_profile["workflow_blob"],
     "policyBlob": observation_profile["policy_blob"],
@@ -7933,21 +7973,25 @@ def observation_environment(case):
         yield artifact_calls
 
 def qualify_observation(case):
-    with observation_environment(case) as artifact_calls, patch.object(
-        m, "_failed_pre_cas_artifact_closure",
-        wraps=m._failed_pre_cas_artifact_closure,
-    ) as artifact_closure:
-        proof = m._validate_failed_pre_cas_continuation_observation(
-            case["repository"], case["row"], case["held"],
-            case["subject"], case["dispatch"], case["cutoff"],
-            case["active"], case["profile"], case["reader"],
-            case["observation"], case["semantic"],
-        )
-        assert artifact_closure.call_count == 1, \
-            "real observation validator bypassed artifact closure"
-        assert sorted(artifact_calls) == [False, True], \
-            "real observation validator bypassed semantic artifact proofs"
-        return proof
+    token = m._CURRENT_READER_SHA_CONTEXT.set(observation_reader_sha)
+    try:
+        with observation_environment(case) as artifact_calls, patch.object(
+            m, "_failed_pre_cas_artifact_closure",
+            wraps=m._failed_pre_cas_artifact_closure,
+        ) as artifact_closure:
+            proof = m._validate_failed_pre_cas_continuation_observation(
+                case["repository"], case["row"], case["held"],
+                case["subject"], case["dispatch"], case["cutoff"],
+                case["active"], case["profile"], case["reader"],
+                case["observation"], case["semantic"],
+            )
+            assert artifact_closure.call_count == 1, \
+                "real observation validator bypassed artifact closure"
+            assert sorted(artifact_calls) == [False, True], \
+                "real observation validator bypassed semantic artifact proofs"
+            return proof
+    finally:
+        m._CURRENT_READER_SHA_CONTEXT.reset(token)
 
 observation_proof = qualify_observation(copy.deepcopy(observation_base))
 assert observation_proof["profile"] == observation_profile["name"]
@@ -8070,6 +8114,7 @@ for index in range(len(observation_profile["steps"])):
     )
 
 for name, field, value in (
+    ("reader-historical-control", "control", observation_subject),
     ("reader-control", "control", "0" * 40),
     ("reader-tree", "tree", "not-a-sha"),
     ("reader-workflow", "workflowBlob", "0" * 40),
@@ -8266,30 +8311,34 @@ observation_drift(
 )
 
 artifact_rejection = "sanitized artifact closure rejection"
-with observation_environment(
-    copy.deepcopy(observation_base),
-), patch.object(
-    m, "_failed_pre_cas_artifact_closure",
-    side_effect=SystemExit(artifact_rejection),
-):
-    try:
-        case = copy.deepcopy(observation_base)
-        m._validate_failed_pre_cas_continuation_observation(
-            case["repository"], case["row"], case["held"],
-            case["subject"], case["dispatch"], case["cutoff"],
-            case["active"], case["profile"], case["reader"],
-            case["observation"], case["semantic"],
-        )
-    except SystemExit as error:
-        assert str(error) == artifact_rejection
-    else:
-        raise AssertionError("artifact closure rejection was swallowed")
+reader_token = m._CURRENT_READER_SHA_CONTEXT.set(observation_reader_sha)
+try:
+    with observation_environment(
+        copy.deepcopy(observation_base),
+    ), patch.object(
+        m, "_failed_pre_cas_artifact_closure",
+        side_effect=SystemExit(artifact_rejection),
+    ):
+        try:
+            case = copy.deepcopy(observation_base)
+            m._validate_failed_pre_cas_continuation_observation(
+                case["repository"], case["row"], case["held"],
+                case["subject"], case["dispatch"], case["cutoff"],
+                case["active"], case["profile"], case["reader"],
+                case["observation"], case["semantic"],
+            )
+        except SystemExit as error:
+            assert str(error) == artifact_rejection
+        else:
+            raise AssertionError("artifact closure rejection was swallowed")
+finally:
+    m._CURRENT_READER_SHA_CONTEXT.reset(reader_token)
 
-assert observation_rejections + 1 == 100, \
+assert observation_rejections + 1 == 101, \
     "real observation rejection matrix changed"
 print(
     "pre_cas_real_observation_validator=PASS "
-    "acceptances=1 rejections=100 "
+    "acceptances=1 rejections=101 "
     "inputs=16 all_steps=true artifact_closure=real"
 )
 
@@ -8315,7 +8364,7 @@ route_held = {
 subject = "f" * 40
 dispatch = {"sanitized": "request"}
 reader = {
-    "control": subject,
+    "control": observation_reader_sha,
     "tree": "e" * 40,
     "workflowBlob": profile["workflow_blob"],
     "policyBlob": profile["policy_blob"],
@@ -8325,27 +8374,38 @@ reader = {
 }
 
 def top_level(observations):
-    with patch.object(
-        m, "_failed_pre_cas_continuation_profile",
-        return_value=profile,
-    ), patch.object(
-        m, "validate_descendant_scope",
-    ), patch.object(
-        m, "_failed_pre_cas_current_reader",
-        return_value=reader,
-    ) as current, patch.object(
-        m, "_collect_failed_pre_cas_continuation_observation",
-        side_effect=observations,
-    ) as collected, patch.object(
-        m, "_validate_failed_pre_cas_continuation_observation",
-        side_effect=lambda *args: {"observation": args[-2]},
-    ):
-        m.validate_failed_pre_cas_continuation_history(
-            profile["repository"], row, route_held, subject, dispatch,
-            None, False, {"sanitized": "semantic"},
-        )
-        assert current.call_count == 2
-        assert collected.call_count == 2
+    token = m._CURRENT_READER_SHA_CONTEXT.set(observation_reader_sha)
+    try:
+        with patch.object(
+            m, "_failed_pre_cas_continuation_profile",
+            return_value=profile,
+        ), patch.object(
+            m, "validate_descendant_scope",
+        ) as ancestry, patch.object(
+            m, "_failed_pre_cas_current_reader",
+            return_value=reader,
+        ) as current, patch.object(
+            m, "_collect_failed_pre_cas_continuation_observation",
+            side_effect=observations,
+        ) as collected, patch.object(
+            m, "_validate_failed_pre_cas_continuation_observation",
+            side_effect=lambda *args: {"observation": args[-2]},
+        ):
+            m.validate_failed_pre_cas_continuation_history(
+                profile["repository"], row, route_held, subject, dispatch,
+                None, False, {"sanitized": "semantic"},
+            )
+            assert current.call_count == 2
+            assert collected.call_count == 2
+            assert [item.args for item in current.call_args_list] == [
+                (profile["repository"], observation_reader_sha, profile),
+            ] * 2
+            assert [item.args for item in ancestry.call_args_list] == [
+                (profile["control"], subject),
+                (profile["control"], observation_reader_sha),
+            ]
+    finally:
+        m._CURRENT_READER_SHA_CONTEXT.reset(token)
 
 top_level([{"token": 1}, {"token": 1}])
 rejected(lambda: top_level([{"token": 1}, {"token": 2}]))
@@ -8451,6 +8511,1399 @@ print(
 )
 PY
 ok "third frozen failed-continuation pre-CAS profile"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import argparse
+import concurrent.futures
+import contextlib
+import copy
+import datetime as dt
+import hashlib
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+import threading
+import types
+from pathlib import Path
+from unittest.mock import patch
+
+validator = Path(sys.argv[1]).resolve()
+
+def load_module(name, source=None):
+    if source is None:
+        spec = importlib.util.spec_from_file_location(name, validator)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    module = types.ModuleType(name)
+    module.__file__ = str(validator)
+    exec(compile(source, str(validator), "exec"), module.__dict__)
+    return module
+
+m = load_module("promoted_reader_contract")
+S0 = "7" * 40
+X = "9" * 40
+THIRD = "8" * 40
+REPOSITORY = "vasilyevstan/betstan"
+
+def binding(name):
+    return {
+        "input": name,
+        "workflow": "test.yml",
+        "titleTemplates": {
+            "workflow_dispatch": "test {subject_sha}",
+        },
+        "artifactTemplate": "test-{subject_sha}-{run_id}",
+    }
+
+def command_args(subject):
+    return argparse.Namespace(
+        repository=REPOSITORY,
+        binding=json.dumps({"input": "single"}),
+        subject_sha=subject,
+        run_id="1",
+        dispatch_inputs="{}",
+        runtime_mode="oke",
+    )
+
+def all_args(subject):
+    bindings = [binding("first"), binding("second")]
+    return argparse.Namespace(
+        repository=REPOSITORY,
+        policy_json=json.dumps({"upstreamRunBindings": bindings}),
+        manifest="",
+        operation="",
+        subject_sha=subject,
+        dispatch_inputs=json.dumps({"first": "1", "second": "2"}),
+        runtime_mode="oke",
+        successor_run_id="",
+        result_json="",
+        baseline_dir="",
+        held_history_file="",
+    )
+
+def probe_public_direct_entry_lifecycle(module):
+    context = module._CURRENT_READER_SHA_CONTEXT
+    arguments = (
+        REPOSITORY, "39496124184", S0, X, {}, "oke",
+        "direct verifier entry fixture",
+    )
+    assert context.get() is None
+
+    qualified = object()
+    def succeed(*args, **kwargs):
+        assert context.get() == X
+        return qualified
+
+    with patch.object(
+        module, "_validate_held_handoff_artifact", side_effect=succeed,
+    ):
+        assert module.validate_held_handoff_artifact(*arguments) is qualified
+    assert context.get() is None
+
+    class InjectedAbort(BaseException):
+        pass
+
+    def abort(*args, **kwargs):
+        assert context.get() == X
+        raise InjectedAbort("synthetic direct-entry interruption")
+
+    try:
+        with patch.object(
+            module, "_validate_held_handoff_artifact", side_effect=abort,
+        ):
+            module.validate_held_handoff_artifact(*arguments)
+    except InjectedAbort as error:
+        assert str(error) == "synthetic direct-entry interruption"
+    else:
+        raise AssertionError("direct-entry BaseException was swallowed")
+    assert context.get() is None
+
+    outer_token = context.set(THIRD)
+    try:
+        seen = []
+        def preserve(*args, **kwargs):
+            seen.append(context.get())
+            return qualified
+
+        with patch.object(
+            module, "_validate_held_handoff_artifact", side_effect=preserve,
+        ):
+            assert module.validate_held_handoff_artifact(*arguments) is qualified
+        assert seen == [THIRD]
+        assert context.get() == THIRD
+    finally:
+        context.reset(outer_token)
+    assert context.get() is None
+
+def probe_context_lifecycle(module):
+    context = module._CURRENT_READER_SHA_CONTEXT
+    assert context.get() is None
+    outer = "6" * 40
+    outer_token = context.set(outer)
+    try:
+        for subject in (X, THIRD):
+            seen = []
+            def validate(repository, selected, historical, run_id, inputs, runtime):
+                assert repository == REPOSITORY
+                assert historical == subject
+                assert context.get() == subject
+                seen.append(subject)
+                return {"artifactName": "synthetic"}
+            with patch.object(module, "validate_binding", side_effect=validate), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                module.command_validate(command_args(subject))
+            assert seen == [subject]
+            assert context.get() == outer
+
+        def failed(*args):
+            assert context.get() == X
+            raise RuntimeError("synthetic command failure")
+
+        try:
+            with patch.object(module, "validate_binding", side_effect=failed), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                module.command_validate(command_args(X))
+        except RuntimeError as error:
+            assert str(error) == "synthetic command failure"
+        else:
+            raise AssertionError("command failure was accepted")
+        assert context.get() == outer
+
+        real_executor = concurrent.futures.ThreadPoolExecutor
+        binding_executor = real_executor(
+            max_workers=2, thread_name_prefix="reader-binding-reuse",
+        )
+
+        class SharedBindingExecutor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, error_type, error, traceback):
+                return False
+
+            def submit(self, function, *args, **kwargs):
+                return binding_executor.submit(function, *args, **kwargs)
+
+        def executor_factory(*args, **kwargs):
+            if kwargs.get("thread_name_prefix") == "held-history-proof":
+                return real_executor(*args, **kwargs)
+            return SharedBindingExecutor()
+
+        lock = threading.Lock()
+        proof_seen = []
+        copied_proof_seen = []
+        failure = {"binding": None}
+
+        def validate_all(
+            repository, selected, historical, run_id, inputs, runtime,
+            successor_run_id="",
+        ):
+            assert context.get() == historical
+            assert module.BINDING_CONTEXT.get() == selected["input"]
+            assert module.BYTE_CONTEXT.get() is not None
+            native = module.NATIVE_CONTEXT.get()
+            assert native is not None and native.history_proofs is not None
+
+            def prove():
+                assert context.get() == historical
+                assert module.BINDING_CONTEXT.get() == selected["input"]
+                assert module.BYTE_CONTEXT.get() is not None
+                assert module.NATIVE_CONTEXT.get() is native
+                work = module.history_worker_context()
+                with lock:
+                    proof_seen.append((historical, selected["input"]))
+                    if work is not None:
+                        copied_proof_seen.append(
+                            (historical, selected["input"]),
+                        )
+
+            with module.HistoryProofCollection(native.history_proofs) as rows:
+                rows.before_row()
+                rows.run(prove, offload=True)
+            if selected["input"] == failure["binding"]:
+                raise RuntimeError("synthetic binding failure")
+            return {"artifactName": "synthetic"}
+
+        def worker_contexts():
+            barrier = threading.Barrier(2)
+            def read():
+                barrier.wait(5)
+                return (
+                    context.get(),
+                    module.BYTE_CONTEXT.get(),
+                    module.NATIVE_CONTEXT.get(),
+                    module.BINDING_CONTEXT.get(),
+                )
+            return [future.result(timeout=5) for future in (
+                binding_executor.submit(read),
+                binding_executor.submit(read),
+            )]
+
+        try:
+            with patch.object(
+                module.concurrent.futures, "ThreadPoolExecutor",
+                side_effect=executor_factory,
+            ), patch.object(
+                module, "validate_binding", side_effect=validate_all,
+            ):
+                for subject in (X, THIRD):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        module.command_validate_all(all_args(subject))
+                    assert context.get() == outer
+                    assert worker_contexts() == [
+                        (None, None, None, None),
+                        (None, None, None, None),
+                    ]
+
+                failure["binding"] = "second"
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        module.command_validate_all(all_args(X))
+                except RuntimeError as error:
+                    assert str(error) == "synthetic binding failure"
+                else:
+                    raise AssertionError("validate-all worker failure passed")
+                assert context.get() == outer
+                assert worker_contexts() == [
+                    (None, None, None, None),
+                    (None, None, None, None),
+                ]
+        finally:
+            binding_executor.shutdown(wait=True)
+
+        assert sorted(proof_seen) == sorted([
+            (X, "first"), (X, "second"),
+            (THIRD, "first"), (THIRD, "second"),
+            (X, "first"), (X, "second"),
+        ])
+        assert {subject for subject, _ in copied_proof_seen} == {X, THIRD}
+    finally:
+        context.reset(outer_token)
+    assert context.get() is None
+
+WRAPPERS = (
+    (
+        "validate_failed_held_continuation_history",
+        "_failed_held_continuation_profile",
+        "_failed_held_current_reader",
+        "_collect_failed_held_continuation_observation",
+        "_validate_failed_held_continuation_observation",
+        True,
+    ),
+    (
+        "validate_failed_clean_reader_continuation_history",
+        "_failed_clean_reader_continuation_profile",
+        "_failed_clean_reader_current_reader",
+        "_collect_failed_clean_reader_continuation_observation",
+        "_validate_failed_clean_reader_continuation_observation",
+        False,
+    ),
+    (
+        "validate_failed_pre_cas_continuation_history",
+        "_failed_pre_cas_continuation_profile",
+        "_failed_pre_cas_current_reader",
+        "_collect_failed_pre_cas_continuation_observation",
+        "_validate_failed_pre_cas_continuation_observation",
+        True,
+    ),
+)
+
+def run_wrapper(module, specification, reader_context):
+    (
+        wrapper_name, profile_name, reader_name, collector_name,
+        observation_name, has_semantic,
+    ) = specification
+    profile = {
+        "name": wrapper_name,
+        "repository": REPOSITORY,
+        "run_id": 101,
+        "control": "1" * 40,
+    }
+    ancestry = []
+    helper_calls = []
+    observed = []
+
+    def descendant(parent, child):
+        ancestry.append((parent, child))
+
+    def current_reader(repository, reader_sha, selected):
+        helper_calls.append((repository, reader_sha, selected))
+        return {"control": reader_sha}
+
+    def collect(repository, selected):
+        return {"stable": True}
+
+    def validate(*args):
+        assert args[3] == S0
+        observed.append((args[3], args[8]["control"], args[9]))
+        return {
+            "subject": args[3],
+            "reader": args[8]["control"],
+            "observation": args[9],
+        }
+
+    token = None
+    if reader_context is not None:
+        token = module._CURRENT_READER_SHA_CONTEXT.set(reader_context)
+    try:
+        with patch.object(module, profile_name, return_value=profile), \
+                patch.object(
+                    module, "validate_descendant_scope",
+                    side_effect=descendant,
+                ), \
+                patch.object(
+                    module, reader_name, side_effect=current_reader,
+                ), \
+                patch.object(module, collector_name, side_effect=collect), \
+                patch.object(module, observation_name, side_effect=validate):
+            arguments = [
+                REPOSITORY, {"id": 101}, {"id": 202}, S0, {},
+                None, False,
+            ]
+            if has_semantic:
+                arguments.append({"stable": "semantic"})
+            getattr(module, wrapper_name)(*arguments)
+    finally:
+        if token is not None:
+            module._CURRENT_READER_SHA_CONTEXT.reset(token)
+    return profile, ancestry, helper_calls, observed
+
+def probe_wrappers(module):
+    for specification in WRAPPERS:
+        profile, ancestry, helper_calls, observed = run_wrapper(
+            module, specification, X,
+        )
+        assert ancestry == [
+            (profile["control"], S0),
+            (profile["control"], X),
+        ]
+        assert [call[1] for call in helper_calls] == [X, X]
+        assert observed == [
+            (S0, X, {"stable": True}),
+            (S0, X, {"stable": True}),
+        ]
+
+        for legacy in (None, S0):
+            profile, ancestry, helper_calls, observed = run_wrapper(
+                module, specification, legacy,
+            )
+            assert ancestry == [(profile["control"], S0)]
+            assert [call[1] for call in helper_calls] == [S0, S0]
+            assert all(item[:2] == (S0, S0) for item in observed)
+
+        (
+            wrapper_name, profile_name, reader_name, collector_name,
+            observation_name, has_semantic,
+        ) = specification
+        profile = {
+            "name": wrapper_name,
+            "repository": REPOSITORY,
+            "run_id": 101,
+            "control": "1" * 40,
+        }
+        reader = []
+        collected = []
+        observed = []
+
+        def reject_reader_ancestry(parent, child):
+            if child == X:
+                raise RuntimeError("synthetic reader ancestry rejection")
+
+        token = module._CURRENT_READER_SHA_CONTEXT.set(X)
+        try:
+            with patch.object(module, profile_name, return_value=profile), \
+                    patch.object(
+                        module, "validate_descendant_scope",
+                        side_effect=reject_reader_ancestry,
+                    ), \
+                    patch.object(
+                        module, reader_name,
+                        side_effect=lambda *args: reader.append(args),
+                    ), \
+                    patch.object(
+                        module, collector_name,
+                        side_effect=lambda *args: collected.append(args),
+                    ), \
+                    patch.object(
+                        module, observation_name,
+                        side_effect=lambda *args: observed.append(args),
+                    ):
+                arguments = [
+                    REPOSITORY, {"id": 101}, {"id": 202}, S0, {},
+                    None, False,
+                ]
+                if has_semantic:
+                    arguments.append({"stable": "semantic"})
+                try:
+                    getattr(module, wrapper_name)(*arguments)
+                except RuntimeError as error:
+                    assert str(error) == "synthetic reader ancestry rejection"
+                else:
+                    raise AssertionError(
+                        f"{wrapper_name} collected before reader ancestry",
+                    )
+        finally:
+            module._CURRENT_READER_SHA_CONTEXT.reset(token)
+        assert reader == collected == observed == []
+
+def rejection_text(action):
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            action()
+    except SystemExit:
+        return stderr.getvalue()
+    except Exception as error:
+        return stderr.getvalue() + f"\n{type(error).__name__}: {error}"
+    raise AssertionError("incomplete synthetic observation was accepted")
+
+def probe_control_comparisons(module):
+    held = {
+        "id": 202,
+        "head_sha": "2" * 40,
+    }
+    row = {"id": 101}
+    cases = (
+        (
+            module._validate_failed_held_continuation_observation,
+            {
+                "name": "held-control",
+                "repository": REPOSITORY,
+                "run_id": 101,
+                "held_run_id": 202,
+                "held_source": held["head_sha"],
+                "current_workflow_blob": "3" * 40,
+                "policy_blob": "4" * 40,
+                "authority_blob": "5" * 40,
+                "artifacts": (),
+            },
+            {
+                "run": {}, "attempt": {}, "workflow": {},
+                "jobPages": [], "pending": [], "approvals": [],
+                "artifactPages": [], "commit": {}, "tree": {},
+                "attemptLog": b"x", "archives": {},
+            },
+            True,
+        ),
+        (
+            module._validate_failed_clean_reader_continuation_observation,
+            {
+                "name": "clean-control",
+                "repository": REPOSITORY,
+                "run_id": 101,
+                "held_run_id": 202,
+                "held_source": held["head_sha"],
+                "workflow_blob": "3" * 40,
+                "policy_blob": "4" * 40,
+                "authority_blob": "5" * 40,
+                "current_verifier_blob": "6" * 40,
+            },
+            {
+                "run": {}, "attempt": {}, "workflow": {},
+                "jobPages": [], "pending": [], "approvals": [],
+                "artifactPages": [], "commit": {}, "tree": {},
+                "attemptLog": b"x",
+            },
+            False,
+        ),
+        (
+            module._validate_failed_pre_cas_continuation_observation,
+            {
+                "name": "pre-cas-control",
+                "repository": REPOSITORY,
+                "run_id": 101,
+                "held_run_id": 202,
+                "held_source": held["head_sha"],
+                "workflow_blob": "3" * 40,
+                "policy_blob": "4" * 40,
+                "authority_blob": "5" * 40,
+                "verifier_blob": "6" * 40,
+            },
+            {
+                "run": {}, "attempt": {}, "workflow": {},
+                "jobPages": [], "pending": [], "approvals": [],
+                "artifactInventories": {}, "commit": {}, "tree": {},
+                "attemptLog": b"x", "archives": {},
+            },
+            True,
+        ),
+    )
+    token = module._CURRENT_READER_SHA_CONTEXT.set(X)
+    try:
+        for function, profile, observation, has_semantic in cases:
+            def invoke(control):
+                reader = {
+                    "control": control,
+                    "tree": "a" * 40,
+                    "workflowBlob": profile[
+                        "current_workflow_blob"
+                        if "current_workflow_blob" in profile
+                        else "workflow_blob"
+                    ],
+                    "policyBlob": profile["policy_blob"],
+                    "authorityBlob": profile["authority_blob"],
+                    "validatorBlob": "b" * 40,
+                }
+                if "current_verifier_blob" in profile:
+                    reader["verifierBlob"] = profile[
+                        "current_verifier_blob"
+                    ]
+                if "verifier_blob" in profile:
+                    reader["verifierBlob"] = profile["verifier_blob"]
+                arguments = [
+                    REPOSITORY, row, held, S0, {}, None, False,
+                    profile, reader, observation,
+                ]
+                if has_semantic:
+                    arguments.append({})
+                return rejection_text(lambda: function(*arguments))
+
+            assert "current exact-reader proof differs" not in invoke(X)
+            assert "current exact-reader proof differs" in invoke(S0)
+            assert "current exact-reader proof differs" in invoke(THIRD)
+    finally:
+        module._CURRENT_READER_SHA_CONTEXT.reset(token)
+
+def history_row(run_id, source, created, updated, conclusion="failure"):
+    return {
+        "id": run_id,
+        "workflow_id": 339733789,
+        "path": ".github/workflows/oci-live-data-rollout.yml",
+        "head_sha": source,
+        "head_branch": "master",
+        "event": "workflow_dispatch",
+        "run_attempt": 1,
+        "status": "completed",
+        "conclusion": conclusion,
+        "display_title": f"oci-live-data apply-slip-index {source}",
+        "created_at": created,
+        "run_started_at": created,
+        "updated_at": updated,
+        "html_url": (
+            f"https://github.com/{REPOSITORY}/actions/runs/{run_id}"
+        ),
+        "head_repository": {
+            "id": 753130566,
+            "node_id": "R_kgDOLOPcRg",
+            "full_name": REPOSITORY,
+        },
+    }
+
+def original_owner(module):
+    return history_row(
+        38635983420,
+        module.FAILED_HELD_CONTINUATION_HELD_SOURCE,
+        "2026-10-14T20:54:25Z",
+        "2026-10-14T22:07:29Z",
+        "success",
+    )
+
+def later_owner(module):
+    return history_row(
+        39496124184,
+        S0,
+        "2026-10-20T08:00:00Z",
+        "2026-10-20T09:00:00Z",
+        "success",
+    )
+
+def frozen_rows(module):
+    return [
+        history_row(
+            module.FAILED_HELD_CONTINUATION_RUN_ID,
+            module.FAILED_HELD_CONTINUATION_CONTROL,
+            module.FAILED_HELD_CONTINUATION_CREATED_AT,
+            module.FAILED_HELD_CONTINUATION_UPDATED_AT,
+        ),
+        history_row(
+            module.FAILED_CLEAN_READER_CONTINUATION_RUN_ID,
+            module.FAILED_CLEAN_READER_CONTINUATION_CONTROL,
+            module.FAILED_CLEAN_READER_CONTINUATION_CREATED_AT,
+            module.FAILED_CLEAN_READER_CONTINUATION_UPDATED_AT,
+        ),
+        history_row(
+            module.FAILED_PRE_CAS_CONTINUATION_RUN_ID,
+            module.FAILED_PRE_CAS_CONTINUATION_CONTROL,
+            module.FAILED_PRE_CAS_CONTINUATION_CREATED_AT,
+            module.FAILED_PRE_CAS_CONTINUATION_UPDATED_AT,
+        ),
+    ]
+
+def policy_process(command, **kwargs):
+    if command[:2] == ["git", "show"]:
+        return subprocess.CompletedProcess(
+            command, 0, "sanitized policy source\n", "",
+        )
+    assert command == ["bash", "-s", "--", "workflows"]
+    return subprocess.CompletedProcess(
+        command, 0, "oci-live-data-rollout.yml\n", "",
+    )
+
+def call_history(module, held, rows, validator_effects):
+    page = {
+        "total_count": len(rows) + 1,
+        "workflow_runs": [copy.deepcopy(held), *copy.deepcopy(rows)],
+    }
+    with patch.object(
+        module.subprocess, "run", side_effect=policy_process,
+    ), patch.object(
+        module, "native_api_batch", return_value=[[[page][0]]],
+    ), patch.object(
+        module, "validate_failed_held_continuation_history",
+        side_effect=validator_effects[0],
+    ) as first, patch.object(
+        module, "validate_failed_clean_reader_continuation_history",
+        side_effect=validator_effects[1],
+    ) as second, patch.object(
+        module, "validate_failed_pre_cas_continuation_history",
+        side_effect=validator_effects[2],
+    ) as third:
+        result = module.held_handoff_history(
+            REPOSITORY, held, S0, dispatch_inputs={},
+            failed_continuation_semantic={},
+        )
+        return result, (first, second, third)
+
+def probe_original_routing(module):
+    calls = []
+    effects = tuple(
+        lambda *args, label=label: calls.append((label, args[1]["id"]))
+        for label in ("held", "clean", "pre-cas")
+    )
+    rows = frozen_rows(module)
+    result, validators = call_history(
+        module, original_owner(module), rows, effects,
+    )
+    assert result["workflow_counts"] == {
+        "oci-live-data-rollout.yml": 4,
+    }
+    assert calls == [
+        ("held", module.FAILED_HELD_CONTINUATION_RUN_ID),
+        ("clean", module.FAILED_CLEAN_READER_CONTINUATION_RUN_ID),
+        ("pre-cas", module.FAILED_PRE_CAS_CONTINUATION_RUN_ID),
+    ]
+    assert [validator.call_count for validator in validators] == [1, 1, 1]
+    for missing in range(3):
+        try:
+            call_history(
+                module, original_owner(module),
+                [row for index, row in enumerate(rows) if index != missing],
+                effects,
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("original owner accepted a missing frozen ID")
+
+def probe_later_routing(module):
+    rejected_effects = (
+        AssertionError("later owner invoked held frozen validator"),
+        AssertionError("later owner invoked clean frozen validator"),
+        AssertionError("later owner invoked pre-CAS frozen validator"),
+    )
+    rows = frozen_rows(module)
+    result, validators = call_history(
+        module, later_owner(module), rows, rejected_effects,
+    )
+    assert result["held_handoff_run_id"] == "39496124184"
+    assert result["workflow_counts"] == {
+        "oci-live-data-rollout.yml": 4,
+    }
+    assert [validator.call_count for validator in validators] == [0, 0, 0]
+
+    def reject(held, selected, expected):
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                call_history(module, held, selected, rejected_effects)
+        except SystemExit:
+            assert expected in stderr.getvalue(), stderr.getvalue()
+            return
+        raise AssertionError(
+            f"later owner accepted invalid frozen history: {expected}",
+        )
+
+    def owner_starting(timestamp):
+        held = later_owner(module)
+        started = dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        held["created_at"] = timestamp
+        held["run_started_at"] = timestamp
+        held["updated_at"] = (
+            started + dt.timedelta(hours=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return held
+
+    for row in rows:
+        drifted = copy.deepcopy(row)
+        drifted["head_branch"] = "drifted-frozen-history"
+        reject(
+            later_owner(module), [drifted],
+            "known frozen failed-continuation run identity changed",
+        )
+
+        terminal = dt.datetime.fromisoformat(
+            row["updated_at"].replace("Z", "+00:00"),
+        )
+        for lower in (
+            terminal,
+            terminal - dt.timedelta(seconds=1),
+        ):
+            held = owner_starting(lower.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            reject(
+                held, [copy.deepcopy(row)],
+                "known frozen failed-continuation run is not pre-window history",
+            )
+            drifted = copy.deepcopy(row)
+            drifted["head_branch"] = "drifted-frozen-history"
+            reject(
+                held, [drifted],
+                "known frozen failed-continuation run is not pre-window history",
+            )
+
+def probe_recursive_394_to_386(module, later_snapshot=None):
+    context = module._CURRENT_READER_SHA_CONTEXT
+    assert context.get() is None
+    predecessor_run = str(module.FAILED_HELD_CONTINUATION_HELD_RUN_ID)
+    predecessor_source = module.FAILED_HELD_CONTINUATION_HELD_SOURCE
+    outer_run = "39496124184"
+    capture_run = "101"
+    failed_run = "202"
+    build_run = "303"
+    checkpoint_run = "404"
+    checkpoint_source = "6" * 40
+    applied_source = "5" * 40
+    baseline_sha = "b" * 64
+    predecessor_manifest = "c" * 64
+    outer_manifest = "d" * 64
+    image_bytes = b"promoted current-reader image fixture\n"
+    baseline_files = {
+        "baseline-provenance.env": b"promoted-reader-baseline",
+    }
+    root = {
+        "baseline_capture_run_id": capture_run,
+        "baseline_artifact_name": "fixture-baseline",
+        "applied_data_run_id": "11",
+        "applied_source_sha": applied_source,
+        "_baseline_files": baseline_files,
+    }
+    checkpoint = {
+        "sourceSha": checkpoint_source,
+        "contentChecksumSha256": "e" * 64,
+        "disposition": "NOT_APPLICABLE",
+    }
+    evidence = {
+        "checkpoint_source_sha": checkpoint_source,
+        "disk_checkpoint_run_id": checkpoint_run,
+        "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+        "disk_checkpoint_disposition": checkpoint["disposition"],
+    }
+    request_base = {
+        "confirmation": module.HELD_HANDOFF_CONFIRMATION,
+        "prerequisite_run_id": capture_run,
+        "failed_deploy_run_id": failed_run,
+        "resume_source_sha": applied_source,
+        "build_run_id": build_run,
+        "checkpoint_source_sha": checkpoint_source,
+        "disk_checkpoint_run_id": checkpoint_run,
+    }
+    predecessor_request = dict(
+        request_base,
+        held_handoff_run_id=predecessor_run,
+        held_handoff_source_sha=predecessor_source,
+    )
+    outer_request = dict(
+        request_base,
+        held_handoff_run_id=outer_run,
+        held_handoff_source_sha=S0,
+    )
+
+    def authority(schema, current_source, predecessor=None):
+        result = {
+            "schema_version": schema,
+            "applied_data_run_id": root["applied_data_run_id"],
+            "applied_source_sha": root["applied_source_sha"],
+            "failed_deploy_run_id": failed_run,
+            "resume_maintenance_mode": "pre-runtime-hold",
+            "failed_deploy_job_conclusion": "failure",
+            "public_validate_job_conclusion": "skipped",
+            "lock_release_step_conclusion": "skipped",
+            "fence_release_step_conclusion": "skipped",
+            "rehold_step_conclusion": "skipped",
+            "failed_activation_run_id": "0",
+            "current_source_sha": current_source,
+            "baseline_sha256": baseline_sha,
+            "runtime_images_sha256": hashlib.sha256(image_bytes).hexdigest(),
+            "checkpoint_source_sha": checkpoint_source,
+            "disk_checkpoint_run_id": checkpoint_run,
+            "disk_checkpoint_sha256": checkpoint["contentChecksumSha256"],
+            "disk_checkpoint_disposition": checkpoint["disposition"],
+            "application_change_scope": "github-infra-docs-only",
+            "status": "PASS",
+        }
+        if predecessor is not None:
+            result.update(predecessor)
+        return result
+
+    predecessor_authority = authority(
+        "live-betting-data-resume-v2", predecessor_source,
+    )
+    outer_authority = authority(
+        "live-betting-data-resume-v4",
+        S0,
+        {
+            "held_handoff_run_id": predecessor_run,
+            "held_handoff_source_sha": predecessor_source,
+            "held_handoff_evidence_sha256": predecessor_manifest,
+        },
+    )
+
+    reports = {
+        f"reports/{stage}-{service}.json"
+        for stage in ("preflight", "apply", "verify")
+        for service in (
+            "event", "gamemaster", "moderation", "resulting", "bet", "slip",
+        )
+    }
+    reports |= {
+        f"reports/{stage}-slip-index.json"
+        for stage in ("preflight", "apply", "verify", "final")
+    }
+    reports |= {"reports/preflight-event-reschedule.json"}
+    reports |= {
+        f"reports/{stage}-backoffice-pre-september-cleanup.json"
+        for stage in ("preflight", "apply", "verify")
+    }
+    package = reports | {
+        "SHA256SUMS", "provenance.env", "schema.env", "journal.json",
+        "resume-authority.env",
+    }
+    predecessor_files = {name: b"fixture" for name in package}
+    predecessor_files["resume-authority.env"] = b"predecessor-authority"
+    outer_files = {name: b"fixture" for name in package}
+    outer_files.update({
+        "resume-authority.env": b"outer-authority",
+        "resume-images.tsv": image_bytes,
+        "held-handoff-history.json": b"{}",
+        "held-handoff-transfer.json": b"{}",
+    })
+
+    predecessor_held = original_owner(module)
+    outer_native = later_owner(module)
+    outer_held = dict(
+        outer_native,
+        _held_complete=True,
+        _held_native_inputs=predecessor_request,
+        _handoff_resume_schema="live-betting-data-resume-v4",
+        _handoff_deadline=4102444800,
+        _handoff_lease_seconds=3600,
+        _handoff_generation=7,
+    )
+    nested_rows = frozen_rows(module)
+    later_rows = (
+        frozen_rows(module)
+        if later_snapshot is None else copy.deepcopy(later_snapshot)
+    )
+    inventory_pages = [
+        {
+            "total_count": len(nested_rows) + 2,
+            "workflow_runs": [
+                copy.deepcopy(predecessor_held),
+                copy.deepcopy(outer_native),
+                *copy.deepcopy(nested_rows),
+            ],
+        },
+        {
+            "total_count": len(later_rows) + 1,
+            "workflow_runs": [
+                copy.deepcopy(outer_native),
+                *copy.deepcopy(later_rows),
+            ],
+        },
+    ]
+
+    profiles = {
+        specification[1]: {
+            "name": specification[0],
+            "repository": REPOSITORY,
+            "run_id": run_id,
+            "control": control,
+        }
+        for specification, run_id, control in zip(
+            WRAPPERS,
+            (
+                module.FAILED_HELD_CONTINUATION_RUN_ID,
+                module.FAILED_CLEAN_READER_CONTINUATION_RUN_ID,
+                module.FAILED_PRE_CAS_CONTINUATION_RUN_ID,
+            ),
+            (
+                module.FAILED_HELD_CONTINUATION_CONTROL,
+                module.FAILED_CLEAN_READER_CONTINUATION_CONTROL,
+                module.FAILED_PRE_CAS_CONTINUATION_CONTROL,
+            ),
+        )
+    }
+    reader_calls = []
+    observed = []
+    ancestry = []
+    native_calls = []
+    history_calls = []
+    owner_calls = []
+    inventory_reads = []
+
+    def reader(repository, reader_sha, profile):
+        reader_calls.append((profile["run_id"], reader_sha))
+        return {"control": reader_sha}
+
+    def observation(*args):
+        if args[2]["id"] != int(predecessor_run):
+            raise AssertionError("frozen history rebound to the later owner")
+        observed.append((args[1]["id"], args[2]["id"], args[3], args[8]["control"]))
+        return {
+            "run": args[1]["id"],
+            "owner": args[2]["id"],
+            "subject": args[3],
+            "reader": args[8]["control"],
+        }
+
+    def descendant(parent, child):
+        ancestry.append((parent, child))
+
+    def native(
+        repository, run_id, source_sha, dispatch_inputs, runtime_mode, label,
+    ):
+        native_calls.append((str(run_id), source_sha, copy.deepcopy(dispatch_inputs)))
+        if str(run_id) == outer_run:
+            assert source_sha == S0
+            assert dispatch_inputs == outer_request
+            return copy.deepcopy(outer_held)
+        assert str(run_id) == predecessor_run
+        assert source_sha == predecessor_source
+        assert dispatch_inputs == predecessor_request
+        return copy.deepcopy(predecessor_held)
+
+    def artifact(repository, run_id, label, *, include_files=False):
+        assert include_files
+        if str(run_id) == outer_run:
+            return copy.deepcopy(evidence), outer_manifest, copy.deepcopy(outer_files)
+        assert str(run_id) == predecessor_run
+        return (
+            copy.deepcopy(evidence),
+            predecessor_manifest,
+            copy.deepcopy(predecessor_files),
+        )
+
+    def parse_environment(raw, *args, **kwargs):
+        if raw == b"predecessor-authority":
+            return copy.deepcopy(predecessor_authority)
+        assert raw == baseline_files["baseline-provenance.env"]
+        return {"namespace": "gaming"}
+
+    def inventory(requests):
+        inventory_reads.append(tuple(requests))
+        if not inventory_pages:
+            raise AssertionError("unexpected extra held-history inventory read")
+        return [[copy.deepcopy(inventory_pages.pop(0))]]
+
+    def api(endpoint):
+        if endpoint in (
+            f"repos/{REPOSITORY}/actions/runs/{outer_run}",
+            f"repos/{REPOSITORY}/actions/runs/{outer_run}/attempts/1",
+        ):
+            return copy.deepcopy(outer_native)
+        if endpoint == (
+            f"repos/{REPOSITORY}/actions/workflows/"
+            "oci-live-data-rollout.yml"
+        ):
+            return {"id": outer_native["workflow_id"]}
+        raise AssertionError(f"unexpected recursive fixture API read: {endpoint}")
+
+    def jobs(repository, run_id, label):
+        assert str(run_id) == outer_run
+        return [{
+            "id": 3949612418401,
+            "run_id": int(outer_run),
+            "name": "rollout",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-10-20T08:01:00Z",
+            "steps": [{
+                "name": "Validate exact SHA phase and trusted upstream runs",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-10-20T08:02:00Z",
+                "completed_at": "2026-10-20T08:03:00Z",
+            }],
+        }]
+
+    def owner(repository, held, subject_sha, dispatch_inputs, successor, label):
+        owner_calls.append((held["id"], subject_sha, successor))
+
+    real_history = module.held_handoff_history
+
+    def history(*args, **kwargs):
+        result = real_history(*args, **kwargs)
+        history_calls.append((
+            args[1]["id"], args[2], args[3] if len(args) > 3 else "",
+            copy.deepcopy(result),
+        ))
+        return result
+
+    real_artifact = module.validate_held_handoff_artifact
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(
+            module.subprocess, "run", side_effect=policy_process,
+        ))
+        stack.enter_context(patch.object(
+            module, "validate_descendant_scope", side_effect=descendant,
+        ))
+        stack.enter_context(patch.object(
+            module, "validate_held_handoff_native", side_effect=native,
+        ))
+        stack.enter_context(patch.object(
+            module, "parse_live_v6_artifact", side_effect=artifact,
+        ))
+        stack.enter_context(patch.object(
+            module, "parse_resume_authority",
+            return_value=copy.deepcopy(outer_authority),
+        ))
+        stack.enter_context(patch.object(
+            module, "parse_env", side_effect=parse_environment,
+        ))
+        stack.enter_context(patch.object(
+            module, "complete_held_artifacts",
+            return_value=copy.deepcopy(baseline_files),
+        ))
+        stack.enter_context(patch.object(
+            module, "validate_failed_deploy_jobs",
+            return_value=("skipped", "skipped", "skipped"),
+        ))
+        stack.enter_context(patch.object(
+            module, "validate_failed_deploy_artifacts",
+            return_value=copy.deepcopy(root),
+        ))
+        stack.enter_context(patch.object(
+            module, "parse_checkpoint_artifact",
+            return_value=copy.deepcopy(checkpoint),
+        ))
+        stack.enter_context(patch.object(module, "validate_live_v6_lineage"))
+        stack.enter_context(patch.object(
+            module, "exact_artifact", return_value={"id": 1},
+        ))
+        stack.enter_context(patch.object(
+            module, "artifact_member", return_value=image_bytes,
+        ))
+        stack.enter_context(patch.object(module, "candidate_images_checksum"))
+        stack.enter_context(patch.object(
+            module, "validate_checksum_manifest", return_value=baseline_sha,
+        ))
+        stack.enter_context(patch.object(
+            module, "unique_artifact_file",
+            return_value=(
+                "baseline-provenance.env",
+                baseline_files["baseline-provenance.env"],
+            ),
+        ))
+        stack.enter_context(patch.object(module, "validate_held_handoff_reports"))
+        stack.enter_context(patch.object(
+            module, "held_handoff_authority", side_effect=owner,
+        ))
+        stack.enter_context(patch.object(module, "validate_held_handoff_transfer"))
+        stack.enter_context(patch.object(
+            module, "native_api_batch", side_effect=inventory,
+        ))
+        stack.enter_context(patch.object(module, "gh_api", side_effect=api))
+        stack.enter_context(patch.object(
+            module, "jobs_for_run", side_effect=jobs,
+        ))
+        stack.enter_context(patch.object(
+            module, "held_handoff_history", side_effect=history,
+        ))
+        for specification in WRAPPERS:
+            (
+                _, profile_name, reader_name, collector_name,
+                observation_name, _,
+            ) = specification
+            stack.enter_context(patch.object(
+                module, profile_name, return_value=profiles[profile_name],
+            ))
+            stack.enter_context(patch.object(
+                module, reader_name, side_effect=reader,
+            ))
+            stack.enter_context(patch.object(
+                module, collector_name, return_value={"stable": True},
+            ))
+            stack.enter_context(patch.object(
+                module, observation_name, side_effect=observation,
+            ))
+
+        artifact_spy = stack.enter_context(patch.object(
+            module, "validate_held_handoff_artifact", wraps=real_artifact,
+        ))
+        result = module.validate_held_handoff_artifact(
+            REPOSITORY, outer_run, S0, X, outer_request, "oke",
+            "recursive promoted-reader fixture",
+        )
+
+    assert context.get() is None
+    assert artifact_spy.call_count == 2
+    recursive = artifact_spy.call_args_list[1]
+    assert recursive.args[1:4] == (
+        predecessor_run, predecessor_source, S0,
+    )
+    assert recursive.kwargs == {"successor_run_id": outer_run}
+    assert native_calls == [
+        (outer_run, S0, outer_request),
+        (predecessor_run, predecessor_source, predecessor_request),
+    ]
+    assert len(inventory_reads) == 2 and not inventory_pages
+    assert [(owner_id, historical, successor) for (
+        owner_id, historical, successor, _
+    ) in history_calls] == [
+        (int(predecessor_run), S0, outer_run),
+        (int(outer_run), X, ""),
+    ]
+    assert history_calls[0][3]["successor_source_sha"] == S0
+    assert history_calls[0][3]["held_handoff_run_id"] == predecessor_run
+    assert history_calls[1][3]["held_handoff_run_id"] == outer_run
+    assert len(reader_calls) == 6
+    assert {reader_sha for _, reader_sha in reader_calls} == {X}
+    assert {
+        run_id: sum(call_run_id == run_id for call_run_id, _ in reader_calls)
+        for run_id in {profile["run_id"] for profile in profiles.values()}
+    } == {profile["run_id"]: 2 for profile in profiles.values()}
+    assert len(observed) == 6
+    assert {
+        (owner, historical, reader_sha)
+        for _, owner, historical, reader_sha in observed
+    } == {(int(predecessor_run), S0, X)}
+    assert (S0, X) in ancestry
+    assert (predecessor_source, S0) in ancestry
+    for profile in profiles.values():
+        assert (profile["control"], S0) in ancestry
+        assert (profile["control"], X) in ancestry
+    assert owner_calls == [(int(outer_run), X, "")]
+    assert result["heldHistory"]["held_handoff_run_id"] == outer_run
+    assert result["resume"]["held_handoff_run_id"] == outer_run
+    assert result["resume"]["held_handoff_source_sha"] == S0
+    return result
+
+def probe_nested_owner_drift(module):
+    later = frozen_rows(module)
+    later[1]["head_branch"] = "drifted-after-predecessor-observation"
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            probe_recursive_394_to_386(module, later)
+    except SystemExit:
+        assert module._CURRENT_READER_SHA_CONTEXT.get() is None
+        assert (
+            "known frozen failed-continuation run identity changed"
+            in stderr.getvalue()
+        )
+        return
+    raise AssertionError(
+        "later owner accepted a drifted nested frozen snapshot",
+    )
+
+probe_public_direct_entry_lifecycle(m)
+probe_context_lifecycle(m)
+probe_wrappers(m)
+probe_control_comparisons(m)
+probe_original_routing(m)
+probe_later_routing(m)
+probe_recursive_394_to_386(m)
+probe_nested_owner_drift(m)
+
+source = validator.read_text(encoding="utf-8")
+mutant_index = 0
+
+def killed(label, replacements, probe):
+    global mutant_index
+    mutant = source
+    for old, new, expected in replacements:
+        count = mutant.count(old)
+        assert count == expected, (label, count, expected, old)
+        mutant = mutant.replace(old, new)
+    mutant_index += 1
+    candidate = load_module(f"promoted_reader_mutant_{mutant_index}", mutant)
+    try:
+        probe(candidate)
+    except (AssertionError, RuntimeError, SystemExit):
+        return
+    raise AssertionError(f"{label} mutant survived")
+
+killed(
+    "unconditional-routing",
+    [(
+        '            if row["id"] in required_frozen_ids:\n',
+        '            if row["id"] in {\n'
+        '                FAILED_HELD_CONTINUATION_RUN_ID,\n'
+        '                FAILED_CLEAN_READER_CONTINUATION_RUN_ID,\n'
+        '                FAILED_PRE_CAS_CONTINUATION_RUN_ID,\n'
+        '            }:\n',
+        1,
+    )],
+    probe_later_routing,
+)
+killed(
+    "skip-all-routing",
+    [(
+        '            if row["id"] in required_frozen_ids:\n',
+        '            if False and row["id"] in required_frozen_ids:\n',
+        1,
+    )],
+    probe_original_routing,
+)
+killed(
+    "historical-subject-reader",
+    [(
+        '            repository, current_reader_sha, profile,\n',
+        '            repository, subject_sha, profile,\n',
+        3,
+    )],
+    probe_wrappers,
+)
+killed(
+    "historical-subject-control-compare",
+    [(
+        '        or current_reader["control"] != current_reader_sha\n',
+        '        or current_reader["control"] != subject_sha\n',
+        3,
+    )],
+    probe_control_comparisons,
+)
+killed(
+    "historical-subject-overwritten",
+    [(
+        '    if current_reader_sha is None:\n'
+        '        current_reader_sha = subject_sha\n'
+        '    validate_descendant_scope(profile["control"], subject_sha)\n',
+        '    if current_reader_sha is None:\n'
+        '        current_reader_sha = subject_sha\n'
+        '    subject_sha = current_reader_sha\n'
+        '    validate_descendant_scope(profile["control"], subject_sha)\n',
+        3,
+    )],
+    probe_wrappers,
+)
+killed(
+    "missing-reader-ancestry",
+    [(
+        '    if current_reader_sha != subject_sha:\n'
+        '        validate_descendant_scope(profile["control"], current_reader_sha)\n',
+        '',
+        3,
+    )],
+    probe_wrappers,
+)
+killed(
+    "missing-command-setup",
+    [(
+        '    with NativeReadCommand(1) as native:\n'
+        '        reader_token = _CURRENT_READER_SHA_CONTEXT.set(args.subject_sha)\n',
+        '    with NativeReadCommand(1) as native:\n'
+        '        reader_token = _CURRENT_READER_SHA_CONTEXT.set(None)\n',
+        1,
+    )],
+    probe_context_lifecycle,
+)
+killed(
+    "missing-worker-setup",
+    [(
+        '            binding_token = BINDING_CONTEXT.set(binding["input"])\n'
+        '            reader_token = _CURRENT_READER_SHA_CONTEXT.set(args.subject_sha)\n',
+        '            binding_token = BINDING_CONTEXT.set(binding["input"])\n'
+        '            reader_token = _CURRENT_READER_SHA_CONTEXT.set(None)\n',
+        1,
+    )],
+    probe_context_lifecycle,
+)
+killed(
+    "missing-command-reset",
+    [(
+        '            _CURRENT_READER_SHA_CONTEXT.reset(reader_token)\n'
+        '        native.check_cancelled()\n',
+        '            reader_token = reader_token\n'
+        '        native.check_cancelled()\n',
+        1,
+    )],
+    probe_context_lifecycle,
+)
+killed(
+    "missing-worker-reset",
+    [(
+        '                _CURRENT_READER_SHA_CONTEXT.reset(reader_token)\n'
+        '                BINDING_CONTEXT.reset(binding_token)\n',
+        '                reader_token = reader_token\n'
+        '                BINDING_CONTEXT.reset(binding_token)\n',
+        1,
+    )],
+    probe_context_lifecycle,
+)
+killed(
+    "missing-direct-entry-setup",
+    [(
+        '    reader_token = _CURRENT_READER_SHA_CONTEXT.set(subject_sha)\n'
+        '    try:\n',
+        '    reader_token = _CURRENT_READER_SHA_CONTEXT.set(None)\n'
+        '    try:\n',
+        1,
+    )],
+    probe_public_direct_entry_lifecycle,
+)
+killed(
+    "ownership-rebound",
+    [(
+        '            and held.get("id") == owner_id\n'
+        '            and held.get("head_sha") == owner_source\n',
+        '            and held.get("id") == 39496124184\n'
+        '            and held.get("head_sha") == held.get("head_sha")\n',
+        1,
+    )],
+    probe_later_routing,
+)
+killed(
+    "missing-generic-frozen-identity",
+    [(
+        '            frozen_identity = known_frozen_rows.get(row["id"])\n',
+        '            frozen_identity = None\n',
+        1,
+    )],
+    probe_later_routing,
+)
+killed(
+    "missing-generic-frozen-boundary",
+    [(
+        '                if updated >= lower:\n'
+        '                    fail("known frozen failed-continuation run is not pre-window history")\n',
+        '',
+        1,
+    )],
+    probe_later_routing,
+)
+killed(
+    "recursive-top-level-subject",
+    [(
+        '                repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],\n'
+        '                source_sha, native, runtime_mode, label, successor_run_id=run_id,\n',
+        '                repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],\n'
+        '                subject_sha, native, runtime_mode, label, successor_run_id=run_id,\n',
+        1,
+    )],
+    probe_recursive_394_to_386,
+)
+
+assert mutant_index == 15
+print(
+    "promoted_current_reader_contract=PASS "
+    "owners=38635983420,39496124184 contexts=command,workers,direct-entry,proofs "
+    f"mutants={mutant_index}"
+)
+PY
+ok "owner-scoped frozen routing and promoted current-reader context"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib
