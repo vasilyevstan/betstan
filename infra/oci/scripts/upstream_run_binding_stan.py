@@ -4787,6 +4787,9 @@ def native_cli_handoff_approval(repository, run_id, operation, label):
 
 def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, successor_run_id, label):
     authority = provenance_read_authority()
+    current_reader_sha = _CURRENT_READER_SHA_CONTEXT.get()
+    if current_reader_sha is None:
+        current_reader_sha = subject_sha
     native = held.get("_held_native_inputs")
     if native is None:
         native = failed_deploy_native_inputs(
@@ -4997,6 +5000,7 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
     entries = sorted(directory.glob("*.json"))
     if len(entries) > 1000:
         fail(f"{label} private authority inventory exceeds its complete bound")
+    current_self_intent = None
     for path in entries:
         if POSITIVE_INTEGER.fullmatch(path.stem):
             record = authority.load_record(directory, path.stem)
@@ -5021,31 +5025,51 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
                     continue
                 if historical_issued.get(record["runId"]) == record:
                     continue
-            elif not successor_run_id and intent["state"] in {"prepared", "dispatching"}:
+            elif (
+                path.name == f"request-{match[1]}.json"
+                and intent["state"] in {"prepared", "dispatching"}
+            ):
+                current_dispatch_inputs = None
+                byte_context = BYTE_CONTEXT.get()
+                if byte_context is None:
+                    if current_reader_sha == subject_sha:
+                        current_dispatch_inputs = dispatch_inputs
+                elif (
+                    isinstance(byte_context, ImmutableBindingBytes)
+                    and isinstance(byte_context.context, dict)
+                    and byte_context.context.get("repository") == repository
+                    and byte_context.context.get("subject") == current_reader_sha
+                    and isinstance(byte_context.context.get("inputs"), dict)
+                ):
+                    current_dispatch_inputs = byte_context.context["inputs"]
                 owner = os.environ.get("BETSTAN_HELD_DISPATCH_OWNER", "")
                 if (
-                    command_owner_is_ancestor(owner)
+                    current_dispatch_inputs is not None
+                    and command_owner_is_ancestor(owner)
                     and (intent["state"] == "prepared" or intent["ownerPid"] == int(owner))
                     and intent["operation"] == "oci-live-data-continue-held-handoff"
-                    and intent["controlSha"] == subject_sha
-                    and intent["subjectSha"] == subject_sha and intent["targetSha"] is None
-                    and {"approved_sha": subject_sha, **intent["inputs"]} == dispatch_inputs
+                    and intent["controlSha"] == current_reader_sha
+                    and intent["subjectSha"] == current_reader_sha and intent["targetSha"] is None
+                    and {"approved_sha": current_reader_sha, **intent["inputs"]}
+                        == current_dispatch_inputs
                     and intent["inputHash"] == authority.canonical_input_hash(intent["inputs"])
                     and intent["dispatchStatus"] is None
                     and authority.parse_utc(intent["expiresAt"], label).timestamp() > time.time()
                 ):
-                    policy = policy_at(subject_sha, intent["operation"])
+                    policy = policy_at(current_reader_sha, intent["operation"])
                     normalized = authority.validate_request_data({
                         "schemaVersion": authority.REQUEST_SCHEMA, "repository": repository,
-                        "operation": intent["operation"], "controlSha": subject_sha,
-                        "subjectSha": subject_sha, "targetSha": None, "inputs": dispatch_inputs,
-                    }, policy, repository, subject_sha)
+                        "operation": intent["operation"], "controlSha": current_reader_sha,
+                        "subjectSha": current_reader_sha, "targetSha": None,
+                        "inputs": current_dispatch_inputs,
+                    }, policy, repository, current_reader_sha)
                     workflow = gh_api(f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml")
                     raw = held_source_bytes(
-                        repository, subject_sha, ".github/workflows/oci-live-data-rollout.yml", label,
+                        repository, current_reader_sha,
+                        ".github/workflows/oci-live-data-rollout.yml", label,
                     ).encode()
                     authority.verify_intent(
-                        intent, normalized, policy, repository, subject_sha,
+                        intent, normalized, policy, repository, current_reader_sha,
                         workflow["id"], hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest(),
                     )
                     if intent["state"] == "prepared":
@@ -5061,6 +5085,9 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
                         and stat.S_IMODE(metadata.st_mode) == 0o600 and metadata.st_nlink == 1
                         and metadata.st_size == 0
                     ):
+                        if current_self_intent is not None:
+                            fail(f"{label} multiple current dispatch intents prevent receiver absence")
+                        current_self_intent = path.name
                         continue
             fail(f"{label} unresolved dispatch intent prevents receiver absence")
 
