@@ -5402,7 +5402,7 @@ with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as i
         reject(cancelled_history)
     assert cancelled_history() == cancelled_proof
     assert list(Path(isolated_home).iterdir()) == []
-print("PASS native cancelled no-execution history: both frozen profiles, coupled authenticated self, two complete collections, isolated HOME and cutoff/source/runner/ancestry/drift negatives")
+print("PASS native cancelled no-execution history: all three frozen profiles, coupled authenticated self, two complete collections, isolated HOME and cutoff/source/runner/ancestry/drift negatives")
 
 for raw in (
     b"native log unavailable",
