@@ -8036,38 +8036,106 @@ def _held_handoff_history(
     })
     lower = parse_timestamp(held.get("created_at"), "held-handoff history")
     cutoff = None
+    successor_endpoint = None
+    successor_identity = None
+    successor_lifecycle = None
+    successor_initial_updated = None
+    successor_attempt_updated = None
+    successor_inventory_updated = None
+    pre_execution_states = {"requested", "pending", "queued", "waiting"}
+
+    def successor_observation(native, label, expected_identity):
+        identity_keys = (
+            "id", "workflow_id", "path", "head_sha", "head_branch", "event",
+            "run_attempt", "display_title", "created_at",
+        )
+        if (
+            not isinstance(native, dict)
+            or any(key not in native for key in identity_keys)
+            or not isinstance(native.get("head_repository"), dict)
+            or "full_name" not in native["head_repository"]
+        ):
+            fail(f"{label} identity is malformed")
+        identity = {key: native[key] for key in identity_keys}
+        identity["head_repository.full_name"] = native["head_repository"]["full_name"]
+        if any(
+            type(identity[key]) is not int or identity[key] < 1
+            for key in ("id", "workflow_id", "run_attempt")
+        ):
+            fail(f"{label} numeric identity is malformed")
+        if any(
+            key not in identity or type(identity[key]) is not type(value)
+            or identity[key] != value
+            for key, value in expected_identity.items()
+        ):
+            fail(f"{label} immutable identity differs")
+        if (
+            "status" not in native or "conclusion" not in native
+            or type(native["status"]) is not str
+            or (
+                native["conclusion"] is not None
+                and type(native["conclusion"]) is not str
+            )
+        ):
+            fail(f"{label} lifecycle is malformed")
+        created = parse_timestamp(identity["created_at"], f"{label} created_at")
+        updated = parse_timestamp(native.get("updated_at"), f"{label} updated_at")
+        if updated < created:
+            fail(f"{label} interval is inconsistent")
+        return identity, (native["status"], native["conclusion"]), updated
+
+    def same_successor_lifecycle(left, right):
+        return all(
+            type(observed) is type(expected) and observed == expected
+            for observed, expected in zip(left, right)
+        )
+
     if successor_run_id:
         if POSITIVE_INTEGER.fullmatch(successor_run_id) is None:
             fail("held-handoff successor run is invalid")
-        latest = gh_api(f"repos/{repository}/actions/runs/{successor_run_id}")
-        first = gh_api(f"repos/{repository}/actions/runs/{successor_run_id}/attempts/1")
+        successor_endpoint = f"repos/{repository}/actions/runs/{successor_run_id}"
+        initial = gh_api(successor_endpoint)
+        first = gh_api(successor_endpoint + "/attempts/1")
         workflow = gh_api(f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml")
+        if not isinstance(workflow, dict):
+            fail("held-handoff successor workflow identity differs")
         expected = {
             "id": int(successor_run_id), "run_attempt": 1, "head_sha": subject_sha,
             "path": ".github/workflows/oci-live-data-rollout.yml",
             "workflow_id": workflow.get("id"), "event": "workflow_dispatch",
             "head_branch": "master", "display_title": f"oci-live-data apply-slip-index {subject_sha}",
+            "head_repository.full_name": repository,
         }
-        for native in (latest, first):
-            if not isinstance(native, dict) or any(native.get(k) != v for k, v in expected.items()):
-                fail("held-handoff successor native identity differs")
-            if (native.get("head_repository") or {}).get("full_name") != repository:
-                fail("held-handoff successor repository differs")
-        if latest.get("status") != first.get("status") or latest.get("conclusion") != first.get("conclusion"):
+        if type(expected["workflow_id"]) is not int or expected["workflow_id"] < 1:
+            fail("held-handoff successor workflow identity differs")
+        successor_identity, successor_lifecycle, successor_initial_updated = (
+            successor_observation(initial, "held-handoff successor", expected)
+        )
+        _, first_lifecycle, successor_attempt_updated = successor_observation(
+            first, "held-handoff successor attempt", successor_identity,
+        )
+        if not same_successor_lifecycle(successor_lifecycle, first_lifecycle):
             fail("held-handoff successor attempt state differs")
-        if first.get("status") == "completed" and first.get("conclusion") != "success":
+        successor_status, successor_conclusion = successor_lifecycle
+        if successor_status == "completed" and successor_conclusion != "success":
             fail("held-handoff completed successor is not successful")
-        active_inventory = fresh or first.get("status") != "completed"
+        if not (
+            successor_status in pre_execution_states and successor_conclusion is None
+            or successor_status == "in_progress" and successor_conclusion is None
+            or successor_status == "completed" and successor_conclusion == "success"
+        ):
+            fail("held-handoff successor state is invalid")
+        active_inventory = fresh or successor_status != "completed"
         if parse_timestamp(held.get("updated_at"), "held handoff") > parse_timestamp(
-            first.get("created_at"), "successor",
+            successor_identity["created_at"], "successor",
         ):
             fail("held-handoff successor predates the held handoff")
-        if first.get("status") in {"in_progress", "completed"}:
+        if successor_status in {"in_progress", "completed"}:
             job = exact_job(jobs_for_run(repository, successor_run_id, "successor"), "rollout", "successor")
             if (
                 type(job.get("id")) is not int or job["id"] < 1
                 or job.get("run_id") != int(successor_run_id)
-                or job.get("status") != first["status"]
+                or job.get("status") != successor_status
             ):
                 fail("held-handoff successor cutoff belongs to another job")
             steps = [step for step in job["steps"]
@@ -8075,12 +8143,10 @@ def _held_handoff_history(
             if len(steps) != 1:
                 fail("held-handoff successor cutoff is ambiguous")
             cutoff = parse_timestamp(steps[0].get("started_at"), "successor cutoff")
-            if not parse_timestamp(first.get("created_at"), "successor") <= parse_timestamp(
+            if not parse_timestamp(successor_identity["created_at"], "successor") <= parse_timestamp(
                 job.get("started_at"), "successor job",
             ) <= cutoff:
                 fail("held-handoff successor cutoff chronology is invalid")
-        elif first.get("status") not in {"queued", "waiting", "requested", "pending"}:
-            fail("held-handoff successor state is invalid")
     frozen_runs = (
         (
             FAILED_HELD_CONTINUATION_RUN_ID,
@@ -8185,11 +8251,11 @@ def _held_handoff_history(
             updated = parse_timestamp(row.get("updated_at"), "historical run")
             if updated < created or cutoff is not None and not active_inventory and created > cutoff:
                 fail("held-handoff historical interval is inconsistent")
-            if row["id"] in {held["id"], int(successor_run_id or "0")}:
+            if row["id"] == held["id"]:
                 proofs.join()
                 if workflow != "oci-live-data-rollout.yml":
                     fail("held-handoff historical owner is bound to another workflow")
-                authenticated = held if row["id"] == held["id"] else first
+                authenticated = held
                 for key in (
                     "id", "head_sha", "created_at", "updated_at", "workflow_id", "run_attempt",
                     "event", "head_branch", "status", "conclusion", "display_title",
@@ -8199,6 +8265,24 @@ def _held_handoff_history(
                         or row[key] != authenticated[key]
                     ):
                         fail("held-handoff owner inventory differs from its authenticated native identity")
+                continue
+            if successor_run_id and row["id"] == int(successor_run_id):
+                proofs.join()
+                if workflow != "oci-live-data-rollout.yml":
+                    fail("held-handoff historical owner is bound to another workflow")
+                _, inventory_lifecycle, successor_inventory_updated = successor_observation(
+                    row, "held-handoff successor inventory", successor_identity,
+                )
+                if (
+                    not same_successor_lifecycle(successor_lifecycle, inventory_lifecycle)
+                    and not (
+                        successor_lifecycle[0] in pre_execution_states
+                        and successor_lifecycle[1] is None
+                        and inventory_lifecycle[0] in pre_execution_states
+                        and inventory_lifecycle[1] is None
+                    )
+                ):
+                    fail("held-handoff successor inventory lifecycle differs")
                 continue
             if expired_receiver is not None and row["id"] == expired_receiver["id"]:
                 proofs.join()
@@ -8306,6 +8390,19 @@ def _held_handoff_history(
             cutoff is None or parse_timestamp(row.get("created_at"), "historical run") <= cutoff
             for row in rows
         )
+    proofs.join()
+    if successor_run_id:
+        if successor_inventory_updated is None:
+            fail("held-handoff history omitted an independently authenticated run")
+        _, final_lifecycle, final_updated = successor_observation(
+            gh_api(successor_endpoint), "held-handoff final successor", successor_identity,
+        )
+        if not same_successor_lifecycle(successor_lifecycle, final_lifecycle):
+            fail("held-handoff successor lifecycle changed during history collection")
+        if final_updated < max(
+            successor_initial_updated, successor_attempt_updated, successor_inventory_updated,
+        ):
+            fail("held-handoff successor final observation regressed")
     return {
         "schema_version": "live-betting-held-handoff-history-v1",
         "repository": repository, "held_handoff_run_id": str(held["id"]),

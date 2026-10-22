@@ -4062,6 +4062,7 @@ print("PASS complete current producer closure, native chronology, authentic fina
 history_held = {
     "id": 77, "head_sha": source, "created_at": "2026-10-07T08:00:00Z",
     "updated_at": "2026-10-07T09:00:00Z",
+    "status": "completed", "conclusion": "success",
 }
 successor = {
     "id": 78, "run_attempt": 1, "head_sha": source, "workflow_id": 4,
@@ -4079,6 +4080,12 @@ cutoff_job = {
 }
 history_mutation = ""
 history_reads = []
+history_order = []
+successor_observations = {}
+successor_observation_overrides = {}
+successor_detail_reads = 0
+successor_final_api_failure = False
+DELETE_OBSERVATION_FIELD = object()
 correction_builds = {
     name: {
         "id": run_id, "path": ".github/workflows/" + name,
@@ -4088,22 +4095,69 @@ correction_builds = {
     }
     for name, run_id in (("production-build.yml", 80), ("oci-production-build.yml", 81))
 }
+def prepare_successor_observations():
+    global successor_observations, successor_detail_reads
+    successor_observations = {
+        name: copy.deepcopy(successor)
+        for name in ("initial", "attempt", "inventory", "final")
+    }
+    for name, changes in successor_observation_overrides.items():
+        row = successor_observations[name]
+        for field, value in changes.items():
+            target, key = (
+                (row["head_repository"], "full_name")
+                if field == "head_repository.full_name" else (row, field)
+            )
+            if value is DELETE_OBSERVATION_FIELD:
+                target.pop(key, None)
+            else:
+                target[key] = value
+    successor_detail_reads = 0
+    history_order.clear()
 def history_api(endpoint):
+    global successor_detail_reads
     if "/actions/workflows/" in endpoint:
+        history_order.append("workflow-detail")
         return {"id": 4}
-    return copy.deepcopy(successor)
+    if endpoint.endswith("/attempts/1"):
+        history_order.append("attempt-detail")
+        return copy.deepcopy(successor_observations["attempt"])
+    successor_detail_reads += 1
+    if successor_detail_reads == 1:
+        history_order.append("initial-detail")
+        return copy.deepcopy(successor_observations["initial"])
+    if successor_detail_reads == 2:
+        history_order.append("final-detail")
+        if successor_final_api_failure:
+            raise SystemExit("fixture final successor API failure")
+        return copy.deepcopy(successor_observations["final"])
+    raise AssertionError("successor detail was read more than twice")
 def history_pages(endpoint):
     history_reads.append(endpoint)
     name = endpoint.split("/workflows/", 1)[1].split("/", 1)[0]
+    history_order.append("inventory:" + name)
     rows = [copy.deepcopy(correction_builds[name])] if name in correction_builds else []
     if name == "oci-live-data-rollout.yml":
+        held_row = {
+            **history_held, "path": ".github/workflows/" + name,
+            "head_repository": {"full_name": "example/repo"}, "head_branch": "master",
+        }
+        if history_mutation == "held-updated":
+            held_row["updated_at"] = "2026-10-07T09:00:01Z"
+        if history_mutation == "held-status":
+            held_row["status"] = "waiting"
+        if history_mutation == "held-conclusion":
+            held_row["conclusion"] = "failure"
         rows = [
-            {**history_held, "path": ".github/workflows/" + name,
-             "head_repository": {"full_name": "example/repo"}, "head_branch": "master", "status": "completed"},
-            copy.deepcopy(successor),
+            held_row,
+            copy.deepcopy(successor_observations["inventory"]),
         ]
         if history_mutation == "omitted-authenticated":
             rows = []
+        if history_mutation == "omitted-successor":
+            rows = rows[:1]
+        if history_mutation == "duplicated-successor":
+            rows.append(copy.deepcopy(rows[-1]))
     if name == "oci-production-deploy.yml":
         rows = [{
             "id": 76, "path": ".github/workflows/" + name,
@@ -4130,40 +4184,224 @@ def history_pages(endpoint):
         return [{"total_count": total, "workflow_runs": rows[:1]},
                 {"total_count": total + (history_mutation == "incoherent-pages"), "workflow_runs": rows[1:]}]
     return [{"total_count": total, "workflow_runs": rows}]
+def history_call(successor_id="78", overrides=None, final_api_failure=False):
+    global successor_observation_overrides, successor_final_api_failure
+    successor_observation_overrides = {} if overrides is None else overrides
+    successor_final_api_failure = final_api_failure
+    prepare_successor_observations()
+    try:
+        return m.held_handoff_history("example/repo", history_held, source, successor_id)
+    finally:
+        successor_observation_overrides = {}
+        successor_final_api_failure = False
+history_join = m.HistoryProofCollection.join
+def traced_history_join(collection):
+    history_order.append("proof-join")
+    return history_join(collection)
 with patch.object(m, "gh_api", side_effect=history_api), \
         patch.object(m, "gh_api_pages", side_effect=history_pages), \
-        patch.object(m, "jobs_for_run", return_value=[cutoff_job]):
-    proof = m.held_handoff_history("example/repo", history_held, source, "78")
+        patch.object(m, "jobs_for_run", return_value=[cutoff_job]) as history_jobs, \
+        patch.object(m.HistoryProofCollection, "join", traced_history_join):
+    proof = history_call()
     assert proof["cutoff_at"] == "2026-10-07T10:00:00Z"
     assert history_reads and all("&created=%3C%3D2026-10-07T10:00:00Z" in p for p in history_reads)
     assert all(not any("/workflows/" + name + "/" in p for p in history_reads) for name in correction_builds)
+    assert len({id(value) for value in successor_observations.values()}) == 4
+    assert len({id(value["head_repository"]) for value in successor_observations.values()}) == 4
+    assert history_order.count("initial-detail") == 1
+    assert history_order.count("attempt-detail") == 1
+    assert history_order.count("workflow-detail") == 1
+    assert history_order.count("final-detail") == 1
+    assert history_jobs.call_count == 1
+    inventory_events = [
+        event for event in history_order if event.startswith("inventory:")
+    ]
+    assert len(inventory_events) == len(history_reads)
+    assert len(history_reads) == len(set(history_reads))
+    final_position = history_order.index("final-detail")
+    last_inventory = max(
+        index for index, event in enumerate(history_order) if event.startswith("inventory:")
+    )
+    assert last_inventory < final_position
+    assert "proof-join" in history_order[last_inventory + 1:final_position]
     history_mutation = "paginated"
-    assert m.held_handoff_history("example/repo", history_held, source, "78") == proof
+    assert history_call() == proof
     history_mutation = ""
-    successor.update(status="waiting", conclusion=None)
-    waiting = m.held_handoff_history("example/repo", history_held, source, "78")
-    assert waiting["cutoff_at"] is None
-    successor.update(status="completed", conclusion="success")
+    for state, conclusion in (
+        ("waiting", None), ("in_progress", None), ("completed", "success"),
+    ):
+        successor.update(status=state, conclusion=conclusion)
+        cutoff_job["status"] = "in_progress" if state == "in_progress" else "completed"
+        stable = history_call()
+        assert bool(stable["cutoff_at"]) == (state != "waiting")
+    successor.update(
+        status="waiting", conclusion=None, updated_at="2026-10-07T09:31:00Z",
+    )
+    cutoff_job["status"] = "completed"
+    for inventory_state, inventory_updated in (
+        ("requested", "2026-10-07T09:30:00Z"),
+        ("pending", "2026-10-07T09:31:30Z"),
+        ("queued", "2026-10-07T09:33:00Z"),
+        ("waiting", "2026-10-07T09:32:30Z"),
+    ):
+        skewed = history_call(overrides={
+            "attempt": {"updated_at": "2026-10-07T09:32:00Z"},
+            "inventory": {
+                "status": inventory_state, "updated_at": inventory_updated,
+            },
+            "final": {"updated_at": "2026-10-07T09:34:00Z"},
+        })
+        assert skewed["cutoff_at"] is None
+    successor.update(
+        status="completed", conclusion="success", updated_at="2026-10-07T10:30:00Z",
+    )
+    cutoff_job["status"] = "completed"
     history_mutation = "later"
-    assert m.held_handoff_history("example/repo", history_held, source, "78") == proof
-    reject(lambda: m.held_handoff_history("example/repo", history_held, source))
+    assert history_call() == proof
+    reject(lambda: history_call(""))
     for history_mutation in ("intervening", "older-intervening", "duplicate", "foreign", "unresolved",
                              "incomplete", "bound", "omitted-authenticated", "incoherent-pages",
-                             "foreign-workflow-owner", "missing-branch"):
-        reject(lambda: m.held_handoff_history("example/repo", history_held, source, "78"))
+                             "foreign-workflow-owner", "missing-branch", "omitted-successor",
+                             "duplicated-successor", "held-updated", "held-status",
+                             "held-conclusion"):
+        reject(history_call)
     history_mutation = ""
-    reject(lambda: m.held_handoff_history("example/repo", history_held, source, "99"))
-    for key, wrong in (
-        ("head_sha", "f" * 40), ("run_attempt", 2), ("path", ".github/workflows/other.yml"),
-        ("display_title", "another operation"), ("conclusion", "failure"),
+    reject(lambda: history_call("99"))
+    immutable_wrong = (
+        ("id", 79),
+        ("workflow_id", 5),
+        ("path", ".github/workflows/other.yml"),
+        ("head_sha", "f" * 40),
+        ("head_branch", "dev"),
+        ("event", "push"),
+        ("run_attempt", 2),
+        ("display_title", "another operation"),
+        ("created_at", "2026-10-07T09:29:00Z"),
+        ("head_repository.full_name", "other/repo"),
+    )
+    immutable_wrong_type = (
+        ("id", True),
+        ("workflow_id", True),
+        ("path", 1),
+        ("head_sha", 1),
+        ("head_branch", 1),
+        ("event", 1),
+        ("run_attempt", True),
+        ("display_title", 1),
+        ("created_at", 1),
+        ("head_repository.full_name", 1),
+    )
+    for observation in ("inventory", "final"):
+        for field, wrong in immutable_wrong + immutable_wrong_type:
+            reject(lambda observation=observation, field=field, wrong=wrong:
+                   history_call(overrides={observation: {field: wrong}}))
+        for field in (
+            *(field for field, _ in immutable_wrong),
+            "head_repository",
+        ):
+            reject(lambda observation=observation, field=field:
+                   history_call(overrides={
+                       observation: {field: DELETE_OBSERVATION_FIELD},
+                   }))
+    for observation, changes in (
+        ("initial", {"id": True}),
+        ("initial", {"head_repository": DELETE_OBSERVATION_FIELD}),
+        ("attempt", {"head_sha": "f" * 40}),
+        ("attempt", {"created_at": DELETE_OBSERVATION_FIELD}),
     ):
-        saved = successor[key]; successor[key] = wrong
-        reject(lambda: m.held_handoff_history("example/repo", history_held, source, "78"))
-        successor[key] = saved
+        reject(lambda observation=observation, changes=changes:
+               history_call(overrides={observation: changes}))
+    for observation in ("initial", "attempt", "inventory", "final"):
+        for field in ("status", "conclusion"):
+            reject(lambda observation=observation, field=field:
+                   history_call(overrides={
+                       observation: {field: DELETE_OBSERVATION_FIELD},
+                   }))
+        for field in ("status", "conclusion"):
+            reject(lambda observation=observation, field=field:
+                   history_call(overrides={observation: {field: True}}))
+    successor.update(
+        status="waiting", conclusion=None, updated_at="2026-10-07T09:31:00Z",
+    )
+    reject(lambda: history_call(overrides={
+        "attempt": {"status": "queued"},
+    }))
+    reject(lambda: history_call(overrides={
+        "initial": {"conclusion": "success"},
+        "attempt": {"conclusion": "success"},
+    }))
+    reject(lambda: history_call(overrides={
+        "inventory": {"status": "in_progress"},
+    }))
+    reject(lambda: history_call(overrides={
+        "inventory": {"conclusion": "success"},
+    }))
+    reject(lambda: history_call(overrides={
+        "final": {"status": "queued"},
+    }))
+    reject(lambda: history_call(overrides={
+        "final": {"conclusion": "success"},
+    }))
+    successor.update(
+        status="in_progress", conclusion=None, updated_at="2026-10-07T09:40:00Z",
+    )
+    cutoff_job["status"] = "in_progress"
+    reject(lambda: history_call(overrides={
+        "inventory": {"status": "waiting"},
+    }))
+    successor.update(
+        status="completed", conclusion="success", updated_at="2026-10-07T10:30:00Z",
+    )
+    cutoff_job["status"] = "completed"
+    reject(lambda: history_call(overrides={
+        "inventory": {"status": "in_progress", "conclusion": None},
+    }))
+    for final_status, final_conclusion in (
+        ("completed", "failure"),
+        ("completed", "cancelled"),
+        ("completed", "skipped"),
+        ("completed", None),
+        ("unknown", None),
+    ):
+        reject(lambda final_status=final_status, final_conclusion=final_conclusion:
+               history_call(overrides={
+                   "final": {
+                       "status": final_status, "conclusion": final_conclusion,
+                   },
+               }))
+    successor.update(
+        status="waiting", conclusion=None, updated_at="2026-10-07T09:31:00Z",
+    )
+    for observation in ("initial", "attempt", "inventory", "final"):
+        for bad_timestamp in (
+            DELETE_OBSERVATION_FIELD,
+            "not-a-timestamp",
+            "2026-10-07T09:29:59Z",
+        ):
+            reject(lambda observation=observation, bad_timestamp=bad_timestamp:
+                   history_call(overrides={
+                       observation: {"updated_at": bad_timestamp},
+                   }))
+    reject(lambda: history_call(overrides={
+        "final": {"updated_at": "2026-10-07T09:30:30Z"},
+    }))
+    reject(lambda: history_call(overrides={
+        "attempt": {"updated_at": "2026-10-07T09:34:00Z"},
+        "final": {"updated_at": "2026-10-07T09:33:00Z"},
+    }))
+    reject(lambda: history_call(overrides={
+        "inventory": {"updated_at": "2026-10-07T09:34:00Z"},
+        "final": {"updated_at": "2026-10-07T09:33:00Z"},
+    }))
+    reject(lambda: history_call(final_api_failure=True))
+    successor.update(
+        status="completed", conclusion="success", updated_at="2026-10-07T10:30:00Z",
+    )
+    cutoff_job["status"] = "completed"
     cutoff_job["run_id"] = 99
-    reject(lambda: m.held_handoff_history("example/repo", history_held, source, "78"))
+    reject(history_call)
     cutoff_job["run_id"] = 78
-print("PASS complete bounded held history, immutable cutoff, later deployment and unrelated exclusions")
+print("PASS complete bounded held history, independent successor snapshots, bounded skew and final reread")
 import base64
 from pathlib import Path
 
@@ -4260,7 +4498,7 @@ def ghost_pages(endpoint):
         page["total_count"] += len(extra)
     return pages
 def ghost_history():
-    return m.held_handoff_history("example/repo", history_held, source, "78")
+    return history_call()
 history_now = int(m.parse_timestamp("2026-10-07T10:31:00Z", "fixture clock").timestamp())
 with patch.object(m, "gh_api", side_effect=ghost_api), \
         patch.object(m, "gh_api_pages", side_effect=ghost_pages), \
@@ -4932,7 +5170,7 @@ def cancelled_page_api(path):
         response[0]["total_count"] += len(cancelled_rows)
     return response
 def cancelled_history(successor_id="78"):
-    return m.held_handoff_history("example/repo", history_held, source, successor_id)
+    return history_call(successor_id)
 def reset_cancelled():
     global cancelled_rows, cancelled_responses, cancelled_pages, cancelled_failure, cancelled_drift
     cancelled_rows = [copy.deepcopy(cancelled_run)]
