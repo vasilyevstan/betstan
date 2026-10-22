@@ -5351,10 +5351,21 @@ with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as i
         cancelled_responses[endpoint]["updated_at"] = "2026-10-07T10:00:01Z"
     assert cancelled_history() == cancelled_proof
     reset_cancelled()
-    changed_source = historical_response(cancelled_path, (Path(sys.argv[2]) / cancelled_path).read_bytes())
-    if changed_source["sha"] != cancelled_historical["sha"]:
-        cancelled_responses[cancelled_source_endpoint] = changed_source
-        reject(cancelled_history)
+    tracked_source = (Path(sys.argv[2]) / cancelled_path).read_bytes()
+    tracked_historical = historical_response(cancelled_path, tracked_source)
+    assert tracked_historical["sha"] == "92038ee7bd21ddc2b888242f2ee91a7bd5571aba"
+    assert tracked_historical["sha"] == m.FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB
+    cancelled_responses[cancelled_source_endpoint] = tracked_historical
+    assert cancelled_history() == cancelled_proof
+    reset_cancelled()
+    changed_source = historical_response(
+        cancelled_path, tracked_source + b"\n# inert cancelled-history fixture\n")
+    assert changed_source["sha"] != tracked_historical["sha"]
+    _, changed_blob = shared_authority.validate_historical_unmaterialized_workflow(
+        cancelled_path, changed_source, blob_sha=changed_source["sha"])
+    assert changed_blob == changed_source["sha"]
+    cancelled_responses[cancelled_source_endpoint] = changed_source
+    reject(cancelled_history)
     for old_guard, replacement in (
         (b"    if: github.run_attempt == 1", b"    if: true"),
         (b"group: oci-control-plane", b"group: unrelated"),
