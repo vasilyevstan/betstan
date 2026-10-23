@@ -841,54 +841,61 @@ handoff, require supported whole renewal-to-renewal timing under the selected
 profile. Legacy v2/v3 retains its literal 1,200-second execution, 600-second
 reserve and 1,800-second lease, including its existing stage arithmetic.
 
-The prospective `live-betting-data-resume-v4` profile has exactly the v3 keys and
-applies only to new executions of the existing successful-held continuation
-branch. Selection is fixed by authenticated executed source, not a new input,
-toggle, operation, workflow or gate. Source, schema and native renewal duration
-must agree. Each predecessor is validated under its own profile: a v2-to-v4
-continuation still validates the predecessor's original 1,800-second clock.
-No existing artifact, authority or lease is converted or extended.
+The `live-betting-data-resume-v4` profile retains exactly the v3 keys and its
+original contract. Historical v2, v3 and v4 evidence is never reinterpreted,
+extended or re-emitted as v5. Fresh executions of the existing
+successful-held continuation branch now emit `live-betting-data-resume-v5`,
+with the same authority key set and a fresh 7,200-second physical lease.
+Selection is fixed by authenticated executed source, not a new input, toggle,
+operation, workflow or gate. Source, schema and native renewal duration must
+agree. Each predecessor is validated under its own profile: a v5 continuation
+may authenticate a v4 predecessor under that predecessor's v4 contract, but
+only the fresh successor execution emits v5 and starts the new v5 lease. No
+existing artifact, authority or lease is converted or extended.
 
-| Stage policy ceiling (seconds) | Legacy v2/v3 | Prospective v4 |
-| --- | ---: | ---: |
-| Packaging | 120 | 120 |
-| Admission | 180 | 600 |
-| Queue/materialization allowance | 120 | 120 |
-| Approval, including three fresh validations | 240 | 1,200 |
-| Independent native validation | 180 | 480 |
-| Startup/snapshot | 240 | 360 |
-| Verification through actual receiver renewal | 120 | 120 |
-| Execution total | 1,200 | 3,000 |
-| Reserve | 600 | 600 |
-| Handoff lease | 1,800 | 3,600 |
+| Stage policy ceiling (seconds) | Legacy v2/v3 | v4 | v5 |
+| --- | ---: | ---: | ---: |
+| Packaging | 120 | 120 | 300 |
+| Admission | 180 | 600 | 1,500 |
+| Queue/materialization allowance | 120 | 120 | 300 |
+| Approval, including three fresh validations | 240 | 1,200 | 2,400 |
+| Independent native validation | 180 | 480 | 1,200 |
+| Startup/snapshot | 240 | 360 | 600 |
+| Verification through actual receiver renewal | 120 | 120 | 300 |
+| Execution total | 1,200 | 3,000 | 6,600 |
+| Reserve | 600 | 600 | 600 |
+| Handoff lease | 1,800 | 3,600 | 7,200 |
 
 These are policy ceilings, not empirical completion bounds or operational
 approval. The clock starts at the new producer's authentic final owner-bound
 renewal, derived from its native deadline minus the selected duration, never
 dispatch or upload. Preparation and physical transfer before that renewal are
 not free work: qualify their costs separately. Normal operation and receiving
-deployment durations remain 14,400 and 10,800 seconds respectively.
+deployment durations remain 14,400 and 10,800 seconds respectively. Only after
+all validations pass does the receiver renew the exact transferred lock to the
+existing 10,800-second deployment lease.
 
 At dispatch, materialization, each of the three approval revalidations and
 native receiving boundaries, remaining time
 must be strictly greater than the unfinished-path bound plus that reserve.
 The bound shrinks only as this fresh receiving path advances; it is not an
 admission deadline for the expired producer used as retained evidence.
-For v4, that bound is the unused authenticated current-phase allocation plus
-the full allowances for every future phase. Unknown or inconsistent phase
+For v4 and v5, that bound is the unused authenticated current-phase allocation
+plus the full allowances for every future phase. Unknown or inconsistent phase
 evidence, invalid chronology, completed-stage overruns, exhausted current-phase
-allocations while work remains, and reserve equality reject. No approval-ordinal
-tail credits apply.
+allocations while work remains, and reserve equality reject. No
+approval-ordinal tail credits apply.
 Completed admission is checked and removed when receiver creation is
 authenticated. Before native job start, elapsed pre-start time consumes the
 approval allocation while the full future queue allowance remains reserved;
 these are not one combined allocation. Completed pre-start time must also fit
-the approval ceiling. Native validation retains its unused 480 seconds plus
-360 for startup and 120 for renewal. Startup progress may use only existing
-authenticated job observations, retaining its unused 360 plus 120; no new
+the selected profile's approval ceiling. Native validation retains its unused
+profile allocation plus the selected startup/snapshot and renewal allocations.
+Startup progress may use only existing authenticated job observations,
+retaining the unused selected startup/snapshot allocation plus renewal; no new
 startup read or checkpoint is added. Verification-step entry checks and removes
 completed startup. Timing-prefix calls, verification and actual renewal then
-consume the 120-second renewal allocation; actual renewal checks the phase end
+consume the selected renewal allocation; actual renewal checks the phase end
 and strictly more than 600 seconds of reserve using full clock precision.
 
 Packaging and whole-run success, admission, queue/materialization, approval,
@@ -907,14 +914,18 @@ or service restoration; unsupported timing withholds operational readiness.
 The separate expired-handoff and fenced rollback routes still require their
 genuinely qualifying failed receiver; no receiver may be fabricated or
 substituted to obtain recovery eligibility.
-Compatible producer, native authenticator, receiver and CLI readers may promote
-together in one pull request, provided promotion itself emits no v4. Verify that
+The existing exact source, schema, native-renewal, lock, fence, history,
+provenance and approval checks remain unchanged; v5 adds no workflow, input,
+gate or bypass. Producer, native authenticator, receiver, evidence verifier and
+CLI readers must support v5 before the first v5 emission. They may promote
+together in one pull request, provided promotion itself emits no v5; verify that
 compatible non-emitting control-plane baseline before a later explicit governed
-continuation; no mandatory second pull request is introduced. Older readers
-reject v4 rather than reinterpret it. After v4 emission, retain v4-capable
-control-plane readers even during application-image rollback. Rollback must
-preserve emitted evidence, original-root rollback and strict transfer semantics;
-an older reader's fail-closed rejection is not recovery authority.
+continuation. Older readers reject v5 fail-closed rather than reinterpret it.
+After v5 evidence exists, rollback to readers without v5 support is prohibited,
+including during application-image rollback. Rollback must preserve historical
+v2-v4 interpretation, emitted v5 evidence, original-root rollback and strict
+transfer semantics; fail-closed rejection by an older reader is not recovery
+authority.
 
 **Final data-handoff baseline admission.** Only `apply-slip-index` adds this
 operation-specific check at the actual selected fresh or imported baseline.

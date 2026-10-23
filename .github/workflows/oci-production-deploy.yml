@@ -668,8 +668,29 @@ jobs:
           fi
           producer_deadline="$(jq -er '.deadline' <<<"$timing")"
           producer_generation="$(jq -er '.generation' <<<"$timing")"
-          handoff_lease_seconds="$(jq -er '.lease_seconds | select(. == 1800 or . == 3600)' <<<"$timing")"
-          handoff_execution_seconds="$(jq -er '.execution_seconds | select(. == 1200 or . == 3000)' <<<"$timing")"
+          handoff_profile="$(jq -er '.profile' <<<"$timing")"
+          case "$handoff_profile" in
+            live-betting-data-resume-v3)
+              expected_handoff_lease_seconds=1800
+              expected_handoff_execution_seconds=1200
+              ;;
+            live-betting-data-resume-v4)
+              expected_handoff_lease_seconds=3600
+              expected_handoff_execution_seconds=3000
+              ;;
+            live-betting-data-resume-v5)
+              expected_handoff_lease_seconds=7200
+              expected_handoff_execution_seconds=6600
+              ;;
+            *)
+              echo "actual receiver renewal has an unsupported authenticated profile" >&2
+              exit 1
+              ;;
+          esac
+          handoff_lease_seconds="$(jq -er '.lease_seconds | select(type == "number")' <<<"$timing")"
+          handoff_execution_seconds="$(jq -er '.execution_seconds | select(type == "number")' <<<"$timing")"
+          [ "$handoff_lease_seconds" = "$expected_handoff_lease_seconds" ]
+          [ "$handoff_execution_seconds" = "$expected_handoff_execution_seconds" ]
           [ "$(jq -er '.reserve_seconds' <<<"$timing")" = 600 ]
           (( handoff_lease_seconds == handoff_execution_seconds + 600 ))
           [ "$renewed_generation" = "$((producer_generation + 1))" ]
@@ -681,16 +702,30 @@ jobs:
             echo "actual receiver renewal exhausted the authentic handoff deadline or reserve" >&2
             exit 1
           fi
-          if [ "$handoff_lease_seconds" = 3600 ]; then
+          if [ "$handoff_profile" != live-betting-data-resume-v3 ]; then
             python3 - "$timing" <<'PY'
           import json, sys, time
           timing = json.loads(sys.argv[1])
+          profiles = {
+              "live-betting-data-resume-v4": {
+                  "lease_seconds": 3600,
+                  "execution_seconds": 3000,
+              },
+              "live-betting-data-resume-v5": {
+                  "lease_seconds": 7200,
+                  "execution_seconds": 6600,
+              },
+          }
+          profile = profiles.get(timing["profile"])
           now = time.time()
           if (
-              timing["profile"] != "live-betting-data-resume-v4"
+              profile is None
+              or timing["lease_seconds"] != profile["lease_seconds"]
+              or timing["execution_seconds"] != profile["execution_seconds"]
               or timing["phase"] != "receiver-renewal"
               or now >= timing["deadline"] - 600
-              or now - (timing["deadline"] - 3600) > 3000
+              or now - (timing["deadline"] - profile["lease_seconds"])
+                  > profile["execution_seconds"]
               or now > timing["renewal_stage_deadline"]
           ):
               raise SystemExit("actual receiver renewal exhausted its authenticated v4 phase or reserve")
