@@ -61,11 +61,23 @@ if os.environ.get("RECEIVER_TEST_FIXTURE"):
     _fixture = json.loads(Path(os.environ["RECEIVER_TEST_FIXTURE"]).read_text())
     _stamp = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
     time.time = lambda: _fixture["now"]
-    current_held_source = lambda *a, **k: (
-        '      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ' + HANDOFF_V4_LEASE_EXPRESSION +
-        '\\n          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v4\\n'
-        if _fixture["profile"] == "live-betting-data-resume-v4" else
-        '      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"\\n')
+    def current_held_source(*args, **kwargs):
+        profile = _fixture["profile"]
+        if profile == "live-betting-data-resume-v4":
+            return (
+                '      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ' +
+                HANDOFF_V4_LEASE_EXPRESSION +
+                '\\n          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || '
+                'resume_schema=live-betting-data-resume-v4\\n'
+            )
+        if profile == "live-betting-data-resume-v5":
+            return (
+                '      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ' +
+                HANDOFF_V5_LEASE_EXPRESSION +
+                '\\n          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || '
+                'resume_schema=live-betting-data-resume-v5\\n'
+            )
+        return '      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"\\n'
     require_fixed_run = lambda *a, **k: {"updated_at": _stamp(_fixture["packaged"])}
     parse_live_v6_artifact = lambda *a, **k: (
         {"source_sha": "2" * 40, "workflow_run_id": "77"}, None, {})
@@ -92,6 +104,12 @@ if os.environ.get("RECEIVER_TEST_FIXTURE"):
             {"name": "Verify transferred database lock and maintenance fence",
              "status": "in_progress", "conclusion": None, "completed_at": None,
              "started_at": _stamp(_fixture["verified"])}]}]
+    _validate_receiver_handoff_timing = validate_receiver_handoff_timing
+    def validate_receiver_handoff_timing(*args, **kwargs):
+        result = _validate_receiver_handoff_timing(*args, **kwargs)
+        if result is not None and _fixture["mode"] == "tuple-mismatch":
+            result = dict(result, lease_seconds=result["lease_seconds"] + 1)
+        return result
 ''')
 lock_helper = scripts / "shared-mongo-operation-lock-stan.sh"
 lock_helper.write_text("#!/usr/bin/env python3\n" + '''
@@ -154,7 +172,7 @@ for mode in (
     "success", "new-capture-old-source-expired", "reserve-equality",
     "fresh-post-does-not-reset", "rerun-after-verify", "active-after-verify",
     "late-after-physical-renewal", "renew-failure", "wrong-generation",
-    "wrong-holder", "missing-ack", "duplicate-ack",
+    "wrong-holder", "missing-ack", "duplicate-ack", "tuple-mismatch",
 ):
     current = dict(state, mode=mode, posted_at=now, old_producer_deadline=now - 86400)
     for name in ("events", "renewed", "lock.json"):
@@ -191,45 +209,108 @@ for mode in (
         assert lock["fencing-generation"] == "12" and lock["holder"] == "live-data-77-1"
     else:
         assert "handoff_receiver_renewal=PASS" not in result.stdout
-print("real_yaml_receiver_timing_native_recheck_and_exact_renewal=PASS cases=12 no_acquire_fallback=true")
-for mode in (
-    "success", "phase-exhausted-after-physical-renewal", "reserve-exhausted-after-physical-renewal",
-    "completed-prestart-overrun", "completed-startup-overrun",
-):
-    now = int(time.time())
-    current = dict(state, now=now, after=now, deadline=now + 3300,
-                   packaged=now - 265, created=now - 240, started=now - 180,
-                   validated=now - 140, verified=now - 40, mode=mode,
-                   profile="live-betting-data-resume-v4")
-    if mode == "phase-exhausted-after-physical-renewal":
-        current.update(now=now - 3, after=now - 2, verified=now - 121,
-                       validated=now - 141, started=now - 241, created=now - 341,
-                       packaged=now - 391, deadline=now + 3174)
-    elif mode == "reserve-exhausted-after-physical-renewal":
-        current["after"] = current["deadline"] - 600
-    elif mode == "completed-prestart-overrun":
-        current.update(created=now - 1381, packaged=now - 1431, deadline=now + 2134)
-    elif mode == "completed-startup-overrun":
-        current.update(validated=now - 401, started=now - 501, created=now - 601,
-                       packaged=now - 651, deadline=now + 2914)
-    for name in ("events", "renewed", "lock.json"):
-        (root / name).unlink(missing_ok=True)
-    (root / "state.json").write_text(json.dumps(current))
-    checked = subprocess.run(["bash"], input=verify, cwd=root, env=env,
-                             text=True, capture_output=True, timeout=30)
-    if mode in {"completed-prestart-overrun", "completed-startup-overrun"}:
-        assert checked.returncode != 0, (mode, checked.stdout)
-        assert not (root / "events").exists(), mode
-        continue
-    assert checked.returncode == 0, (mode, checked.stderr)
-    result = subprocess.run(["bash"], input=renew, cwd=root, env=env,
-                            text=True, capture_output=True, timeout=30)
-    assert (result.returncode == 0) == (mode == "success"), (mode, result.stdout, result.stderr)
-    assert (root / "events").read_text().splitlines() == ["verify", "renew"]
-    assert ("handoff_receiver_renewal=PASS" in result.stdout) == (mode == "success")
-    if mode == "phase-exhausted-after-physical-renewal":
-        assert "exhausted its authenticated v4 phase or reserve" in result.stderr
-print("real_yaml_receiver_v4_phase_completion_and_legacy_profile_isolation=PASS cases=5")
+print("real_yaml_receiver_timing_native_recheck_and_exact_renewal=PASS cases=13 no_acquire_fallback=true")
+staged_profiles = {
+    "live-betting-data-resume-v4": {
+        "lease": 3600, "approval": 1200, "startup": 360, "renewal": 120,
+    },
+    "live-betting-data-resume-v5": {
+        "lease": 7200, "approval": 2400, "startup": 600, "renewal": 300,
+    },
+}
+staged_cases = 0
+for profile, limits in staged_profiles.items():
+    for mode in (
+        "success", "phase-exhausted-after-physical-renewal",
+        "reserve-exhausted-after-physical-renewal",
+        "completed-prestart-overrun", "completed-startup-overrun",
+        "tuple-mismatch",
+    ):
+        staged_cases += 1
+        now = int(time.time())
+        current = dict(
+            state, now=now, after=now,
+            deadline=now + limits["lease"] - 300,
+            packaged=now - 265, created=now - 240, started=now - 180,
+            validated=now - 140, verified=now - 40, mode=mode,
+            profile=profile,
+        )
+        if mode == "phase-exhausted-after-physical-renewal":
+            verified_age = limits["renewal"] + 1
+            validated_age = verified_age + 20
+            started_age = validated_age + 100
+            created_age = started_age + 100
+            packaged_age = created_age + 50
+            renewal_age = packaged_age + 35
+            current.update(
+                now=now - 3, after=now - 2,
+                verified=now - verified_age,
+                validated=now - validated_age,
+                started=now - started_age,
+                created=now - created_age,
+                packaged=now - packaged_age,
+                deadline=now + limits["lease"] - renewal_age,
+            )
+        elif mode == "reserve-exhausted-after-physical-renewal":
+            current["after"] = current["deadline"] - 600
+        elif mode == "completed-prestart-overrun":
+            created_age = 180 + limits["approval"] + 1
+            packaged_age = created_age + 50
+            current.update(
+                created=now - created_age,
+                packaged=now - packaged_age,
+                deadline=now + limits["lease"] - packaged_age - 35,
+            )
+        elif mode == "completed-startup-overrun":
+            validated_age = 40 + limits["startup"] + 1
+            started_age = validated_age + 100
+            created_age = started_age + 100
+            packaged_age = created_age + 50
+            current.update(
+                validated=now - validated_age,
+                started=now - started_age,
+                created=now - created_age,
+                packaged=now - packaged_age,
+                deadline=now + limits["lease"] - packaged_age - 35,
+            )
+        for name in ("events", "renewed", "lock.json"):
+            (root / name).unlink(missing_ok=True)
+        (root / "state.json").write_text(json.dumps(current))
+        checked = subprocess.run(
+            ["bash"], input=verify, cwd=root, env=env,
+            text=True, capture_output=True, timeout=30,
+        )
+        if mode in {
+            "completed-prestart-overrun", "completed-startup-overrun",
+        }:
+            assert checked.returncode != 0, (
+                profile, mode, checked.stdout, checked.stderr,
+            )
+            assert not (root / "events").exists(), (profile, mode)
+            continue
+        assert checked.returncode == 0, (profile, mode, checked.stderr)
+        result = subprocess.run(
+            ["bash"], input=renew, cwd=root, env=env,
+            text=True, capture_output=True, timeout=30,
+        )
+        assert (result.returncode == 0) == (mode == "success"), (
+            profile, mode, result.stdout, result.stderr,
+        )
+        assert (root / "events").read_text().splitlines() == [
+            "verify", "renew",
+        ]
+        assert (
+            "handoff_receiver_renewal=PASS" in result.stdout
+        ) == (mode == "success")
+        if mode == "phase-exhausted-after-physical-renewal":
+            assert (
+                "exhausted its authenticated v4 phase or reserve"
+                in result.stderr
+            )
+print(
+    "real_yaml_receiver_v4_v5_phase_completion_and_legacy_profile_isolation="
+    f"PASS cases={staged_cases}"
+)
 PY
 
 successor_preflight="$(
@@ -3159,7 +3240,7 @@ original, output = map(Path, sys.argv[2:4])
 source, checkpoint_source, workflow, images = sys.argv[4:]
 authority = m.parse_env((original / "resume-authority.env").read_bytes(), "fixture")
 authority.update(
-    schema_version="live-betting-data-resume-v4", resume_maintenance_mode="pre-runtime-hold",
+    schema_version="live-betting-data-resume-v5", resume_maintenance_mode="pre-runtime-hold",
     failed_deploy_job_conclusion="failure", public_validate_job_conclusion="skipped",
     lock_release_step_conclusion="skipped", fence_release_step_conclusion="skipped",
     rehold_step_conclusion="skipped", checkpoint_source_sha=checkpoint_source,
@@ -3221,7 +3302,7 @@ packed = io.BytesIO()
 with zipfile.ZipFile(packed, "w") as archive:
     for path in sorted(root.rglob("*")):
         if path.is_file(): archive.writestr(path.relative_to(root).as_posix(), path.read_bytes())
-files = m.zip_files(packed.getvalue(), "actual v4 producer upload")
+files = m.zip_files(packed.getvalue(), "actual v5 producer upload")
 def consume(selected):
     m.validate_checksum_manifest(selected, "held producer upload")
     provenance = m.parse_env(selected["provenance.env"], "held provenance")
@@ -3229,11 +3310,15 @@ def consume(selected):
     m.validate_held_handoff_reports(selected, provenance)
     return authority
 authority = consume(files)
-assert authority["schema_version"] == "live-betting-data-resume-v4"
+assert authority["schema_version"] == "live-betting-data-resume-v5"
 assert authority["applied_source_sha"] != authority["checkpoint_source_sha"]
 assert files["resume-images.tsv"] == images.read_bytes()
 assert authority["runtime_images_sha256"] == hashlib.sha256(images.read_bytes()).hexdigest()
-for version in ("live-betting-data-resume-v3", "live-betting-data-resume-v4"):
+for version in (
+    "live-betting-data-resume-v3",
+    "live-betting-data-resume-v4",
+    "live-betting-data-resume-v5",
+):
     authority["schema_version"] = version
     files["resume-authority.env"] = "".join(f"{k}={v}\n" for k, v in authority.items()).encode()
     files["SHA256SUMS"] = "".join(
@@ -3271,7 +3356,7 @@ for version in ("live-betting-data-resume-v3", "live-betting-data-resume-v4"):
             try: consume(changed)
             except SystemExit: pass
             else: raise AssertionError(f"{version} consumer accepted {mutation}")
-print("held_handoff_real_producer_v3_v4_consumers=PASS negative_cases=22")
+print("held_handoff_real_producer_v3_v4_v5_consumers=PASS negative_cases=33")
 PY
 valid_images_file="$images_file"
 for mutation in missing-images tampered-images authority-hash conflicting-destination; do
@@ -4381,9 +4466,11 @@ run_held_acquire() {
       bash "$resume_fixture/acquire-step.sh"
   )
 }
-for predecessor_seconds in 1800 3600; do
+transfer_cases=0
+for predecessor_seconds in 1800 3600 7200; do
 for lease in expired live; do
   for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation authority receiver-missing receiver-wrong workflow master policy disk; do
+    transfer_cases=$((transfer_cases + 1))
     rm -rf "$resume_fixture/held-pre-transfer"
     rm -f "$resume_fixture/pre-runtime-lock.json" \
       "$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
@@ -4503,7 +4590,7 @@ fi
 [[ ! -e "$resume_fixture/pre-runtime-lock.json" ]] ||
   fail "root-owner rejection persisted transfer authority"
 unset RESUME_HELD_RUN_ID RESUME_HELD_SOURCE_SHA RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
-echo "held_handoff_workflow_transfer_contract=PASS cases=66 predecessor_profiles=1800,3600 root_owner=REJECTED fresh_native_authority=REQUIRED"
+echo "held_handoff_workflow_transfer_contract=PASS cases=$transfer_cases predecessor_profiles=1800,3600,7200 root_owner=REJECTED fresh_native_authority=REQUIRED"
 
 ruby -ryaml -rjson - "$WORKFLOW" "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" \
   >"$resume_fixture/retained-workflow.json" <<'RUBY'
@@ -5321,6 +5408,44 @@ for literal in (
 ):
     if literal not in deploy:
         raise SystemExit(f"deploy workflow is missing fenced validation contract: {literal}")
+
+for literal in (
+    "live-betting-data-resume-v3)\n"
+    "              expected_handoff_lease_seconds=1800\n"
+    "              expected_handoff_execution_seconds=1200",
+    "live-betting-data-resume-v4)\n"
+    "              expected_handoff_lease_seconds=3600\n"
+    "              expected_handoff_execution_seconds=3000",
+    "live-betting-data-resume-v5)\n"
+    "              expected_handoff_lease_seconds=7200\n"
+    "              expected_handoff_execution_seconds=6600",
+    '"live-betting-data-resume-v4": {\n'
+    '                  "lease_seconds": 3600,\n'
+    '                  "execution_seconds": 3000,',
+    '"live-betting-data-resume-v5": {\n'
+    '                  "lease_seconds": 7200,\n'
+    '                  "execution_seconds": 6600,',
+    "actual receiver renewal exhausted its authenticated v4 phase or reserve",
+):
+    if deploy.count(literal) != 1:
+        raise SystemExit(
+            f"deploy workflow does not retain one exact receiver tuple/check: {literal}"
+        )
+for obsolete in (
+    ".lease_seconds | select(. == 1800 or . == 3600)",
+    ".execution_seconds | select(. == 1200 or . == 3000)",
+):
+    if obsolete in deploy:
+        raise SystemExit("deploy workflow retains a cross-profile numeric selector")
+for literal in (
+    "inputs.held_handoff_run_id != '' && '7200' || '1800'",
+    'test("^(1800|3600|7200)$")',
+    "resume_schema=live-betting-data-resume-v5",
+):
+    if data.count(literal) != 1:
+        raise SystemExit(
+            f"data workflow does not emit one exact v5 held profile: {literal}"
+        )
 
 deploy_lines = deploy.splitlines()
 acquire_indexes = [

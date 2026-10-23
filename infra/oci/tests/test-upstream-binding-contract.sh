@@ -1719,7 +1719,10 @@ current_workflow = (
     repository / ".github/workflows/oci-live-data-rollout.yml"
 ).read_text()
 historical_workflow = (
-    "      " + profile["protected_read"] + "\n" + current_workflow
+    "      " + profile["protected_read"] + "\n"
+    + m.current_reader_workflow_v5(
+        current_workflow, "fixture", inverse=True,
+    )
 )
 tree_entries = []
 for line in subprocess.check_output(
@@ -2031,7 +2034,12 @@ profile = module._failed_held_continuation_profile()
 current_workflow = (
     repository / ".github/workflows/oci-live-data-rollout.yml"
 ).read_text()
-historical_workflow = "      " + profile["protected_read"] + "\n" + current_workflow
+historical_workflow = (
+    "      " + profile["protected_read"] + "\n"
+    + module.current_reader_workflow_v5(
+        current_workflow, "fixture", inverse=True,
+    )
+)
 tree_entries = []
 for line in subprocess.check_output(
     ["git", "ls-tree", "-r", "HEAD"], cwd=repository, text=True,
@@ -2069,7 +2077,10 @@ current_verifier = (
     repository
     / "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
 ).read_text()
-historical_verifier = current_verifier.replace(
+previous_verifier = module.current_reader_verifier_v5(
+    current_verifier, "fixture", inverse=True,
+)
+historical_verifier = previous_verifier.replace(
     "import sys\nsys.dont_write_bytecode = True\n",
     "import sys\n",
     1,
@@ -2077,8 +2088,18 @@ historical_verifier = current_verifier.replace(
 assert historical_verifier != current_verifier
 
 def clean_source_bytes(repo, control, path, label):
+    if path == ".github/workflows/oci-live-data-rollout.yml":
+        return (
+            module.current_reader_workflow_v5(
+                current_workflow, "fixture", inverse=True,
+            )
+            if control == clean_profile["control"] else current_workflow
+        )
     assert path == "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
-    return historical_verifier if control == clean_profile["control"] else current_verifier
+    return (
+        historical_verifier
+        if control == clean_profile["control"] else current_verifier
+    )
 
 with patch.object(module, "gh_api", side_effect=api), \
      patch.object(module, "held_source_bytes", side_effect=clean_source_bytes):
@@ -2510,7 +2531,7 @@ def reject(action):
     with contextlib.redirect_stderr(io.StringIO()):
         try: action()
         except SystemExit: return
-    raise AssertionError("unsafe v4 phase, profile or physical handoff budget passed")
+    raise AssertionError("unsafe staged phase, profile or physical handoff budget passed")
 base, source, producer_run, receiver_run = 1800000000, "1" * 40, "77", "78"
 deadline = base + 3600
 stages = m.HANDOFF_V4_STAGE_CEILINGS
@@ -2543,19 +2564,81 @@ for phase in ("approval-1", "caller-zero-tail", None, []):
 for changed in (dict(stages, packaging=0), dict(stages, approval=True), dict(stages, approval=1201)):
     with patch.object(m, "HANDOFF_V4_STAGE_CEILINGS", changed):
         reject(lambda: m.handoff_remaining_guard_v4(deadline, base + 285, "admission", elapsed))
+v5_deadline = base + 7200
+v5_stages = m.HANDOFF_V5_STAGE_CEILINGS
+assert sum(v5_stages.values()) == m.HANDOFF_V5_EXECUTION_SECONDS == 6600
+assert m.HANDOFF_V5_LEASE_SECONDS == 7200
+assert m.HELD_HANDOFF_AUTHORITY_VERSIONS == {
+    "live-betting-data-resume-v3",
+    "live-betting-data-resume-v4",
+    "live-betting-data-resume-v5",
+}
+assert m.LIVE_RESUME_AUTHORITY_V3_KEYS == (
+    m.LIVE_RESUME_AUTHORITY_V2_KEYS | {
+        "held_handoff_run_id", "held_handoff_source_sha",
+        "held_handoff_evidence_sha256",
+    }
+)
+v5_elapsed = {"packaging": 100, "admission": 900}
+assert m.handoff_remaining_guard_v5(
+    v5_deadline, base + 1000, "admission", v5_elapsed,
+) == 5400
+v5_all_elapsed = dict(v5_elapsed, approval=1200, **{
+    "native-validation": 500, "startup-snapshot": 300,
+    "receiver-renewal": 100,
+})
+v5_tails = {
+    "admission": 5400, "approval": 3600, "native-validation": 1600,
+    "startup-snapshot": 600, "receiver-renewal": 200,
+}
+selected = {"packaging": 100}
+for phase, tail in v5_tails.items():
+    selected[phase] = v5_all_elapsed[phase]
+    now = base + sum(selected.values())
+    assert m.handoff_remaining_guard_v5(
+        v5_deadline, now, phase, selected,
+    ) == tail
+    equality = now + tail + 600
+    reject(lambda: m.handoff_remaining_guard_v5(
+        equality, now, phase, selected,
+    ))
+    assert m.handoff_remaining_guard_v5(
+        equality + 1, now, phase, selected,
+    ) == tail
+    for spent in (
+        -1, v5_stages[phase], v5_stages[phase] + 0.1,
+        float("nan"), float("inf"), True,
+    ):
+        reject(lambda: m.handoff_remaining_guard_v5(
+            v5_deadline, now, phase, dict(selected, **{phase: spent}),
+        ))
+for changed in (
+    dict(v5_stages, packaging=0),
+    dict(v5_stages, approval=True),
+    dict(v5_stages, approval=2401),
+):
+    with patch.object(m, "HANDOFF_V5_STAGE_CEILINGS", changed):
+        reject(lambda: m.handoff_remaining_guard_v5(
+            v5_deadline, base + 1000, "admission", v5_elapsed,
+        ))
 root = Path(sys.argv[1]).parents[3]
-producer_workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+v5_workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
 receiver_workflow = (root / ".github/workflows/oci-production-deploy.yml").read_text()
-assert m.held_handoff_source_version(producer_workflow, "fixture") == "live-betting-data-resume-v4"
-legacy_workflow = producer_workflow.replace(m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"')
+assert m.held_handoff_source_version(v5_workflow, "fixture") == "live-betting-data-resume-v5"
+v4_workflow = m.current_reader_workflow_v5(v5_workflow, "fixture", inverse=True)
+assert m.held_handoff_source_version(v4_workflow, "fixture") == "live-betting-data-resume-v4"
+legacy_workflow = v4_workflow.replace(m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"').replace(
+    "resume_schema=live-betting-data-resume-v4",
+    "resume_schema=live-betting-data-resume-v3",
+)
 assert m.held_handoff_source_version(legacy_workflow, "fixture") == "live-betting-data-resume-v3"
-assert 'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' in producer_workflow
+assert 'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' in v5_workflow
 assert 'SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS: "10800"' in receiver_workflow
 for changed in (
-    producer_workflow.replace("'3600'", "'3601'"),
-    producer_workflow.replace("resume_schema=live-betting-data-resume-v4",
-                              "resume_schema=live-betting-data-resume-v3"),
-    producer_workflow + '\n      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"\n',
+    v5_workflow.replace("'7200'", "'7201'"),
+    v5_workflow.replace("resume_schema=live-betting-data-resume-v5",
+                        "resume_schema=live-betting-data-resume-v4"),
+    v5_workflow + '\n      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"\n',
 ):
     reject(lambda: m.held_handoff_source_version(changed, "fixture"))
 stamp = lambda seconds: dt.datetime.fromtimestamp(base + seconds, dt.timezone.utc).isoformat()
@@ -2583,7 +2666,7 @@ def read(boundary, now, run=receiver_run):
 with patch.object(m, "require_fixed_run", return_value=producer), \
         patch.object(m, "parse_live_v6_artifact", return_value=(package, None, {})), \
         patch.object(m, "parse_resume_authority", return_value={"schema_version": "live-betting-data-resume-v4"}), \
-        patch.object(m, "current_held_source", return_value=producer_workflow), \
+        patch.object(m, "current_held_source", return_value=v4_workflow), \
         patch.object(m, "native_handoff_renewal", return_value=(deadline, 11)) as renewal, \
         patch.object(m, "jobs_for_run", side_effect=lambda repo, run, label:
                      [physical if run == producer_run else job]) as jobs, \
@@ -2649,8 +2732,165 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
     with patch.object(m.time, "time", side_effect=[base + 285, base + 284]):
         reject(lambda: m.validate_receiver_handoff_timing(
             "example/repo", producer_run, source, "dispatch"))
+v5_producer = {"updated_at": stamp(100)}
+v5_workflow_state = dict(
+    id=8, path=".github/workflows/oci-production-deploy.yml", state="active",
+)
+v5_receiver = dict(
+    id=78, workflow_id=8, path=v5_workflow_state["path"], run_attempt=1,
+    head_sha=source, event="workflow_dispatch", head_branch="master",
+    head_repository={"full_name": "example/repo"},
+    display_title=f"oci-deploy {source}", status="waiting", conclusion=None,
+    created_at=stamp(1000),
+)
+v5_validation = dict(
+    name="Validate exact SHA and trusted upstream runs",
+    status="in_progress", conclusion=None, started_at=stamp(2500),
+    completed_at=None,
+)
+v5_handoff = dict(
+    name="Verify transferred database lock and maintenance fence",
+    status="queued", conclusion=None, started_at=None, completed_at=None,
+)
+v5_job = dict(
+    run_id=78, name="deploy", status="in_progress", conclusion=None,
+    started_at=stamp(2500), steps=[v5_validation, v5_handoff],
+)
+def v5_api(path):
+    return copy.deepcopy(
+        v5_workflow_state if "/workflows/" in path else v5_receiver
+    )
+def read_v5(boundary, now, run=receiver_run):
+    v5_workflow_state["state"] = (
+        "active" if boundary in ("dispatch", "materialization")
+        else "disabled_manually"
+    )
+    with patch.object(m.time, "time", return_value=base + now):
+        return m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, boundary, run,
+        )
+with patch.object(m, "require_fixed_run", return_value=v5_producer), \
+        patch.object(m, "parse_live_v6_artifact", return_value=(package, None, {})), \
+        patch.object(m, "parse_resume_authority",
+                     return_value={"schema_version": "live-betting-data-resume-v5"}), \
+        patch.object(m, "current_held_source", return_value=v5_workflow), \
+        patch.object(m, "native_handoff_renewal",
+                     return_value=(v5_deadline, 21)) as v5_renewal, \
+        patch.object(m, "jobs_for_run", side_effect=lambda repo, run, label:
+                     [physical if run == producer_run else v5_job]), \
+        patch.object(m, "gh_api", side_effect=v5_api):
+    result = read_v5("dispatch", 1000, "")
+    assert result["profile"] == "live-betting-data-resume-v5"
+    assert result["lease_seconds"] == 7200
+    assert result["execution_seconds"] == 6600
+    assert result["phase"] == "admission"
+    assert result["unfinished_seconds"] == 5400
+    v5_renewal.assert_called_once_with(
+        "example/repo", producer_run, physical, "receiver handoff timing",
+        lease_seconds=7200,
+    )
+    for boundary in ("materialization", "approval-1", "approval-2", "approval-3"):
+        result = read_v5(boundary, 1800)
+        assert result["phase"] == "approval"
+        assert result["unfinished_seconds"] == 4000
+        assert result["stage_elapsed_seconds"]["admission"] == 900
+        assert result["stage_elapsed_seconds"]["approval"] == 800
+    reject(lambda: read_v5("approval-3", 3400))
+    v5_receiver["status"] = "in_progress"
+    result = read_v5("native-validation", 2700)
+    assert result["phase"] == "native-validation"
+    assert result["unfinished_seconds"] == 1900
+    with patch.dict(v5_job, started_at=stamp(3400)), \
+            patch.dict(v5_validation, started_at=stamp(3400)):
+        assert read_v5(
+            "native-validation", 3401,
+        )["stage_elapsed_seconds"]["approval"] == 2400
+    with patch.dict(v5_job, started_at=stamp(3400.1)), \
+            patch.dict(v5_validation, started_at=stamp(3400.1)):
+        reject(lambda: read_v5("native-validation", 3401))
+    v5_validation.update(
+        status="completed", conclusion="success", completed_at=stamp(3300),
+    )
+    result = read_v5("native-validation", 3400)
+    assert result["phase"] == "startup-snapshot"
+    assert result["unfinished_seconds"] == 800
+    v5_handoff.update(status="in_progress", started_at=stamp(3700))
+    result = read_v5("receiver-renewal", 3800)
+    assert result["phase"] == "receiver-renewal"
+    assert result["unfinished_seconds"] == 200
+    assert result["renewal_stage_deadline"] == base + 4000
+    reject(lambda: read_v5("receiver-renewal", 4000))
+    with patch.dict(v5_receiver, created_at=stamp(99)):
+        reject(lambda: read_v5("receiver-renewal", 3800))
+    with patch.dict(v5_validation, completed_at=stamp(2499)):
+        reject(lambda: read_v5("receiver-renewal", 3800))
+    with patch.dict(v5_handoff, started_at=stamp(3299)):
+        reject(lambda: read_v5("receiver-renewal", 3800))
+    with patch.object(m, "current_held_source", return_value=v4_workflow):
+        reject(lambda: read_v5("dispatch", 1000, ""))
+    with patch.object(m, "parse_resume_authority",
+                      return_value={"schema_version": "live-betting-data-resume-v4"}):
+        reject(lambda: read_v5("dispatch", 1000, ""))
 PY
-ok "v4 source-bound profiles, spent-phase residuals, actual phase transitions, strict exhaustion and unchanged read positions"
+ok "v4/v5 source-bound profiles, staged residuals, native renewal, strict chronology, equality and reserve exhaustion"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import contextlib
+import hashlib
+import importlib.util
+import io
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("current_reader_v5_bytes", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+root = Path(sys.argv[1]).parents[3]
+workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+verifier = (
+    root / "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
+).read_text()
+def blob(value):
+    raw = value.encode()
+    return hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+assert blob(workflow) == m.CURRENT_READER_WORKFLOW_BLOB
+assert blob(verifier) == m.CURRENT_READER_VERIFIER_BLOB
+historical_workflow = m.current_reader_workflow_v5(
+    workflow, "workflow inverse", inverse=True,
+)
+assert blob(historical_workflow) == \
+    m.FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB == \
+    "92038ee7bd21ddc2b888242f2ee91a7bd5571aba"
+assert m.current_reader_workflow_v5(
+    historical_workflow, "workflow forward",
+) == workflow
+historical_verifier = m.current_reader_verifier_v5(
+    verifier, "verifier inverse", inverse=True,
+)
+assert blob(historical_verifier) == \
+    m.FAILED_CLEAN_READER_CONTINUATION_CURRENT_VERIFIER_BLOB == \
+    "b258c4f35ba34492cb26b080d41928cdc1e74cf1"
+assert m.current_reader_verifier_v5(
+    historical_verifier, "verifier forward",
+) == verifier
+for current, historical, edits in (
+    (workflow, historical_workflow, m.CURRENT_READER_WORKFLOW_V5_EDITS),
+    (verifier, historical_verifier, m.CURRENT_READER_VERIFIER_V5_EDITS),
+):
+    for before, after in edits:
+        assert historical.count(before) == 1 and historical.count(after) == 0
+        assert current.count(before) == 0 and current.count(after) == 1
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            m.exact_current_reader_edits(
+                historical + historical, edits, "duplicate forward",
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("duplicate exact-edit source was accepted")
+PY
+ok "v5 current-reader workflow/verifier pins recover and reapply exact frozen bytes with unique edits"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import contextlib, copy, datetime as dt, hashlib, importlib.util, io, json, os, shutil, subprocess, sys
@@ -4011,8 +4251,11 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
     assert observed["_held_complete"] is True
     assert observed["_handoff_deadline"] == renewal_epoch + 1800
     assert current_job["steps"] == current_steps
-    for deadline, generation in ((renewal_epoch + 1802, 12), (renewal_epoch + 1800, 11),
-                                 (renewal_epoch + 3600, 12), (renewal_epoch - 1, 12)):
+    for deadline, generation in (
+        (renewal_epoch + 1802, 12), (renewal_epoch + 1800, 11),
+        (renewal_epoch + 3600, 12), (renewal_epoch + 7200, 12),
+        (renewal_epoch - 1, 12),
+    ):
         with patch.object(m, "gh_api_bytes", return_value=renewal_log(deadline, generation)):
             reject(held_native)
     for field, bad in (("conclusion", "failure"), ("run_id", 78), ("id", True)):
@@ -4026,10 +4269,15 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
         reject(held_native)
     modern_workflow = (m.Path(sys.argv[2]) / ".github/workflows/oci-live-data-rollout.yml").read_text()
     assert re.findall(r"(?m)^      - name: (.+)$", modern_workflow) == current_names
-    legacy_profile_workflow = modern_workflow.replace(
+    v4_profile_workflow = m.current_reader_workflow_v5(
+        modern_workflow, "fixture", inverse=True,
+    )
+    legacy_profile_workflow = v4_profile_workflow.replace(
         m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"').replace(
         "resume_schema=live-betting-data-resume-v4", "resume_schema=live-betting-data-resume-v3")
-    for executed_workflow in (legacy_profile_workflow, modern_workflow):
+    for executed_workflow in (
+        legacy_profile_workflow, v4_profile_workflow, modern_workflow,
+    ):
         for continuation in (False, True):
             native = dict(values)
             if continuation:
@@ -4039,10 +4287,15 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
             expected_schema = (
                 m.held_handoff_source_version(executed_workflow, "fixture") if continuation
                 else "live-betting-data-resume-v2")
-            duration = 3600 if expected_schema == "live-betting-data-resume-v4" else 1800
+            duration = {
+                "live-betting-data-resume-v2": 1800,
+                "live-betting-data-resume-v3": 1800,
+                "live-betting-data-resume-v4": 3600,
+                "live-betting-data-resume-v5": 7200,
+            }[expected_schema]
             with patch.object(m, "current_held_source", return_value=executed_workflow), \
                     patch.object(m, "failed_deploy_native_inputs", return_value=native):
-                for observed_duration in (1800, 3600):
+                for observed_duration in (1800, 3600, 7200):
                     with patch.object(m, "gh_api_bytes",
                                       return_value=renewal_log(renewal_epoch + observed_duration)):
                         if observed_duration != duration:
@@ -5351,7 +5604,13 @@ with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as i
         cancelled_responses[endpoint]["updated_at"] = "2026-10-07T10:00:01Z"
     assert cancelled_history() == cancelled_proof
     reset_cancelled()
-    tracked_source = (Path(sys.argv[2]) / cancelled_path).read_bytes()
+    tracked_current_source = (Path(sys.argv[2]) / cancelled_path).read_text()
+    tracked_current_raw = tracked_current_source.encode()
+    assert historical_response(cancelled_path, tracked_current_raw)["sha"] == \
+        m.CURRENT_READER_WORKFLOW_BLOB
+    tracked_source = m.current_reader_workflow_v5(
+        tracked_current_source, "cancelled historical fixture", inverse=True,
+    ).encode()
     tracked_historical = historical_response(cancelled_path, tracked_source)
     assert tracked_historical["sha"] == "92038ee7bd21ddc2b888242f2ee91a7bd5571aba"
     assert tracked_historical["sha"] == m.FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB
@@ -5823,13 +6082,15 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
             f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
             for name, raw in sorted(successor_files.items()) if name != "SHA256SUMS").encode()
         source_reader = m.held_source_bytes
-        for declared_workflow in (modern_workflow, legacy_profile_workflow):
+        for declared_workflow in (
+            v4_profile_workflow, modern_workflow, legacy_profile_workflow,
+        ):
             def successor_source_bytes(repository, sha, path, label):
                 if path == ".github/workflows/oci-live-data-rollout.yml" and label == "held-handoff successor":
                     return declared_workflow
                 return source_reader(repository, sha, path, label)
             with patch.object(m, "held_source_bytes", side_effect=successor_source_bytes):
-                if declared_workflow == modern_workflow:
+                if declared_workflow == v4_profile_workflow:
                     assert consume_successor() == ("23", source)
                 else:
                     reject(consume_successor)
@@ -7188,7 +7449,7 @@ reader_sha = "9" * 40
 profile = copy.deepcopy(m._failed_clean_reader_continuation_profile())
 # Canonical full-profile digest sealed from the two reviewed native observations.
 reviewed_observations_profile_sha256 = (
-    "dc0078fd9f004f675c9bcca57672705d316b18428a198bbd373f3b4633710d85"
+    "7e603ecf41b3dcdd1bb032be797605af28448949590b89fae0a5251cb58d0c90"
 )
 
 def assert_golden_profile(candidate):
@@ -7460,7 +7721,7 @@ observation = {
 reader = {
     "control": reader_sha,
     "tree": "e" * 40,
-    "workflowBlob": profile["workflow_blob"],
+    "workflowBlob": profile["current_workflow_blob"],
     "policyBlob": profile["policy_blob"],
     "authorityBlob": profile["authority_blob"],
     "validatorBlob": "d" * 40,
@@ -8024,7 +8285,7 @@ assert m.FAILED_PRE_CAS_CONTINUATION_TREE == \
 
 profile = copy.deepcopy(m._failed_pre_cas_continuation_profile())
 reviewed_profile_sha256 = (
-    "0e7046de84bd5238def5d1ce5de9b2ae99001c6dd7c0856344a44817f0a1bb6f"
+    "f803adfdf634fd591b2d614aad7649454d3cc5aa5f1f996e62fff8d95f719812"
 )
 
 def profile_digest(candidate):
@@ -8549,11 +8810,11 @@ observation_held = {
 observation_reader = {
     "control": observation_reader_sha,
     "tree": "e" * 40,
-    "workflowBlob": observation_profile["workflow_blob"],
+    "workflowBlob": observation_profile["current_workflow_blob"],
     "policyBlob": observation_profile["policy_blob"],
     "authorityBlob": observation_profile["authority_blob"],
     "validatorBlob": "d" * 40,
-    "verifierBlob": observation_profile["verifier_blob"],
+    "verifierBlob": observation_profile["current_verifier_blob"],
 }
 observation_tree = {
     "sha": observation_profile["tree"],
@@ -9113,11 +9374,11 @@ dispatch = {"sanitized": "request"}
 reader = {
     "control": observation_reader_sha,
     "tree": "e" * 40,
-    "workflowBlob": profile["workflow_blob"],
+    "workflowBlob": profile["current_workflow_blob"],
     "policyBlob": profile["policy_blob"],
     "authorityBlob": profile["authority_blob"],
     "validatorBlob": "d" * 40,
-    "verifierBlob": profile["verifier_blob"],
+    "verifierBlob": profile["current_verifier_blob"],
 }
 
 def top_level(observations):
@@ -9744,6 +10005,7 @@ def probe_control_comparisons(module):
                 "held_run_id": 202,
                 "held_source": held["head_sha"],
                 "workflow_blob": "3" * 40,
+                "current_workflow_blob": "7" * 40,
                 "policy_blob": "4" * 40,
                 "authority_blob": "5" * 40,
                 "current_verifier_blob": "6" * 40,
@@ -9765,9 +10027,11 @@ def probe_control_comparisons(module):
                 "held_run_id": 202,
                 "held_source": held["head_sha"],
                 "workflow_blob": "3" * 40,
+                "current_workflow_blob": "7" * 40,
                 "policy_blob": "4" * 40,
                 "authority_blob": "5" * 40,
                 "verifier_blob": "6" * 40,
+                "current_verifier_blob": "8" * 40,
             },
             {
                 "run": {}, "attempt": {}, "workflow": {},
@@ -9798,7 +10062,7 @@ def probe_control_comparisons(module):
                     reader["verifierBlob"] = profile[
                         "current_verifier_blob"
                     ]
-                if "verifier_blob" in profile:
+                elif "verifier_blob" in profile:
                     reader["verifierBlob"] = profile["verifier_blob"]
                 arguments = [
                     REPOSITORY, row, held, S0, {}, None, False,
@@ -15030,7 +15294,7 @@ def complete_native(run, values, minute):
         raw = bundle.read("0_rollout.txt")
     renewal = next(step for step in steps if step["name"] == "Restore runtime or verify final deploy handoff")
     renewed = dt.datetime.fromisoformat(renewal["started_at"])
-    lease_seconds = (complete_reader.HANDOFF_V4_LEASE_SECONDS
+    lease_seconds = (complete_reader.HANDOFF_V5_LEASE_SECONDS
                      if values.get("held_handoff_run_id", "0") not in {"", "0"} else 1800)
     deadline = int(renewed.timestamp()) + lease_seconds
     generation = 12 if run == 155 else 14
@@ -15310,11 +15574,11 @@ else:
             except SystemExit:
                 pass
             else:
-                raise AssertionError(f"completed v4 lineage relabelled its capture/controller as the root: {key}")
+                raise AssertionError(f"completed v5 lineage relabelled its capture/controller as the root: {key}")
         log156.write_bytes(original_log156)
     held156 = complete_reader.validate_binding(repo, held_binding, native_source, "156",
         dict(continuation, held_handoff_run_id="156"), "oke")
-    assert held156["resume"]["held_handoff_lease_seconds"] == "3600"
+    assert held156["resume"]["held_handoff_lease_seconds"] == "7200"
     assert held156["baselineFiles"] == held155["baselineFiles"]
     assert held156["resume"]["applied_data_run_id"] == "42"
     assert private_authority.call_count >= 3
@@ -15377,7 +15641,7 @@ else:
             timing = complete_reader.validate_receiver_handoff_timing(
                 repo, "156", native_source, boundary, "157")
             assert timing["boundary"] == boundary and timing["generation"] == 14
-            assert timing["profile"] == "live-betting-data-resume-v4" and timing["lease_seconds"] == 3600
+            assert timing["profile"] == "live-betting-data-resume-v5" and timing["lease_seconds"] == 7200
             for endpoint in unchanged_inventories:
                 rows = read(endpoint)
                 rows["workflow_runs"].append(competitor); rows["total_count"] += 1
@@ -15405,7 +15669,7 @@ else:
         updated_at=(receiver_created + dt.timedelta(hours=1, minutes=1)).isoformat()))
     inventory["total_count"] += 1; write(receiver_inventory, inventory)
     assert complete_reader.validate_pre_runtime_resume_chain(repo, "156", "oke") == ("42", root_source)
-    print("PASS receiver-present complete-v6 -> v4 ordinary binding and authentic timing at materialization/three approvals/native; competing held-interval operation rejects; later deployments preserve immutable lineage")
+    print("PASS receiver-present complete-v6 -> v5 ordinary binding and authentic timing at materialization/three approvals/native; competing held-interval operation rejects; later deployments preserve immutable lineage")
     with contextlib.redirect_stderr(io.StringIO()):
         try:
             complete_reader.validate_failed_deploy_jobs(

@@ -94,15 +94,70 @@ HANDOFF_V4_STAGE_CEILINGS = {
     "packaging": 120, "admission": 600, "queue": 120, "approval": 1200,
     "native-validation": 480, "startup-snapshot": 360, "receiver-renewal": 120,
 }
+HANDOFF_V5_STAGE_CEILINGS = {
+    "packaging": 300, "admission": 1500, "queue": 300, "approval": 2400,
+    "native-validation": 1200, "startup-snapshot": 600, "receiver-renewal": 300,
+}
 HANDOFF_RESERVE_SECONDS = 600
 HANDOFF_V4_EXECUTION_SECONDS = sum(HANDOFF_V4_STAGE_CEILINGS.values())
 HANDOFF_V4_LEASE_SECONDS = HANDOFF_V4_EXECUTION_SECONDS + HANDOFF_RESERVE_SECONDS
+HANDOFF_V5_EXECUTION_SECONDS = sum(HANDOFF_V5_STAGE_CEILINGS.values())
+HANDOFF_V5_LEASE_SECONDS = HANDOFF_V5_EXECUTION_SECONDS + HANDOFF_RESERVE_SECONDS
+STAGED_HANDOFF_AUTHORITY_VERSIONS = {
+    "live-betting-data-resume-v4", "live-betting-data-resume-v5",
+}
 HELD_HANDOFF_AUTHORITY_VERSIONS = {
-    "live-betting-data-resume-v3", "live-betting-data-resume-v4",
+    "live-betting-data-resume-v3", *STAGED_HANDOFF_AUTHORITY_VERSIONS,
 }
 HANDOFF_V4_LEASE_EXPRESSION = (
     "${{ inputs.held_handoff_run_id != '0' && "
     "inputs.held_handoff_run_id != '' && '3600' || '1800' }}"
+)
+HANDOFF_V5_LEASE_EXPRESSION = (
+    "${{ inputs.held_handoff_run_id != '0' && "
+    "inputs.held_handoff_run_id != '' && '7200' || '1800' }}"
+)
+CURRENT_READER_WORKFLOW_BLOB = "2399c672ed5022358880692925870690b203b532"
+CURRENT_READER_VERIFIER_BLOB = "4f1ade3b89dcdc6a736bd8a371f66ccf06f9bd63"
+CURRENT_READER_WORKFLOW_V5_EDITS = (
+    (
+        "inputs.held_handoff_run_id != '' && '3600' || '1800'",
+        "inputs.held_handoff_run_id != '' && '7200' || '1800'",
+    ),
+    ('test("^(1800|3600)$")', 'test("^(1800|3600|7200)$")'),
+    (
+        "resume_schema=live-betting-data-resume-v4",
+        "resume_schema=live-betting-data-resume-v5",
+    ),
+)
+CURRENT_READER_VERIFIER_V5_EDITS = (
+    (
+        '    elif resume_version in {\n'
+        '        "live-betting-data-resume-v2", "live-betting-data-resume-v3", '
+        '"live-betting-data-resume-v4",\n'
+        '    }:\n',
+        '    elif resume_version in {\n'
+        '        "live-betting-data-resume-v2", "live-betting-data-resume-v3", '
+        '"live-betting-data-resume-v4", "live-betting-data-resume-v5",\n'
+        '    }:\n',
+    ),
+    (
+        '    if resume_version in {"live-betting-data-resume-v3", '
+        '"live-betting-data-resume-v4"}:\n',
+        '    if resume_version in {"live-betting-data-resume-v3", '
+        '"live-betting-data-resume-v4", "live-betting-data-resume-v5"}:\n',
+    ),
+    (
+        '            resume_version not in {\n'
+        '                "live-betting-data-resume-v2", '
+        '"live-betting-data-resume-v3", "live-betting-data-resume-v4",\n'
+        '            }\n',
+        '            resume_version not in {\n'
+        '                "live-betting-data-resume-v2", '
+        '"live-betting-data-resume-v3", "live-betting-data-resume-v4", '
+        '"live-betting-data-resume-v5",\n'
+        '            }\n',
+    ),
 )
 EXPIRED_HANDOFF_TREE = "03381913c7ba16a9c9faf8699740e892564a6628"
 EXPIRED_HANDOFF_CLOSURE = {
@@ -4078,6 +4133,64 @@ def held_raw_ancestry(authority, repository, row, subject_sha, label):
     return carrier(row["head_sha"], subject_sha, raw)
 
 
+def exact_current_reader_edits(value, edits, label, *, inverse=False):
+    if (
+        type(value) is not str or type(edits) is not tuple
+        or type(inverse) is not bool
+    ):
+        fail(f"{label} exact edit input is invalid")
+    ordered = reversed(edits) if inverse else edits
+    for before, after in ordered:
+        source, target = (after, before) if inverse else (before, after)
+        if (
+            type(before) is not str or type(after) is not str
+            or not before or not after or before == after
+            or value.count(source) != 1 or target in value
+        ):
+            fail(f"{label} exact edit is absent, duplicated or already applied")
+        value = value.replace(source, target, 1)
+    return value
+
+
+def current_reader_workflow_v5(workflow, label, *, inverse=False):
+    return exact_current_reader_edits(
+        workflow, CURRENT_READER_WORKFLOW_V5_EDITS, label, inverse=inverse,
+    )
+
+
+def current_reader_verifier_v5(verifier, label, *, inverse=False):
+    return exact_current_reader_edits(
+        verifier, CURRENT_READER_VERIFIER_V5_EDITS, label, inverse=inverse,
+    )
+
+
+def handoff_profile_lease_seconds(schema_version, label):
+    profiles = {
+        "live-betting-data-resume-v3": 1800,
+        "live-betting-data-resume-v4": 3600,
+        "live-betting-data-resume-v5": 7200,
+    }
+    if schema_version not in profiles:
+        fail(f"{label} handoff profile is unsupported")
+    return profiles[schema_version]
+
+
+def staged_handoff_profile(schema_version):
+    if schema_version == "live-betting-data-resume-v4":
+        return (
+            HANDOFF_V4_STAGE_CEILINGS,
+            HANDOFF_V4_EXECUTION_SECONDS,
+            HANDOFF_V4_LEASE_SECONDS,
+        )
+    if schema_version == "live-betting-data-resume-v5":
+        return (
+            HANDOFF_V5_STAGE_CEILINGS,
+            HANDOFF_V5_EXECUTION_SECONDS,
+            HANDOFF_V5_LEASE_SECONDS,
+        )
+    fail("staged handoff timing profile is unsupported")
+
+
 def held_handoff_source_version(workflow, label):
     leases = re.findall(
         r"(?m)^      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: (.+)$", workflow,
@@ -4090,6 +4203,12 @@ def held_handoff_source_version(workflow, label):
         in workflow
     ):
         return "live-betting-data-resume-v4"
+    if (
+        leases == [HANDOFF_V5_LEASE_EXPRESSION]
+        and '[ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5'
+        in workflow
+    ):
+        return "live-betting-data-resume-v5"
     fail(f"{label} source does not bind its fixed handoff profile to the continuation branch")
 
 
@@ -4148,7 +4267,12 @@ def current_held_source(repository, source_sha, label, *, native_sources=None):
 
 
 def native_handoff_renewal(repository, run_id, job, label, *, lease_seconds=1800):
-    if type(lease_seconds) is not int or lease_seconds not in {1800, HANDOFF_V4_LEASE_SECONDS}:
+    if (
+        type(lease_seconds) is not int
+        or lease_seconds not in {
+            1800, HANDOFF_V4_LEASE_SECONDS, HANDOFF_V5_LEASE_SECONDS,
+        }
+    ):
         fail(f"{label} native handoff profile is unsupported")
     steps = [
         step for step in job["steps"]
@@ -4231,8 +4355,16 @@ def handoff_remaining_guard(deadline, now, boundary):
     return tail
 
 
-def handoff_remaining_guard_v4(deadline, now, phase, elapsed):
-    stages = HANDOFF_V4_STAGE_CEILINGS
+def handoff_remaining_guard_staged(
+    deadline, now, phase, elapsed, schema_version,
+):
+    stages, execution_seconds, lease_seconds = staged_handoff_profile(
+        schema_version,
+    )
+    expected = {
+        "live-betting-data-resume-v4": (3000, 3600),
+        "live-betting-data-resume-v5": (6600, 7200),
+    }
     futures = {
         "admission": ("queue", "approval", "native-validation", "startup-snapshot", "receiver-renewal"),
         "approval": ("queue", "native-validation", "startup-snapshot", "receiver-renewal"),
@@ -4244,17 +4376,18 @@ def handoff_remaining_guard_v4(deadline, now, phase, elapsed):
     if (
         set(stages) != set(HANDOFF_STAGE_CEILINGS)
         or any(type(value) is not int or value <= 0 for value in stages.values())
-        or sum(stages.values()) != HANDOFF_V4_EXECUTION_SECONDS
-        or HANDOFF_V4_EXECUTION_SECONDS != 3000 or HANDOFF_RESERVE_SECONDS != 600
-        or HANDOFF_V4_LEASE_SECONDS != HANDOFF_V4_EXECUTION_SECONDS + HANDOFF_RESERVE_SECONDS
-        or HANDOFF_V4_LEASE_SECONDS != 3600
+        or schema_version not in expected
+        or (execution_seconds, lease_seconds) != expected[schema_version]
+        or sum(stages.values()) != execution_seconds
+        or HANDOFF_RESERVE_SECONDS != 600
+        or lease_seconds != execution_seconds + HANDOFF_RESERVE_SECONDS
         or type(phase) is not str or phase not in futures
         or type(deadline) is not int or deadline <= 0
         or type(now) not in (int, float) or not math.isfinite(now)
     ):
-        fail("v4 handoff timing profile, phase or physical deadline is unsupported")
+        fail("staged handoff timing profile, phase or physical deadline is unsupported")
     if not isinstance(elapsed, dict) or set(elapsed) != set(completed[:completed.index(phase) + 1]):
-        fail("v4 handoff timing has incomplete or inconsistent authenticated phase evidence")
+        fail("staged handoff timing has incomplete or inconsistent authenticated phase evidence")
     for stage, duration in elapsed.items():
         if (
             type(duration) not in (int, float) or not math.isfinite(duration)
@@ -4268,6 +4401,18 @@ def handoff_remaining_guard_v4(deadline, now, phase, elapsed):
     if deadline - now <= tail + HANDOFF_RESERVE_SECONDS:
         fail("authentic physical handoff deadline cannot cover the unfinished path plus reserve")
     return tail
+
+
+def handoff_remaining_guard_v4(deadline, now, phase, elapsed):
+    return handoff_remaining_guard_staged(
+        deadline, now, phase, elapsed, "live-betting-data-resume-v4",
+    )
+
+
+def handoff_remaining_guard_v5(deadline, now, phase, elapsed):
+    return handoff_remaining_guard_staged(
+        deadline, now, phase, elapsed, "live-betting-data-resume-v5",
+    )
 
 
 def receiver_handoff_run(repository, source, boundary, receiver_run, label):
@@ -4309,11 +4454,15 @@ def receiver_handoff_run(repository, source, boundary, receiver_run, label):
     return first
 
 
-def validate_receiver_handoff_timing_v4(
+def validate_receiver_handoff_timing_staged(
     repository, source, producer, deadline, generation, boundary, receiver_run,
+    schema_version,
 ):
-    label = "receiver v4 handoff timing"
-    renewal = deadline - HANDOFF_V4_LEASE_SECONDS
+    stages, execution_seconds, lease_seconds = staged_handoff_profile(
+        schema_version,
+    )
+    label = f"receiver {schema_version.rsplit('-', 1)[-1]} handoff timing"
+    renewal = deadline - lease_seconds
     observed_at = time.time()
     packaged = parse_timestamp(producer.get("updated_at"), label).timestamp()
     elapsed = {"packaging": packaged - renewal}
@@ -4402,20 +4551,40 @@ def validate_receiver_handoff_timing_v4(
     if now < observed_at:
         fail("receiver timing clock moved backward during its native observation")
     elapsed[phase] = now - phase_started
-    tail = handoff_remaining_guard_v4(deadline, now, phase, elapsed)
-    if now - renewal > HANDOFF_V4_EXECUTION_SECONDS:
+    tail = handoff_remaining_guard_staged(
+        deadline, now, phase, elapsed, schema_version,
+    )
+    if now - renewal > execution_seconds:
         fail("receiver handoff whole renewal-to-renewal ceiling was exhausted")
     return {
-        "profile": "live-betting-data-resume-v4",
-        "lease_seconds": HANDOFF_V4_LEASE_SECONDS, "execution_seconds": HANDOFF_V4_EXECUTION_SECONDS,
+        "profile": schema_version,
+        "lease_seconds": lease_seconds, "execution_seconds": execution_seconds,
         "reserve_seconds": HANDOFF_RESERVE_SECONDS,
         "deadline": deadline, "generation": generation, "boundary": boundary, "phase": phase,
         "unfinished_seconds": tail, "remaining_seconds": int(deadline - now),
         "elapsed_seconds": int(now - renewal),
         "stage_elapsed_seconds": {key: int(value) for key, value in elapsed.items()},
-        **({"renewal_stage_deadline": phase_started + HANDOFF_V4_STAGE_CEILINGS["receiver-renewal"]}
+        **({"renewal_stage_deadline": phase_started + stages["receiver-renewal"]}
            if phase == "receiver-renewal" else {}),
     }
+
+
+def validate_receiver_handoff_timing_v4(
+    repository, source, producer, deadline, generation, boundary, receiver_run,
+):
+    return validate_receiver_handoff_timing_staged(
+        repository, source, producer, deadline, generation, boundary,
+        receiver_run, "live-betting-data-resume-v4",
+    )
+
+
+def validate_receiver_handoff_timing_v5(
+    repository, source, producer, deadline, generation, boundary, receiver_run,
+):
+    return validate_receiver_handoff_timing_staged(
+        repository, source, producer, deadline, generation, boundary,
+        receiver_run, "live-betting-data-resume-v5",
+    )
 
 
 def validate_receiver_handoff_timing(repository, data_run, source, boundary, receiver_run=""):
@@ -4433,8 +4602,8 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     workflow = current_held_source(repository, source, label)
     if held_handoff_source_version(workflow, label) != authority["schema_version"]:
         fail("receiver handoff source and resume authority profiles differ")
-    v4 = authority["schema_version"] == "live-betting-data-resume-v4"
-    lease_seconds = HANDOFF_V4_LEASE_SECONDS if v4 else 1800
+    schema_version = authority["schema_version"]
+    lease_seconds = handoff_profile_lease_seconds(schema_version, label)
     jobs = jobs_for_run(repository, data_run, label)
     job = exact_job(jobs, "rollout", label)
     if (
@@ -4445,8 +4614,12 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     deadline, generation = native_handoff_renewal(
         repository, data_run, job, label, lease_seconds=lease_seconds,
     )
-    if v4:
+    if schema_version == "live-betting-data-resume-v4":
         return validate_receiver_handoff_timing_v4(
+            repository, source, producer, deadline, generation, boundary, receiver_run,
+        )
+    if schema_version == "live-betting-data-resume-v5":
+        return validate_receiver_handoff_timing_v5(
             repository, source, producer, deadline, generation, boundary, receiver_run,
         )
     renewal = deadline - 1800
@@ -4622,7 +4795,10 @@ def validate_held_handoff_native(
         if native["confirmation"] == HELD_HANDOFF_CONFIRMATION
         else "live-betting-data-resume-v2"
     )
-    lease_seconds = HANDOFF_V4_LEASE_SECONDS if resume_schema == "live-betting-data-resume-v4" else 1800
+    lease_seconds = (
+        handoff_profile_lease_seconds(resume_schema, label)
+        if resume_schema in HELD_HANDOFF_AUTHORITY_VERSIONS else 1800
+    )
     deadline, generation = native_handoff_renewal(
         repository, run_id, job, label, lease_seconds=lease_seconds,
     )
@@ -5265,7 +5441,7 @@ def _failed_held_continuation_profile():
         "workflow_blob": dict(FAILED_HELD_CONTINUATION_CLOSURE)[
             ".github/workflows/oci-live-data-rollout.yml"
         ],
-        "current_workflow_blob": FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB,
+        "current_workflow_blob": CURRENT_READER_WORKFLOW_BLOB,
         "policy_blob": dict(FAILED_HELD_CONTINUATION_CLOSURE)[
             "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
         ],
@@ -5406,12 +5582,22 @@ def _failed_held_current_reader(repository, subject_sha, profile):
         index for index, line in enumerate(historical_lines)
         if line.strip() == profile["protected_read"]
     ]
+    prior_workflow = "".join(
+        line for index, line in enumerate(historical_lines)
+        if index not in removed
+    )
+    prior_raw = prior_workflow.encode()
     if (
         len(removed) != 1
-        or "".join(
-            line for index, line in enumerate(historical_lines)
-            if index != removed[0]
+        or hashlib.sha1(
+            f"blob {len(prior_raw)}\0".encode() + prior_raw
+        ).hexdigest() != FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB
+        or current_reader_workflow_v5(
+            prior_workflow, label,
         ) != current_workflow
+        or current_reader_workflow_v5(
+            current_workflow, label, inverse=True,
+        ) != prior_workflow
     ):
         fail(f"{label} corrected workflow is not the reviewed forward-compatible reader")
     return {
@@ -6244,6 +6430,7 @@ def _failed_clean_reader_continuation_profile():
         "tree": FAILED_CLEAN_READER_CONTINUATION_TREE,
         "workflow_id": FAILED_CLEAN_READER_CONTINUATION_WORKFLOW_ID,
         "workflow_blob": closure[".github/workflows/oci-live-data-rollout.yml"],
+        "current_workflow_blob": CURRENT_READER_WORKFLOW_BLOB,
         "policy_blob": closure[
             "infra/azure/agents/"
             "copilot-cli-protected-operation-policy-stan.sh"
@@ -6257,8 +6444,9 @@ def _failed_clean_reader_continuation_profile():
         "verifier_blob": closure[
             "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
         ],
-        "current_verifier_blob":
+        "previous_current_verifier_blob":
             FAILED_CLEAN_READER_CONTINUATION_CURRENT_VERIFIER_BLOB,
+        "current_verifier_blob": CURRENT_READER_VERIFIER_BLOB,
         "input_names": FAILED_CLEAN_READER_CONTINUATION_INPUT_NAMES,
         "policy_sha256": FAILED_CLEAN_READER_CONTINUATION_POLICY_SHA256,
         "input_sha256": FAILED_CLEAN_READER_CONTINUATION_INPUT_SHA256,
@@ -6410,7 +6598,7 @@ def _failed_clean_reader_current_reader(repository, subject_sha, profile):
         Path(__file__).is_symlink() or (root / verifier_path).is_symlink()
         or head != subject_sha or status
         or FULL_SHA.fullmatch(tree_sha) is None
-        or local[workflow_path] != profile["workflow_blob"]
+        or local[workflow_path] != profile["current_workflow_blob"]
         or local[policy_path] != profile["policy_blob"]
         or local[authority_path] != profile["authority_blob"]
         or local[validator_path] != blob_sha(validator_raw)
@@ -6435,6 +6623,21 @@ def _failed_clean_reader_current_reader(repository, subject_sha, profile):
     native_blobs = _failed_held_tree_blobs(tree, tree_sha, label)
     if any(native_blobs.get(path) != blob for path, blob in local.items()):
         fail(f"{label} authenticated source tree differs from local execution")
+    historical_workflow = held_source_bytes(
+        repository, profile["control"], workflow_path, label,
+    )
+    current_workflow = held_source_bytes(
+        repository, subject_sha, workflow_path, label,
+    )
+    if (
+        current_reader_workflow_v5(
+            historical_workflow, label,
+        ) != current_workflow
+        or current_reader_workflow_v5(
+            current_workflow, label, inverse=True,
+        ) != historical_workflow
+    ):
+        fail(f"{label} workflow is not the reviewed v5 timing correction")
     historical_verifier = held_source_bytes(
         repository, profile["control"], verifier_path, label,
     )
@@ -6453,7 +6656,18 @@ def _failed_clean_reader_current_reader(repository, subject_sha, profile):
         + ["sys.dont_write_bytecode = True\n"]
         + historical_lines[markers[0] + 1:]
     )
-    if current_verifier != expected_verifier:
+    previous_raw = expected_verifier.encode()
+    if (
+        hashlib.sha1(
+            f"blob {len(previous_raw)}\0".encode() + previous_raw
+        ).hexdigest() != profile["previous_current_verifier_blob"]
+        or current_reader_verifier_v5(
+            expected_verifier, label,
+        ) != current_verifier
+        or current_reader_verifier_v5(
+            current_verifier, label, inverse=True,
+        ) != expected_verifier
+    ):
         fail(f"{label} verifier is not the reviewed bytecode-safe correction")
     return {
         "control": subject_sha,
@@ -6622,7 +6836,7 @@ def _validate_failed_clean_reader_continuation_observation(
         or current_reader["control"] != current_reader_sha
         or not isinstance(current_reader["tree"], str)
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
-        or current_reader["workflowBlob"] != profile["workflow_blob"]
+        or current_reader["workflowBlob"] != profile["current_workflow_blob"]
         or current_reader["policyBlob"] != profile["policy_blob"]
         or current_reader["authorityBlob"] != profile["authority_blob"]
         or not isinstance(current_reader["validatorBlob"], str)
@@ -7038,6 +7252,7 @@ def _failed_pre_cas_continuation_profile():
         "tree": FAILED_PRE_CAS_CONTINUATION_TREE,
         "workflow_id": FAILED_PRE_CAS_CONTINUATION_WORKFLOW_ID,
         "workflow_blob": closure[".github/workflows/oci-live-data-rollout.yml"],
+        "current_workflow_blob": CURRENT_READER_WORKFLOW_BLOB,
         "policy_blob": closure[
             "infra/azure/agents/"
             "copilot-cli-protected-operation-policy-stan.sh"
@@ -7051,6 +7266,7 @@ def _failed_pre_cas_continuation_profile():
         "verifier_blob": closure[
             "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
         ],
+        "current_verifier_blob": CURRENT_READER_VERIFIER_BLOB,
         "input_names": FAILED_PRE_CAS_CONTINUATION_INPUT_NAMES,
         "policy_sha256": FAILED_PRE_CAS_CONTINUATION_POLICY_SHA256,
         "input_sha256": FAILED_PRE_CAS_CONTINUATION_INPUT_SHA256,
@@ -7206,10 +7422,10 @@ def _failed_pre_cas_current_reader(repository, subject_sha, profile):
     if (
         Path(__file__).is_symlink() or head != subject_sha or status
         or FULL_SHA.fullmatch(tree_sha) is None
-        or local[workflow_path] != profile["workflow_blob"]
+        or local[workflow_path] != profile["current_workflow_blob"]
         or local[policy_path] != profile["policy_blob"]
         or local[authority_path] != profile["authority_blob"]
-        or local[verifier_path] != profile["verifier_blob"]
+        or local[verifier_path] != profile["current_verifier_blob"]
         or local[validator_path] != validator_blob
     ):
         fail(f"{label} is not the clean exact current-master source")
@@ -7230,6 +7446,33 @@ def _failed_pre_cas_current_reader(repository, subject_sha, profile):
     native_blobs = _failed_held_tree_blobs(tree, tree_sha, label)
     if any(native_blobs.get(path) != blob for path, blob in local.items()):
         fail(f"{label} authenticated source tree differs from local execution")
+    historical_workflow = held_source_bytes(
+        repository, profile["control"], workflow_path, label,
+    )
+    current_workflow = held_source_bytes(
+        repository, subject_sha, workflow_path, label,
+    )
+    historical_verifier = held_source_bytes(
+        repository, profile["control"], verifier_path, label,
+    )
+    current_verifier = held_source_bytes(
+        repository, subject_sha, verifier_path, label,
+    )
+    if (
+        current_reader_workflow_v5(
+            historical_workflow, label,
+        ) != current_workflow
+        or current_reader_workflow_v5(
+            current_workflow, label, inverse=True,
+        ) != historical_workflow
+        or current_reader_verifier_v5(
+            historical_verifier, label,
+        ) != current_verifier
+        or current_reader_verifier_v5(
+            current_verifier, label, inverse=True,
+        ) != historical_verifier
+    ):
+        fail(f"{label} is not the reviewed v5 forward-compatible reader")
     return {
         "control": subject_sha,
         "tree": tree_sha,
@@ -7498,10 +7741,10 @@ def _validate_failed_pre_cas_continuation_observation(
         or current_reader["control"] != current_reader_sha
         or not isinstance(current_reader["tree"], str)
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
-        or current_reader["workflowBlob"] != profile["workflow_blob"]
+        or current_reader["workflowBlob"] != profile["current_workflow_blob"]
         or current_reader["policyBlob"] != profile["policy_blob"]
         or current_reader["authorityBlob"] != profile["authority_blob"]
-        or current_reader["verifierBlob"] != profile["verifier_blob"]
+        or current_reader["verifierBlob"] != profile["current_verifier_blob"]
         or not isinstance(current_reader["validatorBlob"], str)
         or FULL_SHA.fullmatch(current_reader["validatorBlob"]) is None
     ):
@@ -8505,7 +8748,10 @@ def validate_held_transfer_runtime(
     lease_seconds="1800",
 ):
     label = "fresh held-handoff physical transfer"
-    if type(lease_seconds) is not str or lease_seconds not in {"1800", "3600"}:
+    if (
+        type(lease_seconds) is not str
+        or lease_seconds not in {"1800", "3600", "7200"}
+    ):
         fail(f"{label} authenticated predecessor profile is unsupported")
     if (
         not isinstance(snapshot, dict) or not isinstance(current, dict)
@@ -8938,7 +9184,7 @@ def validate_pre_runtime_resume_chain(
             or any(request[key] != value for key, value in expected_request.items())
         ):
             fail("held-handoff successor substituted its native root or previous physical holder")
-        if authority["schema_version"] == "live-betting-data-resume-v4":
+        if authority["schema_version"] in STAGED_HANDOFF_AUTHORITY_VERSIONS:
             workflow = held_source_bytes(
                 repository, evidence["source_sha"], ".github/workflows/oci-live-data-rollout.yml",
                 "held-handoff successor",

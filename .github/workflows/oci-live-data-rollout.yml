@@ -136,7 +136,7 @@ jobs:
       SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}
       SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}
       SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"
-      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ${{ inputs.held_handoff_run_id != '0' && inputs.held_handoff_run_id != '' && '3600' || '1800' }}
+      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ${{ inputs.held_handoff_run_id != '0' && inputs.held_handoff_run_id != '' && '7200' || '1800' }}
 
     steps:
       - name: Initialize isolated OCI data paths
@@ -1170,7 +1170,7 @@ jobs:
               previous_holder_source="$HELD_HANDOFF_SOURCE_SHA"
               previous_lease_seconds="$(
                 jq -er '.held_handoff_run_id.held_handoff_lease_seconds |
-                  select(type == "string" and test("^(1800|3600)$"))' \
+                  select(type == "string" and test("^(1800|3600|7200)$"))' \
                   "$RUNNER_TEMP/live-data-upstream-result.json"
               )"
             fi
@@ -1291,7 +1291,7 @@ jobs:
 
           mkdir -p artifacts/oci-live-data-rollout/evidence
           resume_schema=live-betting-data-resume-v2
-          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v4
+          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5
           cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
           schema_version=$resume_schema
           applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
