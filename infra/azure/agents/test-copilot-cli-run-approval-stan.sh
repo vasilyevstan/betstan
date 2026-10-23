@@ -5,10 +5,34 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 APPROVER="$ROOT_DIR/infra/azure/agents/copilot-cli-run-approval-stan.sh"
 POLICY="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
+VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
 SHA="1111111111111111111111111111111111111111"
 TARGET_SHA="0000000000000000000000000000000000000000"
 BLOB="2222222222222222222222222222222222222222"
 REPOSITORY="example/repo"
+
+python3 -I - "$APPROVER" "$VALIDATOR" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+approver, validator = map(Path, sys.argv[1:])
+approval_text = approver.read_text()
+tree = ast.parse(validator.read_text())
+boundaries = None
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "HELD_HISTORY_PROOF_BOUNDARIES"
+        for target in node.targets
+    ):
+        boundaries = ast.literal_eval(node.value)
+        break
+assert boundaries is not None
+assert {"approval-1", "approval-2", "approval-3"} <= boundaries
+assert "binding_revalidation_count=$(( ${binding_revalidation_count:-0} + 1 ))" in approval_text
+assert 'BETSTAN_BINDING_BOUNDARY="approval-$binding_revalidation_count"' in approval_text
+print("three_approval_boundaries_share_sealed_history_proof=PASS")
+PY
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-approval-test.XXXXXX")"
 chmod 700 "$tmp_dir"
@@ -2516,6 +2540,58 @@ make_record() {
     --current-master "$SHA" \
     --repo-root "$ROOT_DIR" \
     --output "$normalized"
+  PYTHONDONTWRITEBYTECODE=1 python3 -I - \
+    "$VALIDATOR" "$HELPER" "$POLICY" "$normalized" "$authority_dir" <<'PY'
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+validator_path, helper_path, policy_path, normalized_path, authority_dir = sys.argv[1:]
+validator_spec = importlib.util.spec_from_file_location(
+    "approval_proof_context_validator", validator_path,
+)
+validator = importlib.util.module_from_spec(validator_spec)
+validator_spec.loader.exec_module(validator)
+helper_spec = importlib.util.spec_from_file_location(
+    "approval_proof_context_authority", helper_path,
+)
+helper = importlib.util.module_from_spec(helper_spec)
+helper_spec.loader.exec_module(helper)
+normalized = json.loads(Path(normalized_path).read_text(encoding="utf-8"))
+policy = json.loads(subprocess.check_output(
+    [policy_path, "get", normalized["operation"]],
+    text=True,
+))
+bindings = policy["upstreamRunBindings"] or []
+if not any(
+    binding.get("runProfile") in validator.HELD_HISTORY_PROOF_PROFILES
+    for binding in bindings
+):
+    raise SystemExit(0)
+inputs = normalized["inputs"]
+if policy["workflow"] == "oci-live-data-rollout.yml":
+    inputs = validator.live_data_native_inputs(inputs, policy["inputNames"])
+requires_mode = any(
+    binding.get("artifactValidatorProfile") == "oci-release-disk-checkpoint-v1"
+    for binding in bindings
+)
+context = {
+    "repository": normalized["repository"],
+    "controlSha": normalized["subjectSha"],
+    "dispatchInputs": inputs,
+    "bindings": bindings,
+    "runtimeMode": inputs.get("runtime_mode", "oke" if requires_mode else ""),
+    "operation": normalized["operation"],
+    "policy": policy,
+}
+sealed = validator.HeldHistoryProofBundle.seal_context(context, helper)
+bundle = validator.HeldHistoryProofBundle(
+    sealed, Path(authority_dir), "dispatch", helper,
+)
+helper.atomic_create(bundle.context_path, bundle.context_sentinel_payload())
+PY
   intent_summary="$(
     "$HELPER" claim-request \
       --normalized "$normalized" \

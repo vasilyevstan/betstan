@@ -21,6 +21,8 @@ import contextlib
 import contextvars
 import copy
 import datetime as dt
+import email.utils
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -37,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -81,11 +84,26 @@ ARTIFACT_DOWNLOAD_BACKOFF_SECONDS = (1, 2)
 BYTE_CONTEXT = contextvars.ContextVar("binding_immutable_bytes", default=None)
 NATIVE_CONTEXT = contextvars.ContextVar("binding_native_reads", default=None)
 BINDING_CONTEXT = contextvars.ContextVar("binding_input", default=None)
+HISTORY_BUNDLE_CONTEXT = contextvars.ContextVar(
+    "binding_held_history_bundle", default=None,
+)
 _CURRENT_READER_SHA_CONTEXT = contextvars.ContextVar(
     "binding_current_reader_sha", default=None,
 )
 HISTORY_WORKER = threading.local()
 _AUTHORITY_IMPORT_LOCK = threading.RLock()
+HELD_HISTORY_PROOF_SCHEMA = "betstan.held-handoff-raw-proof.v1"
+HELD_HISTORY_CONTEXT_SCHEMA = "betstan.held-handoff-proof-context.v1"
+HELD_HISTORY_PROOF_TTL_SECONDS = 24 * 60 * 60
+HELD_HISTORY_PROOF_MAX_BYTES = 64 * 1024 * 1024
+HELD_HISTORY_PROOF_QUOTA_MARGIN = 768
+HELD_HISTORY_PROOF_BOUNDARIES = {
+    "dispatch", "materialization", "approval-1", "approval-2", "approval-3",
+}
+HELD_HISTORY_PROOF_PROFILES = {
+    "oci-successful-held-handoff-v1",
+    "oci-failed-deploy-retained-hold-v1",
+}
 HANDOFF_STAGE_CEILINGS = {
     "packaging": 120, "admission": 180, "queue": 120, "approval": 240,
     "native-validation": 180, "startup-snapshot": 240, "receiver-renewal": 120,
@@ -2015,6 +2033,985 @@ def command_owner_is_ancestor(owner):
             return False
         parent = int(result.stdout.strip())
     return False
+
+
+def _proof_canonical(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+
+
+def _proof_utc(value):
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _proof_parse_http(path, raw):
+    if not isinstance(raw, bytes):
+        fail(f"quota-managed response for {path} is not raw bytes")
+    separator = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
+    if separator not in raw:
+        fail(f"quota-managed response for {path} has no HTTP header boundary")
+    header_raw, body = raw.split(separator, 1)
+    lines = header_raw.replace(b"\r\n", b"\n").split(b"\n")
+    try:
+        status_line = lines[0].decode("ascii")
+    except (IndexError, UnicodeDecodeError):
+        fail(f"quota-managed response for {path} has an invalid status line")
+    status_match = re.fullmatch(r"HTTP/\S+ ([1-5][0-9]{2})(?: .*)?", status_line)
+    if status_match is None or int(status_match.group(1)) != 200:
+        fail(f"quota-managed response for {path} is not HTTP 200")
+    headers = {}
+    singleton_headers = {
+        "date", "x-ratelimit-limit", "x-ratelimit-remaining",
+        "x-ratelimit-reset", "x-ratelimit-resource", "x-ratelimit-used", "link",
+        "etag", "last-modified", "content-type",
+    }
+    for line in lines[1:]:
+        if not line:
+            continue
+        if b":" not in line:
+            fail(f"quota-managed response for {path} has a malformed header")
+        name_raw, value_raw = line.split(b":", 1)
+        try:
+            name = name_raw.decode("ascii").strip().lower()
+            value = value_raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            fail(f"quota-managed response for {path} has a non-text header")
+        if not name:
+            fail(f"quota-managed response for {path} has an empty header")
+        if name in headers:
+            if name in singleton_headers:
+                fail(f"quota-managed response for {path} has duplicate headers")
+            headers[name] += ", " + value
+        else:
+            headers[name] = value
+    required = {
+        "date", "x-ratelimit-limit", "x-ratelimit-remaining",
+        "x-ratelimit-reset", "x-ratelimit-resource", "x-ratelimit-used",
+    }
+    if not required <= set(headers):
+        fail(f"quota-managed response for {path} lacks rate-limit metadata")
+    try:
+        server_time = email.utils.parsedate_to_datetime(headers["date"])
+        limit = int(headers["x-ratelimit-limit"])
+        remaining = int(headers["x-ratelimit-remaining"])
+        used = int(headers["x-ratelimit-used"])
+        reset = int(headers["x-ratelimit-reset"])
+    except (TypeError, ValueError, OverflowError):
+        fail(f"quota-managed response for {path} has invalid rate-limit metadata")
+    if (
+        not isinstance(server_time, dt.datetime) or server_time.tzinfo is None
+        or limit < 1 or remaining < 0 or used < 0
+        or remaining + used != limit or reset < int(server_time.timestamp())
+        or headers["x-ratelimit-resource"] != "core"
+    ):
+        fail(f"quota-managed response for {path} has unsafe rate-limit metadata")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"quota-managed response for {path} has malformed JSON")
+    retained_headers = {
+        key: headers[key] for key in (
+            "date", "x-ratelimit-limit", "x-ratelimit-remaining",
+            "x-ratelimit-reset", "x-ratelimit-resource", "x-ratelimit-used", "link",
+            "etag", "last-modified", "content-type",
+        ) if key in headers
+    }
+    record = {
+        "path": path,
+        "status": 200,
+        "headers": retained_headers,
+        "bodyBase64": base64.b64encode(body).decode("ascii"),
+        "bodySha256": hashlib.sha256(body).hexdigest(),
+    }
+    return payload, record, server_time.astimezone(dt.timezone.utc), remaining
+
+
+def _proof_live_json(path):
+    outcome = _native_run(
+        ["gh", "api", path, "--include"],
+        capture_output=True, text=False, check=False,
+    )
+    if outcome.returncode != 0:
+        fail(f"unable to read quota-managed response for {path}")
+    if len(outcome.stdout) > HELD_HISTORY_PROOF_MAX_BYTES:
+        fail(f"quota-managed response for {path} exceeds its byte ceiling")
+    return _proof_parse_http(path, outcome.stdout)
+
+
+def _proof_replay_json(record, path):
+    if (
+        not isinstance(record, dict)
+        or record.get("path") != path
+        or record.get("status") != 200
+        or not isinstance(record.get("headers"), dict)
+        or not isinstance(record.get("bodyBase64"), str)
+        or not isinstance(record.get("bodySha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", record["bodySha256"]) is None
+    ):
+        fail(f"sealed quota-managed response for {path} is malformed")
+    try:
+        body = base64.b64decode(record["bodyBase64"], validate=True)
+    except (ValueError, binascii.Error):
+        fail(f"sealed quota-managed response for {path} has invalid bytes")
+    if hashlib.sha256(body).hexdigest() != record["bodySha256"]:
+        fail(f"sealed quota-managed response for {path} changed")
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"sealed quota-managed response for {path} has malformed JSON")
+
+
+class HeldHistoryProofBundle:
+    def __init__(self, context, directory, boundary, authority=None):
+        self.context = context
+        self.directory = directory
+        self.boundary = boundary
+        self.authority = authority
+        self.lock = threading.RLock()
+        self.context_digest = hashlib.sha256(
+            _proof_canonical(context).encode("utf-8")
+        ).hexdigest()
+        self.path = directory / f"held-history-proof-{self.context_digest}.bundle"
+        self.context_path = (
+            directory / f"held-history-proof-{self.context_digest}.sentinel"
+        )
+        self.bundle = None
+        self.server_time = None
+        self.expires_at = None
+        self.expiry_deadline = None
+        self.expiry_anchor = None
+        self.lowest_remaining = None
+        self.dirty = False
+        self.prepared = {}
+        self.workflow_observations = {}
+        self.transient_entries = {}
+        self.outstanding_requests = 0
+        self.history_locks = {}
+        self.history_owners = {}
+        self.collection_lock = None
+        self.quota_seed_lock = threading.Lock()
+        self.inventory_lock = threading.Lock()
+        self.inventory_cache = {}
+
+    @classmethod
+    def seal_context(cls, context, authority):
+        try:
+            helper_digest = hashlib.sha256(
+                Path(authority.__file__).read_bytes()
+            ).hexdigest()
+            validator_digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        except (AttributeError, OSError):
+            fail("held-history proof source digests are unavailable")
+        workflows = sorted({
+            item.get("workflow") for item in context.get("bindings", [])
+            if isinstance(item, dict) and isinstance(item.get("workflow"), str)
+        })
+        return {
+            **context,
+            "schemaVersion": HELD_HISTORY_PROOF_SCHEMA,
+            "requestKey": authority.request_key({
+                "repository": context["repository"],
+                "operation": context["operation"],
+                "controlSha": context["controlSha"],
+                "inputHash": authority.canonical_input_hash(
+                    context["dispatchInputs"],
+                ),
+            }),
+            "validatorSha256": validator_digest,
+            "authorityHelperSha256": helper_digest,
+            "workflowInventorySha256": hashlib.sha256(
+                _proof_canonical(workflows).encode("utf-8")
+            ).hexdigest(),
+        }
+
+    @classmethod
+    def maybe_create(cls, context):
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            return None
+        boundary = os.environ.get("BETSTAN_BINDING_BOUNDARY", "")
+        owner = os.environ.get("BETSTAN_BINDING_COMMAND_OWNER", "")
+        if boundary not in HELD_HISTORY_PROOF_BOUNDARIES or not command_owner_is_ancestor(owner):
+            return None
+        authority = _load_shared_authority(
+            "held_history_proof_authority",
+            "held-history proof authority helper is unavailable",
+        )
+        root = Path(__file__).resolve().parents[3]
+        default_root = Path(
+            os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))
+        ) / "betstan/copilot-cli-authority"
+        directory = authority.ensure_authority_dir(
+            os.environ.get("COPILOT_CLI_AUTHORITY_DIR", str(default_root)),
+            root,
+            create=boundary == "dispatch",
+        )
+        return cls(cls.seal_context(context, authority), directory, boundary, authority)
+
+    def acquire_collection_lock(self):
+        with self.lock:
+            if self.collection_lock is not None:
+                return
+            path = self.directory / f".held-history-proof-{self.context_digest}.lock"
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(path, flags, 0o600)
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.getuid() or metadata.st_nlink != 1
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                ):
+                    fail("held-history proof collection lock has unsafe metadata")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except BaseException:
+                if "descriptor" in locals():
+                    os.close(descriptor)
+                raise
+            self.collection_lock = descriptor
+
+    def release_collection_lock(self):
+        with self.lock:
+            descriptor = self.collection_lock
+            self.collection_lock = None
+        if descriptor is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    def close(self):
+        self.release_thread_histories()
+        self.release_collection_lock()
+
+    def post_provider_boundary(self):
+        return (
+            self.boundary == "materialization"
+            or self.boundary.startswith("approval-")
+        )
+
+    def authority_identity(self):
+        if self.authority is None:
+            return None
+        return {
+            "repository": self.context["repository"],
+            "operation": self.context["operation"],
+            "controlSha": self.context["controlSha"],
+            "inputHash": self.authority.canonical_input_hash(
+                self.context["dispatchInputs"],
+            ),
+        }
+
+    def blocking_generations(self):
+        if self.authority is None:
+            return []
+        return self.authority.find_blocking_authorities(
+            self.directory, self.authority_identity(),
+        )
+
+    def verify_post_provider_generation(self):
+        if not self.post_provider_boundary() or self.authority is None:
+            return
+        receiver = os.environ.get("BETSTAN_BOUND_RECEIVER_RUN_ID", "")
+        if POSITIVE_INTEGER.fullmatch(receiver) is None:
+            fail("held-history proof has no exact post-provider receiver")
+        record = self.authority.load_record(self.directory, receiver)
+        identity = self.authority_identity()
+        if (
+            record.get("runId") != int(receiver)
+            or record.get("repository") != identity["repository"]
+            or record.get("operation") != identity["operation"]
+            or record.get("controlSha") != identity["controlSha"]
+            or record.get("inputHash") != identity["inputHash"]
+            or record.get("state") not in {
+                "claimed", "issued", "inflight", "rejecting", "consumed",
+            }
+        ):
+            fail("held-history proof belongs to another authority generation")
+        request_key = self.context.get("requestKey")
+        if request_key != self.authority.request_key(identity):
+            fail("held-history proof request generation changed")
+        intent_path = self.authority.intent_path(self.directory, request_key)
+        try:
+            os.lstat(intent_path)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            fail(f"unable to inspect held-history proof intent: {error}")
+        intent = self.authority.load_intent(self.directory, request_key)
+        if (
+            intent.get("state") != "bound"
+            or intent.get("runId") != int(receiver)
+            or intent.get("repository") != identity["repository"]
+            or intent.get("operation") != identity["operation"]
+            or intent.get("controlSha") != identity["controlSha"]
+            or intent.get("inputHash") != identity["inputHash"]
+        ):
+            fail("held-history proof intent generation changed")
+
+    def dispatch_refresh_is_blocked(self):
+        return (
+            self.boundary == "dispatch"
+            and self.authority is not None
+            and bool(self.blocking_generations())
+        )
+
+    def require_generation_before_collection(self):
+        self.verify_post_provider_generation()
+        if self.boundary != "dispatch" or self.authority is None:
+            return
+        try:
+            os.lstat(self.path)
+        except FileNotFoundError:
+            if self.dispatch_refresh_is_blocked():
+                fail("active authority generation owns the missing held-history proof")
+        except OSError as error:
+            fail(f"unable to inspect held-history proof generation: {error}")
+
+    def context_sentinel_payload(self):
+        payload = {
+            "schemaVersion": HELD_HISTORY_CONTEXT_SCHEMA,
+            "contextSha256": self.context_digest,
+            "requestKey": self.context.get("requestKey"),
+        }
+        if re.fullmatch(r"[0-9a-f]{64}", str(payload["requestKey"])) is None:
+            fail("held-history proof context request key is invalid")
+        payload["sentinelSha256"] = hashlib.sha256(
+            _proof_canonical(payload).encode("utf-8")
+        ).hexdigest()
+        return payload
+
+    def load_context_sentinel(self):
+        if self.authority is None:
+            return False
+        try:
+            os.lstat(self.context_path)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            fail(f"unable to inspect held-history proof context: {error}")
+        observed = self.authority.load_json_file(
+            self.context_path,
+            "held-history proof context",
+            exact_mode=0o600,
+            max_bytes=4096,
+        )
+        if observed != self.context_sentinel_payload():
+            fail("held-history proof context identity changed")
+        return True
+
+    def ensure_dispatch_context_sentinel(self):
+        if self.boundary != "dispatch" or self.authority is None:
+            return
+        if self.load_context_sentinel():
+            return
+        with self.authority.repository_claim_lock(self.directory):
+            if self.load_context_sentinel():
+                return
+            if self.blocking_generations():
+                fail("active authority generation blocks held-history proof context")
+            self.authority.atomic_create(
+                self.context_path,
+                self.context_sentinel_payload(),
+            )
+
+    def preflight(self):
+        self.acquire_collection_lock()
+        self.require_generation_before_collection()
+        self.ensure_dispatch_context_sentinel()
+        self.require_post_provider_bundle(allow_context_sentinel=True)
+
+    def require_post_provider_bundle(self, *, allow_context_sentinel=False):
+        if not self.post_provider_boundary():
+            return
+        try:
+            metadata = os.stat(self.path, follow_symlinks=False)
+        except FileNotFoundError:
+            if allow_context_sentinel and self.load_context_sentinel():
+                return
+            fail("held-history proof is absent after provider dispatch")
+        except OSError as error:
+            fail(f"unable to inspect held-history proof: {error}")
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid() or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or not 2 <= metadata.st_size <= HELD_HISTORY_PROOF_MAX_BYTES
+        ):
+            fail("held-history proof file has unsafe metadata")
+
+    @staticmethod
+    def _row_identity(row):
+        keys = (
+            "id", "workflow_id", "path", "head_sha", "head_branch", "event",
+            "run_attempt", "status", "conclusion", "display_title", "created_at",
+            "run_started_at", "updated_at", "html_url",
+        )
+        if not isinstance(row, dict) or any(key not in row for key in keys):
+            fail("cancelled history row is incomplete for sealed proof")
+        return {key: row[key] for key in keys}
+
+    @classmethod
+    def _row_fingerprint(cls, row):
+        return hashlib.sha256(
+            _proof_canonical(cls._row_identity(row)).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def history_key(repository, held, subject_sha, path):
+        identity = {
+            "repository": repository,
+            "heldRunId": held.get("id"),
+            "heldSourceSha": held.get("head_sha"),
+            "subjectSha": subject_sha,
+            "workflowPath": path,
+        }
+        return hashlib.sha256(
+            _proof_canonical(identity).encode("utf-8")
+        ).hexdigest()
+
+    def _record_response(self, server_time, remaining, request_started=None):
+        if request_started is None:
+            request_started = time.monotonic()
+        with self.lock:
+            anchor = request_started - server_time.timestamp()
+            self.expiry_anchor = (
+                anchor if self.expiry_anchor is None
+                else min(self.expiry_anchor, anchor)
+            )
+            self.server_time = (
+                server_time if self.server_time is None
+                else max(self.server_time, server_time)
+            )
+            self.lowest_remaining = (
+                remaining if self.lowest_remaining is None
+                else min(self.lowest_remaining, remaining)
+            )
+            if self.expires_at is not None and self.server_time >= self.expires_at:
+                fail("held-history proof expired during validation")
+            self._tighten_expiry_deadline()
+            if (
+                self.expiry_deadline is not None
+                and time.monotonic() >= self.expiry_deadline
+            ):
+                fail("held-history proof expired during validation")
+
+    def _tighten_expiry_deadline(self):
+        if self.expiry_anchor is None or self.expires_at is None:
+            return
+        candidate = self.expires_at.timestamp() + self.expiry_anchor
+        self.expiry_deadline = (
+            candidate if self.expiry_deadline is None
+            else min(self.expiry_deadline, candidate)
+        )
+
+    def assert_unexpired_for_acceptance(self):
+        with self.lock:
+            if self.expires_at is None:
+                return
+            if (
+                self.server_time is None
+                or self.server_time >= self.expires_at
+                or self.expiry_deadline is None
+                or time.monotonic() >= self.expiry_deadline
+            ):
+                fail("held-history proof expired before acceptance")
+
+    def _bootstrap_json(self, path):
+        with self.quota_seed_lock:
+            if self.server_time is not None:
+                self.reserve_requests(1)
+                return self._reserved_json(path)
+            request_started = time.monotonic()
+            payload, record, server_time, remaining = _proof_live_json(path)
+            self._record_response(server_time, remaining, request_started)
+            if remaining < HELD_HISTORY_PROOF_QUOTA_MARGIN:
+                fail("GitHub core quota is below the held-history proof reserve")
+            return payload, record
+
+    def reserve_requests(self, count):
+        if type(count) is not int or count < 0:
+            fail("held-history proof request reservation is invalid")
+        with self.lock:
+            if self.lowest_remaining is None:
+                fail("held-history proof quota was not seeded")
+            required = self.outstanding_requests + count + HELD_HISTORY_PROOF_QUOTA_MARGIN
+            if self.lowest_remaining < required:
+                fail(
+                    "GitHub core quota cannot cover the complete held-history proof plan"
+                )
+            self.outstanding_requests += count
+
+    def _reserved_json(self, path):
+        with self.lock:
+            if self.outstanding_requests < 1:
+                fail("held-history proof exceeded its reserved request plan")
+            self.outstanding_requests -= 1
+        request_started = time.monotonic()
+        payload, record, server_time, remaining = _proof_live_json(path)
+        self._record_response(server_time, remaining, request_started)
+        with self.lock:
+            if self.lowest_remaining < (
+                self.outstanding_requests + HELD_HISTORY_PROOF_QUOTA_MARGIN
+            ):
+                fail("GitHub core quota fell below the held-history proof reserve")
+        return payload, record
+
+    @staticmethod
+    def _next_page(record, path):
+        link = record["headers"].get("link", "")
+        next_links = re.findall(r'<([^>]+)>;\s*rel="next"', link)
+        if len(next_links) > 1:
+            fail(f"quota-managed pagination for {path} is ambiguous")
+        return next_links[0] if next_links else None
+
+    def collect_history_pages(self, requests):
+        self.acquire_collection_lock()
+        self.require_generation_before_collection()
+        self.require_post_provider_bundle()
+        key = tuple(requests)
+        with self.inventory_lock:
+            cached = self.inventory_cache.get(key)
+            if cached is not None:
+                return copy.deepcopy(cached)
+            inventories = []
+            for path, paginated in requests:
+                if not paginated:
+                    fail("held-history inventory request lost pagination")
+                payload, record = self._bootstrap_json(path)
+                if not isinstance(payload, dict):
+                    fail(f"held-history inventory page for {path} is not an object")
+                total = payload.get("total_count")
+                if type(total) is not int or not 0 <= total < 1000:
+                    fail("held-history historical inventory exceeds its pagination bound")
+                expected_pages = max(1, (total + 99) // 100)
+                self.reserve_requests(expected_pages - 1)
+                pages = [payload]
+                current_record = record
+                for page_number in range(2, expected_pages + 1):
+                    next_page = self._next_page(current_record, path)
+                    if next_page is None:
+                        fail(f"held-history inventory pagination for {path} ended early")
+                    parsed = urllib.parse.urlparse(next_page)
+                    query = urllib.parse.parse_qs(parsed.query, strict_parsing=True)
+                    expected_path, _, expected_query_text = path.partition("?")
+                    expected_query = urllib.parse.parse_qs(
+                        expected_query_text, strict_parsing=True,
+                    )
+                    expected_query["page"] = [str(page_number)]
+                    path_match = re.fullmatch(
+                        r"repos/([^/]+)/([^/]+)/actions/workflows/([^/]+)/runs",
+                        expected_path,
+                    )
+                    if path_match is None:
+                        fail(f"held-history inventory path for {path} is invalid")
+                    owner, name, workflow = path_match.groups()
+                    workflow_pattern = (
+                        r"(?:" + re.escape(workflow) + r"|[1-9][0-9]*)"
+                    )
+                    same_endpoint = (
+                        parsed.path == "/" + expected_path
+                        or re.fullmatch(
+                            r"/(?:repos/" + re.escape(owner) + "/" + re.escape(name)
+                            + r"|repositories/[1-9][0-9]*)/actions/workflows/"
+                            + workflow_pattern + r"/runs",
+                            parsed.path,
+                        ) is not None
+                    )
+                    if (
+                        parsed.scheme != "https"
+                        or parsed.netloc != "api.github.com"
+                        or not same_endpoint
+                        or query != expected_query
+                    ):
+                        fail(f"held-history inventory pagination for {path} is invalid")
+                    next_endpoint = parsed.path.lstrip("/") + "?" + parsed.query
+                    payload, current_record = self._reserved_json(next_endpoint)
+                    if not isinstance(payload, dict) or payload.get("total_count") != total:
+                        fail(f"held-history inventory page for {path} is inconsistent")
+                    pages.append(payload)
+                if self._next_page(current_record, path) is not None:
+                    fail(f"held-history inventory pagination for {path} exceeds its bound")
+                inventories.append(pages)
+            self.inventory_cache[key] = copy.deepcopy(inventories)
+            return inventories
+
+    def _load(self):
+        if self.bundle is not None:
+            return
+        if self.server_time is None:
+            fail("held-history proof quota was not seeded from workflow history")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.path, flags)
+        except FileNotFoundError:
+            descriptor = None
+        except OSError as error:
+            fail(f"unable to open held-history proof: {error}")
+        if descriptor is None:
+            if self.post_provider_boundary():
+                fail("held-history proof is absent after provider dispatch")
+            if self.dispatch_refresh_is_blocked():
+                fail("active authority generation owns the missing held-history proof")
+            self.bundle = {
+                "schemaVersion": HELD_HISTORY_PROOF_SCHEMA,
+                "context": self.context,
+                "contextSha256": self.context_digest,
+                "createdAt": _proof_utc(self.server_time),
+                "expiresAt": _proof_utc(
+                    self.server_time + dt.timedelta(
+                        seconds=HELD_HISTORY_PROOF_TTL_SECONDS,
+                    )
+                ),
+                "histories": {},
+            }
+            self.expires_at = self.server_time + dt.timedelta(
+                seconds=HELD_HISTORY_PROOF_TTL_SECONDS,
+            )
+            self.expiry_deadline = None
+            self._tighten_expiry_deadline()
+            if time.monotonic() >= self.expiry_deadline:
+                fail("held-history proof expired during validation")
+            self.dirty = True
+            return
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid() or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_size < 2
+                or metadata.st_size > HELD_HISTORY_PROOF_MAX_BYTES
+            ):
+                fail("held-history proof file has unsafe metadata")
+            chunks = []
+            remaining = HELD_HISTORY_PROOF_MAX_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            if len(raw) != metadata.st_size:
+                fail("held-history proof changed during read")
+            bundle = json.loads(raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            fail("held-history proof file is malformed")
+        finally:
+            os.close(descriptor)
+        if not isinstance(bundle, dict):
+            fail("held-history proof root is malformed")
+        digest = bundle.pop("bundleSha256", None)
+        expected = hashlib.sha256(_proof_canonical(bundle).encode("utf-8")).hexdigest()
+        bundle["bundleSha256"] = digest
+        if (
+            digest != expected
+            or bundle.get("schemaVersion") != HELD_HISTORY_PROOF_SCHEMA
+            or bundle.get("context") != self.context
+            or bundle.get("contextSha256") != self.context_digest
+            or not isinstance(bundle.get("histories"), dict)
+        ):
+            fail("held-history proof identity or digest changed")
+        try:
+            created = parse_timestamp(bundle.get("createdAt"), "held-history proof creation")
+            expires = parse_timestamp(bundle.get("expiresAt"), "held-history proof expiry")
+        except SystemExit:
+            raise
+        if expires != created + dt.timedelta(seconds=HELD_HISTORY_PROOF_TTL_SECONDS):
+            fail("held-history proof expiry is invalid")
+        if self.server_time >= expires:
+            if self.post_provider_boundary():
+                fail("held-history proof expired after provider dispatch")
+            if self.dispatch_refresh_is_blocked():
+                fail("active authority generation owns the expired held-history proof")
+            self.bundle = {
+                "schemaVersion": HELD_HISTORY_PROOF_SCHEMA,
+                "context": self.context,
+                "contextSha256": self.context_digest,
+                "createdAt": _proof_utc(self.server_time),
+                "expiresAt": _proof_utc(
+                    self.server_time + dt.timedelta(
+                        seconds=HELD_HISTORY_PROOF_TTL_SECONDS,
+                    )
+                ),
+                "histories": {},
+            }
+            self.expires_at = self.server_time + dt.timedelta(
+                seconds=HELD_HISTORY_PROOF_TTL_SECONDS,
+            )
+            self.expiry_deadline = None
+            self._tighten_expiry_deadline()
+            if time.monotonic() >= self.expiry_deadline:
+                fail("held-history proof expired during validation")
+            self.dirty = True
+            return
+        self.expires_at = expires
+        self._tighten_expiry_deadline()
+        if time.monotonic() >= self.expiry_deadline:
+            fail("held-history proof expired during validation")
+        self.bundle = bundle
+
+    @staticmethod
+    def _validate_workflow(workflow, workflow_id, path):
+        if (
+            not isinstance(workflow, dict)
+            or workflow.get("id") != workflow_id
+            or workflow.get("path") != path
+            or workflow.get("state") not in {"active", "disabled_manually"}
+        ):
+            fail("held-history workflow identity is invalid")
+        return {key: workflow[key] for key in ("id", "path", "state")}
+
+    def prepare_history(self, repository, held, subject_sha, path, rows):
+        self.acquire_collection_lock()
+        key = self.history_key(repository, held, subject_sha, path)
+        workflow_id = held.get("workflow_id")
+        if type(workflow_id) is not int or workflow_id <= 0:
+            fail("held-history proof workflow ID is invalid")
+        thread_id = threading.get_ident()
+        with self.lock:
+            if self.history_owners.get(key) == thread_id:
+                fail("held-history proof cannot recursively collect the same history")
+            gate = self.history_locks.setdefault(key, threading.Lock())
+        gate.acquire()
+        with self.lock:
+            self.history_owners[key] = thread_id
+        try:
+            workflow_path = f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml"
+            with self.lock:
+                self._load()
+                history = self.bundle["histories"].get(key)
+                new_history = history is None
+                if history is None:
+                    history = {
+                        "heldRunId": held.get("id"),
+                        "heldSourceSha": held.get("head_sha"),
+                        "subjectSha": subject_sha,
+                        "workflowId": workflow_id,
+                        "workflowPath": path,
+                        "cutoffAt": _proof_utc(self.server_time),
+                        "entries": {},
+                    }
+                    self.bundle["histories"][key] = history
+                    self.dirty = True
+                if (
+                    history.get("heldRunId") != held.get("id")
+                    or history.get("heldSourceSha") != held.get("head_sha")
+                    or history.get("subjectSha") != subject_sha
+                    or history.get("workflowId") != workflow_id
+                    or history.get("workflowPath") != path
+                    or not isinstance(history.get("entries"), dict)
+                ):
+                    fail("held-history proof history identity changed")
+                current = {}
+                for row in rows:
+                    if row.get("workflow_id") != workflow_id:
+                        fail("cancelled history row belongs to another workflow")
+                    fingerprint = self._row_fingerprint(row)
+                    if fingerprint in current:
+                        fail("held-history proof inventory contains a duplicate row")
+                    current[fingerprint] = row
+                stale = set(history["entries"]) - set(current)
+                if stale:
+                    fail("held-history proof inventory lost or changed a sealed row")
+                cutoff = parse_timestamp(history.get("cutoffAt"), "held-history proof cutoff")
+                missing = []
+                for fingerprint, row in current.items():
+                    if (
+                        fingerprint in history["entries"]
+                        or (key, fingerprint) in self.transient_entries
+                    ):
+                        continue
+                    if (
+                        not new_history
+                        and parse_timestamp(
+                            row["created_at"], "cancelled history creation",
+                        ) < cutoff
+                    ):
+                        fail("held-history proof discovered an older inserted row")
+                    missing.append(fingerprint)
+                self.reserve_requests(len(missing) * 14 + 2)
+                self.prepared[key] = {
+                    "rows": set(current),
+                    "missing": set(missing),
+                    "persist": set(missing) if new_history else set(),
+                    "completed": set(),
+                }
+            workflow, _ = self._reserved_json(workflow_path)
+            workflow_id = held.get("workflow_id")
+            opening = self._validate_workflow(workflow, workflow_id, path)
+            with self.lock:
+                self.workflow_observations[key] = (workflow_path, opening)
+            return key
+        except BaseException:
+            self.release_history(key)
+            raise
+
+    def release_history(self, key):
+        thread_id = threading.get_ident()
+        with self.lock:
+            if self.history_owners.get(key) != thread_id:
+                return
+            del self.history_owners[key]
+            gate = self.history_locks[key]
+        gate.release()
+
+    def release_thread_histories(self):
+        thread_id = threading.get_ident()
+        with self.lock:
+            keys = [
+                key for key, owner in self.history_owners.items()
+                if owner == thread_id
+            ]
+        for key in keys:
+            self.release_history(key)
+
+    def capture_json(self, path, *, paginated=False):
+        payload, record = self._reserved_json(path)
+        if paginated:
+            link = record["headers"].get("link", "")
+            next_links = re.findall(r'<([^>]+)>;\s*rel="next"', link)
+            if next_links:
+                fail(f"quota-managed response for {path} exceeds its one-page semantic bound")
+            if not isinstance(payload, dict):
+                fail(f"quota-managed paginated response for {path} is not an object")
+            return [payload], [record]
+        return payload, record
+
+    def replay_json(self, record, path, *, paginated=False):
+        if paginated:
+            if not isinstance(record, list) or len(record) != 1:
+                fail(f"sealed paginated response for {path} has an invalid page count")
+            payload = _proof_replay_json(record[0], path)
+            if not isinstance(payload, dict):
+                fail(f"sealed paginated response for {path} is not an object")
+            return [payload]
+        return _proof_replay_json(record, path)
+
+    def observations(self, key, row):
+        fingerprint = self._row_fingerprint(row)
+        with self.lock:
+            if key not in self.prepared or fingerprint not in self.prepared[key]["rows"]:
+                fail("held-history proof row was not reserved")
+            entry = self.bundle["histories"][key]["entries"].get(fingerprint)
+            if entry is None:
+                entry = self.transient_entries.get((key, fingerprint))
+            if entry is None:
+                return fingerprint, None
+            if (
+                not isinstance(entry, dict)
+                or entry.get("row") != self._row_identity(row)
+                or not isinstance(entry.get("observations"), list)
+                or len(entry["observations"]) != 2
+            ):
+                fail("held-history proof row entry is malformed")
+            self.prepared[key]["completed"].add(fingerprint)
+            return fingerprint, copy.deepcopy(entry["observations"])
+
+    def store_observations(self, key, row, fingerprint, observations):
+        if not isinstance(observations, list) or len(observations) != 2:
+            fail("held-history proof requires two complete observations")
+        with self.lock:
+            prepared = self.prepared.get(key)
+            if prepared is None or fingerprint not in prepared["missing"]:
+                fail("held-history proof attempted an unreserved collection")
+            entry = {
+                "row": self._row_identity(row),
+                "observations": copy.deepcopy(observations),
+            }
+            if fingerprint in prepared["persist"]:
+                self.bundle["histories"][key]["entries"][fingerprint] = entry
+                self.dirty = True
+            else:
+                self.transient_entries[(key, fingerprint)] = entry
+            prepared["completed"].add(fingerprint)
+
+    def finish_history(self, key):
+        with self.lock:
+            prepared = self.prepared.get(key)
+            workflow_path, opening = self.workflow_observations.get(key, (None, None))
+        if prepared is None or workflow_path is None:
+            fail("held-history proof was not prepared")
+        workflow, _ = self._reserved_json(workflow_path)
+        closing = self._validate_workflow(
+            workflow, opening["id"], opening["path"],
+        )
+        if closing != opening:
+            fail("held-history workflow changed during proof collection")
+        with self.lock:
+            if prepared["completed"] != prepared["rows"]:
+                fail("held-history proof collection is incomplete")
+        self.commit_if_complete()
+        self.release_history(key)
+
+    def commit_if_complete(self):
+        with self.lock:
+            if self.outstanding_requests or any(
+                prepared["completed"] != prepared["rows"]
+                for prepared in self.prepared.values()
+            ):
+                return
+            self.commit()
+
+    def commit(self):
+        with self.lock:
+            for prepared in self.prepared.values():
+                if prepared["completed"] != prepared["rows"]:
+                    fail("held-history proof cannot seal incomplete evidence")
+            if self.outstanding_requests:
+                fail("held-history proof request reservation is incomplete")
+            if not self.dirty:
+                return
+            payload = copy.deepcopy(self.bundle)
+            payload.pop("bundleSha256", None)
+            payload["bundleSha256"] = hashlib.sha256(
+                _proof_canonical(payload).encode("utf-8")
+            ).hexdigest()
+            raw = (_proof_canonical(payload) + "\n").encode("utf-8")
+            if len(raw) > HELD_HISTORY_PROOF_MAX_BYTES:
+                fail("held-history proof exceeds its byte ceiling")
+            claim_lock = (
+                self.authority.repository_claim_lock(self.directory)
+                if self.authority is not None
+                else contextlib.nullcontext()
+            )
+            with claim_lock:
+                if self.authority is not None and self.blocking_generations():
+                    fail("active authority generation blocks held-history proof publication")
+                temporary = None
+                try:
+                    descriptor, name = tempfile.mkstemp(
+                        prefix=".held-history-proof-", dir=self.directory,
+                    )
+                    temporary = Path(name)
+                    os.fchmod(descriptor, 0o600)
+                    with os.fdopen(descriptor, "wb") as handle:
+                        handle.write(raw)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(temporary, self.path)
+                    temporary = None
+                    directory_fd = os.open(
+                        self.directory,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError as error:
+                    fail(f"unable to seal held-history proof: {error}")
+                finally:
+                    if temporary is not None:
+                        try:
+                            temporary.unlink()
+                        except FileNotFoundError:
+                            pass
+            self.bundle = payload
+            self.dirty = False
 
 
 class ImmutableBindingBytes:
@@ -5268,7 +6265,9 @@ def held_handoff_authority(repository, held, subject_sha, dispatch_inputs, succe
             fail(f"{label} unresolved dispatch intent prevents receiver absence")
 
 
-def _validate_cancelled_unstarted_history(repository, row, subject_sha, authority, label, path):
+def _validate_cancelled_unstarted_history(
+    repository, row, subject_sha, authority, label, path, proof_key=None,
+):
     expected = {
         "id": row["id"], "workflow_id": row["workflow_id"], "path": path,
         "head_sha": row["head_sha"], "head_branch": "master",
@@ -5278,10 +6277,44 @@ def _validate_cancelled_unstarted_history(repository, row, subject_sha, authorit
         "html_url": f"https://github.com/{repository}/actions/runs/{row['id']}",
     }
     endpoint = f"repos/{repository}/actions/runs/{row['id']}"
+    proof_bundle = HISTORY_BUNDLE_CONTEXT.get()
+    if (proof_key is None) != (proof_bundle is None):
+        fail(f"{label} held-history proof context is inconsistent")
+    fingerprint = None
+    sealed = None
+    if proof_bundle is not None:
+        fingerprint, sealed = proof_bundle.observations(proof_key, row)
+    raw_observations = []
     observations = []
-    for _ in range(2):
-        latest = gh_api(endpoint)
-        first = gh_api(endpoint + "/attempts/1")
+    for index in range(2):
+        raw = {} if sealed is None else sealed[index]
+        expected_raw_keys = {
+            "latest", "first", "jobs", "pending", "approvals", "artifacts",
+            "historical",
+        }
+        if sealed is not None and (
+            not isinstance(raw, dict) or set(raw) != expected_raw_keys
+        ):
+            fail(f"{label} sealed observation is incomplete")
+
+        def read(name, request_path, *, paginated=False):
+            if sealed is not None:
+                return proof_bundle.replay_json(
+                    raw[name], request_path, paginated=paginated,
+                )
+            if proof_bundle is not None:
+                payload, record = proof_bundle.capture_json(
+                    request_path, paginated=paginated,
+                )
+                raw[name] = record
+                return payload
+            return (
+                gh_api_pages(request_path) if paginated
+                else gh_api(request_path)
+            )
+
+        latest = read("latest", endpoint)
+        first = read("first", endpoint + "/attempts/1")
         windows = []
         for run in (latest, first):
             if (
@@ -5306,21 +6339,37 @@ def _validate_cancelled_unstarted_history(repository, row, subject_sha, authorit
             for key in (*expected, "created_at", "run_started_at", "updated_at")
         ):
             fail(f"{label} native details differ from the complete inventory")
-        workflow_metadata, job_pages, pending, approvals, artifact_pages = native_api_batch([
-            (f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml", False),
-            (endpoint + "/attempts/1/jobs?per_page=100", True),
-            (endpoint + "/pending_deployments", False),
-            (endpoint + "/approvals", False),
-            (endpoint + "/artifacts?per_page=100", True),
-        ])
-        if (
-            not isinstance(workflow_metadata, dict)
-            or type(workflow_metadata.get("id")) is not int
-            or workflow_metadata["id"] != row["workflow_id"]
-            or workflow_metadata.get("path") != path
-            or workflow_metadata.get("state") not in {"active", "disabled_manually"}
-        ):
-            fail(f"{label} workflow identity is invalid")
+        if proof_bundle is None:
+            workflow_metadata, job_pages, pending, approvals, artifact_pages = native_api_batch([
+                (f"repos/{repository}/actions/workflows/oci-live-data-rollout.yml", False),
+                (endpoint + "/attempts/1/jobs?per_page=100", True),
+                (endpoint + "/pending_deployments", False),
+                (endpoint + "/approvals", False),
+                (endpoint + "/artifacts?per_page=100", True),
+            ])
+            if (
+                not isinstance(workflow_metadata, dict)
+                or type(workflow_metadata.get("id")) is not int
+                or workflow_metadata["id"] != row["workflow_id"]
+                or workflow_metadata.get("path") != path
+                or workflow_metadata.get("state") not in {"active", "disabled_manually"}
+            ):
+                fail(f"{label} workflow identity is invalid")
+            workflow_observation = {
+                key: workflow_metadata[key] for key in ("id", "path", "state")
+            }
+        else:
+            job_pages = read(
+                "jobs", endpoint + "/attempts/1/jobs?per_page=100",
+                paginated=True,
+            )
+            pending = read("pending", endpoint + "/pending_deployments")
+            approvals = read("approvals", endpoint + "/approvals")
+            artifact_pages = read(
+                "artifacts", endpoint + "/artifacts?per_page=100",
+                paginated=True,
+            )
+            workflow_observation = None
         jobs = jobs_from_pages(job_pages, label)
         if len(jobs) != 1:
             fail(f"{label} must have exactly one cancelled rollout job")
@@ -5349,8 +6398,9 @@ def _validate_cancelled_unstarted_history(repository, row, subject_sha, authorit
         artifacts = artifacts_from_pages(artifact_pages, label)
         if pending != [] or approvals != [] or artifacts:
             fail(f"{label} has pending, approved, or artifact evidence")
-        historical = gh_api(
-            f"repos/{repository}/contents/{path}?ref={row['head_sha']}"
+        historical = read(
+            "historical",
+            f"repos/{repository}/contents/{path}?ref={row['head_sha']}",
         )
         source_pin = historical.get("sha") if isinstance(historical, dict) else None
         if source_pin not in (
@@ -5375,11 +6425,19 @@ def _validate_cancelled_unstarted_history(repository, row, subject_sha, authorit
         observations.append({
             "latest": {key: latest[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
             "first": {key: first[key] for key in (*expected, "created_at", "run_started_at", "updated_at")},
-            "workflow": {key: workflow_metadata[key] for key in ("id", "path", "state")},
+            "workflow": workflow_observation,
             "job": job, "source_blob": source_blob, "compare": compare,
         })
+        if proof_bundle is not None and sealed is None:
+            if set(raw) != expected_raw_keys:
+                fail(f"{label} raw observation is incomplete")
+            raw_observations.append(raw)
     if observations[0] != observations[1]:
         fail(f"{label} native no-execution evidence changed between complete collections")
+    if proof_bundle is not None and sealed is None:
+        proof_bundle.store_observations(
+            proof_key, row, fingerprint, raw_observations,
+        )
 
 
 def _validate_unmaterialized_history(
@@ -8145,22 +9203,138 @@ def validate_failed_pre_cas_continuation_history(
         fail(f"{profile['name']} native proof changed between complete collections")
 
 
+def precollect_nonterminal_held_history(
+    repository, held, subject_sha, dispatch_inputs, label,
+):
+    proof_bundle = HISTORY_BUNDLE_CONTEXT.get()
+    if proof_bundle is None:
+        return
+    if dispatch_inputs.get("confirmation") != HELD_HANDOFF_CONFIRMATION:
+        fail("held-handoff precollection is restricted to its fixed continuation operation")
+    if str(held["id"]) in {
+        require_dispatch_run(dispatch_inputs, "prerequisite_run_id"),
+        require_dispatch_run(dispatch_inputs, "failed_deploy_run_id"),
+    }:
+        fail("held-handoff precollection cannot substitute the protected root")
+    validate_descendant_scope(held["head_sha"], subject_sha)
+    endpoint = (
+        f"repos/{repository}/actions/workflows/"
+        "oci-live-data-rollout.yml/runs?per_page=100"
+    )
+    pages = proof_bundle.collect_history_pages([(endpoint, True)])[0]
+    totals = {page.get("total_count") for page in pages}
+    if len(totals) != 1 or any(
+        type(total) is not int or not 0 <= total < 1000 for total in totals
+    ):
+        fail("held-handoff precollection inventory is incomplete")
+    rows = []
+    for page in pages:
+        if not isinstance(page.get("workflow_runs"), list):
+            fail("held-handoff precollection inventory is malformed")
+        rows.extend(page["workflow_runs"])
+    if len(rows) != next(iter(totals)):
+        fail("held-handoff precollection inventory is incomplete")
+    excluded = {
+        held["id"],
+        FAILED_HELD_CONTINUATION_RUN_ID,
+        FAILED_CLEAN_READER_CONTINUATION_RUN_ID,
+        FAILED_PRE_CAS_CONTINUATION_RUN_ID,
+    }
+    lower = parse_timestamp(held.get("created_at"), label)
+    ids = set()
+    candidates = []
+    for row in rows:
+        if (
+            not isinstance(row, dict) or type(row.get("id")) is not int
+            or row["id"] < 1 or row["id"] in ids
+            or row.get("path") != ".github/workflows/oci-live-data-rollout.yml"
+            or (row.get("head_repository") or {}).get("full_name") != repository
+            or type(row.get("head_branch")) is not str or not row["head_branch"]
+        ):
+            fail("held-handoff precollection inventory identity is invalid")
+        ids.add(row["id"])
+        if row["id"] == held["id"]:
+            for key in (
+                "id", "workflow_id", "path", "head_sha", "head_branch", "event",
+                "run_attempt", "status", "conclusion", "display_title",
+                "created_at", "run_started_at", "updated_at", "html_url",
+            ):
+                if (
+                    key not in held or key not in row
+                    or type(row[key]) is not type(held[key])
+                    or row[key] != held[key]
+                ):
+                    fail("held-handoff precollection producer inventory changed")
+        created = parse_timestamp(row.get("created_at"), "precollection historical run")
+        updated = parse_timestamp(row.get("updated_at"), "precollection historical run")
+        if updated < created:
+            fail("held-handoff precollection historical interval is inconsistent")
+        if (
+            row["id"] not in excluded
+            and row["head_branch"] == "master"
+            and row.get("status") == "completed"
+            and row.get("conclusion") == "cancelled"
+            and updated >= lower
+        ):
+            candidates.append(row)
+    if held["id"] not in ids:
+        fail("held-handoff precollection omitted its exact producer")
+    key = proof_bundle.prepare_history(
+        repository, held, subject_sha,
+        ".github/workflows/oci-live-data-rollout.yml",
+        candidates,
+    )
+    native = NATIVE_CONTEXT.get()
+    authority = None
+    try:
+        with HistoryProofCollection(
+            native.history_proofs if native is not None else None,
+        ) as proofs:
+            for row in candidates:
+                initialized = authority is not None
+                if authority is None:
+                    authority = _load_shared_authority(
+                        "held_handoff_authority",
+                        "held-handoff precollection source validator is unavailable",
+                    )
+                proofs.run(
+                    _validate_cancelled_unstarted_history,
+                    repository,
+                    copy.deepcopy(row),
+                    subject_sha,
+                    authority,
+                    f"held-handoff precollection cancelled run {row['id']}",
+                    ".github/workflows/oci-live-data-rollout.yml",
+                    key,
+                    offload=initialized,
+                )
+            proofs.join()
+        proof_bundle.finish_history(key)
+    finally:
+        proof_bundle.release_thread_histories()
+
+
 def held_handoff_history(
     repository, held, subject_sha, successor_run_id="", *, dispatch_inputs=None,
     expired_receiver_run_id="", runtime_mode=None, fresh=False,
     failed_continuation_semantic=None,
 ):
     native = NATIVE_CONTEXT.get()
-    with HistoryProofCollection(
-        native.history_proofs if native is not None else None,
-    ) as proofs:
-        return _held_handoff_history(
-            repository, held, subject_sha, successor_run_id,
-            dispatch_inputs=dispatch_inputs,
-            expired_receiver_run_id=expired_receiver_run_id,
-            runtime_mode=runtime_mode, fresh=fresh, proofs=proofs,
-            failed_continuation_semantic=failed_continuation_semantic,
-        )
+    proof_bundle = HISTORY_BUNDLE_CONTEXT.get()
+    try:
+        with HistoryProofCollection(
+            native.history_proofs if native is not None else None,
+        ) as proofs:
+            return _held_handoff_history(
+                repository, held, subject_sha, successor_run_id,
+                dispatch_inputs=dispatch_inputs,
+                expired_receiver_run_id=expired_receiver_run_id,
+                runtime_mode=runtime_mode, fresh=fresh, proofs=proofs,
+                failed_continuation_semantic=failed_continuation_semantic,
+            )
+    finally:
+        if proof_bundle is not None:
+            proof_bundle.release_thread_histories()
 
 
 def _held_handoff_history(
@@ -8169,6 +9343,7 @@ def _held_handoff_history(
     fresh=False, proofs, failed_continuation_semantic=None,
 ):
     authority = None
+    active_proof_key = None
     expired_receiver = None
     active_inventory = fresh
     if expired_receiver_run_id:
@@ -8205,7 +9380,8 @@ def _held_handoff_history(
             )
         proofs.run(
             _validate_cancelled_unstarted_history, repository, copy.deepcopy(row),
-            subject_sha, authority, label, path, offload=initialized,
+            subject_sha, authority, label, path, active_proof_key,
+            offload=initialized,
         )
 
     def validate_provenance_read_failure(row):
@@ -8466,7 +9642,12 @@ def _held_handoff_history(
         if cutoff is not None and not active_inventory:
             endpoint += "&created=%3C%3D" + cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
         history_requests.append((endpoint, True))
-    inventories = native_api_batch(history_requests)
+    proof_bundle = HISTORY_BUNDLE_CONTEXT.get()
+    inventories = (
+        proof_bundle.collect_history_pages(history_requests)
+        if proof_bundle is not None
+        else native_api_batch(history_requests)
+    )
     counts = {}
     for workflow, pages in zip(workflows, inventories):
         totals = {page.get("total_count") for page in pages}
@@ -8479,6 +9660,44 @@ def _held_handoff_history(
             rows.extend(page["workflow_runs"])
         if len(rows) != next(iter(totals)):
             fail("held-handoff historical inventory is incomplete")
+        active_proof_key = None
+        inventory_ids = set()
+        inventory_valid = True
+        for row in rows:
+            if (
+                not isinstance(row, dict) or type(row.get("id")) is not int
+                or row["id"] < 1 or row["id"] in inventory_ids
+                or row.get("path") != f".github/workflows/{workflow}"
+                or (row.get("head_repository") or {}).get("full_name") != repository
+                or type(row.get("head_branch")) is not str or not row["head_branch"]
+            ):
+                inventory_valid = False
+                break
+            inventory_ids.add(row["id"])
+        if (
+            inventory_valid and workflow == "oci-live-data-rollout.yml"
+            and proof_bundle is not None
+        ):
+            excluded_ids = {
+                held["id"], *required_frozen_ids, *known_frozen_rows,
+            }
+            if successor_run_id:
+                excluded_ids.add(int(successor_run_id))
+            if expired_receiver is not None:
+                excluded_ids.add(expired_receiver["id"])
+            candidates = [
+                row for row in rows
+                if row["id"] not in excluded_ids
+                and row.get("head_branch") == "master"
+                and row.get("status") == "completed"
+                and row.get("conclusion") == "cancelled"
+                and parse_timestamp(row.get("updated_at"), "historical run") >= lower
+            ]
+            active_proof_key = proof_bundle.prepare_history(
+                repository, held, subject_sha,
+                ".github/workflows/oci-live-data-rollout.yml",
+                candidates,
+            )
         ids = set()
         for row in rows:
             proofs.before_row()
@@ -8624,6 +9843,8 @@ def _held_handoff_history(
                     subject_sha, authority, label, identity_keys, offload=initialized,
                 )
         proofs.join()
+        if active_proof_key is not None:
+            proof_bundle.finish_history(active_proof_key)
         if workflow == "oci-live-data-rollout.yml":
             required_ids = {held["id"], *required_frozen_ids}
             if successor_run_id:
@@ -11888,6 +13109,15 @@ def validate_binding(
             f"(current attempt {base.get('run_attempt')})"
         )
 
+    profile = binding.get("runProfile")
+    defer_nonterminal_held_history = (
+        HISTORY_BUNDLE_CONTEXT.get() is not None
+        and profile == "oci-successful-held-handoff-v1"
+        and base.get("status") in {
+            "requested", "pending", "queued", "waiting", "in_progress",
+        }
+        and base.get("conclusion") is None
+    )
     expected_path = f".github/workflows/{binding['workflow']}"
     checks = {
         "workflow_id": (base.get("workflow_id"), workflow_id),
@@ -11898,9 +13128,12 @@ def validate_binding(
         ),
         "head_branch": (base.get("head_branch"), "master"),
         "head_sha": (base.get("head_sha"), expected_head_sha),
-        "status": (base.get("status"), "completed"),
-        "conclusion": (base.get("conclusion"), expected_conclusion),
     }
+    if not defer_nonterminal_held_history:
+        checks.update({
+            "status": (base.get("status"), "completed"),
+            "conclusion": (base.get("conclusion"), expected_conclusion),
+        })
     for label, (observed, expected) in checks.items():
         if observed != expected:
             fail(
@@ -11963,10 +13196,34 @@ def validate_binding(
                 f"{binding['input']} first attempt {label} differs from the run"
             )
 
+    if (
+        base.get("status") != "completed"
+        or base.get("conclusion") != expected_conclusion
+    ):
+        if (
+            profile == "oci-successful-held-handoff-v1"
+            and base.get("status") in {
+                "requested", "pending", "queued", "waiting", "in_progress",
+            }
+            and base.get("conclusion") is None
+        ):
+            precollect_nonterminal_held_history(
+                repository, base, subject_sha, dispatch_inputs,
+                f"{binding['input']} nonterminal producer",
+            )
+        if base.get("status") != "completed":
+            fail(
+                f"{binding['input']} run {run_id} status is "
+                f"{base.get('status')!r}, expected 'completed'"
+            )
+        fail(
+            f"{binding['input']} run {run_id} conclusion is "
+            f"{base.get('conclusion')!r}, expected {expected_conclusion!r}"
+        )
+
     artifact_name = substitute(
         binding["artifactTemplate"], expected_head_sha, run_id
     )
-    profile = binding.get("runProfile")
     if profile == "oci-successful-held-handoff-v1":
         return validate_held_handoff_artifact(
             repository, run_id, expected_head_sha, subject_sha, dispatch_inputs,
@@ -12257,10 +13514,25 @@ def command_validate_all(args):
 
 
 def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, native):
+    resources = {}
+    try:
+        return _validate_all_bindings(
+            args, inputs, bindings, chronology_inputs, operation, native, resources,
+        )
+    finally:
+        history_bundle = resources.get("history_bundle")
+        if history_bundle is not None:
+            history_bundle.close()
+
+
+def _validate_all_bindings(
+    args, inputs, bindings, chronology_inputs, operation, native, resources,
+):
     validated = {}
     failures = []
+    history_bundle = None
     if bindings:
-        byte_context = ImmutableBindingBytes({
+        immutable_context = {
             "repository": args.repository, "subject": args.subject_sha,
             "inputs": inputs, "bindings": bindings, "runtime": args.runtime_mode,
             "policy": args.policy_json, "operation": getattr(args, "operation", ""),
@@ -12269,10 +13541,30 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
                 Path(args.manifest).read_text(encoding="utf-8") if args.manifest else ""
             ),
             "validator": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        }
+        byte_context = ImmutableBindingBytes(immutable_context)
+        history_bundle = HeldHistoryProofBundle.maybe_create({
+            "repository": args.repository,
+            "controlSha": args.subject_sha,
+            "dispatchInputs": inputs,
+            "bindings": bindings,
+            "runtimeMode": args.runtime_mode,
+            "operation": operation,
+            "policy": (
+                json.loads(args.policy_json) if args.policy_json
+                else json.loads(immutable_context["manifest"])
+            ),
         })
+        resources["history_bundle"] = history_bundle
+        if history_bundle is not None and any(
+            binding.get("runProfile") in HELD_HISTORY_PROOF_PROFILES
+            for binding in bindings
+        ):
+            history_bundle.preflight()
         def read_binding(binding):
             token = BYTE_CONTEXT.set(byte_context)
             native_token = NATIVE_CONTEXT.set(native)
+            history_token = HISTORY_BUNDLE_CONTEXT.set(history_bundle)
             binding_token = BINDING_CONTEXT.set(binding["input"])
             reader_token = _CURRENT_READER_SHA_CONTEXT.set(args.subject_sha)
             try:
@@ -12284,6 +13576,7 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
             finally:
                 _CURRENT_READER_SHA_CONTEXT.reset(reader_token)
                 BINDING_CONTEXT.reset(binding_token)
+                HISTORY_BUNDLE_CONTEXT.reset(history_token)
                 NATIVE_CONTEXT.reset(native_token)
                 BYTE_CONTEXT.reset(token)
         with concurrent.futures.ThreadPoolExecutor(
@@ -12308,6 +13601,8 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
         native.check_cancelled()
         if failures:
             raise failures[0]
+        if history_bundle is not None:
+            history_bundle.commit()
     for binding in bindings:
         name = binding["input"]
         facts = validated[name]
@@ -12369,6 +13664,8 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
         if baselines and (root.is_symlink() or (root.exists() and any(root.iterdir()))):
             fail("original before baseline output must be empty")
     if args.result_json:
+        if history_bundle is not None:
+            history_bundle.assert_unexpired_for_acceptance()
         safe_results = {
             name: facts["resume"] for name, facts in validated.items()
             if "resume" in facts
@@ -12376,11 +13673,15 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
         with open(args.result_json, "x", encoding="utf-8") as handle:
             json.dump(safe_results, handle, sort_keys=True)
     if getattr(args, "held_history_file", ""):
+        if history_bundle is not None:
+            history_bundle.assert_unexpired_for_acceptance()
         output = Path(args.held_history_file)
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("x", encoding="utf-8") as handle:
             json.dump(histories[0], handle, sort_keys=True)
     if args.baseline_dir:
+        if history_bundle is not None:
+            history_bundle.assert_unexpired_for_acceptance()
         for files in baselines[:1]:
             root = Path(args.baseline_dir)
             root.mkdir(parents=True, exist_ok=True)
@@ -12390,10 +13691,16 @@ def validate_all_bindings(args, inputs, bindings, chronology_inputs, operation, 
                 with destination.open("xb") as handle:
                     handle.write(raw)
     for binding in bindings:
+        if history_bundle is not None:
+            history_bundle.assert_unexpired_for_acceptance()
         name = binding["input"]
         print(f"upstream_binding={name} run={inputs[name]} status=OK")
     if timing is not None:
+        if history_bundle is not None:
+            history_bundle.assert_unexpired_for_acceptance()
         print("handoff_timing=" + json.dumps(timing, sort_keys=True, separators=(",", ":")))
+    if history_bundle is not None:
+        history_bundle.assert_unexpired_for_acceptance()
     print(f"upstream_bindings_validated={len(bindings)}")
 
 
