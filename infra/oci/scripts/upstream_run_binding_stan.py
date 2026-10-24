@@ -136,6 +136,7 @@ HANDOFF_V5_LEASE_EXPRESSION = (
     "inputs.held_handoff_run_id != '' && '7200' || '1800' }}"
 )
 CURRENT_READER_WORKFLOW_BLOB = "2399c672ed5022358880692925870690b203b532"
+CURRENT_READER_AUTHORITY_BLOB = "b587fa03960422a0a73e3dd65b955a3a716c5480"
 CURRENT_READER_VERIFIER_BLOB = "4f1ade3b89dcdc6a736bd8a371f66ccf06f9bd63"
 CURRENT_READER_WORKFLOW_V5_EDITS = (
     (
@@ -6506,6 +6507,7 @@ def _failed_held_continuation_profile():
         "authority_blob": dict(FAILED_HELD_CONTINUATION_CLOSURE)[
             "infra/azure/agents/copilot_cli_authority_stan.py"
         ],
+        "current_authority_blob": CURRENT_READER_AUTHORITY_BLOB,
         "input_names": FAILED_HELD_CONTINUATION_INPUT_NAMES,
         "policy_sha256": FAILED_HELD_CONTINUATION_POLICY_SHA256,
         "input_sha256": FAILED_HELD_CONTINUATION_INPUT_SHA256,
@@ -6608,7 +6610,7 @@ def _failed_held_current_reader(repository, subject_sha, profile):
         or FULL_SHA.fullmatch(tree_sha) is None
         or local[workflow_path] != profile["current_workflow_blob"]
         or local[policy_path] != profile["policy_blob"]
-        or local[authority_path] != profile["authority_blob"]
+        or local[authority_path] != profile["current_authority_blob"]
         or local[validator_path] != validator_blob
     ):
         fail(f"{label} is not the clean exact current-master source")
@@ -7003,7 +7005,7 @@ def _validate_failed_held_continuation_observation(
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
         or current_reader["workflowBlob"] != profile["current_workflow_blob"]
         or current_reader["policyBlob"] != profile["policy_blob"]
-        or current_reader["authorityBlob"] != profile["authority_blob"]
+        or current_reader["authorityBlob"] != profile["current_authority_blob"]
         or not isinstance(current_reader["validatorBlob"], str)
         or FULL_SHA.fullmatch(current_reader["validatorBlob"]) is None
     ):
@@ -7496,6 +7498,7 @@ def _failed_clean_reader_continuation_profile():
         "authority_blob": closure[
             "infra/azure/agents/copilot_cli_authority_stan.py"
         ],
+        "current_authority_blob": CURRENT_READER_AUTHORITY_BLOB,
         "validator_blob": closure[
             "infra/oci/scripts/upstream_run_binding_stan.py"
         ],
@@ -7658,7 +7661,7 @@ def _failed_clean_reader_current_reader(repository, subject_sha, profile):
         or FULL_SHA.fullmatch(tree_sha) is None
         or local[workflow_path] != profile["current_workflow_blob"]
         or local[policy_path] != profile["policy_blob"]
-        or local[authority_path] != profile["authority_blob"]
+        or local[authority_path] != profile["current_authority_blob"]
         or local[validator_path] != blob_sha(validator_raw)
         or local[verifier_path] != blob_sha(verifier_raw)
         or local[verifier_path] != profile["current_verifier_blob"]
@@ -7896,7 +7899,7 @@ def _validate_failed_clean_reader_continuation_observation(
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
         or current_reader["workflowBlob"] != profile["current_workflow_blob"]
         or current_reader["policyBlob"] != profile["policy_blob"]
-        or current_reader["authorityBlob"] != profile["authority_blob"]
+        or current_reader["authorityBlob"] != profile["current_authority_blob"]
         or not isinstance(current_reader["validatorBlob"], str)
         or FULL_SHA.fullmatch(current_reader["validatorBlob"]) is None
         or current_reader["verifierBlob"]
@@ -8318,6 +8321,7 @@ def _failed_pre_cas_continuation_profile():
         "authority_blob": closure[
             "infra/azure/agents/copilot_cli_authority_stan.py"
         ],
+        "current_authority_blob": CURRENT_READER_AUTHORITY_BLOB,
         "validator_blob": closure[
             "infra/oci/scripts/upstream_run_binding_stan.py"
         ],
@@ -8482,7 +8486,7 @@ def _failed_pre_cas_current_reader(repository, subject_sha, profile):
         or FULL_SHA.fullmatch(tree_sha) is None
         or local[workflow_path] != profile["current_workflow_blob"]
         or local[policy_path] != profile["policy_blob"]
-        or local[authority_path] != profile["authority_blob"]
+        or local[authority_path] != profile["current_authority_blob"]
         or local[verifier_path] != profile["current_verifier_blob"]
         or local[validator_path] != validator_blob
     ):
@@ -8801,7 +8805,7 @@ def _validate_failed_pre_cas_continuation_observation(
         or FULL_SHA.fullmatch(current_reader["tree"]) is None
         or current_reader["workflowBlob"] != profile["current_workflow_blob"]
         or current_reader["policyBlob"] != profile["policy_blob"]
-        or current_reader["authorityBlob"] != profile["authority_blob"]
+        or current_reader["authorityBlob"] != profile["current_authority_blob"]
         or current_reader["verifierBlob"] != profile["current_verifier_blob"]
         or not isinstance(current_reader["validatorBlob"], str)
         or FULL_SHA.fullmatch(current_reader["validatorBlob"]) is None

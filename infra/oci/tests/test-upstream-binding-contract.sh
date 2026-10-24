@@ -4261,6 +4261,9 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 root = Path(sys.argv[1]).parents[3]
 workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+authority = (
+    root / "infra/azure/agents/copilot_cli_authority_stan.py"
+).read_text()
 verifier = (
     root / "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
 ).read_text()
@@ -4268,7 +4271,17 @@ def blob(value):
     raw = value.encode()
     return hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
 assert blob(workflow) == m.CURRENT_READER_WORKFLOW_BLOB
+assert blob(authority) == m.CURRENT_READER_AUTHORITY_BLOB
 assert blob(verifier) == m.CURRENT_READER_VERIFIER_BLOB
+for profile in (
+    m._failed_held_continuation_profile(),
+    m._failed_clean_reader_continuation_profile(),
+    m._failed_pre_cas_continuation_profile(),
+):
+    assert profile["authority_blob"] == \
+        "3393e632c7f26ca2f98fd56a230985766db4ec91"
+    assert profile["current_authority_blob"] == \
+        m.CURRENT_READER_AUTHORITY_BLOB
 historical_workflow = m.current_reader_workflow_v5(
     workflow, "workflow inverse", inverse=True,
 )
@@ -4304,7 +4317,7 @@ for current, historical, edits in (
         else:
             raise AssertionError("duplicate exact-edit source was accepted")
 PY
-ok "v5 current-reader workflow/verifier pins recover and reapply exact frozen bytes with unique edits"
+ok "v5 current-reader workflow/authority/verifier pins preserve exact frozen and current bytes"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import contextlib, copy, datetime as dt, hashlib, importlib.util, io, json, os, shutil, subprocess, sys
@@ -8187,7 +8200,7 @@ reader = {
     "tree": "e" * 40,
     "workflowBlob": profile["current_workflow_blob"],
     "policyBlob": profile["policy_blob"],
-    "authorityBlob": profile["authority_blob"],
+    "authorityBlob": profile["current_authority_blob"],
     "validatorBlob": "d" * 40,
 }
 semantic = {
@@ -8863,7 +8876,7 @@ reader_sha = "9" * 40
 profile = copy.deepcopy(m._failed_clean_reader_continuation_profile())
 # Canonical full-profile digest sealed from the two reviewed native observations.
 reviewed_observations_profile_sha256 = (
-    "7e603ecf41b3dcdd1bb032be797605af28448949590b89fae0a5251cb58d0c90"
+    "4ef64c8f6783e8937e1392a417622023eed14c7555dfce3e441ba58070164397"
 )
 
 def assert_golden_profile(candidate):
@@ -9137,7 +9150,7 @@ reader = {
     "tree": "e" * 40,
     "workflowBlob": profile["current_workflow_blob"],
     "policyBlob": profile["policy_blob"],
-    "authorityBlob": profile["authority_blob"],
+    "authorityBlob": profile["current_authority_blob"],
     "validatorBlob": "d" * 40,
     "verifierBlob": profile["current_verifier_blob"],
 }
@@ -9699,7 +9712,7 @@ assert m.FAILED_PRE_CAS_CONTINUATION_TREE == \
 
 profile = copy.deepcopy(m._failed_pre_cas_continuation_profile())
 reviewed_profile_sha256 = (
-    "f803adfdf634fd591b2d614aad7649454d3cc5aa5f1f996e62fff8d95f719812"
+    "c88060dbcfb2859b8254b8e8bd75fd555be146d606c3b224738c21004c7a154c"
 )
 
 def profile_digest(candidate):
@@ -10226,7 +10239,7 @@ observation_reader = {
     "tree": "e" * 40,
     "workflowBlob": observation_profile["current_workflow_blob"],
     "policyBlob": observation_profile["policy_blob"],
-    "authorityBlob": observation_profile["authority_blob"],
+    "authorityBlob": observation_profile["current_authority_blob"],
     "validatorBlob": "d" * 40,
     "verifierBlob": observation_profile["current_verifier_blob"],
 }
@@ -10790,7 +10803,7 @@ reader = {
     "tree": "e" * 40,
     "workflowBlob": profile["current_workflow_blob"],
     "policyBlob": profile["policy_blob"],
-    "authorityBlob": profile["authority_blob"],
+    "authorityBlob": profile["current_authority_blob"],
     "validatorBlob": "d" * 40,
     "verifierBlob": profile["current_verifier_blob"],
 }
@@ -11400,6 +11413,7 @@ def probe_control_comparisons(module):
                 "current_workflow_blob": "3" * 40,
                 "policy_blob": "4" * 40,
                 "authority_blob": "5" * 40,
+                "current_authority_blob": "9" * 40,
                 "artifacts": (),
             },
             {
@@ -11422,6 +11436,7 @@ def probe_control_comparisons(module):
                 "current_workflow_blob": "7" * 40,
                 "policy_blob": "4" * 40,
                 "authority_blob": "5" * 40,
+                "current_authority_blob": "9" * 40,
                 "current_verifier_blob": "6" * 40,
             },
             {
@@ -11444,6 +11459,7 @@ def probe_control_comparisons(module):
                 "current_workflow_blob": "7" * 40,
                 "policy_blob": "4" * 40,
                 "authority_blob": "5" * 40,
+                "current_authority_blob": "9" * 40,
                 "verifier_blob": "6" * 40,
                 "current_verifier_blob": "8" * 40,
             },
@@ -11469,7 +11485,7 @@ def probe_control_comparisons(module):
                         else "workflow_blob"
                     ],
                     "policyBlob": profile["policy_blob"],
-                    "authorityBlob": profile["authority_blob"],
+                    "authorityBlob": profile["current_authority_blob"],
                     "validatorBlob": "b" * 40,
                 }
                 if "current_verifier_blob" in profile:

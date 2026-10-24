@@ -34,7 +34,9 @@ PREPARED_TRANSITION_WORKFLOWS = {
     "oci-live-data-rollout.yml": ".github/workflows/oci-live-data-rollout.yml",
     "oci-live-betting-activate.yml": ".github/workflows/oci-live-betting-activate.yml",
 }
-PREPARED_TTL_SECONDS = 15 * 60
+PREPARED_TTL_SECONDS = 30 * 60
+# Historical 15-minute v2 seals retain their immutable cutoff.
+PREPARED_ACCEPTED_TTL_SECONDS = frozenset({15 * 60, 30 * 60})
 RECORD_SCHEMA_V1 = "betstan.copilot-cli-authority.v1"
 RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
 RECORD_SCHEMA_V3 = "betstan.copilot-cli-authority.v3"
@@ -1218,7 +1220,10 @@ def validate_prepared_seal(intent):
         fail("prepared capture was not empty")
     created = parse_utc(seal["createdAt"], "prepared creation")
     expires = parse_utc(seal["expiresAt"], "prepared expiry")
-    if (expires - created).total_seconds() != PREPARED_TTL_SECONDS:
+    if (
+        (expires - created).total_seconds()
+        not in PREPARED_ACCEPTED_TTL_SECONDS
+    ):
         fail("prepared lifetime is invalid")
 
 
