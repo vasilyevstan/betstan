@@ -1111,10 +1111,21 @@ transition never names, excludes, cancels, or deletes historical runs, and it
 does not weaken the default rule that active work on either workflow blocks.
 A prepared intent may be discarded only while its own workflow remains
 disabled; after the dispatch boundary, exact capture recovery is required, and
-issued or consumed authority remains one-use. If the exact bound run is
-subsequently validated as terminal and jobless and its authority is retired, a
-fresh preparation may create a new generation for the same request. For only
-these two workflows,
+issued or consumed authority remains one-use. Newly created prepared intents
+have an exact 1,800-second half-open lifetime: creation is included, while
+equality with expiry fails. Current v2 readers accept only exact 900-second
+historical seals and exact 1,800-second new seals. A historical 900-second
+cutoff is never renewed, extended, or reinterpreted under the longer lifetime.
+An expired, otherwise untouched preparation may be discarded only through the
+canonical disabled-state discard before the provider boundary; expiry grants
+no dispatch authority. Once a 1,800-second generation is dispatching, bound,
+or spent, rollback must retain exact 900- and 1,800-second reader compatibility
+and keep current-reader helper pins separate from frozen historical helper
+pins, or use a reviewed forward correction.
+
+If the exact bound run is subsequently validated as terminal and jobless and
+its authority is retired, a fresh preparation may create a new generation for
+the same request. For only these two workflows,
 `copilot-cli-dispatch-stan.sh <request-file> --retire-zero-execution` derives
 that run ID from the exact bound preparation and cannot select another run. It
 may retire consumed authority only when the retained same-run approval is

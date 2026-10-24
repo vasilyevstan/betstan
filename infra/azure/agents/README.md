@@ -336,8 +336,16 @@ run has a real job and the expected pending environment, disable the workflow
 before approval as usual. If the provider-call boundary was not crossed,
 disable the workflow before using `--discard-prepared`; a `dispatching` or
 `bound` intent is never discardable and must use the existing exact-capture
-recovery. Once that exact bound numeric authority is validly retired as
-terminal and jobless, a fresh disabled preparation may create a distinct
+recovery. New preparations have an exact 1,800-second half-open lifetime.
+Current v2 readers accept only exact historical 900-second seals and exact new
+1,800-second seals; they never renew, extend, or reinterpret a historical
+cutoff. Equality with expiry fails. An expired untouched preparation remains
+blocking until the workflow is disabled and `--discard-prepared` removes that
+exact generation. Once a 1,800-second generation is dispatching, bound, or
+spent, rollback must retain exact 900/1,800-second reader compatibility and
+the separate current and historical authority-helper pins, or use a reviewed
+forward correction. Once that exact bound numeric authority is validly retired
+as terminal and jobless, a fresh disabled preparation may create a distinct
 generation for the same request. The old bound seal and capture stay preserved
 as spent evidence; old snapshots and delayed transport writes cannot consume
 the replacement. Issued or consumed authority does not qualify for replacement
