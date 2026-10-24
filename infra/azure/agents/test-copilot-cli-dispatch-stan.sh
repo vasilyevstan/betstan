@@ -2207,11 +2207,29 @@ def intent(d):
     assert len(paths) == 1
     return json.loads(paths[0].read_text())
 
+def retime_prepared(value, seconds):
+    value = copy.deepcopy(value)
+    created = a.parse_utc(value["createdAt"], "prepared creation")
+    expires = a.utc_text(created + a.dt.timedelta(seconds=seconds))
+    value["expiresAt"] = expires
+    seal = value["preparedSeal"]
+    seal["expiresAt"] = expires
+    seal["intentIdentitySha256"] = a.immutable_intent_digest(value)
+    seal["sealSha256"] = a.evidence_digest({
+        name: item for name, item in seal.items() if name != "sealSha256"
+    })
+    return value
+
 def prepare(d):
     run(d, "--prepare-disabled-ghosts")
     assert (d / "dispatches").read_text() == "0"
     value = intent(d)
     assert value["schemaVersion"] == a.PREPARED_INTENT_SCHEMA and value["state"] == "prepared"
+    assert a.PREPARED_TTL_SECONDS == 30 * 60
+    assert (
+        a.parse_utc(value["expiresAt"], "prepared expiry")
+        - a.parse_utc(value["createdAt"], "prepared creation")
+    ).total_seconds() == 1800
     assert len(value["preparedSeal"]["candidates"]) == 3
     assert not list((d / "authority").glob("[0-9]*.json")), "prepare granted run/approval authority"
     (d / "collections").write_text("0")
@@ -2284,6 +2302,40 @@ def cleanup_options(d):
 
 d = setup()
 sealed = prepare(d)
+for seconds in (900, 1800):
+    a.validate_prepared_seal(retime_prepared(sealed, seconds))
+for seconds in (899, 901, 1799, 1801):
+    try:
+        a.validate_prepared_seal(retime_prepared(sealed, seconds))
+    except SystemExit as error:
+        assert str(error) == "prepared lifetime is invalid"
+    else:
+        raise AssertionError(f"unsupported prepared lifetime passed: {seconds}")
+old_now = a.utc_now
+try:
+    for seconds in (900, 1800):
+        candidate = retime_prepared(sealed, seconds)
+        created = a.parse_utc(candidate["createdAt"], "prepared creation")
+        expires = a.parse_utc(candidate["expiresAt"], "prepared expiry")
+        for moment, accepted in (
+            (created - a.dt.timedelta(seconds=1), False),
+            (created, True),
+            (expires - a.dt.timedelta(seconds=1), True),
+            (expires, False),
+        ):
+            a.utc_now = lambda moment=moment: moment
+            try:
+                a.require_prepared_lifetime(candidate)
+            except SystemExit:
+                assert not accepted, (seconds, moment)
+            else:
+                assert accepted, (seconds, moment)
+    current = retime_prepared(sealed, 1800)
+    created = a.parse_utc(current["createdAt"], "prepared creation")
+    a.utc_now = lambda: created + a.dt.timedelta(seconds=926)
+    a.require_prepared_lifetime(current)
+finally:
+    a.utc_now = old_now
 run(d, "--prepare-disabled-ghosts", ok=False)
 assert intent(d) == sealed, "repeat prepare renewed the seal"
 for action in ("--resume-captured", "--dispatch", "--dispatch-prepared"):
@@ -2437,15 +2489,48 @@ for capture in ("empty", "multiple", "nonzero"):
 
 # Stale-control and expired prepares remain blocking, but clean actual-current
 # master may explicitly discard them after freshly observing disabled state.
-d = setup()
-options = local_prepare(d)
+d = setup(); options = local_prepare(d)
+current = intent(d)
+created = a.parse_utc(current["createdAt"], "prepared creation")
 old_now = a.utc_now
-a.utc_now = lambda: old_now() + a.dt.timedelta(seconds=a.PREPARED_TTL_SECONDS + 1)
-invoke("verify-prepared", options, ok=False)
-assert a.find_blocking_authorities(d / "authority", json.loads((d / "normalized.json").read_text()))
-discard_snapshot = invoke("prepared-context", cleanup_options(d))
-invoke("discard-prepared", {**cleanup_options(d), "expected_snapshot": discard_snapshot})
-a.utc_now = old_now
+try:
+    a.utc_now = lambda: created + a.dt.timedelta(seconds=926)
+    snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
+    invoke("dispatch-prepared", {
+        **options, "expected_snapshot": snapshot, "owner_pid": os.getpid(),
+    })
+    assert intent(d)["state"] == "dispatching"
+finally:
+    a.utc_now = old_now
+for seconds in (900, 1800):
+    d = setup(); options = local_prepare(d)
+    path = next((d / "authority").glob("request-*.json"))
+    prepared = retime_prepared(intent(d), seconds)
+    write(path, prepared)
+    path.chmod(0o600)
+    created = a.parse_utc(prepared["createdAt"], "prepared creation")
+    old_now = a.utc_now
+    try:
+        a.utc_now = lambda: created + a.dt.timedelta(seconds=seconds - 1)
+        invoke("verify-prepared", options)
+        a.utc_now = lambda: created + a.dt.timedelta(seconds=seconds)
+        error = invoke("verify-prepared", options, ok=False)
+        assert "expired or not yet valid" in error
+        if seconds == 900:
+            a.utc_now = lambda: created + a.dt.timedelta(seconds=926)
+            error = invoke("verify-prepared", options, ok=False)
+            assert "expired or not yet valid" in error
+        assert (d / "dispatches").read_text() == "0"
+        assert a.find_blocking_authorities(
+            d / "authority",
+            json.loads((d / "normalized.json").read_text()),
+        )
+        discard_snapshot = invoke("prepared-context", cleanup_options(d))
+        invoke("discard-prepared", {
+            **cleanup_options(d), "expected_snapshot": discard_snapshot,
+        })
+    finally:
+        a.utc_now = old_now
 d = setup(); options = local_prepare(d)
 f = json.loads((d / "fixture.json").read_text()); f["master"] = "c" * 40
 write(d / "fixture.json", f)
