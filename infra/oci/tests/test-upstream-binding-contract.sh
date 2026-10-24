@@ -2737,18 +2737,28 @@ paths = ["batch/mixed-older", "batch/mixed-late"]
 older_first = json_outcome(paths[0], returncode=1, stderr=b"gh: HTTP 503\n")
 older_second = json_outcome(paths[0], returncode=1, stderr=b"gh: HTTP 503\n")
 late_first = json_outcome(paths[1], returncode=1, stderr=b"gh: HTTP 503\n")
+late_second = json_outcome(paths[1], returncode=1, stderr=b"gh: HTTP 503\n")
+waves = [
+    [older_first, None],
+    [older_second, late_first],
+    [json_outcome(paths[0]), late_second],
+    [json_outcome(paths[1])],
+]
 result, error, calls, sleeps, diagnostic = scripted_batch(
-    [(path, False) for path in paths],
-    [
-        [older_first, None],
-        [older_second, late_first],
-        [json_outcome(paths[0]), json_outcome(paths[1])],
-    ],
+    [(path, False) for path in paths], waves,
 )
 assert error is None and [item["endpoint"] for item in result] == paths
-assert sleeps == [1, 2] and not diagnostic
-assert [len(call) for call in calls] == [2, 2, 2]
+assert sleeps == [1, 2, 2] and not diagnostic
+assert [len(call) for call in calls] == [2, 2, 2, 1]
 assert all(timeout is None for call in calls for _, timeout in call)
+late_command = ["gh", "api", paths[1]]
+assert sum(
+    outcome is not None and outcome.args == late_command
+    for wave in waves for outcome in wave
+) == 3
+assert [[command[2] for command, _ in call] for call in calls] == [
+    paths, paths, paths, [paths[1]],
+]
 
 hard_outcomes = (
     ("http-403", json_outcome("batch/http-403", 1, stderr=b"gh: HTTP 403\n"), SystemExit),
@@ -2823,6 +2833,22 @@ result, error, calls, sleeps, diagnostic = scripted_batch(
 assert result is None and isinstance(error, SystemExit)
 assert len(calls) == 1 and sleeps == []
 assert f"unable to read {paths[0]}" in diagnostic and paths[1] not in diagnostic
+
+for label, later in (
+    ("malformed", json_outcome("batch/later-malformed", stdout=b"{")),
+    (
+        "invalid-utf8",
+        json_outcome("batch/later-invalid-utf8", stdout=b"\xff"),
+    ),
+):
+    paths = [f"batch/retryable-before-{label}", f"batch/later-{label}"]
+    result, error, calls, sleeps, diagnostic = scripted_batch(
+        [(path, False) for path in paths],
+        [[json_outcome(paths[0], 1, stderr=b"gh: HTTP 502\n"), later]],
+    )
+    assert result is None and isinstance(error, SystemExit)
+    assert len(calls) == 1 and sleeps == []
+    assert diagnostic == f"upstream binding rejected: unable to read {paths[0]}\n"
 
 path = "batch/paginated-retry"
 command = ["gh", "api", path, "--paginate", "--slurp"]

@@ -1903,6 +1903,7 @@ def native_api_batch(requests):
     outcomes = [None] * len(requests)
     results = [None] * len(requests)
     completed = [False] * len(requests)
+    terminal_errors = [None] * len(requests)
     pending = list(range(len(requests)))
     while True:
         delay = max(attempts[index] for index in pending)
@@ -1921,11 +1922,19 @@ def native_api_batch(requests):
             if isinstance(outcome, BaseException):
                 blocked = True
                 continue
-            _native_text(outcome.stdout)
-            _native_text(outcome.stderr)
             path, paginated = requests[index]
+            diagnostic = io.StringIO()
+            try:
+                _native_text(outcome.stdout)
+                _native_text(outcome.stderr)
+                if outcome.returncode == 0:
+                    with contextlib.redirect_stderr(diagnostic):
+                        results[index] = _native_json(outcome, path, paginated)
+            except (Exception, SystemExit) as error:
+                terminal_errors[index] = (error, diagnostic.getvalue())
+                blocked = True
+                continue
             if outcome.returncode == 0:
-                results[index] = _native_json(outcome, path, paginated)
                 completed[index] = True
                 continue
             _, _, retryable = _classify_artifact_download_failure(
@@ -1941,6 +1950,10 @@ def native_api_batch(requests):
             continue
         for index, (path, paginated) in enumerate(requests):
             if not completed[index]:
+                if terminal_errors[index] is not None:
+                    error, diagnostic = terminal_errors[index]
+                    sys.stderr.write(diagnostic)
+                    raise error
                 results[index] = _native_json(outcomes[index], path, paginated)
         return results
 
