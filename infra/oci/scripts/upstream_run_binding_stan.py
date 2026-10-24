@@ -1869,25 +1869,34 @@ def _native_run(command, *, capture_output=True, text=False, check=False, timeou
     return outcome
 
 
-def _native_json(outcome, path, paginated=False):
+def _native_json_value(outcome, path, paginated=False):
     if isinstance(outcome, BaseException):
         raise outcome
     if outcome is None:
-        fail(f"native read collection is incomplete for {path}")
+        return None, f"native read collection is incomplete for {path}"
     stdout = _native_text(outcome.stdout)
     _native_text(outcome.stderr)
     if outcome.returncode != 0:
-        fail(f"unable to read {'all pages of ' if paginated else ''}{path}")
+        return None, f"unable to read {'all pages of ' if paginated else ''}{path}"
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError:
-        fail(f"malformed {'paginated response' if paginated else 'response'} for {path}")
+        return None, (
+            f"malformed {'paginated response' if paginated else 'response'} for {path}"
+        )
     if not paginated:
-        return payload
+        return payload, None
     if isinstance(payload, dict):
-        return [payload]
+        return [payload], None
     if not isinstance(payload, list) or not all(isinstance(page, dict) for page in payload):
-        fail(f"unexpected paginated response for {path}")
+        return None, f"unexpected paginated response for {path}"
+    return payload, None
+
+
+def _native_json(outcome, path, paginated=False):
+    payload, failure = _native_json_value(outcome, path, paginated)
+    if failure is not None:
+        fail(failure)
     return payload
 
 
@@ -1923,18 +1932,18 @@ def native_api_batch(requests):
                 blocked = True
                 continue
             path, paginated = requests[index]
-            diagnostic = io.StringIO()
             try:
-                _native_text(outcome.stdout)
-                _native_text(outcome.stderr)
-                if outcome.returncode == 0:
-                    with contextlib.redirect_stderr(diagnostic):
-                        results[index] = _native_json(outcome, path, paginated)
-            except (Exception, SystemExit) as error:
-                terminal_errors[index] = (error, diagnostic.getvalue())
+                payload, failure = _native_json_value(outcome, path, paginated)
+            except Exception as error:
+                terminal_errors[index] = (error, None)
                 blocked = True
                 continue
             if outcome.returncode == 0:
+                if failure is not None:
+                    terminal_errors[index] = (None, failure)
+                    blocked = True
+                    continue
+                results[index] = payload
                 completed[index] = True
                 continue
             _, _, retryable = _classify_artifact_download_failure(
@@ -1951,8 +1960,9 @@ def native_api_batch(requests):
         for index, (path, paginated) in enumerate(requests):
             if not completed[index]:
                 if terminal_errors[index] is not None:
-                    error, diagnostic = terminal_errors[index]
-                    sys.stderr.write(diagnostic)
+                    error, failure = terminal_errors[index]
+                    if failure is not None:
+                        fail(failure)
                     raise error
                 results[index] = _native_json(outcomes[index], path, paginated)
         return results

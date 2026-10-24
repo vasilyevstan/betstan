@@ -2850,6 +2850,56 @@ for label, later in (
     assert len(calls) == 1 and sleeps == []
     assert diagnostic == f"upstream binding rejected: unable to read {paths[0]}\n"
 
+class LockedStderr(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.Lock()
+    def write(self, value):
+        with self.lock:
+            return super().write(value)
+
+paths = ["batch/concurrent-first", "batch/concurrent-second"]
+entered = threading.Barrier(2)
+first_done = threading.Event()
+calls, calls_lock = [], threading.Lock()
+def concurrent_window(batch):
+    assert len(batch) == 1 and batch[0][1] is None
+    path = batch[0][0][2]
+    with calls_lock:
+        calls.append(path)
+    return [json_outcome(path, stdout=path.encode())]
+def concurrent_loads(text):
+    entered.wait(timeout=5)
+    if text != paths[0]:
+        assert first_done.wait(5)
+    raise json.JSONDecodeError("synthetic concurrent failure", text, 0)
+def concurrent_failure(path):
+    try:
+        m.native_api_batch([(path, False)])
+    except SystemExit as error:
+        return error.code
+    finally:
+        if path == paths[0]:
+            first_done.set()
+    raise AssertionError("concurrent malformed native response was accepted")
+
+original_stderr = m.sys.stderr
+visible = LockedStderr()
+with patch.object(m.sys, "stderr", visible), \
+        patch.object(m, "native_window", side_effect=concurrent_window), \
+        patch.object(m.json, "loads", side_effect=concurrent_loads):
+    runtime_stderr = m.sys.stderr
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        codes = list(pool.map(concurrent_failure, paths))
+    assert codes == [1, 1] and sorted(calls) == sorted(paths)
+    assert m.sys.stderr is runtime_stderr
+assert m.sys.stderr is original_stderr
+diagnostic = visible.getvalue()
+for path in paths:
+    assert diagnostic.count(
+        f"upstream binding rejected: malformed response for {path}\n"
+    ) == 1
+
 path = "batch/paginated-retry"
 command = ["gh", "api", path, "--paginate", "--slurp"]
 result, error, calls, sleeps, diagnostic = scripted_batch([(path, True)], [
