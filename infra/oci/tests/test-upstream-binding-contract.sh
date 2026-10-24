@@ -2860,6 +2860,7 @@ class LockedStderr(io.StringIO):
 
 paths = ["batch/concurrent-first", "batch/concurrent-second"]
 entered = threading.Barrier(2)
+first_loading = threading.Event()
 first_done = threading.Event()
 calls, calls_lock = [], threading.Lock()
 def concurrent_window(batch):
@@ -2867,8 +2868,12 @@ def concurrent_window(batch):
     path = batch[0][0][2]
     with calls_lock:
         calls.append(path)
+    if path == paths[1]:
+        assert first_loading.wait(5)
     return [json_outcome(path, stdout=path.encode())]
 def concurrent_loads(text):
+    if text == paths[0]:
+        first_loading.set()
     entered.wait(timeout=5)
     if text != paths[0]:
         assert first_done.wait(5)
