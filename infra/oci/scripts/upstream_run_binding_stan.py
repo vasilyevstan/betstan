@@ -1892,14 +1892,57 @@ def _native_json(outcome, path, paginated=False):
 
 
 def native_api_batch(requests):
-    outcomes = native_window([
-        (["gh", "api", path] + (["--paginate", "--slurp"] if paginated else []), None)
+    commands = [
+        ["gh", "api", path] + (["--paginate", "--slurp"] if paginated else [])
         for path, paginated in requests
-    ])
-    return [
-        _native_json(outcome, path, paginated)
-        for (path, paginated), outcome in zip(requests, outcomes)
     ]
+    if not requests:
+        native_window([])
+        return []
+    attempts = [0] * len(requests)
+    outcomes = [None] * len(requests)
+    results = [None] * len(requests)
+    completed = [False] * len(requests)
+    pending = list(range(len(requests)))
+    while True:
+        delay = max(attempts[index] for index in pending)
+        if delay:
+            time.sleep(delay)
+        wave = native_window([(commands[index], None) for index in pending])
+        next_pending = []
+        eligible_retry = False
+        blocked = False
+        for index, outcome in zip(pending, wave):
+            if outcome is None:
+                next_pending.append(index)
+                continue
+            attempts[index] += 1
+            outcomes[index] = outcome
+            if isinstance(outcome, BaseException):
+                blocked = True
+                continue
+            _native_text(outcome.stdout)
+            _native_text(outcome.stderr)
+            path, paginated = requests[index]
+            if outcome.returncode == 0:
+                results[index] = _native_json(outcome, path, paginated)
+                completed[index] = True
+                continue
+            _, _, retryable = _classify_artifact_download_failure(
+                outcome.returncode, outcome.stderr
+            )
+            if retryable and attempts[index] < 3:
+                eligible_retry = True
+                next_pending.append(index)
+            else:
+                blocked = True
+        if not blocked and eligible_retry:
+            pending = next_pending
+            continue
+        for index, (path, paginated) in enumerate(requests):
+            if not completed[index]:
+                results[index] = _native_json(outcomes[index], path, paginated)
+        return results
 
 
 def gh_api(path):
