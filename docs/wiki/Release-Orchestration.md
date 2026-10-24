@@ -703,12 +703,22 @@ authenticated owned successor may be excluded.
 
 Validation may reuse verified immutable artifact ZIP, exact source and bounded
 raw Git commit-object bytes, never admission or ancestry verdicts or mutable
-observations. Across the three approval
-revalidations, reuse is private to that approval command's temporary workspace,
-removed on exit; dispatch and native validation remain independent. Reuse binds
-the full repository, run/attempt, artifact/digest, source/blob, validator/policy
-and exact shared-helper identity within the existing command-owned context,
-rehashes bytes, and repeats parsing and validation. Current source,
+observations. The local CLI path may also seal the lossless raw GitHub responses
+for the two complete observations of terminal cancelled/unstarted history rows.
+That bundle is bound to the exact repository, operation, control commit, canonical
+inputs, request key, policy, validator, shared helper and protected-workflow
+inventory. Later dispatch, materialization and approval boundaries verify the
+bundle, reparse the raw bodies and rerun the existing semantic validators rather
+than downloading the same immutable row leaves again. Post-provider preflight
+requires the exact receiver record before any binding API read; a retained prepared
+intent must match, while the canonical ordinary record-only post-bind state remains
+valid. Dispatch writes a context-only sentinel for every direct or conditional
+held-history profile before binding reads. Ordinary resume branches retain only this
+marker; a branch that qualifies for held-history reuse must also have the full sealed
+bundle. Because both paths include the validator digest, a changed validator rejects
+before any binding API read. Native GitHub Actions validation remains an independent
+full live collection.
+Current source,
 workflow/policy identity and state, run status/attempt, complete artifact
 inventory, ownership and expiry, authority state, pending gates, exclusivity
 and receiver absence remain fresh at every authority boundary. After serial
@@ -738,12 +748,35 @@ cleanup or atomic late-entry-safe retirement and exactly-once release.
 Main-thread interruption requests cancellation before pool joins; all native
 children are drained and reaped, with permits restored before exit. All binding
 results join before complete-map chronology, dependency checks or acceptance.
-The three approval revalidations remain sequential fresh processes with private
-immutable-byte reuse only. Native-response coalescing or caching, transport,
-credentials, freshness, current-clock, ownership, compare-and-swap, fence, data
-and baseline safeguards are unchanged. Resource caps prove no speedup, timing
-bound or operational readiness; stage values remain unchanged.
-This adds no persistent cache, workflow, schema or bypass.
+The three approval revalidations remain sequential fresh processes. At each one,
+the validator freshly enumerates complete protected-workflow history, brackets
+the replay with workflow identity/state observations, recomputes raw ancestry,
+and validates any row first visible at or after the inclusive bundle watermark
+from live responses. The first complete prefix and inclusive watermark are immutable:
+later rows are never appended or reused and therefore remain live at materialization
+and every approval. Local dispatch may seal this non-authorizing prefix after exact
+producer identity while the producer is still nonterminal, before returning the
+ordinary readiness rejection. A kernel-backed per-request collector lock prevents
+duplicate local processes from repeating the cold scan and releases automatically
+if its process dies. Dirty publication additionally holds the canonical repository
+claim lock and rechecks that no prepared intent, ordinary intent or authority record
+became active during collection, including across validator versions. Every
+cancelled row must retain the same workflow ID authenticated by the opening and
+closing workflow brackets. A missing or changed sealed row, older insertion,
+duplicate, malformed inventory, expired/corrupt bundle, identity mismatch or quota
+shortfall fails before provider mutation. Neither materialization nor approval
+recollects a missing bundle after provider dispatch. Manual history pagination seeds
+one atomic request ledger from coherent required-response `Date`, core `Limit`,
+`Remaining`, `Used`, `Reset` and `Resource` headers. The ledger reserves inventory
+pages, both workflow brackets and terminal leaves plus margin before launching them,
+tracks the lowest observed remaining value and never uses `/rate_limit`. The
+monotonic time captured before each request launch combines with trusted response
+`Date` to produce a non-extendable absolute proof deadline, checked again after
+receiver timing and immediately before every result, baseline, history or success
+output. Transport, credentials, freshness, current-clock, ownership,
+compare-and-swap, fence, data and baseline safeguards are unchanged. Resource caps
+prove no timing bound or operational readiness; stage values remain unchanged. This
+adds no workflow, authority schema or bypass.
 
 Older nonterminal records remain counted and untouched. Only records last
 updated strictly before the held handoff's creation may use the existing

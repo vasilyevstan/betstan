@@ -5,11 +5,36 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DISPATCHER="$ROOT_DIR/infra/azure/agents/copilot-cli-dispatch-stan.sh"
 POLICY="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
+VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
 SHA="1111111111111111111111111111111111111111"
 ADVANCED_SHA="3333333333333333333333333333333333333333"
 BLOB="2222222222222222222222222222222222222222"
 WORKFLOW_ID="301"
 REPOSITORY="example/repo"
+
+python3 -I - "$DISPATCHER" "$VALIDATOR" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+dispatcher, validator = map(Path, sys.argv[1:])
+dispatch_text = dispatcher.read_text()
+tree = ast.parse(validator.read_text())
+boundaries = None
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "HELD_HISTORY_PROOF_BOUNDARIES"
+        for target in node.targets
+    ):
+        boundaries = ast.literal_eval(node.value)
+        break
+assert boundaries is not None
+assert {"dispatch", "materialization"} <= boundaries
+assert "local binding_boundary=dispatch" in dispatch_text
+assert '[[ -z "${2:-}" ]] || binding_boundary=materialization' in dispatch_text
+assert 'BETSTAN_BINDING_BOUNDARY="$binding_boundary"' in dispatch_text
+print("dispatch_and_materialization_share_validator_proof_context=PASS")
+PY
 
 # Required CI uses a depth-one checkout. Reject fixed historical object reads
 # in this supported test path, including Python argv that bypass shell stubs.
@@ -1700,14 +1725,21 @@ if args[0] == "upstream-boundary":
     assert json.loads(parsed["--dispatch-inputs"]) == f["inputs"]
     authority_file = d / "authority" / f'{f["newRun"]}.json'
     successor = parsed.get("--successor-run-id")
+    boundary = os.environ.get("BETSTAN_BINDING_BOUNDARY")
     with (d / "bound-context-calls").open("a") as calls:
-        calls.write(json.dumps({"successor": successor, "bound": authority_file.exists()}) + "\n")
+        calls.write(json.dumps({
+            "successor": successor,
+            "bound": authority_file.exists(),
+            "boundary": boundary,
+        }) + "\n")
     if authority_file.exists():
         record = json.loads(authority_file.read_text())
         assert record["state"] == "claimed" and record["runId"] == f["newRun"]
         assert successor == str(f["newRun"]), "post-bind prerequisite validation omitted the verified successor"
+        assert boundary == "materialization"
     else:
         assert successor is None, "preparation or pre-provider validation received successor context"
+        assert boundary == "dispatch"
     sys.exit()
 if args[0] == "authority-boundary":
     assert f.get("boundContext") and args[1] in {"verify", "issue"}
@@ -2306,6 +2338,10 @@ for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-d
         assert any(not call["bound"] for call in calls) and any(call["bound"] for call in calls)
         assert all(call["successor"] == (str(fixture["newRun"]) if call["bound"] else None)
                    for call in calls)
+        assert all(
+            call["boundary"] == ("materialization" if call["bound"] else "dispatch")
+            for call in calls
+        )
         run(d, "--dispatch-prepared", state="active", ok=False)
         assert (d / "dispatches").read_text() == "1"
     for wrong_read in (1, 2):
@@ -2322,6 +2358,7 @@ for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-d
             assert json.loads((d / "authority" / f'{fixture["newRun"]}.json').read_text())["state"] == "claimed"
             calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
             assert all(not call["bound"] and call["successor"] is None for call in calls)
+            assert all(call["boundary"] == "dispatch" for call in calls)
 request = saved_request
 print("held_and_expired_bound_successor_prepared_materialization_and_both_resumes=PASS", flush=True)
 
@@ -5165,6 +5202,7 @@ repository = os.environ["PROFILE_REPOSITORY"]
 source = os.environ["PROFILE_SHA"]
 fixtures = Path(os.environ["PROFILE_FIXTURES"])
 mutation = os.environ.get("PROFILE_MUTATION", "")
+include = "--include" in args
 
 def output(value):
     if "--jq" in args:
@@ -5182,6 +5220,16 @@ def output(value):
         else:
             raise SystemExit(f"unexpected jq query: {query}")
     else:
+        if include:
+            print("HTTP/2.0 200 OK")
+            print("Date: Thu, 01 Jan 2026 00:30:00 GMT")
+            print("X-RateLimit-Limit: 5000")
+            print("X-RateLimit-Remaining: 4000")
+            print("X-RateLimit-Used: 1000")
+            print("X-RateLimit-Reset: 1767232800")
+            print("X-RateLimit-Resource: core")
+            print("Content-Type: application/json")
+            print()
         print(json.dumps(value, separators=(",", ":")))
 
 def env_parse(raw):
