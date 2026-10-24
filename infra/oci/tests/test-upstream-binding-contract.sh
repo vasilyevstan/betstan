@@ -289,6 +289,1420 @@ PY
 ok "shared authority loader serializes, reenters, restores flags and covers all import sites"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import base64
+import concurrent.futures
+import contextlib
+import copy
+import datetime as dt
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("held_history_bundle", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+root = Path(sys.argv[2]) / "held-history-bundle"
+root.mkdir(mode=0o700)
+context = {
+    "schemaVersion": m.HELD_HISTORY_PROOF_SCHEMA,
+    "repository": "example/repo",
+    "controlSha": "f" * 40,
+    "dispatchInputs": {"data_run_id": "20"},
+    "bindings": [{"input": "data_run_id", "workflow": "oci-live-data-rollout.yml"}],
+    "runtimeMode": "oke",
+    "operation": "oci-production-deploy",
+    "policy": {"operation": "oci-production-deploy"},
+    "validatorSha256": "1" * 64,
+    "authorityHelperSha256": "2" * 64,
+    "workflowInventorySha256": "3" * 64,
+}
+held = {
+    "id": 10,
+    "head_sha": "f" * 40,
+    "workflow_id": 1,
+}
+row = {
+    "id": 11,
+    "workflow_id": 1,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "head_sha": "e" * 40,
+    "head_branch": "master",
+    "event": "workflow_dispatch",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "cancelled",
+    "display_title": "oci-live-data apply-slip-index " + "e" * 40,
+    "created_at": "2025-12-31T00:00:00Z",
+    "run_started_at": "2025-12-31T00:00:00Z",
+    "updated_at": "2025-12-31T00:00:02Z",
+    "html_url": "https://github.com/example/repo/actions/runs/11",
+}
+native_run = {
+    **row,
+    "head_repository": {"full_name": "example/repo"},
+}
+job = {
+    "id": 101,
+    "name": "rollout",
+    "run_id": 11,
+    "run_attempt": 1,
+    "head_sha": "e" * 40,
+    "head_branch": "master",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "steps": [],
+    "runner_id": None,
+    "runner_name": None,
+    "created_at": "2025-12-31T00:00:00Z",
+    "started_at": "2025-12-31T00:00:01Z",
+    "completed_at": "2025-12-31T00:00:02Z",
+}
+workflow = {
+    "id": 1,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "state": "disabled_manually",
+}
+historical = {
+    "sha": "c3c9332f4b23b55de6c32ae2183b89478f97884f",
+    "content": "",
+}
+server_time = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+calls = []
+remaining = [5000]
+live_rows = {11: native_run}
+live_jobs = {11: job}
+live_artifacts = {}
+
+def raw_record(path, payload):
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "path": path,
+        "status": 200,
+        "headers": {
+            "date": "Thu, 01 Jan 2026 00:00:00 GMT",
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": str(remaining[0]),
+            "x-ratelimit-used": str(5000 - remaining[0]),
+            "x-ratelimit-reset": "1767229200",
+            "x-ratelimit-resource": "core",
+        },
+        "bodyBase64": base64.b64encode(body).decode(),
+        "bodySha256": hashlib.sha256(body).hexdigest(),
+    }
+
+wire = (
+    b"HTTP/2.0 200 OK\r\n"
+    b"Date: Thu, 01 Jan 2026 00:00:00 GMT\r\n"
+    b"X-RateLimit-Limit: 5000\r\n"
+    b"X-RateLimit-Remaining: 4999\r\n"
+    b"X-RateLimit-Used: 1\r\n"
+    b"X-RateLimit-Reset: 1767229200\r\n"
+    b"X-RateLimit-Resource: core\r\n"
+    b"Content-Type: application/json\r\n\r\n"
+    b'{"ok":true}\n'
+)
+parsed, parsed_record, parsed_time, parsed_remaining = m._proof_parse_http(
+    "repos/example/repo/actions/workflows/test.yml", wire,
+)
+assert parsed == {"ok": True}
+assert parsed_remaining == 4999 and parsed_time == server_time
+assert m._proof_replay_json(
+    parsed_record, "repos/example/repo/actions/workflows/test.yml",
+) == parsed
+for malformed_wire in (
+    wire.replace(b"X-RateLimit-Used: 1", b"X-RateLimit-Used: 2"),
+    wire.replace(b"1767229200", b"1767225599"),
+    wire.replace(
+        b"X-RateLimit-Used: 1\r\n",
+        b"X-RateLimit-Used: 1\r\nX-RateLimit-Used: 1\r\n",
+    ),
+):
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            m._proof_parse_http(
+                "repos/example/repo/actions/workflows/test.yml",
+                malformed_wire,
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("malformed rate-limit tuple was accepted")
+
+def live(path):
+    calls.append(path)
+    remaining[0] -= 1
+    run_match = re.search(r"/actions/runs/([1-9][0-9]*)", path)
+    run_id = int(run_match.group(1)) if run_match else None
+    if path.endswith("/actions/workflows/oci-live-data-rollout.yml"):
+        payload = workflow
+    elif path.endswith("/attempts/1/jobs?per_page=100"):
+        payload = {"total_count": 1, "jobs": [live_jobs[run_id]]}
+    elif path.endswith("/pending_deployments") or path.endswith("/approvals"):
+        payload = []
+    elif path.endswith("/artifacts?per_page=100"):
+        artifacts = live_artifacts.get(run_id, [])
+        payload = {"total_count": len(artifacts), "artifacts": artifacts}
+    elif "/contents/" in path:
+        payload = historical
+    elif path.endswith("/attempts/1") or run_id is not None:
+        payload = live_rows[run_id]
+    else:
+        raise AssertionError(path)
+    return copy.deepcopy(payload), raw_record(path, payload), server_time, remaining[0]
+
+authority = SimpleNamespace(
+    validate_historical_unmaterialized_workflow=lambda *args, **kwargs: (None, "source"),
+    validate_strict_ancestor_compare=lambda *args: None,
+)
+
+def seeded(bundle):
+    bundle._record_response(server_time, remaining[0])
+    return bundle
+
+with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False), \
+     patch.object(m, "_load_shared_authority") as loader:
+    assert m.HeldHistoryProofBundle.maybe_create(context) is None
+    loader.assert_not_called()
+
+first = seeded(m.HeldHistoryProofBundle(context, root, "dispatch"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}):
+    key = first.prepare_history(
+        "example/repo", held, "f" * 40,
+        ".github/workflows/oci-live-data-rollout.yml", [row],
+    )
+    token = m.HISTORY_BUNDLE_CONTEXT.set(first)
+    try:
+        m._validate_cancelled_unstarted_history(
+            "example/repo", row, "f" * 40, authority,
+            "cancelled", ".github/workflows/oci-live-data-rollout.yml", key,
+        )
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(token)
+    first.finish_history(key)
+    first.commit()
+assert len(calls) == 16
+assert first.path.exists() and first.path.stat().st_mode & 0o777 == 0o600
+first.close()
+
+concurrent_root = Path(sys.argv[2]) / "held-history-concurrent"
+concurrent_root.mkdir(mode=0o700)
+concurrent_bundle = seeded(
+    m.HeldHistoryProofBundle(context, concurrent_root, "dispatch")
+)
+calls.clear()
+remaining[0] = 5000
+
+def collect():
+    key = concurrent_bundle.prepare_history(
+        "example/repo", held, "f" * 40,
+        ".github/workflows/oci-live-data-rollout.yml", [row],
+    )
+    token = m.HISTORY_BUNDLE_CONTEXT.set(concurrent_bundle)
+    try:
+        m._validate_cancelled_unstarted_history(
+            "example/repo", row, "f" * 40, authority,
+            "cancelled", ".github/workflows/oci-live-data-rollout.yml", key,
+        )
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(token)
+    concurrent_bundle.finish_history(key)
+
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}), \
+     concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    futures = [pool.submit(collect) for _ in range(2)]
+    for future in futures:
+        future.result()
+concurrent_bundle.commit()
+assert len(calls) == 18
+concurrent_bundle.close()
+
+calls.clear()
+second = seeded(m.HeldHistoryProofBundle(context, root, "materialization"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}):
+    key = second.prepare_history(
+        "example/repo", held, "f" * 40,
+        ".github/workflows/oci-live-data-rollout.yml", [row],
+    )
+    token = m.HISTORY_BUNDLE_CONTEXT.set(second)
+    try:
+        m._validate_cancelled_unstarted_history(
+            "example/repo", row, "f" * 40, authority,
+            "cancelled", ".github/workflows/oci-live-data-rollout.yml", key,
+        )
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(token)
+    second.finish_history(key)
+    second.commit()
+assert len(calls) == 2
+second.close()
+
+for boundary in ("approval-1", "approval-2", "approval-3"):
+    calls.clear()
+    replay = seeded(m.HeldHistoryProofBundle(context, root, boundary))
+    with patch.object(m, "_proof_live_json", side_effect=live), \
+         patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}):
+        key = replay.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+        token = m.HISTORY_BUNDLE_CONTEXT.set(replay)
+        try:
+            m._validate_cancelled_unstarted_history(
+                "example/repo", row, "f" * 40, authority,
+                "cancelled", ".github/workflows/oci-live-data-rollout.yml", key,
+            )
+        finally:
+            m.HISTORY_BUNDLE_CONTEXT.reset(token)
+        replay.finish_history(key)
+        replay.commit()
+    assert len(calls) == 2, boundary
+    replay.close()
+
+delta = dict(
+    row,
+    id=12,
+    head_sha="d" * 40,
+    display_title="oci-live-data apply-slip-index " + "d" * 40,
+    created_at="2026-01-01T00:00:00Z",
+    run_started_at="2026-01-01T00:00:00Z",
+    updated_at="2026-01-01T00:00:02Z",
+    html_url="https://github.com/example/repo/actions/runs/12",
+)
+live_rows[12] = {**delta, "head_repository": {"full_name": "example/repo"}}
+live_jobs[12] = {
+    **job,
+    "id": 102,
+    "run_id": 12,
+    "head_sha": "d" * 40,
+    "created_at": "2026-01-01T00:00:00Z",
+    "started_at": "2026-01-01T00:00:01Z",
+    "completed_at": "2026-01-01T00:00:02Z",
+}
+sealed_bytes = second.path.read_bytes()
+calls.clear()
+delta_probe = seeded(m.HeldHistoryProofBundle(context, root, "materialization"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}):
+    key = delta_probe.prepare_history(
+        "example/repo", held, "f" * 40,
+        ".github/workflows/oci-live-data-rollout.yml", [row, delta],
+    )
+    token = m.HISTORY_BUNDLE_CONTEXT.set(delta_probe)
+    try:
+        for candidate in (row, delta):
+            m._validate_cancelled_unstarted_history(
+                "example/repo", candidate, "f" * 40, authority,
+                "cancelled", ".github/workflows/oci-live-data-rollout.yml", key,
+            )
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(token)
+    delta_probe.finish_history(key)
+    delta_probe.commit()
+assert len(calls) == 16
+assert second.path.read_bytes() == sealed_bytes
+delta_probe.close()
+
+live_artifacts[12] = [{"id": 999}]
+calls.clear()
+drift_probe = seeded(m.HeldHistoryProofBundle(context, root, "approval-1"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}), \
+     contextlib.redirect_stderr(io.StringIO()):
+    key = drift_probe.prepare_history(
+        "example/repo", held, "f" * 40,
+        ".github/workflows/oci-live-data-rollout.yml", [row, delta],
+    )
+    token = m.HISTORY_BUNDLE_CONTEXT.set(drift_probe)
+    try:
+        m._validate_cancelled_unstarted_history(
+            "example/repo", row, "f" * 40, authority,
+            "cancelled", ".github/workflows/oci-live-data-rollout.yml", key,
+        )
+        try:
+            m._validate_cancelled_unstarted_history(
+                "example/repo", delta, "f" * 40, authority,
+                "cancelled", ".github/workflows/oci-live-data-rollout.yml", key,
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("mutable delta artifact drift was replayed")
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(token)
+assert any("/runs/12/artifacts" in path for path in calls)
+assert second.path.read_bytes() == sealed_bytes
+drift_probe.close()
+live_artifacts.clear()
+
+older = dict(
+    delta,
+    created_at="2025-12-30T00:00:00Z",
+    run_started_at="2025-12-30T00:00:00Z",
+    updated_at="2025-12-30T00:00:02Z",
+)
+older_probe = seeded(m.HeldHistoryProofBundle(context, root, "materialization"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        older_probe.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row, older],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("older inserted row was accepted")
+older_probe.close()
+
+materialization_root = Path(sys.argv[2]) / "held-history-materialization-absent"
+materialization_root.mkdir(mode=0o700)
+calls.clear()
+missing_materialization = seeded(
+    m.HeldHistoryProofBundle(context, materialization_root, "materialization")
+)
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        missing_materialization.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("materialization recollected an absent proof")
+assert calls == []
+missing_materialization.close()
+
+changed_context = dict(context, validatorSha256="9" * 64)
+calls.clear()
+changed_validator = seeded(
+    m.HeldHistoryProofBundle(changed_context, root, "materialization")
+)
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        changed_validator.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("materialization recollected for a changed validator")
+assert calls == []
+changed_validator.close()
+
+calls.clear()
+exact_expiry = m.HeldHistoryProofBundle(context, root, "materialization")
+exact_expiry._record_response(
+    server_time + dt.timedelta(seconds=m.HELD_HISTORY_PROOF_TTL_SECONDS),
+    remaining[0],
+)
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        exact_expiry.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("materialization accepted proof at exact expiry")
+assert calls == []
+exact_expiry.close()
+
+corrupt = bytearray(second.path.read_bytes())
+corrupt[-3] = ord("x")
+second.path.write_bytes(corrupt)
+third = seeded(m.HeldHistoryProofBundle(context, root, "materialization"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        third.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("corrupt sealed proof was recollected")
+third.close()
+
+low_root = Path(sys.argv[2]) / "held-history-low-quota"
+low_root.mkdir(mode=0o700)
+remaining[0] = m.HELD_HISTORY_PROOF_QUOTA_MARGIN + 15
+low = seeded(m.HeldHistoryProofBundle(context, low_root, "dispatch"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        low.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("insufficient actual-header quota was accepted")
+low.close()
+
+approval_root = Path(sys.argv[2]) / "held-history-approval-absent"
+approval_root.mkdir(mode=0o700)
+remaining[0] = 5000
+approval = seeded(m.HeldHistoryProofBundle(context, approval_root, "approval-1"))
+with patch.object(m, "_proof_live_json", side_effect=live), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        approval.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("approval recollected an absent post-dispatch proof")
+approval.close()
+
+mismatch_root = Path(sys.argv[2]) / "held-history-workflow-mismatch"
+mismatch_root.mkdir(mode=0o700)
+mismatch = seeded(m.HeldHistoryProofBundle(
+    {**context, "validatorSha256": "4" * 64},
+    mismatch_root,
+    "dispatch",
+))
+mismatched_row = {**row, "workflow_id": held["workflow_id"] + 1}
+with contextlib.redirect_stderr(io.StringIO()):
+    try:
+        mismatch.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [mismatched_row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("local proof accepted a row from another workflow")
+mismatch.close()
+
+request_key = "9" * 64
+input_hash = "8" * 64
+
+class BlockingAuthority:
+    @staticmethod
+    def canonical_input_hash(_inputs):
+        return input_hash
+
+    @staticmethod
+    def request_key(identity):
+        assert identity == {
+            "repository": "example/repo",
+            "operation": "oci-production-deploy",
+            "controlSha": "f" * 40,
+            "inputHash": input_hash,
+        }
+        return request_key
+
+    @staticmethod
+    def find_blocking_authorities(_directory, identity):
+        BlockingAuthority.request_key(identity)
+        return [("42", "claimed")]
+
+generation_root = Path(sys.argv[2]) / "held-history-generation-owner"
+generation_root.mkdir(mode=0o700)
+generation_context = {
+    **context,
+    "requestKey": request_key,
+    "validatorSha256": "5" * 64,
+}
+blocked = m.HeldHistoryProofBundle(
+    generation_context, generation_root, "dispatch", BlockingAuthority,
+)
+with patch.object(
+    m, "_proof_live_json",
+    side_effect=AssertionError("blocked generation reached GitHub"),
+), contextlib.redirect_stderr(io.StringIO()):
+    try:
+        blocked.collect_history_pages([
+            "repos/example/repo/actions/workflows/oci-live-data-rollout.yml/"
+            "runs?event=workflow_dispatch&branch=master&per_page=100",
+        ])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("active generation recreated a deleted proof")
+assert not blocked.path.exists()
+blocked.close()
+
+old_context = {**generation_context, "validatorSha256": "6" * 64}
+old = seeded(m.HeldHistoryProofBundle(old_context, generation_root, "dispatch"))
+old._load()
+old.commit()
+old_bytes = old.path.read_bytes()
+old.close()
+new_context = {**generation_context, "validatorSha256": "7" * 64}
+changed = m.HeldHistoryProofBundle(
+    new_context, generation_root, "dispatch", BlockingAuthority,
+)
+with patch.object(
+    m, "_proof_live_json",
+    side_effect=AssertionError("changed validator reached GitHub"),
+), contextlib.redirect_stderr(io.StringIO()):
+    try:
+        changed.collect_history_pages([
+            "repos/example/repo/actions/workflows/oci-live-data-rollout.yml/"
+            "runs?event=workflow_dispatch&branch=master&per_page=100",
+        ])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("active generation accepted a replacement validator proof")
+assert old.path.read_bytes() == old_bytes
+assert not changed.path.exists()
+changed.close()
+
+expired_root = Path(sys.argv[2]) / "held-history-expired-owner"
+expired_root.mkdir(mode=0o700)
+expired_time = server_time - dt.timedelta(
+    seconds=m.HELD_HISTORY_PROOF_TTL_SECONDS + 1,
+)
+expired = m.HeldHistoryProofBundle(
+    generation_context, expired_root, "dispatch",
+)
+expired._record_response(expired_time, 5000)
+expired._load()
+expired.commit()
+expired_bytes = expired.path.read_bytes()
+expired.close()
+owned_expired = seeded(m.HeldHistoryProofBundle(
+    generation_context, expired_root, "dispatch", BlockingAuthority,
+))
+with patch.object(
+    m, "_proof_live_json",
+    side_effect=AssertionError("expired owned proof reached GitHub"),
+), contextlib.redirect_stderr(io.StringIO()):
+    try:
+        owned_expired.prepare_history(
+            "example/repo", held, "f" * 40,
+            ".github/workflows/oci-live-data-rollout.yml", [row],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("active generation refreshed an expired proof")
+assert owned_expired.path.read_bytes() == expired_bytes
+owned_expired.close()
+
+real_authority = m._load_shared_authority(
+    "held_history_v1_record_authority",
+    "held-history v1 record helper is unavailable",
+)
+v1_root = Path(sys.argv[2]) / "held-history-v1-record"
+v1_root.mkdir(mode=0o700)
+v1_inputs = {"data_run_id": "20"}
+v1_input_hash = real_authority.canonical_input_hash(v1_inputs)
+v1_normalized = {
+    "schemaVersion": real_authority.NORMALIZED_SCHEMA,
+    "repository": "example/repo",
+    "operation": "oci-production-deploy",
+    "controlSha": "f" * 40,
+    "subjectSha": "f" * 40,
+    "targetSha": None,
+    "inputs": v1_inputs,
+    "dispatchInputs": v1_inputs,
+    "inputHash": v1_input_hash,
+    "displayTitleTemplate": "proof {control_sha}",
+    "subjectRelation": "current",
+    "targetRelation": "none",
+}
+v1_policy = {
+    "operation": "oci-production-deploy",
+    "workflow": "oci-production-deploy.yml",
+    "event": "workflow_dispatch",
+    "environment": "production-emergency",
+    "titleTemplate": "proof {control_sha}",
+}
+v1_request_key = real_authority.request_key(v1_normalized)
+v1_context = {
+    **context,
+    "requestKey": v1_request_key,
+    "validatorSha256": "b" * 64,
+}
+v1_proof = seeded(m.HeldHistoryProofBundle(v1_context, v1_root, "dispatch"))
+v1_proof._load()
+v1_proof.commit()
+v1_proof.close()
+v1_record = real_authority.build_dispatch_record(
+    v1_normalized,
+    v1_policy,
+    "example/repo",
+    1,
+    "c" * 40,
+    "42",
+    "https://github.com/example/repo/actions/runs/42",
+)
+real_authority.atomic_create(
+    real_authority.record_path(v1_root, "42"),
+    v1_record,
+)
+assert not real_authority.intent_path(v1_root, v1_request_key).exists()
+v1_materialization = m.HeldHistoryProofBundle(
+    v1_context, v1_root, "materialization", real_authority,
+)
+with patch.dict(
+    os.environ,
+    {"BETSTAN_BOUND_RECEIVER_RUN_ID": "42"},
+    clear=False,
+):
+    v1_materialization.preflight()
+v1_materialization.close()
+
+ordinary_root = Path(sys.argv[2]) / "held-history-ordinary-resume"
+ordinary_root.mkdir(mode=0o700)
+ordinary_normalized = {
+    **v1_normalized,
+    "operation": "oci-live-data-resume-deploy",
+}
+ordinary_policy = {
+    **v1_policy,
+    "operation": "oci-live-data-resume-deploy",
+    "workflow": "oci-live-data-rollout.yml",
+}
+ordinary_request_key = real_authority.request_key(ordinary_normalized)
+ordinary_context = {
+    **context,
+    "operation": "oci-live-data-resume-deploy",
+    "policy": {"operation": "oci-live-data-resume-deploy"},
+    "requestKey": ordinary_request_key,
+    "validatorSha256": "c" * 64,
+}
+ordinary_dispatch = m.HeldHistoryProofBundle(
+    ordinary_context, ordinary_root, "dispatch", real_authority,
+)
+ordinary_dispatch.preflight()
+assert ordinary_dispatch.context_path.exists()
+assert not ordinary_dispatch.path.exists()
+ordinary_dispatch.close()
+ordinary_record = real_authority.build_dispatch_record(
+    ordinary_normalized,
+    ordinary_policy,
+    "example/repo",
+    1,
+    "c" * 40,
+    "43",
+    "https://github.com/example/repo/actions/runs/43",
+)
+real_authority.atomic_create(
+    real_authority.record_path(ordinary_root, "43"),
+    ordinary_record,
+)
+ordinary_materialization = m.HeldHistoryProofBundle(
+    ordinary_context, ordinary_root, "materialization", real_authority,
+)
+with patch.dict(
+    os.environ,
+    {"BETSTAN_BOUND_RECEIVER_RUN_ID": "43"},
+    clear=False,
+):
+    ordinary_materialization.preflight()
+ordinary_materialization.close()
+
+class RacingAuthority:
+    def __init__(self, blocker):
+        self.blocker = blocker
+        self.active = False
+        self.claim_lock_entries = 0
+
+    @staticmethod
+    def canonical_input_hash(_inputs):
+        return input_hash
+
+    @staticmethod
+    def request_key(identity):
+        BlockingAuthority.request_key(identity)
+        return request_key
+
+    def find_blocking_authorities(self, _directory, identity):
+        self.request_key(identity)
+        return [self.blocker] if self.active else []
+
+    @contextlib.contextmanager
+    def repository_claim_lock(self, _directory):
+        self.claim_lock_entries += 1
+        yield
+
+for index, blocker in enumerate((
+    (f"intent:{request_key}", "prepared"),
+    ("42", "claimed"),
+)):
+    race_root = Path(sys.argv[2]) / f"held-history-publication-race-{index}"
+    race_root.mkdir(mode=0o700)
+    racing_authority = RacingAuthority(blocker)
+    race_context = {
+        **generation_context,
+        "validatorSha256": str(index + 1) * 64,
+    }
+    racing = seeded(m.HeldHistoryProofBundle(
+        race_context, race_root, "dispatch", racing_authority,
+    ))
+    racing._load()
+    racing_authority.active = True
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            racing.commit()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("active authority allowed late proof publication")
+    assert racing_authority.claim_lock_entries == 1
+    assert not racing.path.exists()
+    racing.close()
+
+deadline_root = Path(sys.argv[2]) / "held-history-deadline"
+deadline_root.mkdir(mode=0o700)
+clock = [100.0]
+with patch.object(m.time, "monotonic", side_effect=lambda: clock[0]):
+    deadline = m.HeldHistoryProofBundle(
+        {**context, "validatorSha256": "a" * 64},
+        deadline_root,
+        "dispatch",
+    )
+    deadline._record_response(server_time, 5000)
+    deadline._load()
+    clock[0] = deadline.expiry_deadline - 1
+    deadline.assert_unexpired_for_acceptance()
+    clock[0] = deadline.expiry_deadline
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            deadline.assert_unexpired_for_acceptance()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("monotonic proof deadline was accepted at expiry")
+deadline.close()
+
+delayed_response_root = Path(sys.argv[2]) / "held-history-delayed-response"
+delayed_response_root.mkdir(mode=0o700)
+clock = [200.0]
+with patch.object(m.time, "monotonic", side_effect=lambda: clock[0]):
+    delayed_response = m.HeldHistoryProofBundle(
+        {**context, "validatorSha256": "d" * 64},
+        delayed_response_root,
+        "dispatch",
+    )
+    delayed_response._record_response(server_time, 5000)
+    delayed_response._load()
+    delayed_response.reserve_requests(1)
+    response_time = delayed_response.expires_at - dt.timedelta(seconds=1)
+    clock[0] = delayed_response.expiry_deadline - 1
+
+    def deliver_after_expiry(path):
+        clock[0] = delayed_response.expiry_deadline + 1
+        payload = {"id": 1}
+        return payload, raw_record(path, payload), response_time, 4999
+
+    with patch.object(
+        m, "_proof_live_json", side_effect=deliver_after_expiry,
+    ), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            delayed_response._reserved_json("repos/example/repo/delayed")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("delayed response extended proof expiry")
+delayed_response.close()
+
+zero_call_root = Path(sys.argv[2]) / "held-history-zero-call-preflight"
+zero_call_root.mkdir(mode=0o700)
+policy_path = (
+    Path(sys.argv[1]).resolve().parents[3]
+    / "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+)
+resume_policy = json.loads(subprocess.check_output(
+    [str(policy_path), "get", "oci-live-data-resume-deploy"],
+    text=True,
+))
+resume_bindings = resume_policy["upstreamRunBindings"]
+assert any(
+    binding.get("runProfile") == "oci-failed-deploy-retained-hold-v1"
+    for binding in resume_bindings
+)
+resume_input_hash = "7" * 64
+resume_request_key = "6" * 64
+
+class ResumeBlockingAuthority:
+    @staticmethod
+    def canonical_input_hash(_inputs):
+        return resume_input_hash
+
+    @staticmethod
+    def request_key(identity):
+        assert identity == {
+            "repository": "example/repo",
+            "operation": "oci-live-data-resume-deploy",
+            "controlSha": "f" * 40,
+            "inputHash": resume_input_hash,
+        }
+        return resume_request_key
+
+    @staticmethod
+    def find_blocking_authorities(_directory, identity):
+        ResumeBlockingAuthority.request_key(identity)
+        return [("44", "claimed")]
+
+zero_call_bundle = m.HeldHistoryProofBundle(
+    {
+        **context,
+        "operation": "oci-live-data-resume-deploy",
+        "policy": resume_policy,
+        "bindings": resume_bindings,
+        "requestKey": resume_request_key,
+        "validatorSha256": "e" * 64,
+    },
+    zero_call_root,
+    "dispatch",
+    ResumeBlockingAuthority,
+)
+zero_call_args = SimpleNamespace(
+    repository="example/repo",
+    subject_sha="f" * 40,
+    runtime_mode="oke",
+    policy_json=json.dumps(resume_policy),
+    manifest="",
+    operation="oci-live-data-resume-deploy",
+    successor_run_id="",
+    held_history_file="",
+    baseline_dir="",
+    result_json="",
+)
+with patch.object(
+    m.HeldHistoryProofBundle, "maybe_create", return_value=zero_call_bundle,
+), patch.object(
+    m, "validate_binding",
+    side_effect=AssertionError("changed validator issued a GitHub call"),
+) as validate_call, contextlib.redirect_stderr(io.StringIO()):
+    try:
+        m._validate_all_bindings(
+            zero_call_args,
+            {"data_run_id": "20"},
+            resume_bindings,
+            set(),
+            "oci-live-data-resume-deploy",
+            SimpleNamespace(check_cancelled=lambda: None),
+            {},
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("changed validator passed active-generation preflight")
+assert validate_call.call_count == 0
+assert not zero_call_bundle.path.exists()
+assert not zero_call_bundle.context_path.exists()
+zero_call_bundle.close()
+
+class DelayedAcceptanceBundle:
+    def __init__(self):
+        self.expired = False
+
+    def commit(self):
+        pass
+
+    def assert_unexpired_for_acceptance(self):
+        if self.expired:
+            m.fail("held-history proof expired before acceptance")
+
+delayed = DelayedAcceptanceBundle()
+delayed_args = SimpleNamespace(
+    repository="example/repo",
+    subject_sha="f" * 40,
+    runtime_mode="oke",
+    policy_json=json.dumps({"operation": "oci-production-deploy"}),
+    manifest="",
+    operation="oci-production-deploy",
+    successor_run_id="",
+    held_history_file="",
+    baseline_dir="",
+    result_json="",
+)
+delayed_stdout = io.StringIO()
+
+def delay_past_expiry(*_args):
+    delayed.expired = True
+    return {"receiver": "delayed"}
+
+with patch.object(
+    m.HeldHistoryProofBundle, "maybe_create", return_value=delayed,
+), patch.object(
+    m, "validate_binding", return_value={},
+), patch.object(
+    m, "validate_receiver_handoff_timing", side_effect=delay_past_expiry,
+), contextlib.redirect_stdout(delayed_stdout), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        m._validate_all_bindings(
+            delayed_args,
+            {"data_run_id": "20"},
+            [{"input": "data_run_id"}],
+            set(),
+            "oci-production-deploy",
+            SimpleNamespace(check_cancelled=lambda: None),
+            {},
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("delayed receiver timing accepted an expired proof")
+assert delayed_stdout.getvalue() == ""
+print("held_history_raw_bundle=PASS cold_leaf_reads=14 replay_leaf_reads=0")
+PY
+ok "validator-owned raw held-history bundle replays, reserves actual quota and fails closed"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import base64
+import contextlib
+import copy
+import datetime as dt
+import hashlib
+import importlib.util
+import io
+import json
+import multiprocessing
+import os
+import re
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("held_history_processes", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+work = Path(sys.argv[2])
+root = work / "held-history-125"
+root.mkdir(mode=0o700)
+subject = "f" * 40
+server_time = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+context = {
+    "schemaVersion": m.HELD_HISTORY_PROOF_SCHEMA,
+    "repository": "example/repo",
+    "controlSha": subject,
+    "dispatchInputs": {"data_run_id": "10"},
+    "bindings": [{"input": "data_run_id", "workflow": "oci-live-data-rollout.yml"}],
+    "runtimeMode": "oke",
+    "operation": "oci-production-deploy",
+    "policy": {"operation": "oci-production-deploy"},
+    "validatorSha256": "1" * 64,
+    "authorityHelperSha256": "2" * 64,
+    "workflowInventorySha256": "3" * 64,
+}
+workflow = {
+    "id": 1,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "state": "disabled_manually",
+}
+held = {
+    "id": 10,
+    "workflow_id": 1,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "head_sha": subject,
+    "head_branch": "master",
+    "event": "workflow_dispatch",
+    "run_attempt": 1,
+    "status": "in_progress",
+    "conclusion": None,
+    "display_title": "oci-live-data apply-slip-index " + subject,
+    "created_at": "2025-12-30T00:00:00Z",
+    "run_started_at": "2025-12-30T00:00:00Z",
+    "updated_at": "2025-12-30T00:00:01Z",
+    "html_url": "https://github.com/example/repo/actions/runs/10",
+    "head_repository": {"full_name": "example/repo"},
+}
+candidates = []
+for offset in range(125):
+    run_id = 1000 + offset
+    source = f"{run_id:040x}"[-40:]
+    candidates.append({
+        "id": run_id,
+        "workflow_id": 1,
+        "path": ".github/workflows/oci-live-data-rollout.yml",
+        "head_sha": source,
+        "head_branch": "master",
+        "event": "workflow_dispatch",
+        "run_attempt": 1,
+        "status": "completed",
+        "conclusion": "cancelled",
+        "display_title": "oci-live-data apply-slip-index " + source,
+        "created_at": "2025-12-31T00:00:00Z",
+        "run_started_at": "2025-12-31T00:00:00Z",
+        "updated_at": "2025-12-31T00:00:02Z",
+        "html_url": f"https://github.com/example/repo/actions/runs/{run_id}",
+        "head_repository": {"full_name": "example/repo"},
+    })
+rows_by_id = {row["id"]: row for row in candidates}
+historical = {
+    "sha": "c3c9332f4b23b55de6c32ae2183b89478f97884f",
+    "content": "",
+}
+authority = SimpleNamespace(
+    validate_historical_unmaterialized_workflow=lambda *args, **kwargs: (None, "source"),
+    validate_strict_ancestor_compare=lambda *args: None,
+)
+dispatch_inputs = {
+    "confirmation": m.HELD_HANDOFF_CONFIRMATION,
+    "prerequisite_run_id": "20",
+    "failed_deploy_run_id": "21",
+    "held_handoff_source_sha": subject,
+}
+
+held_binding = {
+    "input": "held_handoff_run_id",
+    "workflow": "oci-live-data-rollout.yml",
+    "titleTemplates": {
+        "workflow_dispatch": "oci-live-data apply-slip-index {subject_sha}",
+    },
+    "artifactTemplate": "oci-live-data-rollout-{run_id}-1",
+    "expectedHeadShaInput": "held_handoff_source_sha",
+    "expectedConclusion": "success",
+    "runProfile": "oci-successful-held-handoff-v1",
+}
+
+def nonterminal_api(path):
+    if path.endswith("/actions/workflows/oci-live-data-rollout.yml"):
+        return workflow
+    if path.endswith("/actions/runs/10") or path.endswith("/actions/runs/10/attempts/1"):
+        return copy.deepcopy(held)
+    raise AssertionError(path)
+
+local_history_token = m.HISTORY_BUNDLE_CONTEXT.set(SimpleNamespace())
+try:
+    with patch.object(m, "gh_api", side_effect=nonterminal_api), \
+         patch.object(m, "validate_descendant_scope"), \
+         patch.object(m, "precollect_nonterminal_held_history") as precollect, \
+         contextlib.redirect_stderr(io.StringIO()):
+        try:
+            m.validate_binding(
+                "example/repo", held_binding, subject, "10",
+                dispatch_inputs, "oke",
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("nonterminal held producer was authorized")
+finally:
+    m.HISTORY_BUNDLE_CONTEXT.reset(local_history_token)
+precollect.assert_called_once()
+
+native_calls = []
+
+def native_nonterminal_api(path):
+    native_calls.append(path)
+    if path.endswith("/actions/workflows/oci-live-data-rollout.yml"):
+        return workflow
+    if path.endswith("/actions/runs/10"):
+        return copy.deepcopy(held)
+    raise AssertionError(f"native validation read past base status: {path}")
+
+native_error = io.StringIO()
+with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False), \
+     patch.object(m, "gh_api", side_effect=native_nonterminal_api), \
+     patch.object(m, "validate_descendant_scope"), \
+     patch.object(m, "precollect_nonterminal_held_history") as native_precollect, \
+     contextlib.redirect_stderr(native_error):
+    try:
+        m.validate_binding(
+            "example/repo", held_binding, subject, "10",
+            dispatch_inputs, "oke",
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("native nonterminal held producer was authorized")
+assert native_calls == [
+    "repos/example/repo/actions/workflows/oci-live-data-rollout.yml",
+    "repos/example/repo/actions/runs/10",
+]
+assert (
+    "held_handoff_run_id run 10 status is 'in_progress', expected 'completed'"
+    in native_error.getvalue()
+)
+native_precollect.assert_not_called()
+
+def record(path, payload, link=""):
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    headers = {
+        "date": "Thu, 01 Jan 2026 00:00:00 GMT",
+        "x-ratelimit-limit": "5000",
+        "x-ratelimit-remaining": "4000",
+        "x-ratelimit-used": "1000",
+        "x-ratelimit-reset": "1767229200",
+        "x-ratelimit-resource": "core",
+    }
+    if link:
+        headers["link"] = link
+    return {
+        "path": path,
+        "status": 200,
+        "headers": headers,
+        "bodyBase64": base64.b64encode(body).decode(),
+        "bodySha256": hashlib.sha256(body).hexdigest(),
+    }
+
+def fixture(producer, sink):
+    inventory = [producer, *candidates]
+
+    def live(path):
+        sink.append(path)
+        if re.search(
+            r"/actions/workflows/(?:oci-live-data-rollout\.yml|456)/runs\?",
+            "/" + path,
+        ):
+            query = path.split("?", 1)[1]
+            page = 2 if "page=2" in query else 1
+            selected = inventory[:100] if page == 1 else inventory[100:]
+            payload = {"total_count": len(inventory), "workflow_runs": selected}
+            link = ""
+            if page == 1:
+                link = (
+                    '<https://api.github.com/repositories/123/actions/workflows/'
+                    '456/runs?per_page=100&page=2>; rel="next"'
+                )
+        elif path.endswith("/actions/workflows/oci-live-data-rollout.yml"):
+            payload, link = workflow, ""
+        elif "/contents/" in path:
+            payload, link = historical, ""
+        else:
+            match = re.search(r"/actions/runs/([1-9][0-9]*)", path)
+            if match is None:
+                raise AssertionError(path)
+            run_id = int(match.group(1))
+            row = rows_by_id[run_id]
+            native = {**row, "head_repository": {"full_name": "example/repo"}}
+            if path.endswith("/attempts/1/jobs?per_page=100"):
+                payload = {
+                    "total_count": 1,
+                    "jobs": [{
+                        "id": run_id + 10000,
+                        "name": "rollout",
+                        "run_id": run_id,
+                        "run_attempt": 1,
+                        "head_sha": row["head_sha"],
+                        "head_branch": "master",
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "steps": [],
+                        "runner_id": None,
+                        "runner_name": None,
+                        "created_at": row["created_at"],
+                        "started_at": "2025-12-31T00:00:01Z",
+                        "completed_at": row["updated_at"],
+                    }],
+                }
+            elif path.endswith("/pending_deployments") or path.endswith("/approvals"):
+                payload = []
+            elif path.endswith("/artifacts?per_page=100"):
+                payload = {"total_count": 0, "artifacts": []}
+            elif path.endswith("/attempts/1") or path.endswith(f"/runs/{run_id}"):
+                payload = native
+            else:
+                raise AssertionError(path)
+            link = ""
+        return copy.deepcopy(payload), record(path, payload, link), server_time, 4000
+
+    return live
+
+missing_root = work / "held-history-post-provider-missing"
+missing_root.mkdir(mode=0o700)
+missing_calls = []
+missing = m.HeldHistoryProofBundle(context, missing_root, "materialization")
+with patch.object(m, "_proof_live_json", side_effect=fixture(held, missing_calls)), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        missing.collect_history_pages([(
+            "repos/example/repo/actions/workflows/"
+            "oci-live-data-rollout.yml/runs?per_page=100",
+            True,
+        )])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("post-provider history inventory recollected a missing bundle")
+missing.close()
+assert missing_calls == []
+
+calls = []
+first = m.HeldHistoryProofBundle(context, root, "dispatch")
+token = m.HISTORY_BUNDLE_CONTEXT.set(first)
+with patch.object(m, "_proof_live_json", side_effect=fixture(held, calls)), \
+     patch.object(m, "_load_shared_authority", return_value=authority), \
+     patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}), \
+     patch.object(m, "validate_descendant_scope"):
+    try:
+        m.precollect_nonterminal_held_history(
+            "example/repo", held, subject, dispatch_inputs, "nonterminal producer",
+        )
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(token)
+first.close()
+leaf_calls = [
+    path for path in calls
+    if re.search(
+        r"/actions/workflows/(?:oci-live-data-rollout\.yml|456)/runs\?",
+        "/" + path,
+    ) is None
+    and not path.endswith("/actions/workflows/oci-live-data-rollout.yml")
+]
+assert len(calls) == 1754
+assert len(leaf_calls) == 1750
+sealed_path = first.path
+sealed_bytes = sealed_path.read_bytes()
+
+terminal = dict(
+    held,
+    status="completed",
+    conclusion="success",
+    updated_at="2025-12-31T00:00:03Z",
+)
+process_context = multiprocessing.get_context("fork")
+
+def replay_after_terminal(boundary, result_queue):
+    replay_calls = []
+    bundle = m.HeldHistoryProofBundle(context, root, boundary)
+    replay_token = m.HISTORY_BUNDLE_CONTEXT.set(bundle)
+    try:
+        with patch.object(
+            m, "_proof_live_json", side_effect=fixture(terminal, replay_calls),
+        ), patch.object(
+            m, "_load_shared_authority", return_value=authority,
+        ), patch.object(
+            m, "held_raw_ancestry", return_value={"ancestor": True},
+        ), patch.object(m, "validate_descendant_scope"):
+            m.precollect_nonterminal_held_history(
+                "example/repo", terminal, subject, dispatch_inputs,
+                "terminal restart",
+            )
+        result_queue.put((len(replay_calls), sealed_path.read_bytes() == sealed_bytes))
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(replay_token)
+        bundle.close()
+
+for replay_boundary in (
+    "materialization", "approval-1", "approval-2", "approval-3",
+):
+    queue = process_context.Queue()
+    replay_process = process_context.Process(
+        target=replay_after_terminal,
+        args=(replay_boundary, queue),
+    )
+    replay_process.start()
+    replay_process.join(30)
+    assert replay_process.exitcode == 0
+    assert queue.get(timeout=5) == (4, True)
+
+contention_root = work / "held-history-process-contention"
+contention_root.mkdir(mode=0o700)
+contention_row = candidates[0]
+total_calls = process_context.Value("i", 0)
+contention_leaf_calls = process_context.Value("i", 0)
+barrier = process_context.Barrier(2)
+contention_queue = process_context.Queue()
+
+def contending_collector(result_queue):
+    def counted_live(path):
+        with total_calls.get_lock():
+            total_calls.value += 1
+        if not path.endswith("/actions/workflows/oci-live-data-rollout.yml"):
+            with contention_leaf_calls.get_lock():
+                contention_leaf_calls.value += 1
+        return fixture(held, [])(path)
+
+    bundle = m.HeldHistoryProofBundle(context, contention_root, "dispatch")
+    bundle._record_response(server_time, 4000)
+    barrier.wait()
+    try:
+        with patch.object(m, "_proof_live_json", side_effect=counted_live), \
+             patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}):
+            key = bundle.prepare_history(
+                "example/repo", held, subject,
+                ".github/workflows/oci-live-data-rollout.yml", [contention_row],
+            )
+            history_token = m.HISTORY_BUNDLE_CONTEXT.set(bundle)
+            try:
+                m._validate_cancelled_unstarted_history(
+                    "example/repo", contention_row, subject, authority,
+                    "process contention",
+                    ".github/workflows/oci-live-data-rollout.yml", key,
+                )
+            finally:
+                m.HISTORY_BUNDLE_CONTEXT.reset(history_token)
+            bundle.finish_history(key)
+        result_queue.put("ok")
+    finally:
+        bundle.close()
+
+processes = [
+    process_context.Process(target=contending_collector, args=(contention_queue,))
+    for _ in range(2)
+]
+for process in processes:
+    process.start()
+for process in processes:
+    process.join(30)
+    assert process.exitcode == 0
+assert [contention_queue.get(timeout=5) for _ in processes] == ["ok", "ok"]
+assert total_calls.value == 18
+assert contention_leaf_calls.value == 14
+
+crash_root = work / "held-history-crash-recovery"
+crash_root.mkdir(mode=0o700)
+
+def abandoned_collector():
+    bundle = m.HeldHistoryProofBundle(context, crash_root, "dispatch")
+    bundle.acquire_collection_lock()
+    os._exit(0)
+
+crashed = process_context.Process(target=abandoned_collector)
+crashed.start()
+crashed.join(10)
+assert crashed.exitcode == 0
+recovered = m.HeldHistoryProofBundle(context, crash_root, "dispatch")
+recovered._record_response(server_time, 4000)
+recovery_calls = []
+with patch.object(m, "_proof_live_json", side_effect=fixture(held, recovery_calls)), \
+     patch.object(m, "held_raw_ancestry", return_value={"ancestor": True}):
+    key = recovered.prepare_history(
+        "example/repo", held, subject,
+        ".github/workflows/oci-live-data-rollout.yml", [contention_row],
+    )
+    history_token = m.HISTORY_BUNDLE_CONTEXT.set(recovered)
+    try:
+        m._validate_cancelled_unstarted_history(
+            "example/repo", contention_row, subject, authority,
+            "crash recovery", ".github/workflows/oci-live-data-rollout.yml", key,
+        )
+    finally:
+        m.HISTORY_BUNDLE_CONTEXT.reset(history_token)
+    recovered.finish_history(key)
+recovered.close()
+assert len(recovery_calls) == 16
+print(
+    "held_history_process_hardening=PASS "
+    "rows=125 cold_leaf_reads=1750 restart_leaf_reads=0 "
+    "contended_leaf_reads=14"
+)
+PY
+ok "nonterminal 125-row precollection survives restart and process contention"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import argparse, contextlib, importlib.util, io, json, sys, threading, time
 from pathlib import Path
 from unittest.mock import patch

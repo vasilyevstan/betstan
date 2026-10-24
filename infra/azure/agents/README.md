@@ -399,9 +399,39 @@ first-attempt, guarded-source `apply-slip-index` run with one cancelled rollout,
 explicit empty steps and unassigned runner fields, and no pending gates, approvals
 or artifacts. Source identity/ancestry and endpoint-local chronology remain
 authenticated; terminalization after a successor's immutable cutoff cannot qualify.
-This portable no-execution proof needs no private authority directory and neither
-retires nor replays a local generation. Canonical cancellation and retirement keep
-their separate durable record and authorization requirements.
+For CLI-owned local validation, the validator seals the lossless raw responses
+for those terminal rows under the existing private authority root after a complete
+successful collection. After exact producer identity is established, dispatch may
+perform this non-authorizing precollection while that producer is still nonterminal;
+the completed prefix is sealed before the normal readiness or receiver-timing
+rejection. Dispatch, materialization and approval reparse and rerun the same semantic
+checks from those bytes instead of downloading the same immutable leaves again.
+The initial prefix and inclusive watermark never change. Rows first visible later
+are read live at every boundary and are never appended to the bundle. Every boundary
+still freshly reads the complete workflow inventories, brackets replay with workflow
+identity/state reads, requires every row to retain that bracketed workflow ID, and
+recomputes ancestry. A kernel-backed per-request collector lock permits only one
+local process to build the prefix and is released by process death. Publication also
+holds the canonical repository claim lock and rechecks that no intent or record
+generation became active during collection. Post-provider preflight binds the proof
+request key to the exact receiver record before any binding read; a retained prepared
+intent must match, while the frozen ordinary-v1 record-only post-bind representation
+remains valid. Dispatch also seals a small context sentinel for every profile that
+can conditionally enter held-history validation. An ordinary resume needs only that
+sentinel; a qualified held-history branch must additionally have the full proof
+bundle, while a changed validator has neither matching path and fails before reads.
+Missing, changed, inserted-before-cutoff, expired, corrupt or
+context-mismatched evidence fails closed; neither materialization nor approval falls
+back to collection after provider dispatch. Native GitHub Actions validation ignores
+the local bundle and performs the full live proof. Managed history pagination seeds
+one atomic request ledger from actual response `Date`, `X-RateLimit-Limit`,
+`Remaining`, `Used`, `Reset` and `Resource` headers before bracket or leaf fan-out;
+the ledger reserves pages, brackets and terminal leaves plus margin and never
+consults `/rate_limit`. Each request launch anchors a monotonic deadline to the
+trusted response `Date`; transport delay cannot extend expiry, which is rechecked
+immediately before result files or success output. This optimization neither retires
+nor replays a local generation. Canonical cancellation and retirement keep their
+separate durable record and authorization requirements.
 
 ### Frozen failed held-handoff continuation history
 
