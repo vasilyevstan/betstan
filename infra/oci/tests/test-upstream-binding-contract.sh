@@ -7346,6 +7346,10 @@ with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as i
     tracked_current_raw = tracked_current_source.encode()
     assert historical_response(cancelled_path, tracked_current_raw)["sha"] == \
         m.CURRENT_READER_WORKFLOW_BLOB
+    cancelled_responses[cancelled_source_endpoint] = historical_response(
+        cancelled_path, tracked_current_raw)
+    assert cancelled_history() == cancelled_proof
+    reset_cancelled()
     tracked_source = m.current_reader_workflow_v5(
         tracked_current_source, "cancelled historical fixture", inverse=True,
     ).encode()
