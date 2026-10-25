@@ -18,6 +18,12 @@ before acting; do not rely on stale conversation state or branch names.
 - Never commit or push directly to protected `dev` or `master`.
 - Immediately handle eligible CLI-owned approvals/merges at startup, resume, and checkpoints; never await a personal prompt.
   Check pending gates first; retain canonical authority, all technical gates, and human-origin approval rules.
+- When the user declares an urgent production critical path or orders process
+  reduction, `betstan-james-bond` is the mandatory scope watchdog. Keep no more
+  than three outcome steps. Do not start or retain a work unit unless it
+  directly advances the next step, satisfies an explicit mandatory rule, or
+  fixes concrete failing evidence. `BOND_KILL` means the exact optional unit
+  is declined or stopped and may not be reintroduced without new evidence.
 - Use the fixed quality chain: architect, three-model simplifier synthesis,
   developer, critic, test engineer, then final validator.
 - Record a documentation-impact assessment for every change. Register the

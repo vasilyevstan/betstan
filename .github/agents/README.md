@@ -131,6 +131,7 @@ operation whose required authority and safety evidence remain valid.
 | Repository entry point and irreversible rules | `.github/copilot-instructions.md` |
 | Quality chain, handoffs, and statuses | This README |
 | Watchdog and recovery behavior | `betstan-conductor.agent.md` |
+| Critical-path scope admission and process killing | `betstan-james-bond.agent.md` |
 | Simplifier pass and synthesis decisions | `betstan-simplifier.agent.md` |
 | PR evidence structure | `.github/pull_request_template.md` |
 | Branch, approval, and contribution policy | `CONTRIBUTING.md` |
@@ -172,6 +173,12 @@ dependencies, an exact private runtime reference, repository provenance when
 applicable, a progress signal, a checkpoint, a next-check trigger, and a stop
 condition. Keep those references in private session handoffs, not repository
 files or public reports.
+
+When the user declares an urgent production critical path or orders process
+reduction, invoke `betstan-james-bond` before registering any additional unit.
+Its admission decision cannot add work. `BOND_KILL` requires the conductor to
+decline or stop the exact optional unit while preserving mandatory technical
+safeguards and the existing delivery owner.
 
 The conductor monitors completion events and bounded checkpoints rather than
 tight-polling. A still-running `gh run watch` is notification transport, not
@@ -488,6 +495,7 @@ Required invariants:
 | Agent | Status |
 |---|---|
 | Conductor | `ORCHESTRATION_HEALTHY`, `ATTENTION_REQUIRED`, `BLOCKED`, `ORCHESTRATION_COMPLETE` |
+| James Bond | `BOND_CLEAR`, `BOND_KILL`, `BOND_BLOCKED` |
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
 | UX/UI expert | `UX_SPEC_READY`, `UX_REVIEW_PASSED`, `UX_CHANGES_REQUIRED`, `UX_CLARIFICATION_NEEDED` |
 | Developer gate | `IMPLEMENTED_LOCAL`, `BLOCKED` |
