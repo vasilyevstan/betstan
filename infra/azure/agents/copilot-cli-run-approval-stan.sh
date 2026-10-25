@@ -99,7 +99,6 @@ mkdir -m 700 "$bytes_dir"
 exec 9<"$bytes_dir"
 unset BETSTAN_APPROVAL_BYTES_OWNER BETSTAN_BINDING_BYTES_CACHE_DIR
 unset BETSTAN_BINDING_COMMAND_OWNER BETSTAN_BINDING_BOUNDARY BETSTAN_BOUND_RECEIVER_RUN_ID
-binding_revalidation_count=0
 run_file="$tmp_dir/run.json"
 pending_file="$tmp_dir/pending.json"
 jobs_file="$tmp_dir/jobs.json"
@@ -419,8 +418,15 @@ revalidate_control() {
 # reuses the shared validator and the same policy definition the dispatcher
 # uses, so there is no third implementation to drift.
 revalidate_upstream_bindings() {
+  local boundary="${1:-}"
   local operation subject_sha dispatch_inputs policy_json bindings
   local bound_mode authoritative_mode environment requires_mode
+  if [[ -n "$boundary" ]]; then
+    case "$boundary" in
+      approval-1|approval-3) ;;
+      *) fail "internal binding proof boundary is invalid" ;;
+    esac
+  fi
 
   operation="$(jq -r '.operation // ""' <<<"$record_summary")"
   [[ -n "$operation" ]] ||
@@ -466,9 +472,9 @@ revalidate_upstream_bindings() {
       fail "held-handoff exclusion requires this exact bound dispatch authority"
     continuation_args=(--successor-run-id "$authority_run_id")
   fi
-  binding_revalidation_count=$(( ${binding_revalidation_count:-0} + 1 ))
+  [[ -n "$boundary" ]] || return 0
   BETSTAN_APPROVAL_BYTES_OWNER="$$" BETSTAN_BINDING_COMMAND_OWNER="$$" \
-  BETSTAN_BINDING_BOUNDARY="approval-$binding_revalidation_count" \
+  BETSTAN_BINDING_BOUNDARY="$boundary" \
   BETSTAN_BOUND_RECEIVER_RUN_ID="$RUN_ID" "$BINDING_VALIDATOR" validate-all \
     --repository "$repository" \
     --policy-json "$policy_json" \
@@ -1105,7 +1111,17 @@ validate_pending_gate --allow-approved-wait
 validate_exclusivity
 revalidate_control
 validate_promotion
-revalidate_upstream_bindings
+if [[ "$ACTION" = "--approve" &&
+  "${COPILOT_CLI_AUTO_APPROVE:-}" = "true" &&
+  "$gate_can_approve" = true ]]; then
+  # An actionable automatic approval defers its one full prerequisite proof
+  # until the exact durable approval claim exists.
+  revalidate_upstream_bindings
+else
+  # Observation, eligibility-only and non-approvable routes run one fixed
+  # proof before returning ELIGIBLE or WAIT.
+  revalidate_upstream_bindings approval-1
+fi
 
 if [[ "$gate_can_approve" = false ]]; then
   # Observation only: no new claim or POST, and no success-shaped ELIGIBLE
@@ -1174,7 +1190,7 @@ claimed_version="$(
 
 if ! approval_revalidation_error="$(
   {
-    revalidate_upstream_bindings &&
+    revalidate_upstream_bindings approval-3 &&
       validate_promotion &&
       validate_exclusivity &&
       validate_pending_gate &&

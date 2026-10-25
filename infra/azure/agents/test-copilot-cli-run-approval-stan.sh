@@ -29,9 +29,12 @@ for node in tree.body:
         break
 assert boundaries is not None
 assert {"approval-1", "approval-2", "approval-3"} <= boundaries
-assert "binding_revalidation_count=$(( ${binding_revalidation_count:-0} + 1 ))" in approval_text
-assert 'BETSTAN_BINDING_BOUNDARY="approval-$binding_revalidation_count"' in approval_text
-print("three_approval_boundaries_share_sealed_history_proof=PASS")
+assert "binding_revalidation_count" not in approval_text
+assert 'BETSTAN_BINDING_BOUNDARY="$boundary"' in approval_text
+assert "revalidate_upstream_bindings approval-1" in approval_text
+assert "revalidate_upstream_bindings approval-3" in approval_text
+assert "revalidate_upstream_bindings approval-2" not in approval_text
+print("route_specific_approval_boundaries_share_sealed_history_proof=PASS")
 PY
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-approval-test.XXXXXX")"
@@ -1916,10 +1919,13 @@ gh() {
   shift
   if [[ -n "${STUB_BINDING_TRACE:-}" &&
         -n "${BETSTAN_APPROVAL_BYTES_OWNER:-}" ]]; then
+    local claim_state=issued
+    authority_is_inflight && claim_state=inflight
     case "$endpoint" in
       "repos/$REPOSITORY/actions/runs/41")
-        printf 'read\t%s\t%s\t%s\n' "$BETSTAN_BINDING_BOUNDARY" \
-          "$BETSTAN_APPROVAL_BYTES_OWNER" "$PPID" >>"$STUB_BINDING_TRACE"
+        printf 'read\t%s\t%s\t%s\t%s\n' "$BETSTAN_BINDING_BOUNDARY" \
+          "$BETSTAN_APPROVAL_BYTES_OWNER" "$PPID" "$claim_state" \
+          >>"$STUB_BINDING_TRACE"
         if [[ "${STUB_DRIFT_AT_BOUNDARY:-}" = "$BETSTAN_BINDING_BOUNDARY" ]]; then
           binding_run_json 41 | jq '.run_attempt=2'
           return
@@ -1930,8 +1936,9 @@ gh() {
         fi
         ;;
       "repos/$REPOSITORY/actions/artifacts/9041/zip")
-        printf 'zip\t%s\t%s\t%s\n' "$BETSTAN_BINDING_BOUNDARY" \
-          "$BETSTAN_APPROVAL_BYTES_OWNER" "$PPID" >>"$STUB_BINDING_TRACE" ;;
+        printf 'zip\t%s\t%s\t%s\t%s\n' "$BETSTAN_BINDING_BOUNDARY" \
+          "$BETSTAN_APPROVAL_BYTES_OWNER" "$PPID" "$claim_state" \
+          >>"$STUB_BINDING_TRACE" ;;
     esac
   fi
 
@@ -2377,7 +2384,7 @@ for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-d
             "record_summary=" + shlex.quote(json.dumps({**base, "runId": record_id})),
             "authority_run_id=" + shlex.quote(authority_id),
             "RUN_ID=" + shlex.quote(requested_id), "authority_mode=" + shlex.quote(mode),
-            "run_id=999", body, "revalidate_upstream_bindings",
+            "run_id=999", body, "revalidate_upstream_bindings approval-3",
         ))
         result = subprocess.run(["bash"], input=setup.encode(), capture_output=True)
         if (record_id, authority_id, requested_id, mode) == (901, "901", "901", "dispatch-record"):
@@ -4060,49 +4067,114 @@ jq -e --argjson run_id "$STUB_RUN_ID" \
 unset STUB_GHOST_WORKFLOW_ID STUB_GHOST_PATH
 echo "prepared_v2_approval_consumer_activation_tests=PASS"
 unset STUB_GHOST_DIR STUB_GHOST_ID
-three_fresh_run_id=14000
-for boundary in none approval-1 approval-2 approval-3 interrupt; do
-  three_fresh_run_id=$((three_fresh_run_id + 1))
-  authority_dir="$tmp_dir/three-fresh-authority-$boundary"
-  make_record oci-production-deploy "$three_fresh_run_id"
-  load_record_stub oci-production-deploy "$three_fresh_run_id"
-  trace="$tmp_dir/three-fresh-$boundary.tsv"
-  : >"$trace"
-  before="$(cat "$post_count_file")"
-  drift="$boundary"
-  interrupt=""
-  [[ "$boundary" != none ]] || drift=""
-  if [[ "$boundary" = interrupt ]]; then drift=""; interrupt=approval-2; fi
-  if STUB_BINDING_TRACE="$trace" STUB_DRIFT_AT_BOUNDARY="$drift" \
-    STUB_INTERRUPT_AT_BOUNDARY="$interrupt" BETSTAN_BINDING_BOUNDARY=caller-forged \
-    BETSTAN_BINDING_BYTES_CACHE_DIR="$tmp_dir/caller-cache-must-not-exist" \
-    COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve \
-      >"$output_file" 2>"$error_file"; then
-    [[ "$boundary" = none ]] || {
-      echo "fresh approval boundary drift or interruption was accepted: $boundary" >&2; exit 1;
-    }
-    grep -qF status=APPROVED "$output_file"
-    [[ "$(cat "$post_count_file")" = "$((before + 1))" ]]
-  else
-    [[ "$boundary" != none ]] || { cat "$error_file" >&2; exit 1; }
-    [[ "$(cat "$post_count_file")" = "$before" ]]
-    ! grep -qF status=APPROVED "$output_file"
-  fi
-  python3 - "$trace" "$boundary" "${TMPDIR:-/tmp}" "$tmp_dir/caller-cache-must-not-exist" <<'PY'
+approval_proof_run_id=14000
+assert_proof_trace() {
+  python3 - "$1" "$2" "$3" "${TMPDIR:-/tmp}" \
+    "$tmp_dir/caller-cache-must-not-exist" <<'PY'
 from pathlib import Path
 import sys
-trace, boundary, temporary, caller = sys.argv[1:]
+
+trace, boundary, claim_state, temporary, caller = sys.argv[1:]
 rows = [line.split("\t") for line in Path(trace).read_text().splitlines()]
 reads = [row for row in rows if row[0] == "read"]
-count = 3 if boundary == "none" else 2 if boundary == "interrupt" else int(boundary[-1])
-assert [row[1] for row in reads] == [f"approval-{n}" for n in range(1, count + 1)], rows
+assert [row[1] for row in reads] == [boundary], rows
+assert all(row[1] != "approval-2" for row in rows), rows
 assert len({row[2] for row in reads}) == 1, "approval command owner drifted"
-assert len({row[3] for row in reads}) == count, "validators were not separate processes"
-if boundary == "none":
-    assert len([row for row in rows if row[0] == "zip"]) == 1, rows
-assert not list(Path(temporary).glob("betstan-cli-approval.*")), "private command workspace leaked"
+assert len({row[3] for row in reads}) == 1, "approval proof was not one process"
+assert [row[4] for row in reads] == [claim_state], rows
+assert not list(Path(temporary).glob("betstan-cli-approval.*")), \
+    "private command workspace leaked"
 assert not Path(caller).exists(), "caller selected the byte workspace"
 PY
-done
-echo "approval_three_fresh_processes_authenticated_byte_reuse_drift_and_interrupt_cleanup=PASS"
+}
+
+# Observation performs one fixed approval-1 proof before ELIGIBLE and never
+# claims or posts, even when the caller tries to select a boundary or cache.
+approval_proof_run_id=$((approval_proof_run_id + 1))
+authority_dir="$tmp_dir/approval-proof-authority-observation"
+make_record oci-production-deploy "$approval_proof_run_id"
+load_record_stub oci-production-deploy "$approval_proof_run_id"
+trace="$tmp_dir/approval-proof-observation.tsv"
+: >"$trace"
+before="$(cat "$post_count_file")"
+STUB_BINDING_TRACE="$trace" BETSTAN_BINDING_BOUNDARY=caller-forged \
+BETSTAN_BINDING_BYTES_CACHE_DIR="$tmp_dir/caller-cache-must-not-exist" \
+COPILOT_CLI_AUTO_APPROVE=false run_approver "$STUB_RUN_ID" \
+  >"$output_file" 2>"$error_file"
+grep -qF status=ELIGIBLE "$output_file"
+[[ "$(cat "$post_count_file")" = "$before" ]]
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+assert_proof_trace "$trace" approval-1 issued
+
+# An actionable automatic approval skips approval-1/approval-2, claims first,
+# runs one approval-3 proof, and then performs exactly one POST.
+approval_proof_run_id=$((approval_proof_run_id + 1))
+authority_dir="$tmp_dir/approval-proof-authority-actionable"
+make_record oci-production-deploy "$approval_proof_run_id"
+load_record_stub oci-production-deploy "$approval_proof_run_id"
+trace="$tmp_dir/approval-proof-actionable.tsv"
+: >"$trace"
+before="$(cat "$post_count_file")"
+STUB_BINDING_TRACE="$trace" BETSTAN_BINDING_BOUNDARY=caller-forged \
+BETSTAN_BINDING_BYTES_CACHE_DIR="$tmp_dir/caller-cache-must-not-exist" \
+COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve \
+  >"$output_file" 2>"$error_file"
+grep -qF status=APPROVED "$output_file"
+[[ "$(cat "$post_count_file")" = "$((before + 1))" ]]
+jq -e '.state == "consumed" and .inflightApproval == null and
+  (.approvals | length) == 1' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+assert_proof_trace "$trace" approval-3 inflight
+
+# Approval-3 drift releases this exact claim to its prior state and cannot POST.
+approval_proof_run_id=$((approval_proof_run_id + 1))
+authority_dir="$tmp_dir/approval-proof-authority-drift"
+make_record oci-production-deploy "$approval_proof_run_id"
+load_record_stub oci-production-deploy "$approval_proof_run_id"
+trace="$tmp_dir/approval-proof-drift.tsv"
+: >"$trace"
+before="$(cat "$post_count_file")"
+if STUB_BINDING_TRACE="$trace" STUB_DRIFT_AT_BOUNDARY=approval-3 \
+  BETSTAN_BINDING_BOUNDARY=caller-forged \
+  BETSTAN_BINDING_BYTES_CACHE_DIR="$tmp_dir/caller-cache-must-not-exist" \
+  COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve \
+    >"$output_file" 2>"$error_file"; then
+  echo "approval-3 binding drift was accepted" >&2
+  exit 1
+fi
+[[ "$(cat "$post_count_file")" = "$before" ]]
+! grep -qF status=APPROVED "$output_file"
+jq -e '.state == "issued" and .inflightApproval == null and
+  (.approvals | length) == 0' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+assert_proof_trace "$trace" approval-3 inflight
+
+# A process interruption during approval-3 preserves the durable inflight
+# record for ordinary reconciliation and cannot POST.
+approval_proof_run_id=$((approval_proof_run_id + 1))
+authority_dir="$tmp_dir/approval-proof-authority-interrupt"
+make_record oci-production-deploy "$approval_proof_run_id"
+load_record_stub oci-production-deploy "$approval_proof_run_id"
+trace="$tmp_dir/approval-proof-interrupt.tsv"
+: >"$trace"
+before="$(cat "$post_count_file")"
+if STUB_BINDING_TRACE="$trace" STUB_INTERRUPT_AT_BOUNDARY=approval-3 \
+  BETSTAN_BINDING_BOUNDARY=caller-forged \
+  BETSTAN_BINDING_BYTES_CACHE_DIR="$tmp_dir/caller-cache-must-not-exist" \
+  COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve \
+    >"$output_file" 2>"$error_file"; then
+  echo "approval-3 interruption was accepted" >&2
+  exit 1
+fi
+[[ "$(cat "$post_count_file")" = "$before" ]]
+jq -e '.state == "inflight" and .inflightApproval != null and
+  (.approvals | length) == 0' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+assert_proof_trace "$trace" approval-3 inflight
+COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --reconcile \
+  >"$output_file" 2>"$error_file"
+grep -qF status=RETRY_READY "$output_file"
+[[ "$(cat "$post_count_file")" = "$before" ]]
+jq -e '.state == "issued" and .inflightApproval == null and
+  (.approvals | length) == 0' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+
+echo "approval_route_proofs_claim_order_drift_interrupt_and_cleanup=PASS"
 echo "copilot_cli_run_approval_tests=PASS"

@@ -713,9 +713,15 @@ or an unfinished successor still scans full current history and authenticates
 consumed-owner authority. Missing records never prove
 absence; incomplete inventories, unresolved authority or dispatch, reruns and
 unexplained history block admission. Current receiver absence and production
-exclusivity must be freshly established at dispatch, materialization, all three
-approval revalidations and immediately before physical transfer; only the exact
-authenticated owned successor may be excluded.
+exclusivity must be freshly established at dispatch, materialization, the
+route-specific approval proof and immediately before physical transfer; only
+the exact authenticated owned successor may be excluded. Observation uses one
+fixed `approval-1` proof before `ELIGIBLE` or `WAIT`. An initially actionable
+automatic approval instead uses one fixed `approval-3` proof after its durable
+claim and before final mutable checks and POST. Physical transfer reuses the
+initial same-job authenticated history result while refreshing mutable
+control, runtime and CAS evidence; it performs no second historical provider
+read.
 
 Validation may reuse verified immutable artifact ZIP, exact source and bounded
 raw Git commit-object bytes, never admission or ancestry verdicts or mutable
@@ -734,11 +740,15 @@ marker; a branch that qualifies for held-history reuse must also have the full s
 bundle. Because both paths include the validator digest, a changed validator rejects
 before any binding API read. Native GitHub Actions validation remains an independent
 full live collection.
-Current source,
-workflow/policy identity and state, run status/attempt, complete artifact
-inventory, ownership and expiry, authority state, pending gates, exclusivity
-and receiver absence remain fresh at every authority boundary. After serial
-input checks, binding coordinators remain `min(4, original_binding_count)`.
+Current source and workflow/policy identity and state, authority state,
+pending gates, exclusivity, receiver/runtime snapshots and CAS evidence are
+refreshed at their mutation-relevant boundaries. Provider run status/attempt,
+complete artifact inventory, ownership and expiry are freshly validated at
+dispatch, materialization and the route-specific approval proof.
+Physical transfer reuses that initial same-job authenticated history result
+while refreshing mutable control, exclusivity, receiver/runtime and CAS
+evidence immediately before mutation. After serial input checks, binding
+coordinators remain `min(4, original_binding_count)`.
 Each authentic native `gh` read window allows at most four children under one
 shared `min(16, 4 * original_binding_count)` budget across JSON, paginated and
 binary reads, including every retry attempt. Existing independent workflow-history
@@ -764,13 +774,17 @@ cleanup or atomic late-entry-safe retirement and exactly-once release.
 Main-thread interruption requests cancellation before pool joins; all native
 children are drained and reaped, with permits restored before exit. All binding
 results join before complete-map chronology, dependency checks or acceptance.
-The three approval revalidations remain sequential fresh processes. At each one,
-the validator freshly enumerates complete protected-workflow history, brackets
-the replay with workflow identity/state observations, recomputes raw ancestry,
-and validates any row first visible at or after the inclusive bundle watermark
-from live responses. The first complete prefix and inclusive watermark are immutable:
-later rows are never appended or reused and therefore remain live at materialization
-and every approval. Local dispatch may seal this non-authorizing prefix after exact
+Each approval route has one fresh proof process. Observation runs fixed
+`approval-1` before `ELIGIBLE` or `WAIT`; an initially actionable automatic
+approval skips that observation proof and fixed `approval-2`, persists its
+exact claim, then runs fixed `approval-3` before final mutable checks and POST.
+At that route-specific proof, the validator freshly enumerates complete
+protected-workflow history, brackets the replay with workflow identity/state
+observations, recomputes raw ancestry, and validates any row first visible at
+or after the inclusive bundle watermark from live responses. The first
+complete prefix and inclusive watermark are immutable: later rows are never
+appended or reused and therefore remain live at materialization and the
+route-specific approval proof. Local dispatch may seal this non-authorizing prefix after exact
 producer identity while the producer is still nonterminal, before returning the
 ordinary readiness rejection. A kernel-backed per-request collector lock prevents
 duplicate local processes from repeating the cold scan and releases automatically
@@ -907,7 +921,7 @@ existing artifact, authority or lease is converted or extended.
 | Packaging | 120 | 120 | 300 |
 | Admission | 180 | 600 | 1,500 |
 | Queue/materialization allowance | 120 | 120 | 300 |
-| Approval, including three fresh validations | 240 | 1,200 | 2,400 |
+| Approval, including one route-specific fresh validation | 240 | 1,200 | 2,400 |
 | Independent native validation | 180 | 480 | 1,200 |
 | Startup/snapshot | 240 | 360 | 600 |
 | Verification through actual receiver renewal | 120 | 120 | 300 |
@@ -924,8 +938,8 @@ deployment durations remain 14,400 and 10,800 seconds respectively. Only after
 all validations pass does the receiver renew the exact transferred lock to the
 existing 10,800-second deployment lease.
 
-At dispatch, materialization, each of the three approval revalidations and
-native receiving boundaries, remaining time
+At dispatch, materialization, the route-specific approval proof and native
+receiving boundaries, remaining time
 must be strictly greater than the unfinished-path bound plus that reserve.
 The bound shrinks only as this fresh receiving path advances; it is not an
 admission deadline for the expired producer used as retained evidence.
@@ -949,12 +963,12 @@ and strictly more than 600 seconds of reserve using full clock precision.
 
 Packaging and whole-run success, admission, queue/materialization, approval,
 native validation/startup/snapshot, and actual receiver verification and
-exact-owner renewal are included. All seven full native validations remain:
-two dispatch-admission checks, one materialization check, three sequential
-approval revalidations and one independent receiver validation, plus two direct
-timing prefixes. Complete positive-cost, source-bound pre-arm qualification must
-also cover shell, control, POST and provider costs before the new continuation
-is armed. No cache or proof elision substitutes for those checks.
+exact-owner renewal are included. All five full native validations remain: two
+dispatch-admission checks, one materialization check, one route-specific
+approval proof and one independent receiver validation, plus two direct timing
+prefixes. Complete positive-cost, source-bound pre-arm qualification must also
+cover shell, control, POST and provider costs before the new continuation is
+armed. No caller cache or proof elision substitutes for those checks.
 Renewal has no acquire fallback, and its acknowledgement and live lock must
 confirm the exact owner, source, generation
 and operation duration before acceptance. Configured ceilings, fixtures or a

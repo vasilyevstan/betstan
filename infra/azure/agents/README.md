@@ -510,7 +510,11 @@ while the authenticated continuation inputs remain fixed. Keep all readers and
 the bytecode-safe import behavior forward-only after reliance, or replace them
 through another reviewed forward correction.
 
-Fresh physical admission precedes snapshot-bound release and `acquire-released`.
+Fresh physical admission precedes snapshot-bound release and
+`acquire-released`. Physical transfer reuses the authenticated history result
+produced by the initial same-job validation; it does not repeat policy lookup
+or historical provider validation there. It still refreshes mutable control,
+runtime and CAS evidence immediately before transfer.
 Checksummed transition evidence distinguishes unconfirmed and confirmed results;
 an ambiguous response or partial transfer stops without replay or fallback
 acquisition, retaining maintenance. The successor executes the full data phase and
@@ -691,15 +695,20 @@ is proven. Automatic migration recovery requires the exact failed
 `oci-migrate` run ID and its consumed CLI authority receipt. Scheduled
 recovery and capacity runs have no record and cannot enter automatic approval.
 
-The approver rechecks current master, promotion authority, workflow ID/path
-and Git blob, first attempt, exact title/event/environment, pending job,
-current-user approval capability, record input hash, historical ancestry, and
-production exclusivity before it reports `ELIGIBLE`. For infrastructure
-finalization it also revalidates the complete paginated artifact inventory,
-current first-attempt identity, exact GHCR build-to-package-validation binding,
-and chronological build -> validation -> k3s capacity chain both before and
-after the local approval claim. One record can acknowledge multiple sequential gates
-on the same exact run and explicitly allowed downstream recovery. Each exact
+The approver's lightweight checks recheck current master, promotion authority,
+workflow ID/path and Git blob, first attempt, exact title/event/environment,
+pending job, current-user approval capability, record input hash and production
+exclusivity. An observation route runs exactly one fixed `approval-1` full
+proof before it reports `ELIGIBLE` or `WAIT`. An initially actionable automatic
+approval skips `approval-1` and `approval-2`, repeats all lightweight checks
+under the authority lock, persists the exact claim, and runs exactly one fixed
+`approval-3` full proof before final mutable checks and the GitHub POST. The
+route-specific full proof revalidates historical ancestry and, for
+infrastructure finalization, the complete paginated artifact inventory, current
+first-attempt identity, exact GHCR build-to-package-validation binding, and
+chronological build -> validation -> k3s capacity chain. One record can
+acknowledge multiple sequential gates on the same exact run and explicitly
+allowed downstream recovery. Each exact
 run/environment/waiting-job-set fingerprint is receipted once, so a later job
 may reuse the same environment without replaying an earlier gate. An ambiguous
 GitHub POST leaves an `inflight` claim and must not be replayed automatically.
@@ -719,13 +728,14 @@ human-consent request. The caller owns subsequent observations and the
 existing fifteen-minute no-progress checkpoint; no wait result authorizes
 redispatch, cancellation, rerun, or workflow enablement.
 
-Immediately after persisting the local `inflight` claim, the approver
-revalidates current master, workflow blob/state, and promotion authority. If
-authority changed, it releases the exact claim to its previous
-`issued`/`consumed` state and makes no GitHub POST. Production exclusivity also
-fails closed unless each active-run API response is a complete object with a
-nonnegative integer `total_count`, a `workflow_runs` array, exact count/list
-agreement, and no more than the requested 100 results.
+Immediately after persisting the local `inflight` claim, the actionable route
+runs its fixed `approval-3` full proof, then revalidates current master,
+workflow blob/state, promotion authority, production exclusivity and the exact
+claimed gate. If any authority changed, it releases the exact claim to its
+previous `issued`/`consumed` state and makes no GitHub POST. Production
+exclusivity also fails closed unless each active-run API response is a complete
+object with a nonnegative integer `total_count`, a `workflow_runs` array, exact
+count/list agreement, and no more than the requested 100 results.
 Reconcile it by observing the exact run again:
 
 ```bash
