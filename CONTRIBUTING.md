@@ -284,13 +284,16 @@ subject SHA, permitted event, exact event-specific title, current run attempt 1,
 successful completion, and a unique unexpired non-empty artifact. The dispatcher
 runs it on fresh dispatch and both resume paths before enabling a workflow or
 issuing authority; the workflow runs it from a checked-in manifest proven
-equivalent to the same policy, before any cloud access or mutation; and the
-approver runs it again immediately before the inflight claim and once more
-after the claim but before the GitHub approval call, releasing the claim and
-leaving issued authority intact if any binding drifted. This ordering is mandatory because protected authority is
-one-use: a prerequisite discovered mid-run would otherwise consume the authority
-for that master SHA permanently, and recovery would require promoting a new
-hardened SHA.
+equivalent to the same policy, before any cloud access or mutation. An
+observation route runs exactly one fixed `approval-1` full proof before
+`ELIGIBLE` or `WAIT`. An initially actionable automatic approval retains all
+lightweight checks, takes its durable claim, then runs exactly one fixed
+`approval-3` full proof before the final mutable checks and GitHub approval
+call, releasing that exact claim and leaving issued authority intact if any
+binding drifted. This ordering is mandatory because protected authority is
+one-use: a prerequisite discovered mid-run would otherwise consume the
+authority for that master SHA permanently, and recovery would require
+promoting a new hardened SHA.
 
 Current OCI data and deployment authority also requires the exact
 canonical-checksummed `k3s-release-disk-checkpoint.v1` artifact. The k3s shape
