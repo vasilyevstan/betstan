@@ -135,7 +135,7 @@ HANDOFF_V5_LEASE_EXPRESSION = (
     "${{ inputs.held_handoff_run_id != '0' && "
     "inputs.held_handoff_run_id != '' && '7200' || '1800' }}"
 )
-CURRENT_READER_WORKFLOW_BLOB = "2399c672ed5022358880692925870690b203b532"
+CURRENT_READER_WORKFLOW_BLOB = "2900c649bdb3b529d357a4df274482295695c8cd"
 CURRENT_READER_AUTHORITY_BLOB = "b587fa03960422a0a73e3dd65b955a3a716c5480"
 CURRENT_READER_VERIFIER_BLOB = "4f1ade3b89dcdc6a736bd8a371f66ccf06f9bd63"
 CURRENT_READER_WORKFLOW_V5_EDITS = (
@@ -147,6 +147,99 @@ CURRENT_READER_WORKFLOW_V5_EDITS = (
     (
         "resume_schema=live-betting-data-resume-v4",
         "resume_schema=live-betting-data-resume-v5",
+    ),
+    (
+        r"""                policy_json="$(
+                  ./infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh \
+                    get oci-live-data-continue-held-handoff
+                )"
+                ./infra/oci/scripts/upstream_run_binding_stan.py validate-all \
+                  --repository "$REPO" --policy-json "$policy_json" \
+                  --subject-sha "$SOURCE_SHA" --dispatch-inputs "$DISPATCH_INPUTS" \
+                  --runtime-mode "$OCI_RUNTIME_MODE" --successor-run-id "$GITHUB_RUN_ID" \
+                  --result-json "$transfer_dir/upstream-result.json"
+                services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
+                deployments=()
+                for service in "${services[@]}"; do deployments+=("gaming-${service}-depl"); done
+                kubectl get deployment "${deployments[@]}" -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/deployments.json"
+                kubectl get pods -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/pods.json"
+                kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/lock.json"
+                python3 - "$snapshot" "$transfer_dir" "$OCI_K8S_NAMESPACE" \
+                  "$HELD_HANDOFF_RUN_ID" "$HELD_HANDOFF_SOURCE_SHA" "$GITHUB_RUN_ID" "$SOURCE_SHA" <<'PY'
+          import importlib.util, json, sys
+          from pathlib import Path
+""",
+        r"""                services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
+                deployments=()
+                for service in "${services[@]}"; do deployments+=("gaming-${service}-depl"); done
+                kubectl get deployment "${deployments[@]}" -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/deployments.json"
+                kubectl get pods -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/pods.json"
+                kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json \
+                  >"$transfer_dir/lock.json"
+                python3 - "$snapshot" "$transfer_dir" \
+                  "$RUNNER_TEMP/live-data-upstream-result.json" "$OCI_K8S_NAMESPACE" \
+                  "$HELD_HANDOFF_RUN_ID" "$HELD_HANDOFF_SOURCE_SHA" "$GITHUB_RUN_ID" "$SOURCE_SHA" <<'PY'
+          import importlib.util, json, os, stat, sys
+          from pathlib import Path
+
+""",
+    ),
+    (
+        "          snapshot, temporary, namespace, held_run, held_source, run, source = sys.argv[1:]\n",
+        "          snapshot, temporary, upstream_result, namespace, held_run, held_source, run, source = sys.argv[1:]\n",
+    ),
+    (
+        '          result = json.loads((temporary / "upstream-result.json").read_bytes())\n',
+        """          upstream_result = Path(upstream_result)
+          descriptor = None
+          try:
+              path_status = upstream_result.lstat()
+              if (
+                  stat.S_ISLNK(path_status.st_mode)
+                  or not stat.S_ISREG(path_status.st_mode)
+              ):
+                  raise ValueError
+              descriptor = os.open(
+                  upstream_result,
+                  os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+              open_status = os.fstat(descriptor)
+              if (
+                  not stat.S_ISREG(open_status.st_mode)
+                  or (open_status.st_dev, open_status.st_ino)
+                  != (path_status.st_dev, path_status.st_ino)
+              ):
+                  raise ValueError
+              with os.fdopen(descriptor, "r", encoding="utf-8") as source_file:
+                  descriptor = None
+                  result = json.load(source_file)
+              final_status = upstream_result.lstat()
+              if (
+                  stat.S_ISLNK(final_status.st_mode)
+                  or not stat.S_ISREG(final_status.st_mode)
+                  or (final_status.st_dev, final_status.st_ino)
+                  != (path_status.st_dev, path_status.st_ino)
+              ):
+                  raise ValueError
+          except (OSError, UnicodeError, ValueError):
+              raise SystemExit("initial upstream result is unavailable or invalid")
+          finally:
+              if descriptor is not None:
+                  os.close(descriptor)
+          if type(result) is not dict:
+              raise SystemExit("initial upstream result root must be an object")
+""",
+    ),
+    (
+        '          fresh = result["held_handoff_run_id"]\n',
+        """          fresh = result.get("held_handoff_run_id")
+          if type(fresh) is not dict:
+              raise SystemExit("initial held-handoff authority must be an object")
+""",
     ),
 )
 CURRENT_READER_VERIFIER_V5_EDITS = (

@@ -3857,6 +3857,20 @@ grep -Fq \
   fail "live-data workflow no longer invokes the evidence verifier directly"
 ok "workflow keeps direct reader and verifier invocation without suppression"
 
+release_wiki="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
+if grep -Fq 'remain fresh at every authority boundary' "$release_wiki"; then
+  fail "release wiki still overclaims transfer-time provider freshness"
+fi
+grep -Fq \
+  'dispatch, materialization and the route-specific approval proof' \
+  "$release_wiki" ||
+  fail "release wiki omits the bounded provider-freshness boundaries"
+grep -Fq \
+  'Physical transfer reuses that initial same-job authenticated history result' \
+  "$release_wiki" ||
+  fail "release wiki omits same-job history-result reuse at physical transfer"
+ok "release wiki separates provider proof freshness from transfer-time mutable checks"
+
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
 import contextlib, dataclasses, hashlib, importlib.util, io, os, subprocess, sys
 from pathlib import Path
@@ -4581,7 +4595,8 @@ verifier = (
 def blob(value):
     raw = value.encode()
     return hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
-assert blob(workflow) == m.CURRENT_READER_WORKFLOW_BLOB
+assert blob(workflow) == m.CURRENT_READER_WORKFLOW_BLOB == \
+    "2900c649bdb3b529d357a4df274482295695c8cd"
 assert blob(authority) == m.CURRENT_READER_AUTHORITY_BLOB
 assert blob(verifier) == m.CURRENT_READER_VERIFIER_BLOB
 for profile in (
@@ -9191,7 +9206,7 @@ reader_sha = "9" * 40
 profile = copy.deepcopy(m._failed_clean_reader_continuation_profile())
 # Canonical full-profile digest sealed from the two reviewed native observations.
 reviewed_observations_profile_sha256 = (
-    "4ef64c8f6783e8937e1392a417622023eed14c7555dfce3e441ba58070164397"
+    "b95fc3355b3a75c9c986b4d87ea8bb701d625935672e2ec0d84d945b6ed6ee04"
 )
 
 def assert_golden_profile(candidate):
@@ -10027,7 +10042,7 @@ assert m.FAILED_PRE_CAS_CONTINUATION_TREE == \
 
 profile = copy.deepcopy(m._failed_pre_cas_continuation_profile())
 reviewed_profile_sha256 = (
-    "c88060dbcfb2859b8254b8e8bd75fd555be146d606c3b224738c21004c7a154c"
+    "718ae642e51ba4a4470324d2e9425c37ce6d7b6247dff534de1889f0dd04c30f"
 )
 
 def profile_digest(candidate):

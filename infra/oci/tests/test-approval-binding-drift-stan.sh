@@ -34,14 +34,19 @@ import sys
 text = open(sys.argv[1], encoding="utf-8").read()
 definition = text.index("revalidate_upstream_bindings() {")
 claim = text.index('"$AUTHORITY_HELPER" claim-approval')
-pre = text.index("\nrevalidate_upstream_bindings\n", definition)
+route = text.index('if [[ "$ACTION" = "--approve" &&', definition)
+route_else = text.index("\nelse\n", route)
+route_end = text.index("\nfi\n", route_else)
+observation = text.index("revalidate_upstream_bindings approval-1", route_else)
+wait = text.index('if [[ "$gate_can_approve" = false ]]', route_end)
+eligible = text.index("status=ELIGIBLE", wait)
 post_start = text.index('if ! approval_revalidation_error="$(', claim)
 post_end = text.index(')"; then', post_start)
 post_body = text[post_start:post_end]
 post_positions = {
     name: post_body.index(name)
     for name in (
-        "revalidate_upstream_bindings",
+        "revalidate_upstream_bindings approval-3",
         "validate_promotion",
         "validate_exclusivity",
         "validate_pending_gate",
@@ -53,10 +58,24 @@ if list(post_positions.values()) != sorted(post_positions.values()):
     raise SystemExit("post-claim mutable checks do not end at exact control")
 release = text.index('"$AUTHORITY_HELPER" release-approval', post_end)
 approve_api = text.index("--method POST", release)
-if not definition < pre < claim:
-    raise SystemExit("bindings are not revalidated before the inflight claim")
+actionable_route = text[route:route_else]
+observation_route = text[route_else:route_end]
+if "  revalidate_upstream_bindings" not in actionable_route:
+    raise SystemExit("actionable route does not retain lightweight binding controls")
+if "approval-" in actionable_route:
+    raise SystemExit("actionable route runs a full proof before the inflight claim")
+if "revalidate_upstream_bindings approval-1" not in observation_route:
+    raise SystemExit("observation route does not run its fixed approval-1 proof")
+if not definition < route < observation < wait < eligible < claim:
+    raise SystemExit("observation proof is not before WAIT or ELIGIBLE")
+if text.count("revalidate_upstream_bindings approval-1") != 1:
+    raise SystemExit("approval-1 proof is not unique to the observation route")
+if text.count("revalidate_upstream_bindings approval-3") != 1:
+    raise SystemExit("approval-3 proof is not unique to the post-claim route")
+if "revalidate_upstream_bindings approval-2" in text:
+    raise SystemExit("retired approval-2 proof is still scheduled")
 if not claim < post_start < post_end < approve_api:
-    raise SystemExit("bindings are not revalidated after the claim")
+    raise SystemExit("approval-3 proof is not after the claim and before POST")
 if not post_end < release < approve_api:
     raise SystemExit("post-claim drift does not release the inflight claim")
 release_body = text[release:approve_api]
@@ -78,7 +97,7 @@ for knob in ("--force", "--skip", "allow_missing", "ALLOW_MISSING", "--retry"):
         raise SystemExit(f"approver introduced a bypass knob: {knob}")
 print("approver ordering ok")
 PY
-[ "$FAIL" -eq 0 ] && ok "revalidation brackets the claim and reuses shared policy"
+[ "$FAIL" -eq 0 ] && ok "observation and actionable proofs are route-specific and reuse shared policy"
 
 # --- Behavioural drift cases against the shared validator --------------------
 

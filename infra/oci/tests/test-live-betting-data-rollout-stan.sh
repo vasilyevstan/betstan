@@ -4025,6 +4025,15 @@ body = step.fetch("run").gsub("${{ steps.provenance_request.outputs.resume_maint
 body = body.gsub(/\$\{\{[^}]+\}\}/, "unused-old-path")
 puts body
 RUBY
+grep -Fq '$RUNNER_TEMP/live-data-upstream-result.json' \
+  "$resume_fixture/acquire-step.sh" ||
+  fail "held transfer does not reuse the initial same-job upstream result"
+! grep -Fq 'get oci-live-data-continue-held-handoff' \
+  "$resume_fixture/acquire-step.sh" ||
+  fail "held transfer repeats protected-operation policy lookup"
+! grep -Fq 'upstream_run_binding_stan.py validate-all' \
+  "$resume_fixture/acquire-step.sh" ||
+  fail "held transfer repeats full upstream validation"
 mkdir -p "$resume_fixture/infra/azure/agents"
 cat >"$resume_fixture/infra/azure/agents/shared-mongo-operation-lock-stan.sh" <<'SH'
 #!/usr/bin/env bash
@@ -4328,8 +4337,15 @@ authority = {
     **fresh_authority,
 }
 (root / "fresh-authority.json").write_text(json.dumps(fresh_authority))
+initial_authority = dict(fresh_authority)
+initial_authority.update(
+    held_handoff_lease_until_epoch="2900",
+    held_handoff_fencing_generation="11",
+    held_handoff_lease_seconds="1800",
+)
 (root / "live-data-upstream-result.json").write_text(json.dumps({
-    "held_handoff_run_id": {"held_handoff_lease_seconds": "1800"}}))
+    "held_handoff_run_id": initial_authority,
+}))
 (root / "artifacts/prerequisite/provenance.env").write_text(
     f'baseline_sha256={authority["baseline_sha256"]}\n')
 (root / "artifacts/oci-live-data-rollout/evidence/resume-authority.env").write_text(
@@ -4357,37 +4373,6 @@ for service, _, image, manifest, platform in (
                                               "imageID": "fixture@" + manifest}]}})
 (root / "fresh-deployments.json").write_text(json.dumps({"items": deployments}))
 (root / "fresh-pods.json").write_text(json.dumps({"items": pods}))
-body = script.read_text()
-entry = '''if __name__ == "__main__":
-    if sys.argv[1:2] != ["validate-all"]:
-        main()
-    else:
-        arguments = dict(zip(sys.argv[2::2], sys.argv[3::2]))
-        root = Path(os.environ["RESUME_PRECAS_ROOT"])
-        with Path(os.environ["RESUME_TEST_LOG"]).open("a") as output:
-            output.write("authority:pre-cas\\n")
-        assert arguments["--repository"] == "example/repo"
-        assert arguments["--subject-sha"] == "2" * 40
-        assert arguments["--runtime-mode"] == "k3s"
-        assert arguments["--successor-run-id"] == "901"
-        assert json.loads(arguments["--policy-json"])["operation"] == "oci-live-data-continue-held-handoff"
-        assert json.loads(arguments["--dispatch-inputs"])["approved_sha"] == "2" * 40
-        if os.environ.get("RESUME_LOCK_FAILURE") == "authority":
-            raise SystemExit("fixture fresh owned-successor authority rejection")
-        facts = json.loads((root / "fresh-authority.json").read_text())
-        if os.environ.get("RESUME_LOCK_FAILURE") == "receiver-missing":
-            facts.pop("failed_deploy_run_id")
-        elif os.environ.get("RESUME_LOCK_FAILURE") == "receiver-wrong":
-            facts["failed_deploy_run_id"] = "4999"
-        lock = json.loads((root / "pre-runtime-lock.json").read_text())["data"]
-        facts.update(held_handoff_lease_until_epoch=lock["lease-until-epoch"],
-                     held_handoff_fencing_generation=lock["fencing-generation"],
-                     held_handoff_lease_seconds=lock["lease-duration-seconds"])
-        with Path(arguments["--result-json"]).open("x") as output:
-            json.dump({"held_handoff_run_id": facts}, output)
-'''
-assert body.count('if __name__ == "__main__":\n    main()') == 1
-script.write_text(body.replace('if __name__ == "__main__":\n    main()', entry))
 PY
 cat >"$resume_fixture/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -4415,8 +4400,9 @@ SH
 cat >"$resume_fixture/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" = "get oci-live-data-continue-held-handoff" ]]
-echo '{"operation":"oci-live-data-continue-held-handoff"}'
+printf 'policy-get:unexpected\n' >>"${RESUME_TEST_LOG:?}"
+echo "transfer must not repeat protected-operation policy lookup" >&2
+exit 1
 SH
 cat >"$resume_fixture/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'SH'
 #!/usr/bin/env bash
@@ -4456,7 +4442,6 @@ run_held_acquire() {
     RESUME_PRECAS_ROOT="$resume_fixture" REPO=example/repo OCI_RUNTIME_MODE=k3s \
     CHECKPOINT_SOURCE_SHA=1111111111111111111111111111111111111111 \
     BUILD_RUN_ID=42 DISK_CHECKPOINT_RUN_ID=45 \
-    DISPATCH_INPUTS='{"approved_sha":"2222222222222222222222222222222222222222"}' \
     RUNNER_TEMP="$resume_fixture" OCI_K8S_NAMESPACE=betstan-oci \
     HELD_HANDOFF_RUN_ID=4008 HELD_HANDOFF_SOURCE_SHA="$RESUME_HELD_SOURCE_SHA" \
     PREREQUISITE_RUN_ID=4007 RESUME_SOURCE_SHA="$RESUME_PREREQUISITE_SOURCE_SHA" \
@@ -4469,14 +4454,26 @@ run_held_acquire() {
 transfer_cases=0
 for predecessor_seconds in 1800 3600 7200; do
 for lease in expired live; do
-  for failure in none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify drift uid generation authority receiver-missing receiver-wrong workflow master policy disk; do
+  for failure in \
+    none exclusive release skipped release-ambiguous acquire acquire-ambiguous verify \
+    drift uid generation workflow master policy disk \
+    upstream-missing upstream-symlink upstream-non-regular upstream-malformed \
+    upstream-root-non-object upstream-held-non-object \
+    mismatch-applied-data-run-id mismatch-applied-source-sha \
+    mismatch-failed-deploy-run-id mismatch-baseline-sha256 \
+    mismatch-held-handoff-run-id mismatch-held-handoff-source-sha \
+    mismatch-held-handoff-evidence-sha256; do
     transfer_cases=$((transfer_cases + 1))
     rm -rf "$resume_fixture/held-pre-transfer"
+    rm -rf "$resume_fixture/live-data-upstream-result.json"
+    rm -f "$resume_fixture/live-data-upstream-target.json"
     rm -f "$resume_fixture/pre-runtime-lock.json" \
       "$resume_fixture/artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
-    python3 - "$resume_fixture/lock.json" "$lease" "$predecessor_seconds" <<'PY'
+    python3 - "$resume_fixture" "$lease" "$predecessor_seconds" <<'PY'
 import json, pathlib, sys, time
-path = pathlib.Path(sys.argv[1]); value = json.loads(path.read_text())
+root = pathlib.Path(sys.argv[1])
+path = root / "lock.json"
+value = json.loads(path.read_text())
 start = 1000 if sys.argv[2] == "expired" else int(time.time()) - 20
 duration = int(sys.argv[3])
 value["metadata"].update(uid="fixture-original-uid", resourceVersion="42")
@@ -4486,12 +4483,53 @@ value["data"].update(
        "lease-duration-seconds": str(duration), "lease-until-epoch": str(start + duration),
        "fencing-generation": "11", "released-at-epoch": "0"})
 path.write_text(json.dumps(value))
-(path.parent / "live-data-upstream-result.json").write_text(json.dumps({
-    "held_handoff_run_id": {"held_handoff_lease_seconds": str(duration)}}))
+facts = json.loads((root / "fresh-authority.json").read_text())
+facts.update(
+    held_handoff_lease_until_epoch=str(start + duration),
+    held_handoff_fencing_generation="11",
+    held_handoff_lease_seconds=str(duration),
+)
+result = root / "live-data-upstream-result.json"
+payload = {"held_handoff_run_id": facts}
+result.write_text(json.dumps(payload))
 PY
     reset_resume_fixture
     cp "$resume_fixture/pre-runtime-images.tsv" "$resume_fixture/actual-images.tsv"
     run_resume_fixture pre-runtime-hold
+    python3 - "$resume_fixture" "$failure" <<'PY'
+import json, pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+failure = sys.argv[2]
+result = root / "live-data-upstream-result.json"
+if failure.startswith("mismatch-"):
+    field = failure.removeprefix("mismatch-").replace("-", "_")
+    allowed = {
+        "applied_data_run_id", "applied_source_sha", "failed_deploy_run_id",
+        "baseline_sha256", "held_handoff_run_id", "held_handoff_source_sha",
+        "held_handoff_evidence_sha256",
+    }
+    if field not in allowed:
+        raise SystemExit(f"unknown mismatch fixture: {field}")
+    payload = json.loads(result.read_text())
+    payload["held_handoff_run_id"][field] = "mismatched-fixture-value"
+    result.write_text(json.dumps(payload))
+elif failure == "upstream-missing":
+    result.unlink()
+elif failure == "upstream-symlink":
+    target = root / "live-data-upstream-target.json"
+    result.replace(target)
+    result.symlink_to(target.name)
+elif failure == "upstream-non-regular":
+    result.unlink()
+    result.mkdir()
+elif failure == "upstream-malformed":
+    result.write_text("{")
+elif failure == "upstream-root-non-object":
+    result.write_text("[]")
+elif failure == "upstream-held-non-object":
+    result.write_text(json.dumps({"held_handoff_run_id": []}))
+PY
     : >"$resume_log"
     python3 - "$resume_fixture/lock.json" "$failure" <<'PY'
 import json, pathlib, sys
@@ -4518,18 +4556,14 @@ if failure != "exclusive":
     expected.append("checkpoint:held")
     if failure != "disk":
         expected.extend(["validate-baseline", "maintenance:verify-held"])
-        if failure not in {"master", "workflow", "policy"}:
-            expected.append("authority:pre-cas")
 early = failure in {
-    "exclusive", "drift", "uid", "generation", "authority",
-    "receiver-missing", "receiver-wrong", "workflow", "master", "policy", "disk",
-}
+    "exclusive", "drift", "uid", "generation", "workflow", "master", "policy", "disk",
+} or failure.startswith(("upstream-", "mismatch-"))
 if not early: expected.append("release")
 if failure in {"none", "acquire", "acquire-ambiguous", "verify"}: expected.append("acquire-released")
 if failure in {"none", "verify"}: expected.append("verify")
 assert events == expected, (failure, events)
-if failure in {"receiver-missing", "receiver-wrong"}:
-    assert events[-1] == "authority:pre-cas"
+if failure.startswith(("upstream-", "mismatch-")):
     assert not {"release", "acquire-released", "verify"} & set(events)
 record = root / "artifacts/oci-live-data-rollout/evidence/held-handoff-transfer.json"
 if early:
@@ -4590,7 +4624,7 @@ fi
 [[ ! -e "$resume_fixture/pre-runtime-lock.json" ]] ||
   fail "root-owner rejection persisted transfer authority"
 unset RESUME_HELD_RUN_ID RESUME_HELD_SOURCE_SHA RESUME_PREREQUISITE_RUN_ID RESUME_PREREQUISITE_SOURCE_SHA
-echo "held_handoff_workflow_transfer_contract=PASS cases=$transfer_cases predecessor_profiles=1800,3600,7200 root_owner=REJECTED fresh_native_authority=REQUIRED"
+echo "held_handoff_workflow_transfer_contract=PASS cases=$transfer_cases predecessor_profiles=1800,3600,7200 root_owner=REJECTED same_job_authenticated_authority=REUSED transfer_policy_get=0 transfer_validate_all=0"
 
 ruby -ryaml -rjson - "$WORKFLOW" "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" \
   >"$resume_fixture/retained-workflow.json" <<'RUBY'
