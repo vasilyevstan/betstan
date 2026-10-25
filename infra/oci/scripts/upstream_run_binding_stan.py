@@ -1869,37 +1869,103 @@ def _native_run(command, *, capture_output=True, text=False, check=False, timeou
     return outcome
 
 
-def _native_json(outcome, path, paginated=False):
+def _native_json_value(outcome, path, paginated=False):
     if isinstance(outcome, BaseException):
         raise outcome
     if outcome is None:
-        fail(f"native read collection is incomplete for {path}")
+        return None, f"native read collection is incomplete for {path}"
     stdout = _native_text(outcome.stdout)
     _native_text(outcome.stderr)
     if outcome.returncode != 0:
-        fail(f"unable to read {'all pages of ' if paginated else ''}{path}")
+        return None, f"unable to read {'all pages of ' if paginated else ''}{path}"
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError:
-        fail(f"malformed {'paginated response' if paginated else 'response'} for {path}")
+        return None, (
+            f"malformed {'paginated response' if paginated else 'response'} for {path}"
+        )
     if not paginated:
-        return payload
+        return payload, None
     if isinstance(payload, dict):
-        return [payload]
+        return [payload], None
     if not isinstance(payload, list) or not all(isinstance(page, dict) for page in payload):
-        fail(f"unexpected paginated response for {path}")
+        return None, f"unexpected paginated response for {path}"
+    return payload, None
+
+
+def _native_json(outcome, path, paginated=False):
+    payload, failure = _native_json_value(outcome, path, paginated)
+    if failure is not None:
+        fail(failure)
     return payload
 
 
 def native_api_batch(requests):
-    outcomes = native_window([
-        (["gh", "api", path] + (["--paginate", "--slurp"] if paginated else []), None)
+    commands = [
+        ["gh", "api", path] + (["--paginate", "--slurp"] if paginated else [])
         for path, paginated in requests
-    ])
-    return [
-        _native_json(outcome, path, paginated)
-        for (path, paginated), outcome in zip(requests, outcomes)
     ]
+    if not requests:
+        native_window([])
+        return []
+    attempts = [0] * len(requests)
+    outcomes = [None] * len(requests)
+    results = [None] * len(requests)
+    completed = [False] * len(requests)
+    terminal_errors = [None] * len(requests)
+    pending = list(range(len(requests)))
+    while True:
+        delay = max(attempts[index] for index in pending)
+        if delay:
+            time.sleep(delay)
+        wave = native_window([(commands[index], None) for index in pending])
+        next_pending = []
+        eligible_retry = False
+        blocked = False
+        for index, outcome in zip(pending, wave):
+            if outcome is None:
+                next_pending.append(index)
+                continue
+            attempts[index] += 1
+            outcomes[index] = outcome
+            if isinstance(outcome, BaseException):
+                blocked = True
+                continue
+            path, paginated = requests[index]
+            try:
+                payload, failure = _native_json_value(outcome, path, paginated)
+            except Exception as error:
+                terminal_errors[index] = (error, None)
+                blocked = True
+                continue
+            if outcome.returncode == 0:
+                if failure is not None:
+                    terminal_errors[index] = (None, failure)
+                    blocked = True
+                    continue
+                results[index] = payload
+                completed[index] = True
+                continue
+            _, _, retryable = _classify_artifact_download_failure(
+                outcome.returncode, outcome.stderr
+            )
+            if retryable and attempts[index] < 3:
+                eligible_retry = True
+                next_pending.append(index)
+            else:
+                blocked = True
+        if not blocked and eligible_retry:
+            pending = next_pending
+            continue
+        for index, (path, paginated) in enumerate(requests):
+            if not completed[index]:
+                if terminal_errors[index] is not None:
+                    error, failure = terminal_errors[index]
+                    if failure is not None:
+                        fail(failure)
+                    raise error
+                results[index] = _native_json(outcomes[index], path, paginated)
+        return results
 
 
 def gh_api(path):

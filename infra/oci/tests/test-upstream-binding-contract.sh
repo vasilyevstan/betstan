@@ -2597,6 +2597,9 @@ try:
         time.sleep(.002)
     if "hang" in path:
         time.sleep(30)
+    if "retry-502" in path and ("always" in path or attempt == 1):
+        sys.stderr.write("gh: HTTP 502\n")
+        raise SystemExit(1)
     if "fail-" in path:
         time.sleep(.08 if "slow" in path else .005)
         sys.stderr.write("synthetic native failure")
@@ -2662,6 +2665,260 @@ def arguments(count):
         runtime_mode="", successor_run_id="", result_json="", baseline_dir="", held_history_file="",
     )
 
+def json_outcome(path, returncode=0, payload=None, stdout=None, stderr=b"", paginated=False):
+    command = ["gh", "api", path] + (["--paginate", "--slurp"] if paginated else [])
+    if stdout is None:
+        if payload is None:
+            payload = [{"endpoint": path}] if paginated else {"endpoint": path}
+        stdout = json.dumps(payload).encode()
+    return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+def scripted_batch(requests, waves):
+    calls, sleeps = [], []
+    def window(batch):
+        calls.append(batch)
+        assert len(calls) <= len(waves), calls
+        return waves[len(calls) - 1]
+    result = error = None
+    with patch.object(m, "native_window", side_effect=window), \
+            patch.object(m.time, "sleep", side_effect=sleeps.append), \
+            contextlib.redirect_stderr(io.StringIO()) as errors:
+        try:
+            result = m.native_api_batch(requests)
+        except BaseException as caught:
+            error = caught
+    return result, error, calls, sleeps, errors.getvalue()
+
+result, error, calls, sleeps, diagnostic = scripted_batch([], [[]])
+assert result == [] and error is None and calls == [[]] and sleeps == [] and not diagnostic
+
+paths = ["batch/surrounding-a", "batch/retry-502", "batch/surrounding-c"]
+requests = [(path, False) for path in paths]
+result, error, calls, sleeps, diagnostic = scripted_batch(requests, [
+    [
+        json_outcome(paths[0], payload={"endpoint": paths[0], "order": 0}),
+        json_outcome(
+            paths[1], returncode=1, payload={"endpoint": "discarded"},
+            stderr=b"gh: HTTP 502\n",
+        ),
+        json_outcome(paths[2], payload={"endpoint": paths[2], "order": 2}),
+    ],
+    [json_outcome(paths[1], payload={"endpoint": paths[1], "order": 1})],
+])
+assert error is None and [item["order"] for item in result] == [0, 1, 2]
+assert sleeps == [1] and not diagnostic
+assert calls == [
+    [(["gh", "api", path], None) for path in paths],
+    [(["gh", "api", paths[1]], None)],
+]
+
+path = "batch/retry-502-always"
+failure = lambda: json_outcome(path, returncode=1, stderr=b"gh: HTTP 502\n")
+result, error, calls, sleeps, diagnostic = scripted_batch(
+    [(path, False)], [[failure()], [failure()], [failure()]],
+)
+assert result is None and isinstance(error, SystemExit) and error.code == 1
+assert len(calls) == 3 and sleeps == [1, 2]
+assert all(call == [(["gh", "api", path], None)] for call in calls)
+assert f"unable to read {path}" in diagnostic
+
+path = "batch/retry-timeout"
+result, error, calls, sleeps, diagnostic = scripted_batch([(path, False)], [
+    [json_outcome(
+        path, returncode=1,
+        stderr=b"context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+    )],
+    [json_outcome(path)],
+])
+assert error is None and result == [{"endpoint": path}]
+assert len(calls) == 2 and sleeps == [1] and not diagnostic
+
+paths = ["batch/mixed-older", "batch/mixed-late"]
+older_first = json_outcome(paths[0], returncode=1, stderr=b"gh: HTTP 503\n")
+older_second = json_outcome(paths[0], returncode=1, stderr=b"gh: HTTP 503\n")
+late_first = json_outcome(paths[1], returncode=1, stderr=b"gh: HTTP 503\n")
+late_second = json_outcome(paths[1], returncode=1, stderr=b"gh: HTTP 503\n")
+waves = [
+    [older_first, None],
+    [older_second, late_first],
+    [json_outcome(paths[0]), late_second],
+    [json_outcome(paths[1])],
+]
+result, error, calls, sleeps, diagnostic = scripted_batch(
+    [(path, False) for path in paths], waves,
+)
+assert error is None and [item["endpoint"] for item in result] == paths
+assert sleeps == [1, 2, 2] and not diagnostic
+assert [len(call) for call in calls] == [2, 2, 2, 1]
+assert all(timeout is None for call in calls for _, timeout in call)
+late_command = ["gh", "api", paths[1]]
+assert sum(
+    outcome is not None and outcome.args == late_command
+    for wave in waves for outcome in wave
+) == 3
+assert [[command[2] for command, _ in call] for call in calls] == [
+    paths, paths, paths, [paths[1]],
+]
+
+hard_outcomes = (
+    ("http-403", json_outcome("batch/http-403", 1, stderr=b"gh: HTTP 403\n"), SystemExit),
+    ("http-404", json_outcome("batch/http-404", 1, stderr=b"gh: HTTP 404\n"), SystemExit),
+    ("http-429", json_outcome("batch/http-429", 1, stderr=b"gh: HTTP 429\n"), SystemExit),
+    (
+        "auth-502",
+        json_outcome("batch/auth-502", 1, stderr=b"gh: Forbidden (HTTP 502)\n"),
+        SystemExit,
+    ),
+    (
+        "ambiguous-5xx",
+        json_outcome("batch/ambiguous-5xx", 1, stderr=b"gh: HTTP 502\ngh: HTTP 503\n"),
+        SystemExit,
+    ),
+    ("exit-2", json_outcome("batch/exit-2", 2, stderr=b"gh: HTTP 502\n"), SystemExit),
+    (
+        "negative",
+        json_outcome("batch/negative", -signal.SIGTERM, stderr=b"gh: HTTP 502\n"),
+        SystemExit,
+    ),
+    ("oserror", OSError("synthetic spawn failure"), OSError),
+    ("exception", RuntimeError("synthetic child exception"), RuntimeError),
+)
+for name, hard, expected in hard_outcomes:
+    path = "batch/" + name
+    result, error, calls, sleeps, diagnostic = scripted_batch(
+        [(path, False)], [[hard]],
+    )
+    assert result is None and isinstance(error, expected), (name, error)
+    assert len(calls) == 1 and sleeps == [], name
+
+path = "batch/invalid-utf8"
+result, error, calls, sleeps, diagnostic = scripted_batch([(path, False)], [[
+    json_outcome(path, 1, stdout=b"\xff", stderr=b"gh: HTTP 502\n"),
+]])
+assert result is None and isinstance(error, UnicodeDecodeError)
+assert len(calls) == 1 and sleeps == [] and not diagnostic
+
+path = "batch/malformed-json"
+result, error, calls, sleeps, diagnostic = scripted_batch([(path, False)], [[
+    json_outcome(path, stdout=b"{"),
+]])
+assert result is None and isinstance(error, SystemExit)
+assert len(calls) == 1 and sleeps == [] and f"malformed response for {path}" in diagnostic
+
+path = "batch/invalid-pages"
+result, error, calls, sleeps, diagnostic = scripted_batch([(path, True)], [[
+    json_outcome(path, stdout=b"[1]", paginated=True),
+]])
+assert result is None and isinstance(error, SystemExit)
+assert len(calls) == 1 and sleeps == []
+assert f"unexpected paginated response for {path}" in diagnostic
+
+paths = ["batch/success-before-none", "batch/never-started"]
+result, error, calls, sleeps, diagnostic = scripted_batch(
+    [(path, False) for path in paths], [[json_outcome(paths[0]), None]],
+)
+assert result is None and isinstance(error, SystemExit)
+assert len(calls) == 1 and sleeps == []
+assert f"native read collection is incomplete for {paths[1]}" in diagnostic
+
+paths = ["batch/retryable-before-hard", "batch/hard-after-retryable", "batch/unstarted"]
+result, error, calls, sleeps, diagnostic = scripted_batch(
+    [(path, False) for path in paths],
+    [[
+        json_outcome(paths[0], 1, stderr=b"gh: HTTP 502\n"),
+        json_outcome(paths[1], 1, stderr=b"gh: HTTP 403\n"),
+        None,
+    ]],
+)
+assert result is None and isinstance(error, SystemExit)
+assert len(calls) == 1 and sleeps == []
+assert f"unable to read {paths[0]}" in diagnostic and paths[1] not in diagnostic
+
+for label, later in (
+    ("malformed", json_outcome("batch/later-malformed", stdout=b"{")),
+    (
+        "invalid-utf8",
+        json_outcome("batch/later-invalid-utf8", stdout=b"\xff"),
+    ),
+):
+    paths = [f"batch/retryable-before-{label}", f"batch/later-{label}"]
+    result, error, calls, sleeps, diagnostic = scripted_batch(
+        [(path, False) for path in paths],
+        [[json_outcome(paths[0], 1, stderr=b"gh: HTTP 502\n"), later]],
+    )
+    assert result is None and isinstance(error, SystemExit)
+    assert len(calls) == 1 and sleeps == []
+    assert diagnostic == f"upstream binding rejected: unable to read {paths[0]}\n"
+
+class LockedStderr(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.Lock()
+    def write(self, value):
+        with self.lock:
+            return super().write(value)
+
+paths = ["batch/concurrent-first", "batch/concurrent-second"]
+entered = threading.Barrier(2)
+first_loading = threading.Event()
+first_done = threading.Event()
+calls, calls_lock = [], threading.Lock()
+def concurrent_window(batch):
+    assert len(batch) == 1 and batch[0][1] is None
+    path = batch[0][0][2]
+    with calls_lock:
+        calls.append(path)
+    if path == paths[1]:
+        assert first_loading.wait(5)
+    return [json_outcome(path, stdout=path.encode())]
+def concurrent_loads(text):
+    if text == paths[0]:
+        first_loading.set()
+    entered.wait(timeout=5)
+    if text != paths[0]:
+        assert first_done.wait(5)
+    raise json.JSONDecodeError("synthetic concurrent failure", text, 0)
+def concurrent_failure(path):
+    try:
+        m.native_api_batch([(path, False)])
+    except SystemExit as error:
+        return error.code
+    finally:
+        if path == paths[0]:
+            first_done.set()
+    raise AssertionError("concurrent malformed native response was accepted")
+
+original_stderr = m.sys.stderr
+visible = LockedStderr()
+with patch.object(m.sys, "stderr", visible), \
+        patch.object(m, "native_window", side_effect=concurrent_window), \
+        patch.object(m.json, "loads", side_effect=concurrent_loads):
+    runtime_stderr = m.sys.stderr
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        codes = list(pool.map(concurrent_failure, paths))
+    assert codes == [1, 1] and sorted(calls) == sorted(paths)
+    assert m.sys.stderr is runtime_stderr
+assert m.sys.stderr is original_stderr
+diagnostic = visible.getvalue()
+for path in paths:
+    assert diagnostic.count(
+        f"upstream binding rejected: malformed response for {path}\n"
+    ) == 1
+
+path = "batch/paginated-retry"
+command = ["gh", "api", path, "--paginate", "--slurp"]
+result, error, calls, sleeps, diagnostic = scripted_batch([(path, True)], [
+    [json_outcome(
+        path, 1, payload=[{"endpoint": "discarded"}],
+        stderr=b"gh: HTTP 504\n", paginated=True,
+    )],
+    [json_outcome(path, payload=[{"endpoint": "fresh"}], paginated=True)],
+])
+assert error is None and result == [[{"endpoint": "fresh"}]]
+assert calls == [[(command, None)], [(command, None)]]
+assert sleeps == [1] and not diagnostic
+print("native_api_batch_retry_contract=PASS")
+
 def read_binding(*values):
     name = values[1]["input"]
     native = m.NATIVE_CONTEXT.get()
@@ -2682,6 +2939,60 @@ environment = dict(
     NATIVE_STUB_RELEASE=str(release),
 )
 with patch.dict(os.environ, environment):
+    paths = [
+        "native/run_0/surrounding-a",
+        "native/run_0/retry-502-once",
+        "native/run_0/surrounding-c",
+    ]
+    reset(3)
+    sleeps = []
+    with m.NativeReadCommand(1) as native, \
+            patch.object(m.time, "sleep", side_effect=sleeps.append):
+        results = m.native_api_batch([(path, False) for path in paths])
+        assert [result["endpoint"] for result in results] == paths
+        assert native.active == 0
+    observed = state()
+    assert observed["calls"][paths[0]] == 1
+    assert observed["calls"][paths[1]] == 2
+    assert observed["calls"][paths[2]] == 1
+    assert sleeps == [1] and observed["peak"] <= 4 and not observed["active"]
+    gone(observed["pids"])
+
+    path = "native/run_0/retry-502-cancel"
+    reset(1)
+    with m.NativeReadCommand(1) as native:
+        def cancel_during_backoff(seconds):
+            assert seconds == 1
+            native.cancelled.set()
+        with patch.object(m.time, "sleep", side_effect=cancel_during_backoff):
+            try:
+                m.native_api_batch([(path, False)])
+            except concurrent.futures.CancelledError:
+                pass
+            else:
+                raise AssertionError("native batch cancellation during backoff was ignored")
+        assert native.active == 0
+    observed = state()
+    assert observed["calls"][path] == 1 and not observed["active"]
+    gone(observed["pids"])
+
+    path = "native/run_0/retry-502-singleton"
+    reset(1)
+    with m.NativeReadCommand(1) as native, \
+            patch.object(m.time, "sleep") as sleep, \
+            contextlib.redirect_stderr(io.StringIO()) as errors:
+        try:
+            m.gh_api(path)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("singleton native read retried a transient failure")
+        assert native.active == 0 and not sleep.called
+        assert f"unable to read {path}" in errors.getvalue()
+    observed = state()
+    assert observed["calls"][path] == 1 and not observed["active"]
+    gone(observed["pids"])
+
     for count in (0, 1, 2, 3, 4, 6):
         cap = min(16, 4 * count)
         scope_ids = set()

@@ -258,6 +258,22 @@ These are transport retries, not protected-workflow reruns or
 reuse of consumed authority, and do not establish that an unclassified failure
 would recover.
 
+**Upstream JSON read batches.** Native batched `gh api` reads retry only
+classifier-positive, unambiguous HTTP 500/502/503/504 or the classifier's exact
+transient timeout/reset signatures, with at most three actual executions per
+original index. A `None` outcome was never started, consumes no attempt, and is
+resubmitted only when that wave also had an eligible retryable failure; every
+non-`None` outcome is strictly decoded and every success is parsed immediately.
+Later `native_window` waves contain only eligible failed and never-started
+indices in original order, sleep the largest due per-index backoff of one or two
+seconds, retry a paginated read as its whole original command, and discard failed
+stdout. The unchanged four-child window and global native budget apply to every
+execution, with `timeout=None` and no new diagnostics. Hard, ambiguous, content,
+or evidence failures stop the batch through existing errors; singleton, proof,
+artifact-download, and mutation reads do not gain these retries. After promotion,
+collect a fresh proof bundle for the promoted source rather than reusing earlier
+observations.
+
 Failed-deploy native-input validation uses the exact attempt-one run-log archive
 as its single primary byte source instead of a direct job-log request. Native
 latest/attempt-one metadata, the complete paginated attempt-one job inventory,
