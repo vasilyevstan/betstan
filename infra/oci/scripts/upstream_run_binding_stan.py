@@ -6474,6 +6474,7 @@ def _validate_cancelled_unstarted_history(
             "c3c9332f4b23b55de6c32ae2183b89478f97884f",
             "472896760221c61ef517d656b0ef102d7344f2c9",
             FAILED_HELD_CONTINUATION_CURRENT_WORKFLOW_BLOB,
+            CURRENT_READER_WORKFLOW_BLOB,
         ):
             fail(f"{label} historical workflow is not the guarded source profile")
         try:
