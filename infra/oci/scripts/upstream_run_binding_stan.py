@@ -9481,7 +9481,7 @@ def precollect_nonterminal_held_history(
 def held_handoff_history(
     repository, held, subject_sha, successor_run_id="", *, dispatch_inputs=None,
     expired_receiver_run_id="", runtime_mode=None, fresh=False,
-    failed_continuation_semantic=None,
+    failed_continuation_semantic=None, qualified_ancestral_receiver_run_id="",
 ):
     native = NATIVE_CONTEXT.get()
     proof_bundle = HISTORY_BUNDLE_CONTEXT.get()
@@ -9495,6 +9495,7 @@ def held_handoff_history(
                 expired_receiver_run_id=expired_receiver_run_id,
                 runtime_mode=runtime_mode, fresh=fresh, proofs=proofs,
                 failed_continuation_semantic=failed_continuation_semantic,
+                qualified_ancestral_receiver_run_id=qualified_ancestral_receiver_run_id,
             )
     finally:
         if proof_bundle is not None:
@@ -9505,6 +9506,7 @@ def _held_handoff_history(
     repository, held, subject_sha, successor_run_id="", *,
     dispatch_inputs=None, expired_receiver_run_id="", runtime_mode=None,
     fresh=False, proofs, failed_continuation_semantic=None,
+    qualified_ancestral_receiver_run_id="",
 ):
     authority = None
     active_proof_key = None
@@ -9551,7 +9553,12 @@ def _held_handoff_history(
     def validate_provenance_read_failure(row):
         nonlocal authority
         label = f"held-handoff provenance-read run {row['id']}"
-        if expired_receiver is None:
+        expected_failed_deploy_run_id = (
+            str(expired_receiver["id"])
+            if expired_receiver is not None
+            else qualified_ancestral_receiver_run_id
+        )
+        if not expected_failed_deploy_run_id:
             fail(f"{label} does not belong to the qualified expired-handoff recovery")
         if authority is None:
             authority = provenance_read_authority()
@@ -9590,7 +9597,7 @@ def _held_handoff_history(
             if (
                 native["prerequisite_run_id"] != str(held["id"])
                 or native["resume_source_sha"] != held["head_sha"]
-                or native["failed_deploy_run_id"] != str(expired_receiver["id"])
+                or native["failed_deploy_run_id"] != expected_failed_deploy_run_id
             ):
                 fail(f"{label} substitutes the retained holder or expired receiver")
             observations.append(observation)
@@ -10502,6 +10509,11 @@ def _validate_held_handoff_artifact(
         repository, held, subject_sha, successor_run_id,
         dispatch_inputs=dispatch_inputs,
         failed_continuation_semantic=failed_continuation_semantic,
+        qualified_ancestral_receiver_run_id=(
+            failed_run
+            if root.get("no_takeover_handoff_qualification") == "expired-own-handoff"
+            else ""
+        ),
     )
     # The expired receiver qualifies the ancestor, not the current physical transfer.
     root.pop("no_takeover_handoff_qualification", None)
