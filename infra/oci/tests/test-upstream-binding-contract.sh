@@ -7926,8 +7926,10 @@ with patch.object(m, "parse_live_v6_artifact", side_effect=continuation_data), \
             assert all(
                 set(call.kwargs) == {
                     "dispatch_inputs", "failed_continuation_semantic",
+                    "qualified_ancestral_receiver_run_id",
                 }
                 and call.kwargs["dispatch_inputs"] == held_request
+                and call.kwargs["qualified_ancestral_receiver_run_id"] == ""
                 and set(call.kwargs["failed_continuation_semantic"]) == {
                     "rootRunId", "rootSourceSha", "baselineFiles", "imageBytes",
                     "checkpoint", "heldEvidenceSha256", "lockHolder",
@@ -9874,7 +9876,7 @@ def route_process(command, **kwargs):
 
 def route(
     rows, old_effect=None, new_effect=None, generic_effect=None,
-    qualified_generic=False,
+    qualified_generic=False, qualified_ancestral=False,
 ):
     page = [{
         "total_count": len(rows) + 2,
@@ -9913,7 +9915,7 @@ def route(
          patch.object(
              m, "expired_handoff_native_inputs",
              return_value=expired_qualification,
-         ):
+         ) as expired:
         result = m.held_handoff_history(
             profile["repository"], held, subject,
             dispatch_inputs=fresh_inputs,
@@ -9921,8 +9923,12 @@ def route(
                 str(expired_receiver["id"]) if qualified_generic else ""
             ),
             failed_continuation_semantic={"sanitized": True},
+            qualified_ancestral_receiver_run_id=(
+                str(expired_receiver["id"]) if qualified_ancestral else ""
+            ),
         )
         assert pre_cas.call_count == 1
+        assert expired.call_count == (1 if qualified_generic else 0)
         return result, old, new, generic
 
 result, old, new, generic = route([old_row, route_row])
@@ -9995,6 +10001,22 @@ assert old.call_count == 1 and new.call_count == 1
 assert generic.call_count == 0
 
 unrelated = dict(route_row, id=profile["run_id"] + 1)
+rejected(lambda: route(
+    [old_row, route_row, unrelated],
+    generic_effect=AssertionError("unqualified generic route was reached"),
+))
+try:
+    route(
+        [old_row, route_row, unrelated],
+        generic_effect=RuntimeError(
+            "sanitized qualified generic ancestral route",
+        ),
+        qualified_ancestral=True,
+    )
+except RuntimeError as error:
+    assert str(error) == "sanitized qualified generic ancestral route"
+else:
+    raise AssertionError("qualified generic ancestral receiver was bypassed")
 try:
     route(
         [old_row, route_row, unrelated],
@@ -17104,6 +17126,16 @@ continuation = {name: continuation[name] for name in held_policy["inputNames"]}
 continuation.update(held_policy["fixedInputs"])
 assert set(continuation) == set(held_policy["inputNames"])
 metadata156, cutoff156 = complete_native(156, continuation, 10)
+failed157 = dict(
+    metadata155,
+    id=157,
+    html_url=f"https://github.com/{repo}/actions/runs/157",
+    status="completed",
+    conclusion="failure",
+    created_at="2026-01-01T03:05:00Z",
+    run_started_at="2026-01-01T03:05:30Z",
+    updated_at="2026-01-01T03:06:00Z",
+)
 for workflow in set(workflows) - {
     "common-package-publish.yml", "production-build.yml", "oci-production-build.yml",
 }:
@@ -17119,9 +17151,84 @@ for workflow in set(workflows) - {
               {"total_count": len(selected), "workflow_runs": selected})
 held_binding = next(item for item in held_policy["upstreamRunBindings"]
                     if item["input"] == "held_handoff_run_id")
-with patch.object(complete_reader, "held_handoff_authority") as private_authority:
+history_endpoint = f"{prefix}/actions/workflows/oci-live-data-rollout.yml/runs?per_page=100"
+cutoff_endpoint = history_endpoint + "&created=%3C%3D" + cutoff156.replace("+00:00", "Z")
+original_history = read(history_endpoint)
+original_cutoff_history = read(cutoff_endpoint)
+for endpoint, history in (
+    (history_endpoint, original_history),
+    (cutoff_endpoint, original_cutoff_history),
+):
+    write(endpoint, {
+        "total_count": history["total_count"] + 1,
+        "workflow_runs": [*history["workflow_runs"], failed157],
+    })
+provenance_observation = {
+    "run": copy.deepcopy(failed157),
+    "attempts": [{"run": copy.deepcopy(failed157)}],
+}
+class AncestralProvenanceAuthority:
+    failed_deploy_run_id = "54"
+
+    def validate_provenance_read_observation(self, identity, observation):
+        assert identity["runId"] == 157
+        assert observation == provenance_observation
+        return {
+            "prerequisite_run_id": "155",
+            "resume_source_sha": native_source,
+            "failed_deploy_run_id": self.failed_deploy_run_id,
+        }
+
+ancestral_authority = AncestralProvenanceAuthority()
+with patch.object(complete_reader, "held_handoff_authority") as private_authority, \
+        patch.object(
+            complete_reader, "provenance_read_authority",
+            return_value=ancestral_authority,
+        ), \
+        patch.object(
+            complete_reader, "collect_provenance_read_observation",
+            side_effect=lambda *_: copy.deepcopy(provenance_observation),
+        ):
+    with patch.object(
+        complete_reader, "held_handoff_history",
+        wraps=complete_reader.held_handoff_history,
+    ) as held_history:
+        held155 = complete_reader.validate_binding(
+            repo, held_binding, native_source, "155", continuation, "oke",
+            successor_run_id="156",
+        )
+    ancestral_calls = [
+        call for call in held_history.call_args_list
+        if call.kwargs.get("qualified_ancestral_receiver_run_id")
+    ]
+    assert len(ancestral_calls) == 1
+    assert ancestral_calls[0].kwargs["qualified_ancestral_receiver_run_id"] == "54"
+    regressed_held155 = held155
+    ancestral_authority.failed_deploy_run_id = "999"
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            complete_reader.validate_binding(
+                repo, held_binding, native_source, "155", continuation, "oke",
+                successor_run_id="156",
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(
+                "ancestral provenance-read failure substituted its failed receiver"
+            )
+    ancestral_authority.failed_deploy_run_id = "54"
+    write(history_endpoint, original_history)
+    write(cutoff_endpoint, original_cutoff_history)
     held155 = complete_reader.validate_binding(
-        repo, held_binding, native_source, "155", continuation, "oke", successor_run_id="156")
+        repo, held_binding, native_source, "155", continuation, "oke",
+        successor_run_id="156",
+    )
+    assert held155["resume"] == regressed_held155["resume"]
+    print(
+        "PASS current held owner accepts only its authenticated ancestral "
+        "provenance-read failure"
+    )
     assert held155["resume"]["held_handoff_lease_seconds"] == "1800"
     assert held155["resume"]["applied_data_run_id"] == "42"
     assert held155["resume"]["baseline_capture_run_id"] == "53"
