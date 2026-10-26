@@ -12446,7 +12446,7 @@ def probe_recursive_394_to_386(module, later_snapshot=None):
     assert recursive.args[1:4] == (
         predecessor_run, predecessor_source, S0,
     )
-    assert recursive.kwargs == {"successor_run_id": outer_run}
+    assert recursive.kwargs == {"successor_run_id": outer_run, "_nested": True}
     assert native_calls == [
         (outer_run, S0, outer_request),
         (predecessor_run, predecessor_source, predecessor_request),
@@ -12681,9 +12681,13 @@ killed(
     "recursive-top-level-subject",
     [(
         '                repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],\n'
-        '                source_sha, native, runtime_mode, label, successor_run_id=run_id,\n',
+        '                source_sha, native, runtime_mode, label,\n'
+        '                successor_run_id=run_id,\n'
+        '                _nested=True,\n',
         '                repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],\n'
-        '                subject_sha, native, runtime_mode, label, successor_run_id=run_id,\n',
+        '                subject_sha, native, runtime_mode, label,\n'
+        '                successor_run_id=run_id,\n'
+        '                _nested=True,\n',
         1,
     )],
     probe_recursive_394_to_386,
@@ -17126,16 +17130,6 @@ continuation = {name: continuation[name] for name in held_policy["inputNames"]}
 continuation.update(held_policy["fixedInputs"])
 assert set(continuation) == set(held_policy["inputNames"])
 metadata156, cutoff156 = complete_native(156, continuation, 10)
-failed157 = dict(
-    metadata155,
-    id=157,
-    html_url=f"https://github.com/{repo}/actions/runs/157",
-    status="completed",
-    conclusion="failure",
-    created_at="2026-01-01T03:05:00Z",
-    run_started_at="2026-01-01T03:05:30Z",
-    updated_at="2026-01-01T03:06:00Z",
-)
 for workflow in set(workflows) - {
     "common-package-publish.yml", "production-build.yml", "oci-production-build.yml",
 }:
@@ -17152,82 +17146,10 @@ for workflow in set(workflows) - {
 held_binding = next(item for item in held_policy["upstreamRunBindings"]
                     if item["input"] == "held_handoff_run_id")
 history_endpoint = f"{prefix}/actions/workflows/oci-live-data-rollout.yml/runs?per_page=100"
-cutoff_endpoint = history_endpoint + "&created=%3C%3D" + cutoff156.replace("+00:00", "Z")
-original_history = read(history_endpoint)
-original_cutoff_history = read(cutoff_endpoint)
-for endpoint, history in (
-    (history_endpoint, original_history),
-    (cutoff_endpoint, original_cutoff_history),
-):
-    write(endpoint, {
-        "total_count": history["total_count"] + 1,
-        "workflow_runs": [*history["workflow_runs"], failed157],
-    })
-provenance_observation = {
-    "run": copy.deepcopy(failed157),
-    "attempts": [{"run": copy.deepcopy(failed157)}],
-}
-class AncestralProvenanceAuthority:
-    failed_deploy_run_id = "54"
-
-    def validate_provenance_read_observation(self, identity, observation):
-        assert identity["runId"] == 157
-        assert observation == provenance_observation
-        return {
-            "prerequisite_run_id": "155",
-            "resume_source_sha": native_source,
-            "failed_deploy_run_id": self.failed_deploy_run_id,
-        }
-
-ancestral_authority = AncestralProvenanceAuthority()
-with patch.object(complete_reader, "held_handoff_authority") as private_authority, \
-        patch.object(
-            complete_reader, "provenance_read_authority",
-            return_value=ancestral_authority,
-        ), \
-        patch.object(
-            complete_reader, "collect_provenance_read_observation",
-            side_effect=lambda *_: copy.deepcopy(provenance_observation),
-        ):
-    with patch.object(
-        complete_reader, "held_handoff_history",
-        wraps=complete_reader.held_handoff_history,
-    ) as held_history:
-        held155 = complete_reader.validate_binding(
-            repo, held_binding, native_source, "155", continuation, "oke",
-            successor_run_id="156",
-        )
-    ancestral_calls = [
-        call for call in held_history.call_args_list
-        if call.kwargs.get("qualified_ancestral_receiver_run_id")
-    ]
-    assert len(ancestral_calls) == 1
-    assert ancestral_calls[0].kwargs["qualified_ancestral_receiver_run_id"] == "54"
-    regressed_held155 = held155
-    ancestral_authority.failed_deploy_run_id = "999"
-    with contextlib.redirect_stderr(io.StringIO()):
-        try:
-            complete_reader.validate_binding(
-                repo, held_binding, native_source, "155", continuation, "oke",
-                successor_run_id="156",
-            )
-        except SystemExit:
-            pass
-        else:
-            raise AssertionError(
-                "ancestral provenance-read failure substituted its failed receiver"
-            )
-    ancestral_authority.failed_deploy_run_id = "54"
-    write(history_endpoint, original_history)
-    write(cutoff_endpoint, original_cutoff_history)
+with patch.object(complete_reader, "held_handoff_authority") as private_authority:
     held155 = complete_reader.validate_binding(
         repo, held_binding, native_source, "155", continuation, "oke",
         successor_run_id="156",
-    )
-    assert held155["resume"] == regressed_held155["resume"]
-    print(
-        "PASS current held owner accepts only its authenticated ancestral "
-        "provenance-read failure"
     )
     assert held155["resume"]["held_handoff_lease_seconds"] == "1800"
     assert held155["resume"]["applied_data_run_id"] == "42"
@@ -17443,8 +17365,104 @@ else:
             else:
                 raise AssertionError(f"completed v5 lineage relabelled its capture/controller as the root: {key}")
         log156.write_bytes(original_log156)
-    held156 = complete_reader.validate_binding(repo, held_binding, native_source, "156",
-        dict(continuation, held_handoff_run_id="156"), "oke")
+    outer_continuation = dict(continuation, held_handoff_run_id="156")
+    failed_created = dt.datetime.fromisoformat(metadata156["updated_at"]) + dt.timedelta(seconds=1)
+    failed_started = failed_created + dt.timedelta(seconds=1)
+    failed_updated = failed_started + dt.timedelta(seconds=1)
+    assert (
+        dt.datetime.fromisoformat(metadata155["updated_at"])
+        < dt.datetime.fromisoformat(metadata156["created_at"])
+        < failed_created
+    )
+    failed157 = dict(
+        metadata156,
+        id=157,
+        html_url=f"https://github.com/{repo}/actions/runs/157",
+        status="completed",
+        conclusion="failure",
+        created_at=failed_created.isoformat(),
+        run_started_at=failed_started.isoformat(),
+        updated_at=failed_updated.isoformat(),
+    )
+    original_history = read(history_endpoint)
+    write(history_endpoint, {
+        "total_count": original_history["total_count"] + 1,
+        "workflow_runs": [*original_history["workflow_runs"], failed157],
+    })
+    provenance_observation = {
+        "run": copy.deepcopy(failed157),
+        "attempts": [{"run": copy.deepcopy(failed157)}],
+    }
+
+    class AncestralProvenanceAuthority:
+        failed_deploy_run_id = "54"
+
+        def validate_provenance_read_observation(self, identity, observation):
+            assert identity["runId"] == 157
+            assert observation == provenance_observation
+            return {
+                "prerequisite_run_id": "156",
+                "resume_source_sha": native_source,
+                "failed_deploy_run_id": self.failed_deploy_run_id,
+            }
+
+    ancestral_authority = AncestralProvenanceAuthority()
+    try:
+        with patch.object(
+            complete_reader, "provenance_read_authority",
+            return_value=ancestral_authority,
+        ), patch.object(
+            complete_reader, "collect_provenance_read_observation",
+            side_effect=lambda *_: copy.deepcopy(provenance_observation),
+        ):
+            with patch.object(
+                complete_reader, "held_handoff_history",
+                wraps=complete_reader.held_handoff_history,
+            ) as held_history:
+                held156 = complete_reader.validate_binding(
+                    repo, held_binding, native_source, "156", outer_continuation, "oke",
+                )
+            assert any(
+                call.args[1]["id"] == 156
+                and call.kwargs.get("qualified_ancestral_receiver_run_id") == "54"
+                for call in held_history.call_args_list
+            )
+            assert "no_takeover_handoff_qualification" not in held156["resume"]
+            ancestral_authority.failed_deploy_run_id = "999"
+            with contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    complete_reader.validate_binding(
+                        repo, held_binding, native_source, "156", outer_continuation, "oke",
+                    )
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(
+                        "nested ancestral provenance-read failure substituted its failed receiver"
+                    )
+            ancestral_authority.failed_deploy_run_id = "54"
+            canonical_result.unlink(missing_ok=True)
+            with contextlib.redirect_stdout(io.StringIO()) as outer_canonical_output:
+                complete_reader.command_validate_all(argparse.Namespace(
+                    repository=repo, policy_json=json.dumps(held_policy), manifest="", operation="",
+                    subject_sha=native_source, dispatch_inputs=json.dumps(outer_continuation),
+                    runtime_mode="oke", successor_run_id="", result_json=str(canonical_result),
+                    baseline_dir="", held_history_file=""))
+            outer_canonical_raw = canonical_result.read_text()
+            outer_canonical = json.loads(outer_canonical_raw)
+            assert "upstream_bindings_validated=6" in outer_canonical_output.getvalue().splitlines()
+            assert set(outer_canonical) == {"failed_deploy_run_id", "held_handoff_run_id"}
+            assert "no_takeover_handoff_qualification" not in outer_canonical_raw
+            assert all(
+                result["held_handoff_run_id"] == "156"
+                for result in outer_canonical.values()
+            )
+    finally:
+        write(history_endpoint, original_history)
+    print(
+        "PASS nested current held owner accepts only its authenticated ancestral "
+        "provenance-read failure"
+    )
     assert held156["resume"]["held_handoff_lease_seconds"] == "7200"
     assert held156["baselineFiles"] == held155["baselineFiles"]
     assert held156["resume"]["applied_data_run_id"] == "42"
