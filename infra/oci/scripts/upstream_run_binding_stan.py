@@ -10326,18 +10326,18 @@ def complete_held_artifacts(repository, run_id, source_sha, held, files, label):
 
 def validate_held_handoff_artifact(
     repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
-    *, successor_run_id="",
+    *, successor_run_id="", _nested=False,
 ):
     if _CURRENT_READER_SHA_CONTEXT.get() is not None:
         return _validate_held_handoff_artifact(
             repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
-            successor_run_id=successor_run_id,
+            successor_run_id=successor_run_id, _nested=_nested,
         )
     reader_token = _CURRENT_READER_SHA_CONTEXT.set(subject_sha)
     try:
         return _validate_held_handoff_artifact(
             repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
-            successor_run_id=successor_run_id,
+            successor_run_id=successor_run_id, _nested=_nested,
         )
     finally:
         _CURRENT_READER_SHA_CONTEXT.reset(reader_token)
@@ -10345,7 +10345,7 @@ def validate_held_handoff_artifact(
 
 def _validate_held_handoff_artifact(
     repository, run_id, source_sha, subject_sha, dispatch_inputs, runtime_mode, label,
-    *, successor_run_id="",
+    *, successor_run_id="", _nested=False,
 ):
     if dispatch_inputs.get("confirmation") != HELD_HANDOFF_CONFIRMATION:
         fail("held-handoff profile is restricted to its fixed continuation operation")
@@ -10407,7 +10407,9 @@ def _validate_held_handoff_artifact(
                 fail("complete held handoff substituted its prior physical producer")
             predecessor = validate_held_handoff_artifact(
                 repository, native["held_handoff_run_id"], native["held_handoff_source_sha"],
-                source_sha, native, runtime_mode, label, successor_run_id=run_id,
+                source_sha, native, runtime_mode, label,
+                successor_run_id=run_id,
+                _nested=True,
             )
             root = dict(predecessor["resume"], _baseline_files=predecessor["baselineFiles"])
         else:
@@ -10516,7 +10518,8 @@ def _validate_held_handoff_artifact(
         ),
     )
     # The expired receiver qualifies the ancestor, not the current physical transfer.
-    root.pop("no_takeover_handoff_qualification", None)
+    if not _nested:
+        root.pop("no_takeover_handoff_qualification", None)
     return {
         "artifactName": f"oci-live-data-rollout-{run_id}-1",
         "createdAt": held["created_at"], "completedAt": held["updated_at"],
