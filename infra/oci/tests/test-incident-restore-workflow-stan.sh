@@ -203,6 +203,7 @@ unless ordinary_validation.include?('ordinary_dispatch_inputs="$(') &&
          incident_continuation_control_sha
          incident_continuation_journal_identity_sha256
          incident_continuation_generation
+         incident_access_cleanup_lineage_json
        ].all? { |name| ordinary_validation.include?(".#{name}") }
   fail_contract("ordinary validator did not remove exact neutral incident inputs")
 end
@@ -214,7 +215,7 @@ end
 
 ordered = [
   "Verify fixed incident manifest and immutable evidence",
-  "Reject competing production activity",
+  "Reject competing incident production activity",
   "Verify fixed infrastructure checkpoint",
   "Reconcile bounded incident access-cleanup lineage",
   "Capture exact current incident access identity",
@@ -357,10 +358,10 @@ predecessor_cleanup_position = incident_position.call(
   "Reconcile bounded incident access-cleanup lineage"
 )
 oke_access_position = incident_position.call(
-  "Reconcile expired and authorize current runner IPv4"
+  "Reconcile expired and authorize incident runner IPv4"
 )
 k3s_access_position = incident_position.call(
-  "Open ephemeral OCI Bastion access to k3s"
+  "Open ephemeral incident OCI Bastion access to k3s"
 )
 capture_access_position = incident_position.call(
   "Capture exact current incident access identity"
@@ -429,8 +430,8 @@ no_replay_guards.each do |name, dependency|
   end
 end
 for cleanup_name in [
-  "Revoke exact runner rule",
-  "Close ephemeral OCI Bastion access",
+  "Revoke exact incident runner rule",
+  "Close ephemeral incident OCI Bastion access",
 ]
   cleanup_position = incident_position.call(cleanup_name)
   fail_contract("missing incident cleanup #{cleanup_name}") unless

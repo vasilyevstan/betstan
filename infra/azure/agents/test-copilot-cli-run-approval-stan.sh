@@ -66,12 +66,18 @@ assert "verify-incident-continuation" in continuation
 assert 'actions/runs/$predecessor_run_id' in continuation
 assert 'EXCLUDE_RUN_ID="$RUN_ID"' in continuation
 assert "production_run_exclusivity=PASS" in continuation
+assert continuation.index(
+    "production_run_exclusivity=PASS"
+) < continuation.index('actions/runs/$predecessor_run_id')
 post_claim = text[text.index("if ! approval_revalidation_error="):]
 release = post_claim.index('"$AUTHORITY_HELPER" release-approval')
 failure = post_claim.index('fail "$approval_revalidation_error"')
 post = post_claim.index("--method POST")
 assert release < failure < post
 assert "revalidate_upstream_bindings approval-3" in post_claim[:release]
+assert post_claim[:release].rindex(
+    "validate_incident_continuation_authority"
+) > post_claim[:release].rindex("revalidate_control")
 print("incident_manifest_approval_prerequisite=PASS empty_upstream=true drift_releases_claim=true continuation=true")
 PY
 

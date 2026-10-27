@@ -427,7 +427,8 @@ jobs:
                 .incident_continuation_authority_sha256,
                 .incident_continuation_control_sha,
                 .incident_continuation_journal_identity_sha256,
-                .incident_continuation_generation
+                .incident_continuation_generation,
+                .incident_access_cleanup_lineage_json
               )
             ' <<<"$DISPATCH_INPUTS"
           )"
@@ -918,7 +919,8 @@ jobs:
                     .incident_continuation_authority_sha256,
                     .incident_continuation_control_sha,
                     .incident_continuation_journal_identity_sha256,
-                    .incident_continuation_generation
+                    .incident_continuation_generation,
+                    .incident_access_cleanup_lineage_json
                   )
                 ' <<<"$DISPATCH_INPUTS"
               )"
@@ -2514,7 +2516,7 @@ jobs:
                 "$RUNNER_TEMP/incident-verification.json")"
           } >>"$GITHUB_ENV"
 
-      - name: Reject competing production activity
+      - name: Reject competing incident production activity
         if: inputs.phase == 'incident-restore'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2594,12 +2596,12 @@ jobs:
                   handle.write(f"{key}={value}\n")
           PY
 
-      - name: Install pinned OCI CLI
+      - name: Install pinned OCI CLI for incident restore
         if: inputs.phase == 'incident-restore'
         id: incident_oci_cli
         run: ./infra/oci/scripts/install-cli.sh
 
-      - name: Verify OKE identity
+      - name: Verify incident OKE identity
         if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -2614,7 +2616,7 @@ jobs:
             --query 'data.{type:type,state:"lifecycle-state"}' \
             >/dev/null
 
-      - name: Verify k3s identity
+      - name: Verify incident k3s identity
         if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -2652,7 +2654,7 @@ jobs:
               artifacts/oci-live-data-incident-restore/access-cleanup-lineage.json \
             --output artifacts/oci-live-data-incident-restore/access-lineage-cleanup.json
 
-      - name: Reconcile expired and authorize current runner IPv4
+      - name: Reconcile expired and authorize incident runner IPv4
         if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -2671,7 +2673,7 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/authorize-github-runner.sh authorize
 
-      - name: Configure kubectl from exact cluster OCID
+      - name: Configure incident kubectl from exact cluster OCID
         if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
         uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
         env:
@@ -2683,7 +2685,7 @@ jobs:
         with:
           cluster: ${{ steps.infrastructure.outputs.cluster_ocid }}
 
-      - name: Open ephemeral OCI Bastion access to k3s
+      - name: Open ephemeral incident OCI Bastion access to k3s
         if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -3453,7 +3455,7 @@ jobs:
           OBSERVED_FENCE_STATUS=false \
             ./infra/oci/scripts/incident_restore_state_stan.py record-published
 
-      - name: Revoke exact runner rule
+      - name: Revoke exact incident runner rule
         if: >-
           always() &&
           inputs.phase == 'incident-restore' &&
@@ -3471,7 +3473,7 @@ jobs:
             ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
           fi
 
-      - name: Close ephemeral OCI Bastion access
+      - name: Close ephemeral incident OCI Bastion access
         if: >-
           always() &&
           inputs.phase == 'incident-restore' &&
@@ -3488,6 +3490,6 @@ jobs:
           WORK_DIR: ${{ runner.temp }}/incident-k3s-access
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
-      - name: Remove isolated OCI client state
+      - name: Remove isolated incident OCI client state
         if: always() && inputs.phase == 'incident-restore'
         run: rm -rf "$RUNNER_TEMP/oci-home"

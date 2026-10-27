@@ -40,7 +40,9 @@ class IncidentContinuationAuthorityTests(unittest.TestCase):
     )
 
     def setUp(self):
-        parent = Path(os.environ["TMPDIR"]).resolve()
+        parent = Path(
+            os.environ.get("TMPDIR", tempfile.gettempdir())
+        ).resolve()
         self.work = Path(
             tempfile.mkdtemp(
                 prefix="incident-continuation-authority.",

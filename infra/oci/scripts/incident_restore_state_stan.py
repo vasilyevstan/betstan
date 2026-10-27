@@ -650,7 +650,10 @@ def validate_released_successor(
     released = lock_data(released_document, "released incident lock")
     if set(released) != CORE_LOCK_KEYS:
         fail("released incident lock is not canonical")
-    if released_uid != active_uid or released_version == active_version:
+    if (
+        released_uid != active_uid
+        or int(released_version) <= int(active_version)
+    ):
         fail("released incident lock identity did not advance")
     active_generation = positive_data(
         active, "fencing-generation", "active incident lock"

@@ -549,6 +549,22 @@ run_state 5003 "$CONTROL_D" 3 true "$STATE_DIR/access-d.json" \
       "$STATE_DIR/journal.json")" == "4" ]] ||
   fail "C to D CAS successor or access lineage was not recorded"
 
+jq '.metadata.resourceVersion = "13"' \
+  "$STATE_DIR/released-d.json" >"$WORK_DIR/released-d-lower-version.json"
+cp "$WORK_DIR/released-d-lower-version.json" "$STATE_DIR/lock.json"
+cp "$STATE_DIR/journal.json" "$WORK_DIR/journal-before-lower-release.json"
+set +e
+run_state 5003 "$CONTROL_D" 3 true "$STATE_DIR/access-d.json" \
+    classify >"$WORK_DIR/released-d-lower-version.out" 2>&1
+status=$?
+set -e
+if [[ "$status" -eq 0 ]]; then
+  fail "lower-version released successor was accepted"
+fi
+cmp -s "$STATE_DIR/journal.json" \
+  "$WORK_DIR/journal-before-lower-release.json" ||
+  fail "lower-version released successor changed the journal"
+
 cp "$STATE_DIR/released-d.json" "$STATE_DIR/lock.json"
 classification="$(
   run_state 5003 "$CONTROL_D" 3 true "$STATE_DIR/access-d.json" classify

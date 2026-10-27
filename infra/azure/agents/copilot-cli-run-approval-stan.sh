@@ -526,6 +526,11 @@ validate_incident_continuation_authority() {
     jq -er '.predecessorRunId | tostring |
       select(test("^[1-9][0-9]*$"))' <<<"$continuation"
   )" || fail "incident continuation predecessor identity is invalid"
+  [[ "$(
+    REPO="$repository" EXCLUDE_RUN_ID="$RUN_ID" \
+      PROSPECTIVE_PROMOTION_PR="" "$RUN_EXCLUSIVITY_SCRIPT"
+  )" = "production_run_exclusivity=PASS" ]] ||
+    fail "incident continuation lost current production exclusivity"
   gh api \
     "repos/$repository/actions/runs/$predecessor_run_id" \
     >"$incident_predecessor_run_file" ||
@@ -543,11 +548,6 @@ validate_incident_continuation_authority() {
     --workflow-blob-sha "$workflow_blob_sha" \
     >/dev/null ||
     fail "incident continuation authority is no longer exact"
-  [[ "$(
-    REPO="$repository" EXCLUDE_RUN_ID="$RUN_ID" \
-      PROSPECTIVE_PROMOTION_PR="" "$RUN_EXCLUSIVITY_SCRIPT"
-  )" = "production_run_exclusivity=PASS" ]] ||
-    fail "incident continuation lost current production exclusivity"
 }
 
 record_summary=""
@@ -1265,7 +1265,8 @@ if ! approval_revalidation_error="$(
       validate_exclusivity &&
       validate_pending_gate &&
       validate_claimed_gate_identity &&
-      revalidate_control
+      revalidate_control &&
+      validate_incident_continuation_authority
   } 2>&1
 )"; then
   "$AUTHORITY_HELPER" release-approval \

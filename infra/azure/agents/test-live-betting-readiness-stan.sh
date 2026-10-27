@@ -16,6 +16,15 @@ assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'current service set s
 assert_contains "$RUN_SUMMARY_FILE" 'image_provenance_rows=10' 'current service set should contain ten images'
 assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'current service set should verify every deployment'
 
+run_live_betting_scenario azure-runtime-digest-drift "$SCRIPT" azure \
+  MODE=dark \
+  IMAGE_PROVENANCE_FILE="$current_images" \
+  STUB_POD_IMAGE_DIGEST_MISMATCH_SERVICE=auth
+assert_eq 1 "$RUN_RC" "dark mode should reject a different runtime platform digest"
+assert_contains "$RUN_SCENARIO_DIR/output/workloads-check.stderr" \
+  'matches the authenticated platform digest' \
+  'runtime readiness should bind pod imageID to authenticated provenance'
+
 while IFS='|' read -r identity_case services; do
   images="$TEST_ROOT/azure-${identity_case}-images.tsv"
   create_image_provenance "$images" azure "$services"

@@ -37,6 +37,31 @@ ok() {
   printf 'PASS %s\n' "$1"
 }
 
+ensure_historical_reader_blobs() {
+  local blob missing=false
+  local -a blobs=(
+    2900c649bdb3b529d357a4df274482295695c8cd
+    d5afe224080abecda336f1b3d190c83674835ebf
+    b587fa03960422a0a73e3dd65b955a3a716c5480
+  )
+  for blob in "${blobs[@]}"; do
+    git -C "$ROOT_DIR" cat-file -e "$blob^{blob}" 2>/dev/null || missing=true
+  done
+  if [[ "$missing" == true ]]; then
+    [[ "$(git -C "$ROOT_DIR" rev-parse --is-shallow-repository)" == true ]] ||
+      fail "historical reader blobs are missing from a complete repository"
+    git -C "$ROOT_DIR" fetch --quiet --no-tags --deepen=1 \
+      origin "$(git -C "$ROOT_DIR" rev-parse HEAD)" ||
+      fail "could not deepen the shallow checkout for historical reader fixtures"
+  fi
+  for blob in "${blobs[@]}"; do
+    git -C "$ROOT_DIR" cat-file -e "$blob^{blob}" 2>/dev/null ||
+      fail "historical reader blob remains unavailable: $blob"
+  done
+}
+
+ensure_historical_reader_blobs
+
 env -u PYTHONDONTWRITEBYTECODE python3 - \
   "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
 import concurrent.futures
@@ -5997,10 +6022,49 @@ with patch.object(m, "require_fixed_run", return_value=held_metadata), \
             reject(held_native)
 print("PASS fixed successful held producer, exact native slots 1..37/74/75, complete outcomes, and original root tuple")
 current_workflow = subprocess.check_output([
-    "git", "-C", sys.argv[2], "show", source + ":.github/workflows/oci-live-data-rollout.yml",
+    "git", "-C", sys.argv[2], "show",
+    source + ":.github/workflows/oci-live-data-rollout.yml",
 ]).decode()
 current_names = re.findall(r"(?m)^      - name: (.+)$", current_workflow)
-current_skipped = held_skipped | {"Verify reader-qualified released activation state"}
+current_skipped = held_skipped | {
+    "Verify reader-qualified released activation state",
+    "Verify fixed incident manifest and immutable evidence",
+    "Reject competing incident production activity",
+    "Verify fixed infrastructure checkpoint",
+    "Install pinned OCI CLI for incident restore",
+    "Verify incident OKE identity",
+    "Verify incident k3s identity",
+    "Reconcile bounded incident access-cleanup lineage",
+    "Reconcile expired and authorize incident runner IPv4",
+    "Configure incident kubectl from exact cluster OCID",
+    "Open ephemeral incident OCI Bastion access to k3s",
+    "Capture exact current incident access identity",
+    "Authenticate incident journal control handoff",
+    "Classify exact incident continuation state",
+    "Adopt authenticated active incident successor",
+    "Persist current incident access identity",
+    "Reconstruct authenticated incident baseline state",
+    "Verify original held fence writers and images",
+    "Replace exact expired held lock",
+    "Reconcile incident writers under exact lock and fence",
+    "Restore authenticated baseline while retaining fence",
+    "Release incident lock before fence",
+    "Persist recovered released-lock transition",
+    "Capture persisted incident lock postimages",
+    "Reconcile published incident access resources",
+    "Release fence after lock",
+    "Persist recovered unfenced transition",
+    "Capture restored readiness and public availability",
+    "Seal non-deployable incident evidence",
+    "Seal already-published incident continuation evidence",
+    "Re-quiesce incident writers after restoration failure",
+    "Seal checksummed incident failure evidence",
+    "Upload bounded incident restoration evidence",
+    "Mark incident evidence publication complete",
+    "Revoke exact incident runner rule",
+    "Close ephemeral incident OCI Bastion access",
+    "Remove isolated incident OCI client state",
+}
 current_start = m.dt.datetime(2026, 10, 7, 9, 9, tzinfo=m.dt.timezone.utc)
 current_steps = []
 for index, name in enumerate([
@@ -6095,7 +6159,13 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
                             assert observed["_handoff_lease_seconds"] == duration
                             assert observed["_handoff_resume_schema"] == expected_schema
                             assert observed["_handoff_deadline"] == renewal_epoch + duration
-    with patch.object(m, "current_held_source", return_value=modern_workflow), \
+    unsupported_workflow = modern_workflow.replace(
+        "      - name: Validate dispatch phase and confirmation routing",
+        "      - name: Unsupported current reader routing",
+        1,
+    )
+    assert unsupported_workflow != modern_workflow
+    with patch.object(m, "current_held_source", return_value=unsupported_workflow), \
             patch.object(m, "failed_deploy_native_inputs", return_value=values), \
             patch.object(m, "gh_api_bytes", return_value=renewal_log()):
         reject(held_native)

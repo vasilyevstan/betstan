@@ -76,7 +76,10 @@ for index, service in enumerate(services, 1):
     else:
         repository = "ocir.example.invalid/fixture/betstan_images"
         image_ref = f"{repository}@{digest}"
-        rows.append("\t".join([service, repository, image_ref, digest, digest]))
+        platform_digest = f"sha256:{index + 100:064x}"
+        rows.append("\t".join([
+            service, repository, image_ref, digest, platform_digest
+        ]))
 path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 PY
 }
@@ -272,22 +275,33 @@ PY
 fi
 if [[ "$args" == *"get pods"* ]]; then
   [[ "$fail_command" != "pods" ]] || exit 1
-  python3 - "$IMAGE_PROVENANCE_FILE" "${STUB_TOPOLOGY_MODE:-shared}" <<'PY'
+  python3 - \
+    "$IMAGE_PROVENANCE_FILE" \
+    "${STUB_TOPOLOGY_MODE:-shared}" \
+    "${STUB_POD_IMAGE_DIGEST_MISMATCH_SERVICE:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 images_path = Path(sys.argv[1])
 topology_mode = sys.argv[2]
+mismatch_service = sys.argv[3]
 items = []
 for raw_line in images_path.read_text(encoding='utf-8').splitlines():
     if not raw_line.strip():
         continue
-    service, _repository, image_ref, digest, *_rest = raw_line.split('\t')
+    parts = raw_line.split('\t')
+    service, _repository, image_ref, digest = parts[:4]
+    platform_digest = parts[4] if len(parts) >= 5 else digest
+    if service == mismatch_service:
+        platform_digest = "sha256:" + ("0" * 64)
+    runtime_image = image_ref.rsplit("@", 1)[0] + "@" + platform_digest
     name = f'gaming-{service}'
     items.append({
         'metadata': {'name': f'{name}-pod-0', 'labels': {'app': name}},
-        'status': {'containerStatuses': [{'name': name, 'ready': True, 'imageID': image_ref}]},
+        'status': {'containerStatuses': [{
+            'name': name, 'ready': True, 'imageID': runtime_image
+        }]},
     })
 items.append({
     'metadata': {'name': 'gaming-rabbitmq-pod-0', 'labels': {'app': 'gaming-rabbitmq'}},
