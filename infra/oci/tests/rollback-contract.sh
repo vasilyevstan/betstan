@@ -1131,13 +1131,15 @@ service_platform_digest_from_image() {
 }
 
 print_all_workloads() {
-  python3 - "$STUB_STATE_DIR" "${STUB_FLAG_VALUE:-false}" <<'PY'
+  python3 - "$STUB_STATE_DIR" "${STUB_FLAG_VALUE:-false}" \
+    "${STUB_PRE_ROLLBACK_POD_SCENARIO:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 state_dir = Path(sys.argv[1])
 flag_value = sys.argv[2]
+pod_scenario = sys.argv[3]
 services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip", "telemetry"]
 items = []
 for service in services:
@@ -1153,12 +1155,13 @@ for service in services:
     env = []
     if service == "gamemaster":
         env.append({"name": "LIVE_KICKOFFS_ENABLED", "value": flag_value})
+    replicas = 2 if service == "event" and pod_scenario == "deleting-plus-exact" else 1
     items.append({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {"name": f"gaming-{service}-depl", "annotations": {"deployment.kubernetes.io/revision": fields.get("revision", "0")}},
-        "spec": {"replicas": 1, "template": {"spec": {"containers": [{"name": f"gaming-{service}", "image": fields.get("image", ""), "env": env}]}}},
-        "status": {"readyReplicas": 1, "availableReplicas": 1, "updatedReplicas": 1},
+        "spec": {"replicas": replicas, "template": {"spec": {"containers": [{"name": f"gaming-{service}", "image": fields.get("image", ""), "env": env}]}}},
+        "status": {"readyReplicas": replicas, "availableReplicas": replicas, "updatedReplicas": replicas},
     })
 items.append({
     "apiVersion": "apps/v1",
@@ -1180,7 +1183,8 @@ PY
 
 print_all_pods() {
   python3 - "$STUB_STATE_DIR" "${STUB_BAD_DIGEST_SERVICE:-}" "${MODE:-}" \
-    "${STUB_POD_IMAGE_ID_MODE:-platform}" <<'PY'
+    "${STUB_POD_IMAGE_ID_MODE:-platform}" \
+    "${STUB_PRE_ROLLBACK_POD_SCENARIO:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1189,6 +1193,7 @@ state_dir = Path(sys.argv[1])
 bad_service = sys.argv[2]
 mode = sys.argv[3]
 image_id_mode = sys.argv[4]
+pod_scenario = sys.argv[5]
 services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip", "telemetry"]
 items = []
 platform_map = {
@@ -1203,6 +1208,14 @@ platform_map = {
     "slip": 38,
     "telemetry": 40,
 }
+
+def image_id(service, digest):
+    if image_id_mode == "direct":
+        return digest
+    if image_id_mode == "scheme":
+        return f"containerd://{digest}"
+    return f"docker-pullable://fixture.invalid/namespace/{service}@{digest}"
+
 for service in services:
     fields = {}
     for line in (state_dir / f"{service}.env").read_text(encoding="utf-8").splitlines():
@@ -1219,9 +1232,34 @@ for service in services:
         and fields.get("revision") == "8"
     ):
         digest = 'sha256:' + ('9' * 64)
+    if service == "event" and pod_scenario == "deleting-plus-exact":
+        items.append({
+            "metadata": {
+                "name": "gaming-event-pod-stale",
+                "labels": {"app": "gaming-event"},
+                "deletionTimestamp": "2026-01-01T00:00:00Z",
+            },
+            "status": {"containerStatuses": [{
+                "name": "gaming-event",
+                "ready": True,
+                "imageID": image_id(service, 'sha256:' + ('9' * 64)),
+            }]},
+        })
+        items.extend(
+            {
+                "metadata": {"name": f"gaming-event-pod-{index}", "labels": {"app": "gaming-event"}},
+                "status": {"containerStatuses": [{
+                    "name": "gaming-event",
+                    "ready": True,
+                    "imageID": image_id(service, digest),
+                }]},
+            }
+            for index in range(2)
+        )
+        continue
     items.append({
         "metadata": {"name": f"gaming-{service}-pod-0", "labels": {"app": f"gaming-{service}"}},
-        "status": {"containerStatuses": [{"name": f"gaming-{service}", "ready": True, "imageID": f"docker-pullable://fixture.invalid/namespace/{service}@{digest}"}]},
+        "status": {"containerStatuses": [{"name": f"gaming-{service}", "ready": True, "imageID": image_id(service, digest)}]},
     })
 items.append({
     "metadata": {"name": "rabbitmq-0", "labels": {"app": "gaming-rabbitmq"}},
@@ -1513,7 +1551,13 @@ PY
           if [[ -z "${MODE:-}" && "$service" == "event" &&
             -n "${STUB_PRE_ROLLBACK_POD_SCENARIO:-}" ]]; then
             jq -n --arg service "$service" --arg digest "$digest" \
-              --arg scenario "$STUB_PRE_ROLLBACK_POD_SCENARIO" '
+              --arg scenario "$STUB_PRE_ROLLBACK_POD_SCENARIO" \
+              --arg image_id_mode "${STUB_POD_IMAGE_ID_MODE:-platform}" '
+              def image_id($pod_digest):
+                if $image_id_mode == "direct" then $pod_digest
+                elif $image_id_mode == "scheme" then "containerd://" + $pod_digest
+                else "docker-pullable://fixture.invalid/namespace/" + $service + "@" + $pod_digest
+                end;
               def pod($suffix; $pod_digest; $deleting):
                 {
                   metadata: (
@@ -1523,7 +1567,7 @@ PY
                   status:{containerStatuses:[{
                     name:("gaming-" + $service),
                     ready:true,
-                    imageID:("docker-pullable://fixture.invalid/namespace/" + $service + "@" + $pod_digest)
+                    imageID:image_id($pod_digest)
                   }]}
                 };
               if $scenario == "count-mismatch" then
@@ -1546,13 +1590,18 @@ PY
               end'
             exit 0
           fi
-          jq -n --arg service "$service" --arg digest "$digest" \
+          case "${STUB_POD_IMAGE_ID_MODE:-platform}" in
+            direct) image_id="$digest" ;;
+            scheme) image_id="containerd://$digest" ;;
+            *) image_id="docker-pullable://fixture.invalid/namespace/${service}@$digest" ;;
+          esac
+          jq -n --arg service "$service" --arg image_id "$image_id" \
             --arg cash_flag "${STUB_CASH_BACK_POD_FLAG:-${STUB_LIVE_CASH_BACK_FLAG:-absent}}" '{
             items:[{metadata:{name:($service + "-pod-0"),labels:{app:("gaming-" + $service)}},
               spec:{containers:[{name:("gaming-"+$service),
                 env: (if ($service == "bet" or $service == "resulting") and $cash_flag != "absent"
                       then [{name:"CASH_BACK_ENABLED",value:$cash_flag}] else [] end)}]},
-              status:{containerStatuses:[{name:("gaming-" + $service),ready:true,imageID:("docker-pullable://fixture.invalid/namespace/" + $service + "@" + $digest)}]}}]
+              status:{containerStatuses:[{name:("gaming-" + $service),ready:true,imageID:$image_id}]}}]
           }'
         else
           print_all_pods
@@ -3609,6 +3658,12 @@ assert_not_contains "$WORK_DIR/legacy-sse-rollback-success/queue-verification.ts
 run_expect_failure exact-digest-verification \
   STUB_BAD_DIGEST_SERVICE=event ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/exact-digest-verification.out" 'does not serve the expected manifest/platform digest'
+run_expect_failure exact-digest-direct-verification \
+  STUB_BAD_DIGEST_SERVICE=event \
+  STUB_POD_IMAGE_ID_MODE=direct \
+  ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/exact-digest-direct-verification.out" \
+  'does not serve the expected manifest/platform digest'
 
 if ! run_script "$WORK_DIR/manifest-image-id-success" \
     STUB_POD_IMAGE_ID_MODE=manifest \
@@ -3619,6 +3674,18 @@ if ! run_script "$WORK_DIR/manifest-image-id-success" \
   fail 'OCI rollback rejected CRI-reported immutable manifest image IDs'
 fi
 assert_contains "$WORK_DIR/manifest-image-id-success.out" 'oci_rollback_status=PASS'
+for image_id_mode in direct scheme; do
+  label="${image_id_mode}-image-id-success"
+  if ! run_script "$WORK_DIR/$label" \
+      "STUB_POD_IMAGE_ID_MODE=$image_id_mode" \
+      STUB_DYNAMIC_QUEUE_NAME_AFTER_ROLLBACK=event_live_update.rolled-pod \
+      STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=headers-only-exact-window-eof \
+      ROLLBACK_MODE=execute >"$WORK_DIR/$label.out" 2>&1; then
+    cat "$WORK_DIR/$label.out" >&2
+    fail "OCI rollback rejected $image_id_mode immutable image IDs"
+  fi
+  assert_contains "$WORK_DIR/$label.out" 'oci_rollback_status=PASS'
+done
 
 if ! run_script "$WORK_DIR/success-exact-window-eof" \
     STUB_DYNAMIC_QUEUE_NAME_AFTER_ROLLBACK=event_live_update.rolled-pod \

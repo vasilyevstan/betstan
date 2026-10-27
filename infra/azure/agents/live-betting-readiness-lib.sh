@@ -1042,6 +1042,8 @@ for service, image_ref, platform_digest in image_rows:
     ready_pods = 0
     ready_digest_pods = 0
     for pod in pods_for_app:
+        if (pod.get("metadata") or {}).get("deletionTimestamp") is not None:
+            continue
         for status_entry in (pod.get("status") or {}).get("containerStatuses") or []:
             image_id = status_entry.get("imageID") or ""
             image_id_match = image_id_digest_re.search(image_id)

@@ -588,11 +588,14 @@ verify_exact_digest() {
     "$(expected_platform_digest "$service")" \
     >>"$OUTPUT_DIR/exact-digest-verification.tsv" <<'PY'
 import json
+import re
 import sys
 
 deployment = json.load(open(sys.argv[1], encoding='utf-8'))
 pods = json.load(open(sys.argv[2], encoding='utf-8'))
 container, service, expected_ref, manifest_digest, platform_digest = sys.argv[3:8]
+digest_value_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+image_id_digest_pattern = re.compile(r"(?:@|://)(sha256:[0-9a-f]{64})$")
 images = [
     item.get('image', '')
     for item in deployment.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
@@ -611,10 +614,11 @@ for pod in pods.get('items', []):
         if not status.get('ready'):
             raise SystemExit(f'{service}: pod {pod_name} is not ready')
         image_id = status.get('imageID', '')
-        if not (
-            image_id.endswith('@' + manifest_digest)
-            or image_id.endswith('@' + platform_digest)
-        ):
+        match = image_id_digest_pattern.search(image_id)
+        observed_digest = image_id if digest_value_pattern.fullmatch(image_id) else (
+            match.group(1) if match is not None else ""
+        )
+        if observed_digest not in {manifest_digest, platform_digest}:
             raise SystemExit(
                 f'{service}: pod {pod_name} does not serve the expected manifest/platform digest'
             )
