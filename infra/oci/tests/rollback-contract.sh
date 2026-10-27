@@ -1330,15 +1330,25 @@ EOF_STATE
           esac
         done
         if [[ "$output_mode" == "json" ]]; then
+          ready_replicas=1
+          if [[ "$service" == "event" ]]; then
+            case "${STUB_PRE_ROLLBACK_POD_SCENARIO:-}" in
+              count-mismatch|mixed-digests|deleting-plus-exact)
+                ready_replicas=2
+                ;;
+            esac
+          fi
           jq -n --arg container "gaming-${service}" --arg image "$image" --arg revision "$revision" \
             --arg cash_flag "${STUB_LIVE_CASH_BACK_FLAG:-absent}" \
-            --arg shape "${STUB_TELEMETRY_DEPLOYMENT_SHAPE:-object}" '{
+            --arg shape "${STUB_TELEMETRY_DEPLOYMENT_SHAPE:-object}" \
+            --argjson ready_replicas "$ready_replicas" '{
             metadata:{generation:8,annotations:{"deployment.kubernetes.io/revision":$revision}},
-            spec:{replicas:1,template:{spec:{containers:[{name:$container,image:$image,
+            spec:{replicas:$ready_replicas,template:{spec:{containers:[{name:$container,image:$image,
               env: ([{name:"UNRELATED",value:"retained"}] +
                 (if ($container == "gaming-bet" or $container == "gaming-resulting") and $cash_flag != "absent"
                  then [{name:"CASH_BACK_ENABLED",value:$cash_flag}] else [] end))}]}}},
-            status:{observedGeneration:8,readyReplicas:1,availableReplicas:1,updatedReplicas:1}
+            status:{observedGeneration:8,readyReplicas:$ready_replicas,
+              availableReplicas:$ready_replicas,updatedReplicas:$ready_replicas}
           } | if $container == "gaming-telemetry" and $shape == "duplicate" then
             .spec.template.spec.containers += .spec.template.spec.containers
           elif $container == "gaming-telemetry" and $shape == "missing-container" then
@@ -1499,6 +1509,42 @@ PY
             "${STUB_BAD_DIGEST_SERVICE:-}" == "$service" &&
             "$revision" == "8" ]]; then
             digest='sha256:9999999999999999999999999999999999999999999999999999999999999999'
+          fi
+          if [[ -z "${MODE:-}" && "$service" == "event" &&
+            -n "${STUB_PRE_ROLLBACK_POD_SCENARIO:-}" ]]; then
+            jq -n --arg service "$service" --arg digest "$digest" \
+              --arg scenario "$STUB_PRE_ROLLBACK_POD_SCENARIO" '
+              def pod($suffix; $pod_digest; $deleting):
+                {
+                  metadata: (
+                    {name:($service + "-pod-" + $suffix),labels:{app:("gaming-" + $service)}} +
+                    (if $deleting then {deletionTimestamp:"2026-01-01T00:00:00Z"} else {} end)
+                  ),
+                  status:{containerStatuses:[{
+                    name:("gaming-" + $service),
+                    ready:true,
+                    imageID:("docker-pullable://fixture.invalid/namespace/" + $service + "@" + $pod_digest)
+                  }]}
+                };
+              if $scenario == "count-mismatch" then
+                {items:[pod("0"; $digest; false)]}
+              elif $scenario == "mixed-digests" then
+                {items:[
+                  pod("0"; $digest; false),
+                  pod("1"; ("sha256:" + ("9" * 64)); false)
+                ]}
+              elif $scenario == "deleting-plus-exact" then
+                {items:[
+                  pod("stale"; ("sha256:" + ("9" * 64)); true),
+                  pod("0"; $digest; false),
+                  pod("1"; $digest; false)
+                ]}
+              elif $scenario == "deleting-only" then
+                {items:[pod("stale"; $digest; true)]}
+              else
+                error("unsupported pre-rollback pod scenario")
+              end'
+            exit 0
           fi
           jq -n --arg service "$service" --arg digest "$digest" \
             --arg cash_flag "${STUB_CASH_BACK_POD_FLAG:-${STUB_LIVE_CASH_BACK_FLAG:-absent}}" '{
@@ -2720,6 +2766,31 @@ assert all(len(row) == 5 for row in rows)
 assert all(re.fullmatch(r"sha256:[0-9a-f]{64}", row[4]) for row in rows)
 print("rollback_preflight_platform_digest_capture=PASS")
 PY
+for scenario in count-mismatch mixed-digests deleting-only; do
+  label="preflight-runtime-digest-${scenario}"
+  run_expect_failure "$label" \
+    "STUB_PRE_ROLLBACK_POD_SCENARIO=$scenario" \
+    ROLLBACK_MODE=execute
+  assert_contains "$WORK_DIR/$label.out" \
+    'current deployment gaming-event-depl runtime digest is not exact'
+  [[ ! -s "$STATE_DIR/$label/kubectl.log" ]] ||
+    fail "preflight runtime digest scenario $scenario reached deployment mutation"
+  [[ ! -e "$WORK_DIR/$label/rollback-readiness-evidence.env" &&
+    ! -e "$WORK_DIR/$label/preflight-live-readiness-evidence.env" ]] ||
+    fail "preflight runtime digest scenario $scenario reached readiness acceptance"
+done
+deleting_capture_dir="$WORK_DIR/preflight-runtime-digest-deleting-plus-exact"
+if ! run_script "$deleting_capture_dir" \
+    STUB_PRE_ROLLBACK_POD_SCENARIO=deleting-plus-exact \
+    ROLLBACK_MODE=dry-run >"$deleting_capture_dir.out" 2>&1; then
+  cat "$deleting_capture_dir.out" >&2
+  fail 'preflight runtime digest capture rejected exact pods beside a deleting stale pod'
+fi
+expected_event_platform_digest="$(printf 'sha256:%064d' 35)"
+awk -F '\t' -v digest="$expected_event_platform_digest" \
+  '$1 == "event" && $5 == digest { found = 1 } END { exit(found ? 0 : 1) }' \
+  "$deleting_capture_dir/current-images.tsv" ||
+  fail 'preflight runtime digest capture did not ignore the deleting stale pod'
 run_expect_failure recovery-baseline-wrong-workflow \
   STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-recovery" \
   STUB_RECOVERY_MODE=1 \
