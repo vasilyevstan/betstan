@@ -2463,12 +2463,14 @@ for workflow in "$infra_workflow" "$data_workflow" "$deploy_workflow" "$migrate_
   grep -Fq 'github.run_attempt == 1' "$workflow"
   grep -Fq 'group: oci-control-plane' "$workflow"
 done
-for workflow in "$data_workflow" "$deploy_workflow"; do
-  [[ "$(grep -Fc \
-    'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
-    "$workflow")" == "1" ]] ||
-    fail "target SSH private key must be scoped to one k3s access step: $(basename "$workflow")"
-done
+[[ "$(grep -Fc \
+  'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
+  "$data_workflow")" == "2" ]] ||
+  fail "target SSH private key must be scoped to each live-data access path"
+[[ "$(grep -Fc \
+  'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
+  "$deploy_workflow")" == "1" ]] ||
+  fail "target SSH private key must be scoped to the deploy k3s access step"
 [[ "$(grep -Fc \
   'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
   "$infra_workflow")" == "2" ]] ||
@@ -2484,24 +2486,49 @@ grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH: "true"' "$infra_workflow" ||
 grep -Fq 'unset OCI_K3S_SSH_PRIVATE_KEY' "$infra_workflow" ||
   fail "infrastructure finalization does not clear the target SSH secret before use"
 python3 - "$data_workflow" "$deploy_workflow" <<'PY'
+import re
 from pathlib import Path
 import sys
 
-for path in map(Path, sys.argv[1:]):
+for path, expected_count in zip(map(Path, sys.argv[1:]), (2, 1)):
     workflow = path.read_text(encoding="utf-8")
-    start = workflow.index("      - name: Open ephemeral OCI Bastion access to k3s")
-    end = workflow.index("\n      - name:", start + 1)
-    access = workflow[start:end]
-    setting = '          OCI_K3S_RETAIN_TARGET_SSH: "true"'
-    assert setting in access, f"{path.name}: checkpoint access must retain target SSH"
-    assert workflow.count("OCI_K3S_RETAIN_TARGET_SSH") == 1, (
-        f"{path.name}: target SSH retention must be scoped to the access step"
+    access_starts = [
+        match.start()
+        for match in re.finditer(
+            "      - name: Open ephemeral(?: incident)? "
+            "OCI Bastion access to k3s",
+            workflow,
+        )
+    ]
+    assert len(access_starts) == expected_count, (
+        f"{path.name}: unexpected k3s access step count"
     )
-    start = workflow.index("      - name: Close ephemeral OCI Bastion access")
-    end = workflow.find("\n      - name:", start + 1)
-    cleanup = workflow[start:] if end < 0 else workflow[start:end]
-    assert "always()" in cleanup, f"{path.name}: access cleanup must always run"
-    assert "./infra/oci/scripts/configure-k3s-access.sh cleanup" in cleanup
+    setting = '          OCI_K3S_RETAIN_TARGET_SSH: "true"'
+    for start in access_starts:
+        end = workflow.index("\n      - name:", start + 1)
+        access = workflow[start:end]
+        assert setting in access, (
+            f"{path.name}: checkpoint access must retain target SSH"
+        )
+    assert workflow.count("OCI_K3S_RETAIN_TARGET_SSH") == expected_count, (
+        f"{path.name}: target SSH retention must be scoped to each access step"
+    )
+    cleanup_starts = [
+        match.start()
+        for match in re.finditer(
+            "      - name: Close ephemeral(?: incident)? "
+            "OCI Bastion access",
+            workflow,
+        )
+    ]
+    assert len(cleanup_starts) == expected_count, (
+        f"{path.name}: unexpected k3s cleanup step count"
+    )
+    for start in cleanup_starts:
+        end = workflow.find("\n      - name:", start + 1)
+        cleanup = workflow[start:] if end < 0 else workflow[start:end]
+        assert "always()" in cleanup, f"{path.name}: access cleanup must always run"
+        assert "./infra/oci/scripts/configure-k3s-access.sh cleanup" in cleanup
 PY
 ! grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH' "$migrate_workflow" ||
   fail "API-only migration retains target SSH key material after API forwarding"

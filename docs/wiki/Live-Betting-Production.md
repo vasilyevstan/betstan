@@ -331,6 +331,42 @@ fresh held revalidation before releasing the lock and then the fence. Exact
 integer bytes enforce the 70 percent ceiling, so a value one byte over blocks
 release even when a rounded display says `70.00`.
 
+### Exceptional restoration of a held baseline
+
+One exceptional incident route can restore an already-authenticated held
+live-betting baseline. It is available only for the fixed finite evidence and
+exact expired lock preimage reviewed for that incident; it cannot select
+another historical generation or search production history for a convenient
+target. Verification of that evidence and current production exclusivity
+happens before operation authority, not after runtime mutation has begun.
+
+This is runtime restoration, not a live-betting release. It restores the exact
+service images and replica counts from the authenticated baseline and does not
+change matches, markets, bets, schedules, indexes, or service-owned data. While
+restoration is in progress, public mutations remain fenced and writers are
+reconciled under the replacement lock. Read availability alone is not treated
+as recovery success.
+
+The replacement is one exact active-to-active transition from the expired
+owner, with no released gap or generic lock fallback. The baseline is restored
+while the mutation fence remains active; the lock is released before the fence.
+Automatic kickoffs stay disabled while complete readiness verifies exact
+workloads and images, public APIs and SSE, queues and consumers, storage
+topology, and routing. Only that complete result can establish restored
+availability.
+
+An interruption does not authorize blind replay. A protected continuation
+authenticates the journal and live postimage, resumes only the remaining
+phase, and carries a bounded lineage of exact temporary-access cleanup
+obligations. Unknown state or drift blocks; an unresolved cleanup remains
+bound to a later protected continuation rather than triggering open-ended
+resource discovery.
+
+This path neither replaces normal rollback nor delivers newer application
+changes. Ordinary release, deployment, activation, rollback, match, and bet
+compatibility rules remain unchanged. Any later product release still follows
+the normal exact-SHA chain in [[Release Orchestration]].
+
 Scheduler events are inserted with `$setOnInsert`, so pricing improvements
 apply automatically to new slots but do not rewrite the already persisted
 24-hour pool. The corrected release candidate extends the existing event

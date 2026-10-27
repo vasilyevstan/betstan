@@ -174,6 +174,25 @@ run_live_betting_scenario oci-sse-heartbeat "$SCRIPT" oci MODE=monitor STUB_FLAG
 assert_eq 1 "$RUN_RC" "OCI monitor should fail without SSE heartbeat"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=sse_contract' 'missing SSE heartbeat should fail SSE contract'
 
+run_live_betting_scenario oci-absent-consumer "$SCRIPT" oci \
+  MODE=dark \
+  STUB_DYNAMIC_QUEUE_CONSUMERS=0
+assert_eq 1 "$RUN_RC" "OCI dark readiness should reject an absent live queue consumer"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=rabbitmq_queues' 'absent OCI queue consumers should fail RabbitMQ readiness'
+
+run_live_betting_scenario oci-image-drift "$SCRIPT" oci \
+  MODE=dark \
+  IMAGE_PROVENANCE_FILE="$current_images" \
+  STUB_WORKLOAD_IMAGE_DRIFT=auth
+assert_eq 1 "$RUN_RC" "OCI dark readiness should reject exact-image drift"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=workload_images' 'OCI exact-image drift should fail workload readiness'
+
+run_live_betting_scenario oci-redirect-failure "$SCRIPT" oci \
+  MODE=dark \
+  STUB_CURL_FAILURE=secondary-redirect
+assert_eq 1 "$RUN_RC" "OCI dark readiness should reject redirect routing failure"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=public_hosts' 'OCI redirect failure should fail public routing readiness'
+
 run_live_betting_scenario oci-prematch-empty "$SCRIPT" oci MODE=monitor STUB_FLAG_VALUE=true STUB_EVENT_MODE=empty
 assert_eq 1 "$RUN_RC" "OCI monitor should fail on empty PRE_MATCH payload"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=legacy_prematch_api' 'empty event payload should fail prematch contract'
@@ -202,4 +221,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=20'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=23'

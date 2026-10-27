@@ -14,6 +14,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
+INCIDENT_MANIFEST_VERIFIER="$ROOT_DIR/infra/oci/scripts/incident_manifest_stan.py"
 POLICY_HELPER="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 RUN_EXCLUSIVITY_SCRIPT="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
 AUTHORITY_DIR="${COPILOT_CLI_AUTHORITY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/betstan/copilot-cli-authority}"
@@ -105,6 +106,8 @@ jobs_file="$tmp_dir/jobs.json"
 approvals_file="$tmp_dir/approvals.json"
 promotion_file="$tmp_dir/promotion.json"
 upstream_run_file="$tmp_dir/upstream-run.json"
+incident_inputs_file="$tmp_dir/incident-inputs.json"
+incident_predecessor_run_file="$tmp_dir/incident-predecessor-run.json"
 lock_token=""
 authority_run_id=""
 
@@ -123,7 +126,9 @@ cleanup() {
     "$jobs_file" \
     "$approvals_file" \
     "$promotion_file" \
-    "$upstream_run_file"
+    "$upstream_run_file" \
+    "$incident_inputs_file" \
+    "$incident_predecessor_run_file"
   exec 9<&-
   rm -rf "$bytes_dir"
   rmdir "$tmp_dir" 2>/dev/null || true
@@ -420,6 +425,7 @@ revalidate_control() {
 revalidate_upstream_bindings() {
   local boundary="${1:-}"
   local operation subject_sha dispatch_inputs policy_json bindings
+  local incident_output
   local bound_mode authoritative_mode environment requires_mode
   if [[ -n "$boundary" ]]; then
     case "$boundary" in
@@ -457,6 +463,31 @@ revalidate_upstream_bindings() {
       fail "authoritative runtime mode changed since dispatch; approval refused"
   fi
 
+  if [[ "$operation" = "oci-live-data-incident-restore" ]]; then
+    [[ -x "$INCIDENT_MANIFEST_VERIFIER" ]] ||
+      fail "incident manifest verifier is unavailable"
+    [[ -n "$boundary" ]] || return 0
+    jq -c '.dispatchInputs' <<<"$record_summary" >"$incident_inputs_file"
+    incident_output="$tmp_dir/incident-manifest-output"
+    rm -rf -- "$incident_output"
+    "$INCIDENT_MANIFEST_VERIFIER" verify \
+      --repository "$repository" \
+      --repo-root "$ROOT_DIR" \
+      --control-sha "$current_master" \
+      --dispatch-inputs-json "$(cat "$incident_inputs_file")" \
+      --current-run-id "$RUN_ID" \
+      --output-dir "$incident_output" \
+      --result-json "$incident_output/verification-result.json" >/dev/null ||
+      fail "incident manifest evidence is no longer valid; approval refused"
+    jq -e '
+      .currentRun.createdAtEpoch > .heldLock.leaseUntilEpoch and
+      (.currentRun.metadataSha256 |
+        type == "string" and test("^[0-9a-f]{64}$"))
+    ' "$incident_output/verification-result.json" >/dev/null ||
+      fail "incident current-run creation evidence is invalid; approval refused"
+    rm -rf -- "$incident_output"
+  fi
+
   [[ "$bindings" != "[]" ]] || return 0
   subject_sha="$(jq -r '.subjectSha // ""' <<<"$record_summary")"
   [[ -n "$subject_sha" ]] ||
@@ -483,6 +514,40 @@ revalidate_upstream_bindings() {
     --runtime-mode "$authoritative_mode" \
     ${continuation_args[@]+"${continuation_args[@]}"} ||
     fail "upstream prerequisites are no longer valid; approval refused"
+}
+
+validate_incident_continuation_authority() {
+  local predecessor_run_id continuation
+  [[ "$(jq -r '.operation // ""' <<<"$record_summary")" == \
+    "oci-live-data-incident-restore" ]] || return 0
+  continuation="$(jq -c '.continuation // null' <<<"$record_summary")"
+  [[ "$continuation" != "null" ]] || return 0
+  predecessor_run_id="$(
+    jq -er '.predecessorRunId | tostring |
+      select(test("^[1-9][0-9]*$"))' <<<"$continuation"
+  )" || fail "incident continuation predecessor identity is invalid"
+  [[ "$(
+    REPO="$repository" EXCLUDE_RUN_ID="$RUN_ID" \
+      PROSPECTIVE_PROMOTION_PR="" "$RUN_EXCLUSIVITY_SCRIPT"
+  )" = "production_run_exclusivity=PASS" ]] ||
+    fail "incident continuation lost current production exclusivity"
+  gh api \
+    "repos/$repository/actions/runs/$predecessor_run_id" \
+    >"$incident_predecessor_run_file" ||
+    fail "unable to re-read the exact incident continuation predecessor"
+  chmod 600 "$incident_predecessor_run_file"
+  "$AUTHORITY_HELPER" verify-incident-continuation \
+    --authority-dir "$AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" \
+    --run-id "$authority_run_id" \
+    --predecessor-run-json "$incident_predecessor_run_file" \
+    --policy-json "$policy_json" \
+    --repository "$repository" \
+    --current-master "$current_master" \
+    --workflow-id "$workflow_id" \
+    --workflow-blob-sha "$workflow_blob_sha" \
+    >/dev/null ||
+    fail "incident continuation authority is no longer exact"
 }
 
 record_summary=""
@@ -541,6 +606,7 @@ validate_authority_and_run() {
       require_record_state "authority record"
       record_version="$(jq -r '.version' <<<"$record_summary")"
       expected_title="$(jq -r '.displayTitle' <<<"$record_summary")"
+      validate_incident_continuation_authority
       validate_record_sha_relations "$record_summary" "$policy_json"
       if [[ -n "$EXPECTED_SUBJECT_SHA" ]] &&
         [[ "$(jq -r '.subjectSha // ""' <<<"$record_summary")" != "$EXPECTED_SUBJECT_SHA" ]]; then
@@ -866,7 +932,11 @@ record = authority.verify_record(
     record, json.loads(policy_json), repository, master, workflow_id, blob,
 )
 summary = json.loads(summary_json)
-if any(record.get(key) != value for key, value in summary.items()):
+if any(
+    record.get(key) != value
+    for key, value in summary.items()
+    if key != "dispatchInputs"
+):
     raise SystemExit("authority changed while proving the approved wait")
 matches = [
     receipt for receipt in record["approvals"]
@@ -1195,7 +1265,8 @@ if ! approval_revalidation_error="$(
       validate_exclusivity &&
       validate_pending_gate &&
       validate_claimed_gate_identity &&
-      revalidate_control
+      revalidate_control &&
+      validate_incident_continuation_authority
   } 2>&1
 )"; then
   "$AUTHORITY_HELPER" release-approval \

@@ -1477,7 +1477,9 @@ changes = {
     "producer-id": ("id: provenance_request", "id: other_provenance"),
     "duplicate-producer": (
         "      - name: Reject competing production activity",
-        "      - id: provenance_request\n        run: echo duplicate\n"
+        "      - id: provenance_request\n"
+        "        if: inputs.phase != 'incident-restore'\n"
+        "        run: echo duplicate\n"
         "      - name: Reject competing production activity",
     ),
     "commented-validator": (
@@ -1567,7 +1569,7 @@ if mutation in {"commented-validator", "wrong-policy", "both-successor-bindings"
     prefix, text, suffix = text[:start], text[start:end], text[end:]
 expected_count = 2 if mutation == "both-successor-bindings" else 1
 assert text.count(old) == expected_count, (mutation, text.count(old))
-text = text.replace(old, new)
+text = text.replace(old, new, 1) if mutation == "duplicate-producer" else text.replace(old, new)
 if mutation == "successor-binding":
     assert 'continuation_args=(--successor-run-id "$GITHUB_RUN_ID")' in text
 elif mutation == "resume-successor-binding":

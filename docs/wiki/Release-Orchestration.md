@@ -612,7 +612,7 @@ zero external activity. `oci-failed-continue-held-handoff-clean-reader-v1`
 covers the later first-attempt preflight validation failure, before provider
 access or domain mutation.
 `oci-failed-continue-held-handoff-pre-cas-no-domain-mutation-v1` authenticates
-run `39229920454` as an executed first attempt that completed read-only
+one fixed reviewed run as an executed first attempt that completed read-only
 provider/runtime checks and rollback capture, then failed before lock
 compare-and-swap or domain mutation.
 
@@ -672,11 +672,12 @@ historical subject and, when the current reader differs, separately of that
 reader before native evidence collection. The later run remains the physical
 owner; its historical predecessor is not restored as owner.
 
-Run `39229920454` is immutable executed history and has no generic fallback: it
-must not be deleted, excluded, or treated as zero execution, and it is not
-eligible for zero-execution retirement. Forward recovery still requires a
-fresh first-attempt continuation from clean exact current `master`, with every
-physical-state, lease, fence, compare-and-swap, and timing check unchanged.
+That fixed reviewed run is immutable executed history and has no generic
+fallback: it must not be deleted, excluded, or treated as zero execution, and
+it is not eligible for zero-execution retirement. Forward recovery still
+requires a fresh first-attempt continuation from clean exact current `master`,
+with every physical-state, lease, fence, compare-and-swap, and timing check
+unchanged.
 There is no new proof carrier or serialized field, and authority, schemas,
 operation inputs, workflow, dispatcher, timing, retention, locks, fences, and
 mutation behavior are unchanged. This is forward-only reader/profile behavior.
@@ -1572,6 +1573,82 @@ and every pre-mutation check remain fail-closed.
 A generation that failed its own deployment is never an accepted rollback
 baseline.
 
+### Exceptional held-baseline incident restoration
+
+BetStan has one exceptional restoration route for a production incident that
+is already in an authenticated held state. It applies only to the specific
+baseline and expired active lock owner described by finite evidence checked
+into the reviewed source. Callers cannot supply a different manifest, evidence
+digest, historical run, baseline, or target. Evidence collection is fixed and
+bounded; the route does not search recent runs, traverse open-ended history, or
+discover a substitute recovery target.
+
+Verification precedes authority. Before dispatch authority can be issued or
+protected approval can be consumed, the verifier authenticates the fixed
+manifest, complete evidence set, source ancestry, unchanged application-image
+inputs, baseline semantics, infrastructure checkpoint, and held-lock preimage.
+It also proves current production exclusivity. The workflow repeats the
+verification at its protected boundary. Missing, expired, incomplete,
+ambiguous, or changed evidence fails closed. Lock expiry by itself grants no
+authority.
+
+The restoration preserves these ordering rules:
+
+1. The complete expired active-lock preimage, active mutation fence, quiesced
+   writers, and authenticated baseline images must all agree.
+2. One resource-versioned compare-and-swap replaces the expired owner
+   **active-to-active** and advances the fencing generation. There is no
+   intermediate released state and no fallback to generic acquisition,
+   force-release, blind retry, or lease renewal.
+3. While the public mutation fence remains active, the operation reconciles
+   writers and restores the authenticated images and replica counts for the
+   complete service baseline. It performs no backfill, index, fixture, or
+   other domain-data mutation.
+4. The exact incident lock is released before the mutation fence is released.
+   Reversing that order is not an accepted recovery.
+5. After unfencing, the complete dark-readiness contract must pass against the
+   restored baseline, including exact workloads and images, APIs and SSE,
+   queues and consumers, shared storage topology, and public, redirect, and
+   diagnostic routing. Automatic live kickoffs remain disabled during this
+   validation. The resulting evidence is checksummed and explicitly
+   non-deployable.
+
+Continuation is state-based rather than a replay. A resource-versioned journal
+records the authenticated active and released lock postimages, fence state,
+readiness, evidence sealing, and publication. Only a protected first-attempt
+successor bound to the exact terminal failed or cancelled predecessor may
+continue; rerunning the predecessor is not continuation authority. If the
+active-to-active replacement completed before its journal write, a successor
+may adopt only the exact live postimage while the fence is still active. If a
+later transition completed, continuation resumes from that authenticated
+phase instead of repeating takeover, restoration, lock release, or
+publication. Any identity, generation, fence, baseline, or journal drift
+blocks.
+
+While the incident lock is still active, failure handling re-quiesces writers
+and retains the mutation fence before returning control. Every generation also
+binds the exact temporary-access cleanup obligation it created. A successor
+inherits a bounded authority lineage, reconciles those named obligations
+before opening current access, and preserves unrelated resources. An
+unconfirmed cleanup remains an obligation for the next protected generation;
+a continuation that encounters published state must confirm that all
+journaled access is absent before completing. The lineage has a fixed finite
+bound and never becomes open-ended resource discovery.
+
+This route restores a historical runtime baseline; it does not build or deploy
+a new application generation, activate live betting, perform ordinary
+rollback, or replace the normal exact-SHA release chain. Normal data,
+deployment, activation, and rollback paths explicitly exclude incident mode
+and retain their existing contracts. New application changes still require
+the ordinary reviewed build, checkpoint, data, deployment, activation, and
+acceptance sequence after restoration.
+
+Rollback planning must preserve the ability to authenticate any emitted
+incident journal and cleanup lineage. A source revert cannot erase,
+reinterpret, or turn that one-use recovery state into ordinary lock authority;
+when compatible interpretation cannot be retained, leave the safety boundary
+in place and use a reviewed forward correction.
+
 ## Stall and incident handling
 
 The conductor monitors the real blocking object: agent result, process,
@@ -1669,5 +1746,6 @@ procedures remain outside the public wiki.
 - [[Quality Gates]]
 - [[Agents]]
 - [[Infrastructure]]
+- [[Live Betting Production]]
 - [[Security]]
 - [[Engineering Learnings]]

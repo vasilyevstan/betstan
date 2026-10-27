@@ -37,6 +37,40 @@ ok() {
   printf 'PASS %s\n' "$1"
 }
 
+ensure_historical_reader_blobs() {
+  local blob fixture_commit missing=false
+  local -a blobs=(
+    2900c649bdb3b529d357a4df274482295695c8cd
+    d5afe224080abecda336f1b3d190c83674835ebf
+    b587fa03960422a0a73e3dd65b955a3a716c5480
+    27a98e345050fefb799c706fde03d8f79e14ed6c
+    1752489383424fa4bd55bbc7d36e4cac95e14d31
+  )
+  local -a fixture_commits=(
+    e524317441d29ddd06ef3196e030442979600eb1
+    2a632ebe47c3250c26081a23113fd95390afe912
+  )
+  for blob in "${blobs[@]}"; do
+    git -C "$ROOT_DIR" cat-file -e "$blob^{blob}" 2>/dev/null || missing=true
+  done
+  if [[ "$missing" == true ]]; then
+    [[ "$(git -C "$ROOT_DIR" rev-parse --is-shallow-repository)" == true ]] ||
+      fail "historical reader blobs are missing from a complete repository"
+    for fixture_commit in "${fixture_commits[@]}"; do
+      git -C "$ROOT_DIR" cat-file -e "$fixture_commit^{commit}" 2>/dev/null ||
+        git -C "$ROOT_DIR" fetch --quiet --no-tags --depth=1 \
+          origin "$fixture_commit" ||
+        fail "could not fetch pinned historical reader fixture $fixture_commit"
+    done
+  fi
+  for blob in "${blobs[@]}"; do
+    git -C "$ROOT_DIR" cat-file -e "$blob^{blob}" 2>/dev/null ||
+      fail "historical reader blob remains unavailable: $blob"
+  done
+}
+
+ensure_historical_reader_blobs
+
 env -u PYTHONDONTWRITEBYTECODE python3 - \
   "$VALIDATOR" "$AUTHORITY_HELPER" "$WORK" <<'PY'
 import concurrent.futures
@@ -3385,6 +3419,19 @@ paths = (
     "infra/azure/agents/copilot_cli_authority_stan.py",
     validator_path,
 )
+frozen_blobs = {
+    ".github/workflows/oci-live-data-rollout.yml":
+        "2900c649bdb3b529d357a4df274482295695c8cd",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh":
+        "d5afe224080abecda336f1b3d190c83674835ebf",
+    "infra/azure/agents/copilot_cli_authority_stan.py":
+        "b587fa03960422a0a73e3dd65b955a3a716c5480",
+}
+
+def frozen_source(relative):
+    return subprocess.check_output(
+        ["git", "-C", str(source), "cat-file", "blob", frozen_blobs[relative]],
+    )
 
 def fixture(name, validator):
     repository = work / name
@@ -3394,7 +3441,7 @@ def fixture(name, validator):
         if relative == validator_path:
             destination.write_bytes(validator)
         else:
-            shutil.copy2(source / relative, destination)
+            destination.write_bytes(frozen_source(relative))
     subprocess.run(
         ["git", "init", "--quiet", "--initial-branch=master"],
         cwd=repository, check=True,
@@ -3672,10 +3719,24 @@ paths = (
     "infra/oci/scripts/upstream_run_binding_stan.py",
     "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
 )
+frozen_blobs = {
+    ".github/workflows/oci-live-data-rollout.yml":
+        "2900c649bdb3b529d357a4df274482295695c8cd",
+    "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh":
+        "d5afe224080abecda336f1b3d190c83674835ebf",
+    "infra/azure/agents/copilot_cli_authority_stan.py":
+        "b587fa03960422a0a73e3dd65b955a3a716c5480",
+}
 for relative in paths:
     destination = repository / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source / relative, destination)
+    if relative in frozen_blobs:
+        destination.write_bytes(subprocess.check_output([
+            "git", "-C", str(source), "cat-file", "blob",
+            frozen_blobs[relative],
+        ]))
+    else:
+        shutil.copy2(source / relative, destination)
 subprocess.run(
     ["git", "init", "--quiet", "--initial-branch=master"],
     cwd=repository, check=True,
@@ -4578,6 +4639,7 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import subprocess
 import sys
 from pathlib import Path
 
@@ -4585,10 +4647,13 @@ spec = importlib.util.spec_from_file_location("current_reader_v5_bytes", sys.arg
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 root = Path(sys.argv[1]).parents[3]
-workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
-authority = (
-    root / "infra/azure/agents/copilot_cli_authority_stan.py"
-).read_text()
+def frozen(sha):
+    return subprocess.check_output(
+        ["git", "-C", str(root), "cat-file", "blob", sha],
+        text=True,
+    )
+workflow = frozen(m.CURRENT_READER_WORKFLOW_BLOB)
+authority = frozen(m.CURRENT_READER_AUTHORITY_BLOB)
 verifier = (
     root / "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh"
 ).read_text()
@@ -4599,6 +4664,12 @@ assert blob(workflow) == m.CURRENT_READER_WORKFLOW_BLOB == \
     "2900c649bdb3b529d357a4df274482295695c8cd"
 assert blob(authority) == m.CURRENT_READER_AUTHORITY_BLOB
 assert blob(verifier) == m.CURRENT_READER_VERIFIER_BLOB
+assert blob(
+    (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+) != m.CURRENT_READER_WORKFLOW_BLOB
+assert blob(
+    (root / "infra/azure/agents/copilot_cli_authority_stan.py").read_text()
+) != m.CURRENT_READER_AUTHORITY_BLOB
 for profile in (
     m._failed_held_continuation_profile(),
     m._failed_clean_reader_continuation_profile(),
@@ -5960,10 +6031,49 @@ with patch.object(m, "require_fixed_run", return_value=held_metadata), \
             reject(held_native)
 print("PASS fixed successful held producer, exact native slots 1..37/74/75, complete outcomes, and original root tuple")
 current_workflow = subprocess.check_output([
-    "git", "-C", sys.argv[2], "show", source + ":.github/workflows/oci-live-data-rollout.yml",
+    "git", "-C", sys.argv[2], "show",
+    source + ":.github/workflows/oci-live-data-rollout.yml",
 ]).decode()
 current_names = re.findall(r"(?m)^      - name: (.+)$", current_workflow)
-current_skipped = held_skipped | {"Verify reader-qualified released activation state"}
+current_skipped = held_skipped | {
+    "Verify reader-qualified released activation state",
+    "Verify fixed incident manifest and immutable evidence",
+    "Reject competing incident production activity",
+    "Verify fixed infrastructure checkpoint",
+    "Install pinned OCI CLI for incident restore",
+    "Verify incident OKE identity",
+    "Verify incident k3s identity",
+    "Reconcile bounded incident access-cleanup lineage",
+    "Reconcile expired and authorize incident runner IPv4",
+    "Configure incident kubectl from exact cluster OCID",
+    "Open ephemeral incident OCI Bastion access to k3s",
+    "Capture exact current incident access identity",
+    "Authenticate incident journal control handoff",
+    "Classify exact incident continuation state",
+    "Adopt authenticated active incident successor",
+    "Persist current incident access identity",
+    "Reconstruct authenticated incident baseline state",
+    "Verify original held fence writers and images",
+    "Replace exact expired held lock",
+    "Reconcile incident writers under exact lock and fence",
+    "Restore authenticated baseline while retaining fence",
+    "Release incident lock before fence",
+    "Persist recovered released-lock transition",
+    "Capture persisted incident lock postimages",
+    "Reconcile published incident access resources",
+    "Release fence after lock",
+    "Persist recovered unfenced transition",
+    "Capture restored readiness and public availability",
+    "Seal non-deployable incident evidence",
+    "Seal already-published incident continuation evidence",
+    "Re-quiesce incident writers after restoration failure",
+    "Seal checksummed incident failure evidence",
+    "Upload bounded incident restoration evidence",
+    "Mark incident evidence publication complete",
+    "Revoke exact incident runner rule",
+    "Close ephemeral incident OCI Bastion access",
+    "Remove isolated incident OCI client state",
+}
 current_start = m.dt.datetime(2026, 10, 7, 9, 9, tzinfo=m.dt.timezone.utc)
 current_steps = []
 for index, name in enumerate([
@@ -6021,15 +6131,15 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
     with patch.object(m, "failed_deploy_native_inputs", return_value=dict(values, build_run_id="99")):
         reject(held_native)
     modern_workflow = (m.Path(sys.argv[2]) / ".github/workflows/oci-live-data-rollout.yml").read_text()
-    assert re.findall(r"(?m)^      - name: (.+)$", modern_workflow) == current_names
+    assert re.findall(r"(?m)^      - name: (.+)$", current_workflow) == current_names
     v4_profile_workflow = m.current_reader_workflow_v5(
-        modern_workflow, "fixture", inverse=True,
+        current_workflow, "fixture", inverse=True,
     )
     legacy_profile_workflow = v4_profile_workflow.replace(
         m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"').replace(
         "resume_schema=live-betting-data-resume-v4", "resume_schema=live-betting-data-resume-v3")
     for executed_workflow in (
-        legacy_profile_workflow, v4_profile_workflow, modern_workflow,
+        legacy_profile_workflow, v4_profile_workflow, current_workflow,
     ):
         for continuation in (False, True):
             native = dict(values)
@@ -6058,6 +6168,16 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
                             assert observed["_handoff_lease_seconds"] == duration
                             assert observed["_handoff_resume_schema"] == expected_schema
                             assert observed["_handoff_deadline"] == renewal_epoch + duration
+    unsupported_workflow = modern_workflow.replace(
+        "      - name: Validate dispatch phase and confirmation routing",
+        "      - name: Unsupported current reader routing",
+        1,
+    )
+    assert unsupported_workflow != modern_workflow
+    with patch.object(m, "current_held_source", return_value=unsupported_workflow), \
+            patch.object(m, "failed_deploy_native_inputs", return_value=values), \
+            patch.object(m, "gh_api_bytes", return_value=renewal_log()):
+        reject(held_native)
 tree = subprocess.check_output(["git", "-C", sys.argv[2], "rev-parse", source + "^{tree}"], text=True).strip()
 with patch.object(m, "gh_api", return_value={"sha": source, "tree": {"sha": tree}}):
     assert m.current_held_source("example/repo", source, "fixture") == current_workflow
@@ -7357,7 +7477,10 @@ with tempfile.TemporaryDirectory(dir=Path(sys.argv[2]) / "infra/oci/tests") as i
         cancelled_responses[endpoint]["updated_at"] = "2026-10-07T10:00:01Z"
     assert cancelled_history() == cancelled_proof
     reset_cancelled()
-    tracked_current_source = (Path(sys.argv[2]) / cancelled_path).read_text()
+    tracked_current_source = subprocess.check_output([
+        "git", "-C", sys.argv[2], "cat-file", "blob",
+        m.CURRENT_READER_WORKFLOW_BLOB,
+    ], text=True)
     tracked_current_raw = tracked_current_source.encode()
     assert historical_response(cancelled_path, tracked_current_raw)["sha"] == \
         m.CURRENT_READER_WORKFLOW_BLOB
@@ -17021,14 +17144,30 @@ native_paths = {
     "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh",
 }
 native_blobs = {}
+frozen_rollout_step_names = None
 for filename in sorted(native_paths):
     member = root / filename
     raw = member.read_bytes()
+    if filename == ".github/workflows/oci-live-data-rollout.yml":
+        raw = subprocess.check_output([
+            "git", "-C", str(root), "cat-file", "blob",
+            complete_reader.CURRENT_READER_WORKFLOW_BLOB,
+        ])
+        assert hashlib.sha1(
+            f"blob {len(raw)}\0".encode() + raw
+        ).hexdigest() == complete_reader.CURRENT_READER_WORKFLOW_BLOB
+        frozen_rollout_step_names = re.findall(
+            rb"(?m)^      - name: (.+)$", raw
+        )
     blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], input=raw).decode().strip()
     mode = "100755" if os.access(member, os.X_OK) else "100644"
     subprocess.run(["git", "update-index", "--add", "--cacheinfo",
                     f"{mode},{blob},{filename}"], check=True)
     native_blobs[filename] = blob
+assert frozen_rollout_step_names is not None
+frozen_rollout_step_names = [
+    name.decode() for name in frozen_rollout_step_names
+]
 native_tree = subprocess.check_output(["git", "write-tree", "--missing-ok"], text=True).strip()
 native_source = subprocess.check_output([
     "git", "commit-tree", native_tree, "-p", control_source, "-m", "Complete native fixture",
@@ -17039,7 +17178,7 @@ for filename, blob in native_blobs.items():
     write(f"{prefix}/contents/{filename}?ref={native_source}", {"type": "file", "sha": blob})
 
 def complete_native(run, values, minute):
-    names = ["Set up job", *[step["name"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]],
+    names = ["Set up job", *frozen_rollout_step_names,
              "Post Checkout approved current master commit", "Complete job"]
     skipped = {
         "Download failed deploy protected baseline", "Verify reader-qualified released activation state",

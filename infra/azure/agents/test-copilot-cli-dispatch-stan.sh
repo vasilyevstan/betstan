@@ -12,6 +12,8 @@ BLOB="2222222222222222222222222222222222222222"
 WORKFLOW_ID="301"
 REPOSITORY="example/repo"
 
+python3 "$ROOT_DIR/infra/azure/agents/test_copilot_cli_incident_continuation_stan.py"
+
 python3 -I - "$DISPATCHER" "$VALIDATOR" <<'PY'
 import ast
 import sys
@@ -34,6 +36,42 @@ assert "local binding_boundary=dispatch" in dispatch_text
 assert '[[ -z "${2:-}" ]] || binding_boundary=materialization' in dispatch_text
 assert 'BETSTAN_BINDING_BOUNDARY="$binding_boundary"' in dispatch_text
 print("dispatch_and_materialization_share_validator_proof_context=PASS")
+PY
+
+python3 -I - "$DISPATCHER" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+protected_start = text.index("validate_protected_prerequisites() {")
+protected = text[protected_start:text.index("\n}\n", protected_start) + 3]
+expected_order = [
+    "validate_common_package_prerequisites",
+    "validate_runtime_mode_binding",
+    "validate_incident_manifest",
+    "validate_upstream_run_bindings",
+]
+positions = [protected.index(item) for item in expected_order]
+assert positions == sorted(positions)
+main = text[text.index('if [[ "$ACTION" = "--dispatch-prepared" ]]'):]
+assert main.index("validate_protected_prerequisites") < main.index(
+    '"$AUTHORITY_HELPER" claim-request'
+)
+post_claim = main[main.index('"$AUTHORITY_HELPER" claim-request'):]
+assert post_claim.index("validate_protected_prerequisites") < post_claim.index(
+    '"$AUTHORITY_HELPER" cancel-intent'
+)
+candidate = main.index("incident-continuation-candidate")
+blocking = main.index('"$AUTHORITY_HELPER" blocking-record')
+claim = main.index('"$AUTHORITY_HELPER" claim-request')
+assert candidate < blocking < claim
+assert 'actions/runs/$incident_predecessor_run_id' in main
+assert "--incident-predecessor-run-json" in main
+assert "--incident-exclusivity-json" in main
+assert "continuationInputs" in main
+assert "gh run rerun" not in main
+assert "incident_manifest_stan.py" in text
+print("incident_manifest_dispatch_prerequisite=PASS pre_intent=true post_claim_cancel=true continuation=true")
 PY
 
 # Required CI uses a depth-one checkout. Reject fixed historical object reads
@@ -3724,6 +3762,31 @@ run(d, "--retire-preflight-read-only-failure", ok=False)
 # Git history; only the additive v5 reader changes are removed.
 import inspect
 old_loader = inspect.getsource(a.load_record).replace(
+    "def load_record(directory, run_id, _stack=None):\n"
+    "    stack = set() if _stack is None else set(_stack)\n"
+    "    run_text = str(run_id)\n"
+    "    if run_text in stack:\n"
+    '        fail("incident continuation authority chain contains a cycle")\n'
+    "    stack.add(run_text)\n",
+    "def load_record(directory, run_id):\n",
+)
+v6_schema_start = old_loader.index(
+    "    elif schema_version == RECORD_SCHEMA_V6:\n"
+)
+v6_schema_end = old_loader.index("    else:\n", v6_schema_start)
+old_loader = (
+    old_loader[:v6_schema_start] + old_loader[v6_schema_end:]
+)
+v6_validation_start = old_loader.index(
+    "    elif schema_version == RECORD_SCHEMA_V6:\n"
+)
+v6_validation_end = old_loader.index(
+    "    return record\n", v6_validation_start
+)
+old_loader = (
+    old_loader[:v6_validation_start]
+    + old_loader[v6_validation_end:]
+).replace(
     "        provenance_read_record=True,\n", "",
 ).replace(
     '    elif schema_version == RECORD_SCHEMA_V5:\n'
