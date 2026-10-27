@@ -1179,7 +1179,8 @@ PY
 }
 
 print_all_pods() {
-  python3 - "$STUB_STATE_DIR" "${STUB_BAD_DIGEST_SERVICE:-}" "${MODE:-}" <<'PY'
+  python3 - "$STUB_STATE_DIR" "${STUB_BAD_DIGEST_SERVICE:-}" "${MODE:-}" \
+    "${STUB_POD_IMAGE_ID_MODE:-platform}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1187,6 +1188,7 @@ from pathlib import Path
 state_dir = Path(sys.argv[1])
 bad_service = sys.argv[2]
 mode = sys.argv[3]
+image_id_mode = sys.argv[4]
 services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip", "telemetry"]
 items = []
 platform_map = {
@@ -1195,10 +1197,10 @@ platform_map = {
     "backoffice": 33,
     "client": 34,
     "event": 35,
-    "gamemaster": 36,
-    "moderation": 37,
-    "resulting": 38,
-    "slip": 39,
+    "gamemaster": 39,
+    "moderation": 36,
+    "resulting": 37,
+    "slip": 38,
     "telemetry": 40,
 }
 for service in services:
@@ -1207,8 +1209,15 @@ for service in services:
         if "=" in line:
             key, value = line.split("=", 1)
             fields[key] = value
-    digest = 'sha256:' + f"{platform_map[service]:064d}"
-    if not mode and service == bad_service:
+    if image_id_mode == "manifest":
+        digest = fields["image"].rsplit("@", 1)[-1]
+    else:
+        digest = 'sha256:' + f"{platform_map[service]:064d}"
+    if (
+        not mode
+        and service == bad_service
+        and fields.get("revision") == "8"
+    ):
         digest = 'sha256:' + ('9' * 64)
     items.append({
         "metadata": {"name": f"gaming-{service}-pod-0", "labels": {"app": f"gaming-{service}"}},
@@ -1486,7 +1495,9 @@ PY
           if [[ "${STUB_POD_IMAGE_ID_MODE:-platform}" == "manifest" ]]; then
             digest="${image##*@}"
           fi
-          if [[ -z "${MODE:-}" && "${STUB_BAD_DIGEST_SERVICE:-}" == "$service" ]]; then
+          if [[ -z "${MODE:-}" &&
+            "${STUB_BAD_DIGEST_SERVICE:-}" == "$service" &&
+            "$revision" == "8" ]]; then
             digest='sha256:9999999999999999999999999999999999999999999999999999999999999999'
           fi
           jq -n --arg service "$service" --arg digest "$digest" \
@@ -2694,6 +2705,21 @@ if ! run_script "$WORK_DIR/recovery-baseline-success" \
 fi
 assert_contains "$WORK_DIR/recovery-baseline-success/deploy-provenance-binding.env" \
   'origin=recovery-transition'
+python3 - "$WORK_DIR/recovery-baseline-success/current-images.tsv" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+rows = [
+    line.split("\t")
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line
+]
+assert len(rows) == 9
+assert all(len(row) == 5 for row in rows)
+assert all(re.fullmatch(r"sha256:[0-9a-f]{64}", row[4]) for row in rows)
+print("rollback_preflight_platform_digest_capture=PASS")
+PY
 run_expect_failure recovery-baseline-wrong-workflow \
   STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-recovery" \
   STUB_RECOVERY_MODE=1 \
