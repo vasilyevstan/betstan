@@ -2549,7 +2549,7 @@ jobs:
               raise SystemExit("infrastructure provenance is missing or unsafe")
           values = {}
           for raw in path.read_text(encoding="utf-8").splitlines():
-              match = re.fullmatch(r"([a-z][a-z0-9_]*)=([^\r\n]*)", raw)
+              match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]*)=([^\r\n]*)", raw)
               if not match or match.group(1) in values:
                   raise SystemExit("infrastructure provenance is malformed")
               values[match.group(1)] = match.group(2)
