@@ -22,6 +22,9 @@ REQUEST_SCHEMA = "betstan.copilot-cli-dispatch-request.v1"
 NORMALIZED_SCHEMA = "betstan.copilot-cli-dispatch-normalized.v1"
 INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v1"
 PREPARED_INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v2"
+INCIDENT_CONTINUATION_INTENT_SCHEMA = (
+    "betstan.copilot-cli-dispatch-intent.v3"
+)
 TRANSITION_OBSERVATION_SCHEMA = "betstan.disabled-transition-observation.v2"
 # Workflows admitted to the prepared disabled-workflow transition lifecycle
 # (dispatcher admission, authority context/seal/discard, observer argv, and
@@ -42,8 +45,27 @@ RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
 RECORD_SCHEMA_V3 = "betstan.copilot-cli-authority.v3"
 RECORD_SCHEMA_V4 = "betstan.copilot-cli-authority.v4"
 RECORD_SCHEMA_V5 = "betstan.copilot-cli-authority.v5"
-# New records retain the established v1 shape. Only the explicit,
-# evidence-bound stale-claim retirement migrates a record to v2.
+RECORD_SCHEMA_V6 = "betstan.copilot-cli-authority.v6"
+INCIDENT_CONTINUATION_SCHEMA = (
+    "betstan.copilot-cli-incident-continuation.v1"
+)
+INCIDENT_EXCLUSIVITY_SCHEMA = (
+    "betstan.copilot-cli-incident-continuation-exclusivity.v1"
+)
+INCIDENT_OPERATION = "oci-live-data-incident-restore"
+INCIDENT_MANIFEST_PATH = "infra/oci/incident/manifest.json"
+INCIDENT_VERIFIER_PATH = "infra/oci/scripts/incident_manifest_stan.py"
+INCIDENT_CONTINUATION_INPUT_DEFAULTS = {
+    "incident_continuation_run_id": "0",
+    "incident_continuation_authority_sha256": "none",
+    "incident_continuation_control_sha": "none",
+    "incident_continuation_journal_identity_sha256": "none",
+    "incident_continuation_generation": "0",
+    "incident_access_cleanup_lineage_json": "[]",
+}
+INCIDENT_ACCESS_CLEANUP_MAX_LINEAGE = 32
+# Ordinary new records retain the established v1 shape. Explicit retirement
+# schemas and the manifest-bound incident continuation use their own versions.
 RECORD_SCHEMA = RECORD_SCHEMA_V1
 UNMATERIALIZED_EVIDENCE_SCHEMA = (
     "betstan.copilot-cli-unmaterialized-evidence.v2"
@@ -256,6 +278,7 @@ INTENT_KEYS = {
     "runId",
     "runUrl",
 }
+CONTINUATION_INTENT_KEYS = INTENT_KEYS | {"continuation"}
 PREPARED_SEAL_KEYS = {
     "requestKey", "requestSha256", "requestFile", "inputHash", "controlSha",
     "workflowId", "workflowPath", "workflowBlobSha", "policySha256",
@@ -321,6 +344,39 @@ REJECTION_RETIREMENT_KEYS = RETIREMENT_KEYS | {
     "approvalsSha256",
 }
 RECORD_V3_KEYS = RECORD_V1_KEYS | {"rejection", "retirement"}
+INCIDENT_EXCLUSIVITY_KEYS = {
+    "schemaVersion",
+    "repository",
+    "controlSha",
+    "predecessorRunId",
+    "observedAt",
+    "result",
+    "outputSha256",
+}
+INCIDENT_CONTINUATION_KEYS = {
+    "schemaVersion",
+    "generation",
+    "predecessorRunId",
+    "predecessorAuthoritySha256",
+    "predecessorAuthorityState",
+    "predecessorRunSha256",
+    "predecessorConclusion",
+    "predecessorControlSha",
+    "predecessorInputHash",
+    "predecessorWorkflowId",
+    "predecessorWorkflowBlobSha",
+    "manifestSha256",
+    "manifestOwnerRunId",
+    "journalIdentitySha256",
+    "controlHandoff",
+    "controlHandoffSha256",
+    "exclusivity",
+    "exclusivitySha256",
+    "accessCleanupLineage",
+    "accessCleanupLineageSha256",
+    "dispatchInputs",
+}
+RECORD_V6_KEYS = RECORD_V1_KEYS | {"continuation"}
 ZERO_EXECUTION_RETIREMENT_KEYS = RETIREMENT_KEYS | {
     "recordVersion", "policy", "intentDigest", "captureSha256",
     "secondObservationDigest", "evidence",
@@ -385,7 +441,7 @@ UNMATERIALIZED_WORKFLOWS = {
         "job": "rollout",
         "renderedTitle": re.compile(
             r"^oci-live-data "
-            r"(?:dry-run|apply-backfills|apply-slip-index) "
+            r"(?:dry-run|apply-backfills|apply-slip-index|incident-restore) "
             r"[0-9a-f]{40}$"
         ),
         "mutationTokens": (
@@ -671,6 +727,334 @@ def utc_now():
 
 def utc_text(value):
     return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def incident_lineage_inputs(inputs):
+    if not isinstance(inputs, dict):
+        fail("incident continuation inputs are invalid")
+    return {
+        key: value
+        for key, value in inputs.items()
+        if key != "approved_sha"
+        and key not in INCIDENT_CONTINUATION_INPUT_DEFAULTS
+    }
+
+
+def validate_control_handoff_proof(proof):
+    expected_keys = {
+        "schemaVersion",
+        "fromControlSha",
+        "toControlSha",
+        "relation",
+        "manifestSha256",
+        "journalIdentity",
+        "journalIdentitySha256",
+        "imageInputs",
+        "proofSha256",
+    }
+    if not isinstance(proof, dict) or set(proof) != expected_keys:
+        fail("incident continuation control handoff schema is invalid")
+    if (
+        proof["schemaVersion"]
+        != "betstan.oci-live-data-incident-control-handoff.v1"
+        or not FULL_SHA.fullmatch(proof["fromControlSha"])
+        or not FULL_SHA.fullmatch(proof["toControlSha"])
+        or proof["relation"] not in {"same", "descendant"}
+        or proof["relation"]
+        != (
+            "same"
+            if proof["fromControlSha"] == proof["toControlSha"]
+            else "descendant"
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", proof["manifestSha256"])
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", proof["journalIdentitySha256"]
+        )
+        or proof["imageInputs"] != "unchanged"
+    ):
+        fail("incident continuation control handoff is invalid")
+    identity = proof["journalIdentity"]
+    if not isinstance(identity, dict) or set(identity) != {
+        "schemaVersion",
+        "namespace",
+        "name",
+        "operationId",
+        "ownerRunId",
+        "manifestSha256",
+    }:
+        fail("incident continuation journal identity schema is invalid")
+    if (
+        identity["schemaVersion"]
+        != "betstan.oci-live-data-incident-restore-state.v1"
+        or identity["namespace"] != "betstan-oci"
+        or identity["name"] != "gaming-oci-live-data-incident-restore"
+        or identity["operationId"] != "live-data-incident-restore"
+        or not POSITIVE_INTEGER.fullmatch(str(identity["ownerRunId"]))
+        or identity["manifestSha256"] != proof["manifestSha256"]
+        or evidence_digest(identity) != proof["journalIdentitySha256"]
+    ):
+        fail("incident continuation journal identity is invalid")
+    if proof["proofSha256"] != evidence_digest(
+        {
+            key: value
+            for key, value in proof.items()
+            if key != "proofSha256"
+        }
+    ):
+        fail("incident continuation control handoff digest is invalid")
+    return proof
+
+
+def validate_incident_exclusivity(proof):
+    if not isinstance(proof, dict) or set(proof) != INCIDENT_EXCLUSIVITY_KEYS:
+        fail("incident continuation exclusivity schema is invalid")
+    if (
+        proof["schemaVersion"] != INCIDENT_EXCLUSIVITY_SCHEMA
+        or not isinstance(proof["repository"], str)
+        or not proof["repository"]
+        or not FULL_SHA.fullmatch(proof["controlSha"])
+        or not POSITIVE_INTEGER.fullmatch(str(proof["predecessorRunId"]))
+        or proof["result"] != "production_run_exclusivity=PASS"
+        or not re.fullmatch(r"[0-9a-f]{64}", proof["outputSha256"])
+        or proof["outputSha256"]
+        != hashlib.sha256(
+            (proof["result"] + "\n").encode("utf-8")
+        ).hexdigest()
+    ):
+        fail("incident continuation exclusivity proof is invalid")
+    parse_utc(proof["observedAt"], "incident continuation exclusivity time")
+    return proof
+
+
+def validate_incident_access_cleanup_lineage(
+    value,
+    *,
+    generation,
+    predecessor_run_id=None,
+    predecessor_control_sha=None,
+    predecessor_authority_sha256=None,
+):
+    if not isinstance(value, list):
+        fail("incident access-cleanup lineage must be an array")
+    if len(value) > INCIDENT_ACCESS_CLEANUP_MAX_LINEAGE:
+        fail("incident access-cleanup lineage exceeds its fixed bound")
+    if len(value) != generation:
+        fail("incident access-cleanup lineage length must match generation")
+    normalized = []
+    seen_runs = set()
+    for expected_generation, item in enumerate(value):
+        if not isinstance(item, dict) or set(item) != {
+            "runId",
+            "controlSha",
+            "authorityGeneration",
+            "authoritySha256",
+        }:
+            fail("incident access-cleanup lineage entry shape is invalid")
+        run_id = item["runId"]
+        control_sha = item["controlSha"]
+        authority_generation = item["authorityGeneration"]
+        authority_sha256 = item["authoritySha256"]
+        if (
+            not POSITIVE_INTEGER.fullmatch(str(run_id))
+            or not FULL_SHA.fullmatch(str(control_sha))
+            or not ZERO_OR_POSITIVE_INTEGER.fullmatch(
+                str(authority_generation)
+            )
+            or not re.fullmatch(r"[0-9a-f]{64}", str(authority_sha256))
+            or int(authority_generation) != expected_generation
+        ):
+            fail("incident access-cleanup lineage entry is invalid")
+        run_id = int(run_id)
+        if run_id in seen_runs:
+            fail("incident access-cleanup lineage run IDs must be unique")
+        seen_runs.add(run_id)
+        normalized.append(
+            {
+                "runId": run_id,
+                "controlSha": control_sha,
+                "authorityGeneration": int(authority_generation),
+                "authoritySha256": authority_sha256,
+            }
+        )
+    if generation:
+        last = normalized[-1]
+        if (
+            last["runId"] != predecessor_run_id
+            or last["controlSha"] != predecessor_control_sha
+            or last["authoritySha256"] != predecessor_authority_sha256
+        ):
+            fail(
+                "incident access-cleanup lineage does not bind the exact "
+                "predecessor authority"
+            )
+    return normalized
+
+
+def build_incident_access_cleanup_lineage(predecessor):
+    if predecessor.get("schemaVersion") == RECORD_SCHEMA_V6:
+        predecessor_continuation = predecessor.get("continuation")
+        if not isinstance(predecessor_continuation, dict):
+            fail("incident predecessor continuation is missing")
+        predecessor_generation = int(
+            predecessor_continuation.get("generation", -1)
+        )
+        inherited = validate_incident_access_cleanup_lineage(
+            predecessor_continuation.get("accessCleanupLineage"),
+            generation=predecessor_generation,
+            predecessor_run_id=int(
+                predecessor_continuation.get("predecessorRunId", 0)
+            ),
+            predecessor_control_sha=predecessor_continuation.get(
+                "predecessorControlSha"
+            ),
+            predecessor_authority_sha256=predecessor_continuation.get(
+                "predecessorAuthoritySha256"
+            ),
+        )
+        authority_generation = predecessor_generation
+    else:
+        inherited = []
+        authority_generation = 0
+    if len(inherited) >= INCIDENT_ACCESS_CLEANUP_MAX_LINEAGE:
+        fail("incident access-cleanup lineage cannot exceed its fixed bound")
+    return [
+        *inherited,
+        {
+            "runId": int(predecessor["runId"]),
+            "controlSha": predecessor["controlSha"],
+            "authorityGeneration": authority_generation,
+            "authoritySha256": evidence_digest(predecessor),
+        },
+    ]
+
+
+def validate_incident_continuation_shape(continuation):
+    if (
+        not isinstance(continuation, dict)
+        or set(continuation) != INCIDENT_CONTINUATION_KEYS
+    ):
+        fail("incident continuation authority schema is invalid")
+    if (
+        continuation["schemaVersion"] != INCIDENT_CONTINUATION_SCHEMA
+        or not POSITIVE_INTEGER.fullmatch(str(continuation["generation"]))
+        or not POSITIVE_INTEGER.fullmatch(
+            str(continuation["predecessorRunId"])
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            continuation["predecessorAuthoritySha256"],
+        )
+        or continuation["predecessorAuthorityState"]
+        not in {"issued", "consumed"}
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", continuation["predecessorRunSha256"]
+        )
+        or continuation["predecessorConclusion"]
+        not in {"failure", "cancelled"}
+        or not FULL_SHA.fullmatch(
+            continuation["predecessorControlSha"]
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", continuation["predecessorInputHash"]
+        )
+        or not POSITIVE_INTEGER.fullmatch(
+            str(continuation["predecessorWorkflowId"])
+        )
+        or not FULL_SHA.fullmatch(
+            continuation["predecessorWorkflowBlobSha"]
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", continuation["manifestSha256"]
+        )
+        or not POSITIVE_INTEGER.fullmatch(
+            str(continuation["manifestOwnerRunId"])
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", continuation["journalIdentitySha256"]
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", continuation["controlHandoffSha256"]
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", continuation["exclusivitySha256"]
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            continuation["accessCleanupLineageSha256"],
+        )
+    ):
+        fail("incident continuation authority values are invalid")
+    handoff = validate_control_handoff_proof(
+        continuation["controlHandoff"]
+    )
+    exclusivity = validate_incident_exclusivity(
+        continuation["exclusivity"]
+    )
+    access_cleanup_lineage = validate_incident_access_cleanup_lineage(
+        continuation["accessCleanupLineage"],
+        generation=int(continuation["generation"]),
+        predecessor_run_id=int(continuation["predecessorRunId"]),
+        predecessor_control_sha=continuation["predecessorControlSha"],
+        predecessor_authority_sha256=continuation[
+            "predecessorAuthoritySha256"
+        ],
+    )
+    if (
+        continuation["controlHandoffSha256"] != evidence_digest(handoff)
+        or continuation["exclusivitySha256"] != evidence_digest(exclusivity)
+        or handoff["fromControlSha"]
+        != continuation["predecessorControlSha"]
+        or handoff["manifestSha256"] != continuation["manifestSha256"]
+        or handoff["journalIdentitySha256"]
+        != continuation["journalIdentitySha256"]
+        or handoff["journalIdentity"]["ownerRunId"]
+        != continuation["manifestOwnerRunId"]
+        or str(exclusivity["predecessorRunId"])
+        != str(continuation["predecessorRunId"])
+        or continuation["accessCleanupLineageSha256"]
+        != evidence_digest(access_cleanup_lineage)
+    ):
+        fail("incident continuation authority bindings differ")
+    dispatch_inputs = continuation["dispatchInputs"]
+    if (
+        not isinstance(dispatch_inputs, dict)
+        or set(dispatch_inputs) != set(INCIDENT_CONTINUATION_INPUT_DEFAULTS)
+    ):
+        fail("incident continuation dispatch inputs are invalid")
+    expected_inputs = {
+        "incident_continuation_run_id": str(
+            continuation["predecessorRunId"]
+        ),
+        "incident_continuation_authority_sha256": continuation[
+            "predecessorAuthoritySha256"
+        ],
+        "incident_continuation_control_sha": continuation[
+            "predecessorControlSha"
+        ],
+        "incident_continuation_journal_identity_sha256": continuation[
+            "journalIdentitySha256"
+        ],
+        "incident_continuation_generation": str(
+            continuation["generation"]
+        ),
+        "incident_access_cleanup_lineage_json": json.dumps(
+            access_cleanup_lineage,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    if dispatch_inputs != expected_inputs:
+        fail("incident continuation dispatch input binding differs")
+    return continuation
+
+
+def effective_dispatch_inputs(record):
+    inputs = workflow_dispatch_inputs(record["inputs"])
+    continuation = record.get("continuation")
+    if continuation is not None:
+        validate_incident_continuation_shape(continuation)
+        inputs.update(continuation["dispatchInputs"])
+    return inputs
 
 
 def resolved_inside(path, parent):
@@ -1241,18 +1625,33 @@ def load_intent_file(path, key):
     if not isinstance(intent, dict):
         fail("dispatch intent has an unexpected schema")
     schema = intent.get("schemaVersion")
-    expected_keys = (
-        INTENT_KEYS | {"preparedSeal"} if schema == PREPARED_INTENT_SCHEMA else INTENT_KEYS
-    )
+    if schema == PREPARED_INTENT_SCHEMA:
+        expected_keys = INTENT_KEYS | {"preparedSeal"}
+    elif schema == INCIDENT_CONTINUATION_INTENT_SCHEMA:
+        expected_keys = CONTINUATION_INTENT_KEYS
+    else:
+        expected_keys = INTENT_KEYS
     if set(intent) != expected_keys:
         fail("dispatch intent has an unexpected schema")
-    if schema not in {INTENT_SCHEMA, PREPARED_INTENT_SCHEMA}:
+    if schema not in {
+        INTENT_SCHEMA,
+        PREPARED_INTENT_SCHEMA,
+        INCIDENT_CONTINUATION_INTENT_SCHEMA,
+    }:
         fail("dispatch intent schema version is unsupported")
+    if schema == INCIDENT_CONTINUATION_INTENT_SCHEMA:
+        validate_incident_continuation_shape(intent["continuation"])
+        if intent["operation"] != INCIDENT_OPERATION:
+            fail("incident continuation intent operation is invalid")
     if intent["requestKey"] != key:
         fail("dispatch intent request key mismatch")
     if intent["authorityOwner"] != AUTHORITY_OWNER:
         fail("dispatch intent owner is invalid")
-    states = {"prepared", "dispatching", "bound"} if schema == PREPARED_INTENT_SCHEMA else {"dispatching", "bound"}
+    states = (
+        {"prepared", "dispatching", "bound"}
+        if schema == PREPARED_INTENT_SCHEMA
+        else {"dispatching", "bound"}
+    )
     if intent["state"] not in states:
         fail("dispatch intent state is invalid")
     if not isinstance(intent["version"], int) or intent["version"] < 1:
@@ -1324,6 +1723,22 @@ def verify_intent(
     for name, value in expected.items():
         if intent[name] != value:
             fail(f"dispatch intent {name} mismatch")
+    if intent["schemaVersion"] == INCIDENT_CONTINUATION_INTENT_SCHEMA:
+        continuation = validate_incident_continuation_shape(
+            intent["continuation"]
+        )
+        if (
+            continuation["controlHandoff"]["toControlSha"]
+            != current_master
+            or continuation["exclusivity"]["repository"] != repository
+            or continuation["exclusivity"]["controlSha"] != current_master
+            or any(
+                intent["inputs"].get(key) != value
+                for key, value in
+                INCIDENT_CONTINUATION_INPUT_DEFAULTS.items()
+            )
+        ):
+            fail("incident continuation intent current binding differs")
     if intent["requestKey"] != request_key(normalized):
         fail("dispatch intent does not match the normalized request")
     return intent
@@ -1335,7 +1750,12 @@ def lock_path(directory, run_id):
     return directory / f"{run_id}.lock"
 
 
-def load_record(directory, run_id):
+def load_record(directory, run_id, _stack=None):
+    stack = set() if _stack is None else set(_stack)
+    run_text = str(run_id)
+    if run_text in stack:
+        fail("incident continuation authority chain contains a cycle")
+    stack.add(run_text)
     path = record_path(directory, run_id)
     record = load_json_file(
         path,
@@ -1361,6 +1781,9 @@ def load_record(directory, run_id):
             fail("authority record has an unexpected schema")
     elif schema_version == RECORD_SCHEMA_V5:
         if set(record) != RECORD_V2_KEYS:
+            fail("authority record has an unexpected schema")
+    elif schema_version == RECORD_SCHEMA_V6:
+        if set(record) != RECORD_V6_KEYS:
             fail("authority record has an unexpected schema")
     else:
         fail("authority record schema version is unsupported")
@@ -1696,6 +2119,78 @@ def load_record(directory, run_id):
         validate_zero_execution_retirement(record)
     elif schema_version == RECORD_SCHEMA_V5:
         validate_preflight_read_retirement(record)
+    elif schema_version == RECORD_SCHEMA_V6:
+        continuation = validate_incident_continuation_shape(
+            record["continuation"]
+        )
+        predecessor_run_id = continuation["predecessorRunId"]
+        if (
+            str(predecessor_run_id) == str(record["runId"])
+            or int(predecessor_run_id) >= int(record["runId"])
+        ):
+            fail("incident continuation predecessor run ordering is invalid")
+        predecessor = load_record(
+            directory, predecessor_run_id, _stack=stack
+        )
+        expected_generation = (
+            predecessor["continuation"]["generation"] + 1
+            if predecessor["schemaVersion"] == RECORD_SCHEMA_V6
+            else 1
+        )
+        if continuation["generation"] != expected_generation:
+            fail("incident continuation generation is not sequential")
+        if (
+            predecessor["operation"] != INCIDENT_OPERATION
+            or record["operation"] != INCIDENT_OPERATION
+            or predecessor["runAttempt"] != 1
+            or predecessor["state"]
+            not in {"issued", "consumed"}
+            or predecessor["state"]
+            != continuation["predecessorAuthorityState"]
+            or evidence_digest(predecessor)
+            != continuation["predecessorAuthoritySha256"]
+            or predecessor["controlSha"]
+            != continuation["predecessorControlSha"]
+            or predecessor["inputHash"]
+            != continuation["predecessorInputHash"]
+            or predecessor["workflowId"]
+            != continuation["predecessorWorkflowId"]
+            or predecessor["workflowBlobSha"]
+            != continuation["predecessorWorkflowBlobSha"]
+            or predecessor["repository"] != record["repository"]
+            or predecessor["workflow"] != record["workflow"]
+            or predecessor["event"] != record["event"]
+            or predecessor["environment"] != record["environment"]
+            or incident_lineage_inputs(predecessor["inputs"])
+            != incident_lineage_inputs(record["inputs"])
+        ):
+            fail("incident continuation predecessor authority differs")
+        expected_access_cleanup_lineage = (
+            build_incident_access_cleanup_lineage(predecessor)
+        )
+        if (
+            continuation["accessCleanupLineage"]
+            != expected_access_cleanup_lineage
+            or continuation["accessCleanupLineageSha256"]
+            != evidence_digest(expected_access_cleanup_lineage)
+        ):
+            fail(
+                "incident continuation access-cleanup lineage differs "
+                "from its protected authority chain"
+            )
+        if any(
+            record["inputs"].get(key) != value
+            for key, value in INCIDENT_CONTINUATION_INPUT_DEFAULTS.items()
+        ):
+            fail("incident continuation base request inputs are not neutral")
+        handoff = continuation["controlHandoff"]
+        exclusivity = continuation["exclusivity"]
+        if (
+            handoff["toControlSha"] != record["controlSha"]
+            or exclusivity["repository"] != record["repository"]
+            or exclusivity["controlSha"] != record["controlSha"]
+        ):
+            fail("incident continuation current-control binding differs")
     return record
 
 
@@ -2761,6 +3256,221 @@ def command_write_inputs(args):
         raise
 
 
+def incident_continuation_candidate(directory, normalized):
+    if normalized["operation"] != INCIDENT_OPERATION:
+        return None
+    eligible = []
+    referenced = set()
+    for candidate in sorted(directory.glob("*.json")):
+        run_id = candidate.stem
+        if (
+            run_id.startswith("request-")
+            or run_id.startswith("spent-")
+            or run_id.startswith("incident-spent-")
+            or not POSITIVE_INTEGER.fullmatch(run_id)
+        ):
+            continue
+        record = load_record(directory, run_id)
+        if (
+            record["repository"] != normalized["repository"]
+            or record["operation"] != INCIDENT_OPERATION
+        ):
+            continue
+        if record["schemaVersion"] == RECORD_SCHEMA_V6:
+            referenced.add(str(record["continuation"]["predecessorRunId"]))
+        if (
+            record["state"] in {"issued", "consumed"}
+            and incident_lineage_inputs(record["inputs"])
+            == incident_lineage_inputs(normalized["inputs"])
+        ):
+            eligible.append(record)
+    leaves = [
+        record
+        for record in eligible
+        if str(record["runId"]) not in referenced
+    ]
+    if not eligible:
+        return None
+    if len(leaves) != 1:
+        fail("incident continuation authority lineage is ambiguous")
+    return leaves[0]
+
+
+def load_incident_predecessor_run(path, predecessor):
+    run = load_json_file(
+        path,
+        "incident continuation predecessor run",
+        private=True,
+    )
+    validate_run_against_record(run, predecessor)
+    if (
+        run.get("status") != "completed"
+        or run.get("conclusion") not in {"failure", "cancelled"}
+        or int(run.get("run_attempt", 0)) != 1
+    ):
+        fail(
+            "incident continuation predecessor must be an exact "
+            "first-attempt terminal failure or cancellation"
+        )
+    return run
+
+
+def load_incident_control_handoff(
+    repo_root, directory, predecessor_control, current_control
+):
+    verifier = Path(repo_root) / INCIDENT_VERIFIER_PATH
+    if not verifier.is_file() or verifier.is_symlink():
+        fail("incident continuation control verifier is unavailable")
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".incident-handoff-",
+            dir=directory,
+        ) as scratch:
+            environment = dict(os.environ)
+            environment["TMPDIR"] = scratch
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(verifier),
+                    "verify-control-handoff",
+                    "--repo-root",
+                    str(repo_root),
+                    "--from-control-sha",
+                    predecessor_control,
+                    "--to-control-sha",
+                    current_control,
+                    "--scratch-dir",
+                    scratch,
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+    except OSError:
+        fail("unable to execute incident continuation control verifier")
+    if result.returncode != 0:
+        fail("incident continuation control handoff was rejected")
+    proof = load_json_text(
+        result.stdout, "incident continuation control handoff"
+    )
+    return validate_control_handoff_proof(proof)
+
+
+def load_incident_exclusivity(path, normalized, predecessor_run_id):
+    proof = validate_incident_exclusivity(
+        load_json_file(
+            path,
+            "incident continuation exclusivity proof",
+            private=True,
+        )
+    )
+    observed = parse_utc(
+        proof["observedAt"], "incident continuation exclusivity time"
+    )
+    age = (utc_now() - observed).total_seconds()
+    if age < -5 or age > 300:
+        fail("incident continuation exclusivity proof is not current")
+    if (
+        proof["repository"] != normalized["repository"]
+        or proof["controlSha"] != normalized["controlSha"]
+        or str(proof["predecessorRunId"]) != str(predecessor_run_id)
+    ):
+        fail("incident continuation exclusivity binding differs")
+    return proof
+
+
+def build_incident_continuation(
+    args, policy, normalized, directory, predecessor
+):
+    if (
+        args.incident_predecessor_run_json is None
+        or args.incident_exclusivity_json is None
+    ):
+        fail(
+            "incident continuation requires exact predecessor and "
+            "production exclusivity evidence"
+        )
+    verify_record(
+        predecessor,
+        policy,
+        args.repository,
+        predecessor["controlSha"],
+        predecessor["workflowId"],
+        predecessor["workflowBlobSha"],
+        retirement_only=True,
+    )
+    if predecessor["state"] == "consumed" and not any(
+        receipt["operation"] == INCIDENT_OPERATION
+        and str(receipt["runId"]) == str(predecessor["runId"])
+        for receipt in predecessor["approvals"]
+    ):
+        fail("consumed incident predecessor lacks its exact approval receipt")
+    predecessor_run = load_incident_predecessor_run(
+        args.incident_predecessor_run_json, predecessor
+    )
+    handoff = load_incident_control_handoff(
+        args.repo_root,
+        directory,
+        predecessor["controlSha"],
+        normalized["controlSha"],
+    )
+    exclusivity = load_incident_exclusivity(
+        args.incident_exclusivity_json,
+        normalized,
+        predecessor["runId"],
+    )
+    generation = (
+        predecessor["continuation"]["generation"] + 1
+        if predecessor["schemaVersion"] == RECORD_SCHEMA_V6
+        else 1
+    )
+    access_cleanup_lineage = build_incident_access_cleanup_lineage(
+        predecessor
+    )
+    continuation = {
+        "schemaVersion": INCIDENT_CONTINUATION_SCHEMA,
+        "generation": generation,
+        "predecessorRunId": predecessor["runId"],
+        "predecessorAuthoritySha256": evidence_digest(predecessor),
+        "predecessorAuthorityState": predecessor["state"],
+        "predecessorRunSha256": evidence_digest(predecessor_run),
+        "predecessorConclusion": predecessor_run["conclusion"],
+        "predecessorControlSha": predecessor["controlSha"],
+        "predecessorInputHash": predecessor["inputHash"],
+        "predecessorWorkflowId": predecessor["workflowId"],
+        "predecessorWorkflowBlobSha": predecessor["workflowBlobSha"],
+        "manifestSha256": handoff["manifestSha256"],
+        "manifestOwnerRunId": handoff["journalIdentity"]["ownerRunId"],
+        "journalIdentitySha256": handoff["journalIdentitySha256"],
+        "controlHandoff": handoff,
+        "controlHandoffSha256": evidence_digest(handoff),
+        "exclusivity": exclusivity,
+        "exclusivitySha256": evidence_digest(exclusivity),
+        "accessCleanupLineage": access_cleanup_lineage,
+        "accessCleanupLineageSha256": evidence_digest(
+            access_cleanup_lineage
+        ),
+        "dispatchInputs": {
+            "incident_continuation_run_id": str(predecessor["runId"]),
+            "incident_continuation_authority_sha256":
+                evidence_digest(predecessor),
+            "incident_continuation_control_sha":
+                predecessor["controlSha"],
+            "incident_continuation_journal_identity_sha256":
+                handoff["journalIdentitySha256"],
+            "incident_continuation_generation": str(generation),
+            "incident_access_cleanup_lineage_json": json.dumps(
+                access_cleanup_lineage,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        },
+    }
+    return validate_incident_continuation_shape(continuation)
+
+
 def build_dispatch_record(
     normalized,
     policy,
@@ -2769,6 +3479,7 @@ def build_dispatch_record(
     workflow_blob_sha,
     run_id,
     run_url,
+    continuation=None,
 ):
     request = {key: normalized[key] for key in REQUEST_KEYS}
     request["schemaVersion"] = REQUEST_SCHEMA
@@ -2778,8 +3489,12 @@ def build_dispatch_record(
         run_id=run_id,
     )
     created_at = utc_now()
-    return {
-        "schemaVersion": RECORD_SCHEMA,
+    record = {
+        "schemaVersion": (
+            RECORD_SCHEMA_V6
+            if continuation is not None
+            else RECORD_SCHEMA
+        ),
         "repository": repository,
         "operation": policy["operation"],
         "workflow": policy["workflow"],
@@ -2806,6 +3521,9 @@ def build_dispatch_record(
         "approvals": [],
         "inflightApproval": None,
     }
+    if continuation is not None:
+        record["continuation"] = continuation
+    return record
 
 
 def claim_request_under_lock(
@@ -2819,6 +3537,23 @@ def claim_request_under_lock(
     prepared=None,
 ):
     replace_retired = False
+    replace_incident = False
+    spent_intent = None
+    continuation = None
+    predecessor = (
+        incident_continuation_candidate(directory, normalized)
+        if prepared is None
+        else None
+    )
+    if predecessor is not None:
+        continuation = build_incident_continuation(
+            args, policy, normalized, directory, predecessor
+        )
+    elif (
+        getattr(args, "incident_predecessor_run_json", None) is not None
+        or getattr(args, "incident_exclusivity_json", None) is not None
+    ):
+        fail("incident continuation evidence has no exact predecessor")
     if path.exists() or path.is_symlink():
         intent = verify_intent(
             load_intent(directory, key),
@@ -2829,12 +3564,54 @@ def claim_request_under_lock(
             workflow_id,
             args.workflow_blob_sha,
         )
+        if continuation is not None:
+            if (
+                intent["schemaVersion"]
+                == INCIDENT_CONTINUATION_INTENT_SCHEMA
+                and intent["continuation"] == continuation
+            ):
+                print(
+                    canonical_json(
+                        {
+                            "capturePath": str(
+                                directory / intent["captureFile"]
+                            ),
+                            "continuationInputs": continuation[
+                                "dispatchInputs"
+                            ],
+                            "created": False,
+                            "requestKey": key,
+                            "state": intent["state"],
+                            "version": intent["version"],
+                        }
+                    )
+                )
+                return
+            if (
+                intent["state"] != "bound"
+                or str(intent["runId"])
+                != str(continuation["predecessorRunId"])
+            ):
+                fail(
+                    "incident continuation cannot replace a different "
+                    "dispatch generation"
+                )
+            replace_incident = True
+            spent_intent = intent
         replace_retired = prepared is not None and retired_bound_intent(directory, intent)
-        if not replace_retired:
+        if replace_retired:
+            spent_intent = intent
+        if not replace_retired and not replace_incident:
             print(
                 canonical_json(
                     {
                         "capturePath": str(directory / intent["captureFile"]),
+                        "continuationInputs": (
+                            intent["continuation"]["dispatchInputs"]
+                            if intent["schemaVersion"]
+                            == INCIDENT_CONTINUATION_INTENT_SCHEMA
+                            else {}
+                        ),
                         "created": False,
                         "requestKey": key,
                         "state": intent["state"],
@@ -2843,8 +3620,18 @@ def claim_request_under_lock(
                 )
             )
             return
-        spent_intent = intent
     blocking_matches = find_blocking_authorities(directory, normalized)
+    if continuation is not None:
+        blocking_matches = [
+            match
+            for match in blocking_matches
+            if not (
+                str(match[0])
+                == str(continuation["predecessorRunId"])
+                and match[1]
+                == continuation["predecessorAuthorityState"]
+            )
+        ]
     if blocking_matches:
         authority, state = blocking_matches[0]
         fail(
@@ -2856,7 +3643,15 @@ def claim_request_under_lock(
     create_private_file(capture_path)
     created_at = utc_now()
     intent = {
-        "schemaVersion": PREPARED_INTENT_SCHEMA if prepared is not None else INTENT_SCHEMA,
+        "schemaVersion": (
+            PREPARED_INTENT_SCHEMA
+            if prepared is not None
+            else (
+                INCIDENT_CONTINUATION_INTENT_SCHEMA
+                if continuation is not None
+                else INTENT_SCHEMA
+            )
+        ),
         "requestKey": key,
         "repository": args.repository,
         "operation": policy["operation"],
@@ -2886,6 +3681,8 @@ def claim_request_under_lock(
         "runId": None,
         "runUrl": None,
     }
+    if continuation is not None:
+        intent["continuation"] = continuation
     if prepared is not None:
         seal = {
             **prepared,
@@ -2904,6 +3701,11 @@ def claim_request_under_lock(
         if replace_retired:
             preserve_spent_intent(directory, spent_intent)
             atomic_replace(path, intent)
+        elif replace_incident:
+            preserve_incident_spent_intent(
+                directory, spent_intent, predecessor
+            )
+            atomic_replace(path, intent)
         else:
             atomic_create(path, intent)
     except BaseException:
@@ -2916,6 +3718,11 @@ def claim_request_under_lock(
         canonical_json(
             {
                 "capturePath": str(capture_path),
+                "continuationInputs": (
+                    continuation["dispatchInputs"]
+                    if continuation is not None
+                    else {}
+                ),
                 "created": True,
                 "requestKey": key,
                 "state": intent["state"],
@@ -4172,7 +4979,8 @@ def command_cancel_intent(args):
         args.workflow_blob_sha,
     )
     if (
-        intent["schemaVersion"] != INTENT_SCHEMA
+        intent["schemaVersion"]
+        not in {INTENT_SCHEMA, INCIDENT_CONTINUATION_INTENT_SCHEMA}
         or intent["state"] != "dispatching"
         or intent["version"] != args.expected_version
         or intent["ownerPid"] != args.owner_pid
@@ -4269,6 +5077,7 @@ def bind_intent_under_lock(args, policy, normalized, directory, workflow_id, key
         args.workflow_blob_sha,
         run_id,
         run_url,
+        continuation=intent.get("continuation"),
     )
     record_file = record_path(directory, run_id)
     if record_file.exists() or record_file.is_symlink():
@@ -4289,7 +5098,10 @@ def bind_intent_under_lock(args, policy, normalized, directory, workflow_id, key
             fail("existing authority record does not match dispatch intent")
     else:
         atomic_create(record_file, record)
-    if intent["schemaVersion"] == INTENT_SCHEMA:
+    if intent["schemaVersion"] in {
+        INTENT_SCHEMA,
+        INCIDENT_CONTINUATION_INTENT_SCHEMA,
+    }:
         durable_unlink(path)
         try:
             durable_unlink(capture_path)
@@ -4375,6 +5187,8 @@ def command_ensure_automatic_record(args):
         verified = record
     print(canonical_json({
         "controlSha": verified["controlSha"],
+        "continuation": verified.get("continuation"),
+        "dispatchInputs": effective_dispatch_inputs(verified),
         "displayTitle": verified["displayTitle"],
         "environment": verified["environment"],
         "inputHash": verified["inputHash"],
@@ -4400,6 +5214,12 @@ def bound_intent_record(directory, intent):
         intent["displayTitleTemplate"], intent, run_id=intent["runId"],
     ):
         fail("bound prepared intent/record mismatch")
+    if intent["schemaVersion"] == INCIDENT_CONTINUATION_INTENT_SCHEMA:
+        if (
+            record["schemaVersion"] != RECORD_SCHEMA_V6
+            or record["continuation"] != intent["continuation"]
+        ):
+            fail("bound incident continuation intent/record mismatch")
     return record
 
 
@@ -4449,8 +5269,37 @@ def preserve_spent_intent(directory, intent):
         atomic_create(archive, intent)
 
 
+def preserve_incident_spent_intent(directory, intent, predecessor):
+    if (
+        intent["state"] != "bound"
+        or str(intent["runId"]) != str(predecessor["runId"])
+    ):
+        fail("incident continuation may preserve only its exact predecessor")
+    record = bound_intent_record(directory, intent)
+    if (
+        record["state"] not in {"issued", "consumed"}
+        or evidence_digest(record) != evidence_digest(predecessor)
+    ):
+        fail("incident continuation predecessor intent is not terminal authority")
+    archive = directory / (
+        "incident-spent-"
+        f"{intent['requestKey']}-"
+        f"{Path(intent['captureFile']).stem}.json"
+    )
+    if archive.exists() or archive.is_symlink():
+        if load_intent_file(archive, intent["requestKey"]) != intent:
+            fail("incident predecessor archive differs")
+    else:
+        atomic_create(archive, intent)
+
+
 def find_blocking_authorities(directory, normalized):
     matches = []
+    incident_candidate = (
+        incident_continuation_candidate(directory, normalized)
+        if normalized["operation"] == INCIDENT_OPERATION
+        else None
+    )
     for candidate in sorted(directory.glob("request-*.json")):
         key = candidate.stem.removeprefix("request-")
         intent = load_intent(directory, key)
@@ -4461,10 +5310,33 @@ def find_blocking_authorities(directory, normalized):
                 # below still fences claimed/inflight/rejecting runs.
                 if retired_bound_intent(directory, intent) or key != request_key(normalized):
                     continue
+            if (
+                incident_candidate is not None
+                and intent["state"] == "bound"
+                and str(intent["runId"])
+                == str(incident_candidate["runId"])
+            ):
+                continue
             matches.append((f"intent:{key}", intent["state"]))
     for candidate in sorted(directory.glob("*.json")):
         run_id = candidate.stem
         if run_id.startswith("request-"):
+            continue
+        incident_spent = re.fullmatch(
+            r"incident-spent-([0-9a-f]{64})-"
+            r"(dispatch-[0-9a-f]{32})",
+            run_id,
+        )
+        if incident_spent:
+            intent = load_intent_file(candidate, incident_spent[1])
+            if (
+                Path(intent["captureFile"]).stem != incident_spent[2]
+                or intent["state"] != "bound"
+            ):
+                fail("incident predecessor archive is invalid")
+            record = bound_intent_record(directory, intent)
+            if record["state"] not in {"issued", "consumed"}:
+                fail("incident predecessor archive authority is unresolved")
             continue
         spent = re.fullmatch(r"spent-([0-9a-f]{64})-(dispatch-[0-9a-f]{32})", run_id)
         if spent:
@@ -4490,6 +5362,14 @@ def find_blocking_authorities(directory, normalized):
             and record["operation"] == normalized["operation"]
             and record["inputHash"] == normalized["inputHash"]
             and record["state"] in {"issued", "consumed"}
+            and (
+                normalized["operation"] != INCIDENT_OPERATION
+                or (
+                    incident_candidate is not None
+                    and str(record["runId"])
+                    == str(incident_candidate["runId"])
+                )
+            )
         )
         if globally_unresolved or exact_one_use:
             matches.append((run_id, record["state"]))
@@ -4517,6 +5397,84 @@ def command_blocking_record(args):
     matches = find_blocking_authorities(directory, normalized)
     if matches:
         print(f"{matches[0][0]}\t{matches[0][1]}")
+
+
+def command_incident_continuation_candidate(args):
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    normalized = load_normalized(
+        args.normalized,
+        policy,
+        args.repository,
+        args.current_master,
+    )
+    if normalized["operation"] != INCIDENT_OPERATION:
+        return
+    authority_path = Path(args.authority_dir)
+    if not authority_path.exists():
+        return
+    directory = ensure_authority_dir(
+        args.authority_dir,
+        args.repo_root,
+        create=False,
+    )
+    predecessor = incident_continuation_candidate(directory, normalized)
+    if predecessor is None:
+        return
+    print(
+        canonical_json(
+            {
+                "predecessorRunId": predecessor["runId"],
+                "predecessorControlSha": predecessor["controlSha"],
+                "predecessorAuthoritySha256": evidence_digest(predecessor),
+                "predecessorAuthorityState": predecessor["state"],
+            }
+        )
+    )
+
+
+def command_verify_incident_continuation(args):
+    directory = ensure_authority_dir(
+        args.authority_dir,
+        args.repo_root,
+        create=False,
+    )
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    record = load_record(directory, args.run_id)
+    verify_record(
+        record,
+        policy,
+        args.repository,
+        args.current_master,
+        args.workflow_id,
+        args.workflow_blob_sha,
+    )
+    if record["schemaVersion"] != RECORD_SCHEMA_V6:
+        fail("authority record is not an incident continuation")
+    continuation = record["continuation"]
+    predecessor = load_record(
+        directory, continuation["predecessorRunId"]
+    )
+    predecessor_run = load_incident_predecessor_run(
+        args.predecessor_run_json, predecessor
+    )
+    if evidence_digest(predecessor_run) != continuation[
+        "predecessorRunSha256"
+    ]:
+        fail("incident continuation predecessor run response changed")
+    print(
+        canonical_json(
+            {
+                "generation": continuation["generation"],
+                "journalIdentitySha256": continuation[
+                    "journalIdentitySha256"
+                ],
+                "predecessorControlSha": continuation[
+                    "predecessorControlSha"
+                ],
+                "predecessorRunId": continuation["predecessorRunId"],
+            }
+        )
+    )
 
 
 def command_issue(args):
@@ -5115,6 +6073,8 @@ def command_verify(args):
     )
     print(canonical_json({
         "controlSha": verified["controlSha"],
+        "continuation": verified.get("continuation"),
+        "dispatchInputs": effective_dispatch_inputs(verified),
         "displayTitle": verified["displayTitle"],
         "environment": verified["environment"],
         "inputHash": verified["inputHash"],
@@ -5459,6 +6419,8 @@ def build_parser():
     claim_request.add_argument("--workflow-id", required=True)
     claim_request.add_argument("--workflow-blob-sha", required=True)
     claim_request.add_argument("--owner-pid", required=True, type=int)
+    claim_request.add_argument("--incident-predecessor-run-json")
+    claim_request.add_argument("--incident-exclusivity-json")
     common_authority_arguments(claim_request)
     claim_request.set_defaults(function=command_claim_request)
 
@@ -5587,6 +6549,41 @@ def build_parser():
     blocking_record.add_argument("--normalized", required=True)
     common_authority_arguments(blocking_record)
     blocking_record.set_defaults(function=command_blocking_record)
+
+    continuation_candidate = subparsers.add_parser(
+        "incident-continuation-candidate"
+    )
+    continuation_candidate.add_argument("--normalized", required=True)
+    continuation_candidate.add_argument("--policy-json", required=True)
+    continuation_candidate.add_argument("--repository", required=True)
+    continuation_candidate.add_argument("--current-master", required=True)
+    continuation_candidate.add_argument("--workflow-id", required=True)
+    continuation_candidate.add_argument(
+        "--workflow-blob-sha", required=True
+    )
+    common_authority_arguments(continuation_candidate)
+    continuation_candidate.set_defaults(
+        function=command_incident_continuation_candidate
+    )
+
+    verify_continuation = subparsers.add_parser(
+        "verify-incident-continuation"
+    )
+    verify_continuation.add_argument("--run-id", required=True)
+    verify_continuation.add_argument(
+        "--predecessor-run-json", required=True
+    )
+    verify_continuation.add_argument("--policy-json", required=True)
+    verify_continuation.add_argument("--repository", required=True)
+    verify_continuation.add_argument("--current-master", required=True)
+    verify_continuation.add_argument("--workflow-id", required=True)
+    verify_continuation.add_argument(
+        "--workflow-blob-sha", required=True
+    )
+    common_authority_arguments(verify_continuation)
+    verify_continuation.set_defaults(
+        function=command_verify_incident_continuation
+    )
 
     issue = subparsers.add_parser("issue")
     issue.add_argument("--run-id", required=True)

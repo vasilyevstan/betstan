@@ -907,6 +907,53 @@ The failed rollback attempts remain immutable and are retained as evidence:
 gate, and `34082076542` stopped at the expired-lease check. None of the three
 mutated a workload.
 
+## Bounded held-baseline incident restoration — 2026-10-26
+
+The fixed held-baseline recovery is deliberately narrower than ordinary
+release or rollback machinery:
+
+- `incident_manifest_stan.py` validates only the strict, maximum-16-KiB
+  `infra/oci/incident/manifest.json`. It rejects duplicate or unknown keys and
+  unsafe archives; uses only exact run and artifact endpoints within 24 GitHub
+  metadata requests; binds rollout, baseline, and infrastructure artifacts by
+  identity, digest, size, expiry, member set, and member hashes; and proves
+  current-control ancestry plus unchanged canonical image inputs before
+  dispatcher or approver authority. Approval and workflow verification fetch
+  the exact current run attempt, bind its immutable metadata digest and
+  `created_at`, and require request creation to be strictly after the relevant
+  lease cutoff before takeover can proceed.
+- `shared-mongo-operation-lock-stan.sh replace-expired-active` performs one
+  resource-versioned active-to-active replacement of the complete authenticated
+  held preimage. The UID stays fixed, resource version advances, generation is
+  exactly incremented, acquisition follows lease expiry, and the fixed lease
+  duration and incident bindings must match. There is no generic acquire,
+  released intermediate, retry, or force fallback; an uncertain response gets
+  one reread and an applied, not-applied, or ambiguous terminal result. It has
+  no runner-clock fallback: a fresh exact-run GitHub response `Date` supplies
+  the provider transition epoch, the new lease begins there, and the run
+  metadata digest, creation epoch, old cutoff, transition epoch, and new lease
+  are persisted in takeover evidence and the active postimage.
+- `live-data-maintenance-stan.sh` reconstructs exact images and replica counts
+  from the authenticated baseline, rejects missing, zero, or drifting writer
+  state, and restores while `RESTORE_KEEP_FENCE=true`. Failure re-quiesces all
+  writers; success releases the lock before the fence and then runs complete
+  API, SSE, RabbitMQ, image, routing, and readiness validation.
+- `incident_restore_state_stan.py` persists exact active/released lock
+  postimages and fenced, unfenced, readiness, sealed, and published phases.
+  Protected continuation comes only from the exact terminal failed or cancelled
+  predecessor authority, admits one winner, authenticates any active CAS
+  successor before adoption, and requires explicit descendant-control handoff.
+  Already-published continuation performs cleanup only and never replays
+  takeover, restoration, readiness, or publication.
+- Runner access is a durable obligation, not ephemeral best effort.
+  `incident_access_stan.py` combines journaled resource records with a canonical
+  authority-linked lineage capped at 32 generations. Every successor inherits
+  all prior exact OKE rule or k3s session identities and appends its immediate
+  predecessor even when cleanup failed before that predecessor opened access.
+  Cleanup runs oldest-first, preserves unrelated resources, reconciles
+  applied-then-error and restart by exact reread, and blocks terminal success
+  until every obligation is absent.
+
 ## Bounded reporting during long protected operations — 2026-09-07
 
 OCI recovery work is slow by construction: protected environments wait for

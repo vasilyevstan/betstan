@@ -503,6 +503,8 @@ capture_pre_rollback_state() {
     local deployment="gaming-${service}-depl"
     local container="gaming-${service}"
     local deployment_json="$WORK_DIR/${service}-current-deployment.json"
+    local pods_json="$WORK_DIR/${service}-current-pods.json"
+    local runtime_digest
     kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" -o json >"$deployment_json"
     read -r image revision ready available < <(
       python3 - "$deployment_json" "$container" <<'PY'
@@ -525,8 +527,46 @@ print(
 PY
     )
     if [[ -n "$current_images_file" ]]; then
+      kubectl get pods -n "$OCI_K8S_NAMESPACE" -l "app=${container}" \
+        -o json >"$pods_json" ||
+        oci_die "current deployment ${deployment} pods could not be read"
+      runtime_digest="$(
+        python3 - "$pods_json" "$container" "$ready" <<'PY'
+import json
+import re
+import sys
+
+pods = json.load(open(sys.argv[1], encoding="utf-8"))
+container = sys.argv[2]
+expected_ready = int(sys.argv[3])
+digest_value_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+digest_pattern = re.compile(r"(?:@|://)(sha256:[0-9a-f]{64})$")
+digests = []
+for pod in pods.get("items", []):
+    if pod.get("metadata", {}).get("deletionTimestamp") is not None:
+        continue
+    for status in pod.get("status", {}).get("containerStatuses", []):
+        if status.get("name") != container or status.get("ready") is not True:
+            continue
+        image_id = status.get("imageID", "")
+        match = digest_pattern.search(image_id)
+        digest = image_id if digest_value_pattern.fullmatch(image_id) else (
+            match.group(1) if match is not None else None
+        )
+        if digest is None:
+            raise SystemExit("ready pod imageID is not digest-bound")
+        digests.append(digest)
+if expected_ready < 1 or len(digests) != expected_ready:
+    raise SystemExit("ready pod evidence does not match deployment readiness")
+if len(set(digests)) != 1:
+    raise SystemExit("ready pods do not share one runtime platform digest")
+print(digests[0])
+PY
+      )" || oci_die "current deployment ${deployment} runtime digest is not exact"
       if [[ "$image" =~ ^(.+)@(sha256:[0-9a-f]{64})$ ]]; then
-        printf '%s\t%s\t%s\t%s\n' "$service" "${BASH_REMATCH[1]}" "$image" "${BASH_REMATCH[2]}" >>"$current_images_file"
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+          "$service" "${BASH_REMATCH[1]}" "$image" \
+          "${BASH_REMATCH[2]}" "$runtime_digest" >>"$current_images_file"
       else
         oci_die "current deployment ${deployment} does not use an immutable digest"
       fi
@@ -548,11 +588,14 @@ verify_exact_digest() {
     "$(expected_platform_digest "$service")" \
     >>"$OUTPUT_DIR/exact-digest-verification.tsv" <<'PY'
 import json
+import re
 import sys
 
 deployment = json.load(open(sys.argv[1], encoding='utf-8'))
 pods = json.load(open(sys.argv[2], encoding='utf-8'))
 container, service, expected_ref, manifest_digest, platform_digest = sys.argv[3:8]
+digest_value_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+image_id_digest_pattern = re.compile(r"(?:@|://)(sha256:[0-9a-f]{64})$")
 images = [
     item.get('image', '')
     for item in deployment.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
@@ -571,10 +614,11 @@ for pod in pods.get('items', []):
         if not status.get('ready'):
             raise SystemExit(f'{service}: pod {pod_name} is not ready')
         image_id = status.get('imageID', '')
-        if not (
-            image_id.endswith('@' + manifest_digest)
-            or image_id.endswith('@' + platform_digest)
-        ):
+        match = image_id_digest_pattern.search(image_id)
+        observed_digest = image_id if digest_value_pattern.fullmatch(image_id) else (
+            match.group(1) if match is not None else ""
+        )
+        if observed_digest not in {manifest_digest, platform_digest}:
             raise SystemExit(
                 f'{service}: pod {pod_name} does not serve the expected manifest/platform digest'
             )

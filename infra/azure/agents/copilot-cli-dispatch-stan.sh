@@ -23,6 +23,7 @@ POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-poli
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 RUN_EXCLUSIVITY_SCRIPT="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
 UPSTREAM_BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
+INCIDENT_MANIFEST_VERIFIER="$ROOT_DIR/infra/oci/scripts/incident_manifest_stan.py"
 AUTHORITY_DIR="${COPILOT_CLI_AUTHORITY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/betstan/copilot-cli-authority}"
 MATERIALIZATION_ATTEMPTS="${COPILOT_CLI_MATERIALIZATION_ATTEMPTS:-12}"
 MATERIALIZATION_SLEEP_SECONDS="${COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS:-5}"
@@ -163,6 +164,9 @@ zero_workflow_file="$tmp_dir/zero-workflow.json"
 zero_historical_file="$tmp_dir/zero-historical.json"
 zero_compare_file="$tmp_dir/zero-compare.json"
 zero_artifacts_file="$tmp_dir/zero-artifacts.json"
+incident_predecessor_run_file="$tmp_dir/incident-predecessor-run.json"
+incident_exclusivity_file="$tmp_dir/incident-exclusivity.json"
+incident_inputs_file="$tmp_dir/incident-inputs.json"
 authority_lock_run_id=""
 authority_lock_token=""
 cleanup() {
@@ -198,7 +202,9 @@ cleanup() {
     "$observation_file" \
     "$zero_first_file" "$zero_second_file" "$zero_attempt_file" \
     "$zero_attempts_file" "$zero_workflow_file" "$zero_historical_file" \
-    "$zero_compare_file" "$zero_artifacts_file"
+    "$zero_compare_file" "$zero_artifacts_file" \
+    "$incident_predecessor_run_file" "$incident_exclusivity_file" \
+    "$incident_inputs_file"
   rm -f "$tmp_dir"/preflight-*.json
   rmdir "$tmp_dir" 2>/dev/null || true
 }
@@ -233,8 +239,52 @@ release_authority_lock() {
 }
 
 validate_production_exclusivity() {
-  REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
-    "$RUN_EXCLUSIVITY_SCRIPT"
+  local evidence_file="${1:-}"
+  local predecessor_run_id="${2:-}"
+  local result
+  if [[ -z "$evidence_file" ]]; then
+    REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+      "$RUN_EXCLUSIVITY_SCRIPT"
+    return
+  fi
+  result="$(
+    REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+      "$RUN_EXCLUSIVITY_SCRIPT"
+  )" || return
+  [[ "$result" = "production_run_exclusivity=PASS" ]] ||
+    fail "production exclusivity returned an unexpected result"
+  printf '%s\n' "$result"
+  [[ "$predecessor_run_id" =~ ^[1-9][0-9]*$ ]] ||
+    fail "incident continuation predecessor run ID is invalid"
+  python3 - \
+    "$evidence_file" "$repository" "$current_master" \
+    "$predecessor_run_id" "$result" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import sys
+
+path, repository, control, predecessor, result = sys.argv[1:]
+value = {
+    "schemaVersion":
+        "betstan.copilot-cli-incident-continuation-exclusivity.v1",
+    "repository": repository,
+    "controlSha": control,
+    "predecessorRunId": int(predecessor),
+    "observedAt": datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat().replace("+00:00", "Z"),
+    "result": result,
+    "outputSha256": hashlib.sha256(
+        (result + "\n").encode("utf-8")
+    ).hexdigest(),
+}
+with open(path, "x", encoding="utf-8") as handle:
+    json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+os.chmod(path, 0o600)
+PY
 }
 
 collect_zero_execution() {
@@ -1045,6 +1095,23 @@ validate_upstream_run_bindings() {
     fail "upstream run bindings were rejected before any authority was issued"
 }
 
+validate_incident_manifest() {
+  local verifier_output
+  [[ "$operation" = "oci-live-data-incident-restore" ]] || return 0
+  [[ -x "$INCIDENT_MANIFEST_VERIFIER" ]] ||
+    fail "incident manifest verifier is unavailable"
+  verifier_output="$tmp_dir/incident-manifest-output"
+  rm -rf -- "$verifier_output"
+  "$INCIDENT_MANIFEST_VERIFIER" verify \
+    --repository "$repository" \
+    --repo-root "$ROOT_DIR" \
+    --control-sha "$current_master" \
+    --dispatch-inputs-json "$(cat "$inputs_file")" \
+    --output-dir "$verifier_output" >/dev/null ||
+    fail "incident manifest evidence was rejected before any authority was issued"
+  rm -rf -- "$verifier_output"
+}
+
 validate_common_package_prerequisites() {
   [[ "$operation" = "common-package-publish" ]] || return 0
 
@@ -1170,6 +1237,7 @@ PY
 validate_protected_prerequisites() {
   validate_common_package_prerequisites
   validate_runtime_mode_binding
+  validate_incident_manifest
   validate_upstream_run_bindings "${1:-}" "${2:-}"
 }
 
@@ -1524,6 +1592,39 @@ printf 'dispatch=READY operation=%s workflow=%s environment=%s control_sha=%s in
 [[ "$ACTION" = "--dispatch" || "$ACTION" = "--dispatch-prepared" ]] || exit 0
 
 if [[ "$ACTION" = "--dispatch" ]]; then
+incident_continuation=""
+incident_predecessor_run_id=""
+incident_predecessor_state=""
+incident_claim_args=()
+if [[ "$operation" = "oci-live-data-incident-restore" ]]; then
+  incident_continuation="$(
+    "$AUTHORITY_HELPER" incident-continuation-candidate \
+      --normalized "$normalized_file" \
+      --policy-json "$policy_json" \
+      --repository "$repository" \
+      --current-master "$current_master" \
+      --workflow-id "$workflow_id" \
+      --workflow-blob-sha "$workflow_blob_sha" \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR"
+  )"
+  if [[ -n "$incident_continuation" ]]; then
+    incident_predecessor_run_id="$(
+      jq -er '.predecessorRunId | tostring | select(test("^[1-9][0-9]*$"))' \
+        <<<"$incident_continuation"
+    )" || fail "incident continuation candidate run ID is invalid"
+    incident_predecessor_state="$(
+      jq -er '.predecessorAuthorityState |
+        select(. == "issued" or . == "consumed")' \
+        <<<"$incident_continuation"
+    )" || fail "incident continuation candidate state is invalid"
+    gh api \
+      "repos/$repository/actions/runs/$incident_predecessor_run_id" \
+      >"$incident_predecessor_run_file" ||
+      fail "unable to read the exact incident continuation predecessor run"
+    chmod 600 "$incident_predecessor_run_file"
+  fi
+fi
 blocking_record="$(
   "$AUTHORITY_HELPER" blocking-record \
     --normalized "$normalized_file" \
@@ -1532,11 +1633,24 @@ blocking_record="$(
 )"
 if [[ -n "$blocking_record" ]]; then
   IFS=$'\t' read -r blocking_authority blocking_state <<<"$blocking_record"
-  fail "dispatch is blocked by $blocking_state authority $blocking_authority; do not redispatch"
+  if [[ -z "$incident_continuation" ||
+    "$blocking_authority" != "$incident_predecessor_run_id" ||
+    "$blocking_state" != "$incident_predecessor_state" ]]; then
+    fail "dispatch is blocked by $blocking_state authority $blocking_authority; do not redispatch"
+  fi
 fi
 
 revalidate_dispatch_target
-validate_production_exclusivity
+if [[ -n "$incident_continuation" ]]; then
+  validate_production_exclusivity \
+    "$incident_exclusivity_file" "$incident_predecessor_run_id"
+  incident_claim_args=(
+    --incident-predecessor-run-json "$incident_predecessor_run_file"
+    --incident-exclusivity-json "$incident_exclusivity_file"
+  )
+else
+  validate_production_exclusivity
+fi
 revalidate_dispatch_target
 
 intent_summary="$(
@@ -1549,13 +1663,21 @@ intent_summary="$(
     --workflow-blob-sha "$workflow_blob_sha" \
     --owner-pid "$$" \
     --authority-dir "$AUTHORITY_DIR" \
-    --repo-root "$ROOT_DIR"
+    --repo-root "$ROOT_DIR" \
+    ${incident_claim_args[@]+"${incident_claim_args[@]}"}
 )"
 if [[ "$(jq -r '.created' <<<"$intent_summary")" != "true" ]]; then
   fail "request already has an unresolved dispatch intent; do not redispatch"
 fi
 capture_path="$(jq -r '.capturePath' <<<"$intent_summary")"
 intent_version="$(jq -r '.version' <<<"$intent_summary")"
+continuation_inputs="$(jq -c '.continuationInputs // {}' <<<"$intent_summary")"
+if [[ "$continuation_inputs" != "{}" ]]; then
+  jq --argjson continuation "$continuation_inputs" \
+    '. + $continuation' "$inputs_file" >"$incident_inputs_file"
+  chmod 600 "$incident_inputs_file"
+  mv "$incident_inputs_file" "$inputs_file"
+fi
 
 if ! dispatch_revalidation_error="$(
   {

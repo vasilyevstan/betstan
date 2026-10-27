@@ -556,6 +556,7 @@ selected = names.to_h do |name|
 end
 dark = selected.fetch(names[1])
 abort "released readiness is not pre-arm-only" unless dark.fetch("if") ==
+  "inputs.phase != 'incident-restore' && " \
   "steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account'"
 abort "released readiness lost dark mode" unless dark.fetch("env").slice(
   "MODE", "EXPECTED_LIVE_KICKOFFS_ENABLED", "IMAGE_PROVENANCE_FILE"
@@ -565,7 +566,8 @@ abort "released readiness lost dark mode" unless dark.fetch("env").slice(
 }
 names.last(2).each do |name|
   abort "cleanup exclusion widened" unless selected.fetch(name).fetch("if").split.join(" ") ==
-    "inputs.failed_activation_run_id != '0' && steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'"
+    "inputs.phase != 'incident-restore' && inputs.failed_activation_run_id != '0' && " \
+    "steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'"
 end
 puts JSON.generate(selected)
 RUBY

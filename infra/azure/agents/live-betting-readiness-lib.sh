@@ -961,7 +961,10 @@ import sys
 from pathlib import Path
 
 workloads_path, pods_path, images_path, expected_flag = sys.argv[1:]
-digest_re = re.compile(r"@sha256:[0-9a-f]{64}$")
+digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
+image_id_digest_re = re.compile(
+    r"(?:@|://)(sha256:[0-9a-f]{64})$"
+)
 
 def read_images(path: str):
     rows = []
@@ -972,9 +975,16 @@ def read_images(path: str):
         if len(parts) < 4:
             raise SystemExit("image provenance rows must contain at least four tab-separated columns")
         service, _repository, image_ref, digest = parts[:4]
-        if not service or not image_ref or not digest_re.search(image_ref):
+        platform_digest = parts[4] if len(parts) >= 5 else digest
+        if (
+            not service
+            or not image_ref
+            or digest_re.fullmatch(digest) is None
+            or digest_re.fullmatch(platform_digest) is None
+            or not image_ref.endswith(f"@{digest}")
+        ):
             raise SystemExit(f"invalid image provenance row for {service or 'missing-service'}")
-        rows.append((service, image_ref))
+        rows.append((service, image_ref, platform_digest))
     return rows
 
 workloads = json.loads(Path(workloads_path).read_text(encoding="utf-8"))
@@ -1003,13 +1013,13 @@ historical_services = (
     "moderation", "resulting", "slip",
 )
 current_services = historical_services + ("telemetry",)
-observed_services = tuple(sorted(service for service, _ in image_rows))
+observed_services = tuple(sorted(service for service, _, _ in image_rows))
 if observed_services not in (historical_services, current_services):
     raise SystemExit(
         "expected canonical historical-nine or current-ten service identities, "
         f"found {observed_services!r}"
     )
-for service, image_ref in image_rows:
+for service, image_ref, platform_digest in image_rows:
     deployment_name = f"gaming-{service}-depl"
     container_name = f"gaming-{service}"
     workload = workloads_by_name.get(deployment_name)
@@ -1029,13 +1039,33 @@ for service, image_ref in image_rows:
     if actual_image != image_ref:
         raise SystemExit(f"deployment {deployment_name} image does not match provenance")
     pods_for_app = pod_items_by_app.get(container_name, [])
+    ready_pods = 0
     ready_digest_pods = 0
     for pod in pods_for_app:
+        if (pod.get("metadata") or {}).get("deletionTimestamp") is not None:
+            continue
         for status_entry in (pod.get("status") or {}).get("containerStatuses") or []:
-            if status_entry.get("name") == container_name and status_entry.get("ready") is True and digest_re.search(status_entry.get("imageID") or ""):
-                ready_digest_pods += 1
-    if ready_digest_pods < 1:
-        raise SystemExit(f"deployment {deployment_name} has no ready pod with a digest imageID")
+            image_id = status_entry.get("imageID") or ""
+            image_id_match = image_id_digest_re.search(image_id)
+            observed_digest = (
+                image_id
+                if digest_re.fullmatch(image_id)
+                else image_id_match.group(1)
+                if image_id_match is not None
+                else ""
+            )
+            if (
+                status_entry.get("name") == container_name
+                and status_entry.get("ready") is True
+            ):
+                ready_pods += 1
+                if observed_digest == platform_digest:
+                    ready_digest_pods += 1
+    if ready_digest_pods < replicas or ready_digest_pods != ready_pods:
+        raise SystemExit(
+            f"deployment {deployment_name} has a ready pod whose imageID "
+            "does not match the authenticated platform digest"
+        )
 
 gamemaster = workloads_by_name.get("gaming-gamemaster-depl")
 if not isinstance(gamemaster, dict):
