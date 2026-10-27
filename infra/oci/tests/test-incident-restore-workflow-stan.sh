@@ -253,6 +253,9 @@ end
 
 incident_steps = steps[incident_start..]
 incident_text = incident_steps.to_s
+unless incident_text.include?('([A-Za-z][A-Za-z0-9_]*)=')
+  fail_contract("incident infrastructure provenance rejects uppercase keys")
+end
 for forbidden in [
   "upstream_run_binding_stan.py",
   "/actions/runs?",
