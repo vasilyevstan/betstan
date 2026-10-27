@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "40" ]] || {
-  echo "expected 40 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "41" ]] || {
+  echo "expected 41 protected operations, got $operation_count" >&2
   exit 1
 }
 
@@ -145,15 +145,33 @@ policies.each do |policy|
         inert_disk_defaults.all? do |name, expected|
           inputs.fetch(name).fetch("default") == expected
         end
-      inert_held_defaults = {
+      inert_live_data_defaults = {
         "held_handoff_run_id" => "0",
         "held_handoff_source_sha" => "none",
+        "incident_continuation_run_id" => "0",
+        "incident_continuation_authority_sha256" => "none",
+        "incident_continuation_control_sha" => "none",
+        "incident_continuation_journal_identity_sha256" => "none",
+        "incident_continuation_generation" => "0",
+        "incident_access_cleanup_lineage_json" => "[]",
       }
+      expected_inert_inputs =
+        if operation == "oci-live-data-continue-held-handoff"
+          inert_live_data_defaults.keys - %w[
+            held_handoff_run_id
+            held_handoff_source_sha
+          ]
+        elsif operation == "oci-live-data-incident-restore"
+          []
+        else
+          inert_live_data_defaults.keys
+        end
       legacy_live_data =
         workflow == "oci-live-data-rollout.yml" &&
-        operation != "oci-live-data-continue-held-handoff" &&
-        (actual_inputs - policy_inputs).sort == inert_held_defaults.keys.sort &&
-        inert_held_defaults.all? do |name, expected|
+        (policy_inputs - actual_inputs).empty? &&
+        (actual_inputs - policy_inputs).sort == expected_inert_inputs.sort &&
+        expected_inert_inputs.all? do |name|
+          expected = inert_live_data_defaults.fetch(name)
           inputs.fetch(name).fetch("default") == expected &&
             inputs.fetch(name).fetch("type") == "string"
         end
@@ -213,7 +231,9 @@ live_data = policies.select do |entry|
   entry["workflow"] == "oci-live-data-rollout.yml"
 end.to_h { |entry| [entry.fetch("operation"), entry] }
 live_data.reject { |operation, _|
-  operation.include?("-resume-") || operation == "oci-live-data-continue-held-handoff"
+  operation.include?("-resume-") ||
+    operation == "oci-live-data-continue-held-handoff" ||
+    operation == "oci-live-data-incident-restore"
 }.each do |operation, policy|
   unless policy.fetch("inputTemplates").slice(
       "resume_source_sha", "checkpoint_source_sha"
@@ -223,6 +243,38 @@ live_data.reject { |operation, _|
     }
     fail("#{operation} lost current-source templates")
   end
+end
+
+incident_restore = live_data.fetch("oci-live-data-incident-restore")
+unless incident_restore.fetch("environment") == "oci-migration" &&
+    incident_restore.fetch("subjectInput") == "approved_sha" &&
+    incident_restore.fetch("subjectRelation") == "current" &&
+    incident_restore.fetch("fullShaInputs") == ["approved_sha"] &&
+    incident_restore.fetch("upstreamRunBindings") == [] &&
+    incident_restore.fetch("fixedInputs") == {
+      "resume_source_sha" => "70679a6179df2167cb39f185cb0c26dca2ce649d",
+      "build_run_id" => "37576331905",
+      "infrastructure_run_id" => "37582984293",
+      "checkpoint_source_sha" => "1bf86112ba2458161e6039091b1aa6289fdfce1d",
+      "disk_checkpoint_run_id" => "37582984293",
+      "phase" => "incident-restore",
+      "prerequisite_run_id" => "39945618182",
+      "baseline_recovery_run_id" => "0",
+      "baseline_recovery_source_sha" => "none",
+      "failed_deploy_run_id" => "0",
+      "failed_activation_run_id" => "0",
+      "failed_activation_user_id" => "0",
+      "held_handoff_run_id" => "39945618182",
+      "held_handoff_source_sha" => "70679a6179df2167cb39f185cb0c26dca2ce649d",
+      "incident_continuation_run_id" => "0",
+      "incident_continuation_authority_sha256" => "none",
+      "incident_continuation_control_sha" => "none",
+      "incident_continuation_journal_identity_sha256" => "none",
+      "incident_continuation_generation" => "0",
+      "incident_access_cleanup_lineage_json" => "[]",
+      "confirmation" => "RESTORE AUTHENTICATED HELD BASELINE EXACT SHA",
+    }
+  fail("incident restoration policy lost its fixed manifest-bound contract")
 end
 live_data.select { |operation, _|
   operation.include?("-resume-") || operation == "oci-live-data-continue-held-handoff"

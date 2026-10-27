@@ -29,13 +29,14 @@ on:
         required: true
         type: string
       phase:
-        description: Read, backfill, or create and verify the Slip index
+        description: Read, backfill, create the Slip index, or restore the authenticated held baseline
         required: true
         type: choice
         options:
           - dry-run
           - apply-backfills
           - apply-slip-index
+          - incident-restore
       prerequisite_run_id:
         description: Prior successful phase run ID, or 0 for dry-run
         required: true
@@ -76,6 +77,36 @@ on:
         required: true
         default: none
         type: string
+      incident_continuation_run_id:
+        description: Dispatcher-bound terminal predecessor run, or 0 for the initial incident generation
+        required: true
+        default: "0"
+        type: string
+      incident_continuation_authority_sha256:
+        description: Dispatcher-bound predecessor authority digest, or none
+        required: true
+        default: none
+        type: string
+      incident_continuation_control_sha:
+        description: Dispatcher-bound predecessor control SHA, or none
+        required: true
+        default: none
+        type: string
+      incident_continuation_journal_identity_sha256:
+        description: Dispatcher-bound incident journal identity digest, or none
+        required: true
+        default: none
+        type: string
+      incident_continuation_generation:
+        description: Dispatcher-bound continuation generation, or 0
+        required: true
+        default: "0"
+        type: string
+      incident_access_cleanup_lineage_json:
+        description: Dispatcher-bound bounded access-cleanup authority lineage
+        required: true
+        default: "[]"
+        type: string
       confirmation:
         description: Type the exact confirmation phrase for the selected phase
         required: true
@@ -112,6 +143,12 @@ jobs:
       FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}
       HELD_HANDOFF_RUN_ID: ${{ inputs.held_handoff_run_id }}
       HELD_HANDOFF_SOURCE_SHA: ${{ inputs.held_handoff_source_sha }}
+      INCIDENT_CONTINUATION_RUN_ID: ${{ inputs.incident_continuation_run_id }}
+      INCIDENT_CONTINUATION_AUTHORITY_SHA256: ${{ inputs.incident_continuation_authority_sha256 }}
+      INCIDENT_CONTINUATION_CONTROL_SHA: ${{ inputs.incident_continuation_control_sha }}
+      INCIDENT_CONTINUATION_JOURNAL_IDENTITY_SHA256: ${{ inputs.incident_continuation_journal_identity_sha256 }}
+      INCIDENT_CONTINUATION_GENERATION: ${{ inputs.incident_continuation_generation }}
+      INCIDENT_ACCESS_CLEANUP_LINEAGE_JSON: ${{ inputs.incident_access_cleanup_lineage_json }}
       CONFIRMATION: ${{ inputs.confirmation }}
       DISPATCH_INPUTS: ${{ toJSON(inputs) }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
@@ -137,8 +174,100 @@ jobs:
       SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}
       SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"
       SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: ${{ inputs.held_handoff_run_id != '0' && inputs.held_handoff_run_id != '' && '7200' || '1800' }}
+      INCIDENT_LOCK_TOKEN: live-data-incident-${{ github.run_id }}-${{ github.run_attempt }}
+      INCIDENT_LOCK_OPERATION: live-data-incident-restore
+      INCIDENT_LOCK_LEASE_SECONDS: "7200"
+      INCIDENT_ACCESS_RECORD_FILE: artifacts/oci-live-data-incident-restore/access-current.json
 
     steps:
+      - name: Validate dispatch phase and confirmation routing
+        run: |
+          set -euo pipefail
+          case "${PHASE}|${CONFIRMATION}" in
+            "dry-run|DRY RUN LIVE DATA EXACT SHA" | \
+            "apply-backfills|APPLY LIVE BACKFILLS EXACT SHA" | \
+            "apply-slip-index|APPLY LIVE SLIP INDEX EXACT SHA" | \
+            "apply-slip-index|CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA" | \
+            "apply-slip-index|RESUME APPLIED LIVE DATA EXACT SHA" | \
+            "apply-slip-index|RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA" | \
+            "apply-slip-index|RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" | \
+            "apply-slip-index|RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA" | \
+            "incident-restore|RESTORE AUTHENTICATED HELD BASELINE EXACT SHA")
+              ;;
+            *)
+              echo "Invalid live-data phase/confirmation pair" >&2
+              exit 1
+              ;;
+          esac
+          continuation_tuple="$INCIDENT_CONTINUATION_RUN_ID|$INCIDENT_CONTINUATION_AUTHORITY_SHA256|$INCIDENT_CONTINUATION_CONTROL_SHA|$INCIDENT_CONTINUATION_JOURNAL_IDENTITY_SHA256|$INCIDENT_CONTINUATION_GENERATION"
+          if [ "$PHASE" != "incident-restore" ]; then
+            [ "$continuation_tuple" = "0|none|none|none|0" ] || {
+              echo "Incident continuation inputs are forbidden outside incident mode" >&2
+              exit 1
+            }
+            [ "$INCIDENT_ACCESS_CLEANUP_LINEAGE_JSON" = "[]" ] || {
+              echo "Incident access-cleanup lineage is forbidden outside incident mode" >&2
+              exit 1
+            }
+          elif [ "$continuation_tuple" = "0|none|none|none|0" ]; then
+            [ "$INCIDENT_ACCESS_CLEANUP_LINEAGE_JSON" = "[]" ] || {
+              echo "Initial incident access-cleanup lineage must be empty" >&2
+              exit 1
+            }
+          elif [ "$continuation_tuple" != "0|none|none|none|0" ]; then
+            if ! [[ "$INCIDENT_CONTINUATION_RUN_ID" =~ ^[1-9][0-9]*$ &&
+              "$INCIDENT_CONTINUATION_AUTHORITY_SHA256" =~ ^[0-9a-f]{64}$ &&
+              "$INCIDENT_CONTINUATION_CONTROL_SHA" =~ ^[0-9a-f]{40}$ &&
+              "$INCIDENT_CONTINUATION_JOURNAL_IDENTITY_SHA256" =~ ^[0-9a-f]{64}$ &&
+              "$INCIDENT_CONTINUATION_GENERATION" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Incident continuation inputs are malformed" >&2
+              exit 1
+            fi
+            python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          raw = os.environ["INCIDENT_ACCESS_CLEANUP_LINEAGE_JSON"]
+          try:
+              lineage = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"Incident access-cleanup lineage is malformed: {exc}")
+          if json.dumps(lineage, sort_keys=True, separators=(",", ":")) != raw:
+              raise SystemExit("Incident access-cleanup lineage is not canonical JSON")
+          generation = int(os.environ["INCIDENT_CONTINUATION_GENERATION"])
+          if not isinstance(lineage, list) or len(lineage) != generation or len(lineage) > 32:
+              raise SystemExit("Incident access-cleanup lineage length is invalid")
+          seen = set()
+          for expected, item in enumerate(lineage):
+              if not isinstance(item, dict) or set(item) != {
+                  "runId", "controlSha", "authorityGeneration", "authoritySha256"
+              }:
+                  raise SystemExit("Incident access-cleanup lineage entry shape is invalid")
+              if (
+                  isinstance(item["runId"], bool)
+                  or not isinstance(item["runId"], int)
+                  or item["runId"] <= 0
+                  or item["runId"] in seen
+                  or item["authorityGeneration"] != expected
+                  or not re.fullmatch(r"[0-9a-f]{40}", item["controlSha"])
+                  or not re.fullmatch(r"[0-9a-f]{64}", item["authoritySha256"])
+              ):
+                  raise SystemExit("Incident access-cleanup lineage entry is invalid")
+              seen.add(item["runId"])
+          last = lineage[-1]
+          if (
+              str(last["runId"]) != os.environ["INCIDENT_CONTINUATION_RUN_ID"]
+              or last["controlSha"] != os.environ["INCIDENT_CONTINUATION_CONTROL_SHA"]
+              or last["authoritySha256"]
+              != os.environ["INCIDENT_CONTINUATION_AUTHORITY_SHA256"]
+          ):
+              raise SystemExit(
+                  "Incident access-cleanup lineage does not bind the exact predecessor"
+              )
+          PY
+          fi
+
       - name: Initialize isolated OCI data paths
         run: |
           {
@@ -156,8 +285,12 @@ jobs:
             artifacts/resume-build \
             artifacts/oci-live-data-rollout \
             artifacts/oci-data-baseline-before \
-            artifacts/oci-data-baseline-after
-          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+            artifacts/oci-data-baseline-after \
+            artifacts/incident-authenticated \
+            artifacts/oci-live-data-incident-restore
+          chmod 700 \
+            "$RUNNER_TEMP/oci-home" \
+            "$RUNNER_TEMP/oci-home/.kube"
 
       - name: Checkout approved current master commit
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -166,6 +299,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate exact SHA phase and trusted upstream runs
+        if: inputs.phase != 'incident-restore'
         id: provenance_request
         env:
           GH_TOKEN: ${{ github.token }}
@@ -286,11 +420,22 @@ jobs:
           elif [ "$protected_operation" = "oci-live-data-resume-deploy" ]; then
             continuation_args=(--successor-run-id "$GITHUB_RUN_ID")
           fi
+          ordinary_dispatch_inputs="$(
+            jq -c '
+              del(
+                .incident_continuation_run_id,
+                .incident_continuation_authority_sha256,
+                .incident_continuation_control_sha,
+                .incident_continuation_journal_identity_sha256,
+                .incident_continuation_generation
+              )
+            ' <<<"$DISPATCH_INPUTS"
+          )"
           ./infra/oci/scripts/upstream_run_binding_stan.py validate-all \
             --repository "$REPOSITORY" \
             --policy-json "$policy_json" \
             --subject-sha "$SOURCE_SHA" \
-            --dispatch-inputs "$DISPATCH_INPUTS" \
+            --dispatch-inputs "$ordinary_dispatch_inputs" \
             --runtime-mode "$OCI_RUNTIME_MODE" \
             --result-json "$RUNNER_TEMP/live-data-upstream-result.json" \
             --baseline-dir artifacts/oci-data-baseline-before \
@@ -414,6 +559,7 @@ jobs:
           fi
 
       - name: Reject competing production activity
+        if: inputs.phase != 'incident-restore'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -421,6 +567,7 @@ jobs:
         run: ./infra/azure/agents/production-run-exclusivity-stan.sh
 
       - name: Download exact OCI image provenance
+        if: inputs.phase != 'incident-restore'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-image-provenance-${{ inputs.checkpoint_source_sha }}-${{ inputs.build_run_id }}-1
@@ -430,6 +577,7 @@ jobs:
           run-id: ${{ inputs.build_run_id }}
 
       - name: Download exact OCI infrastructure provenance
+        if: inputs.phase != 'incident-restore'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
@@ -439,6 +587,7 @@ jobs:
           run-id: ${{ inputs.infrastructure_run_id }}
 
       - name: Download exact release disk checkpoint
+        if: inputs.phase != 'incident-restore'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-release-disk-checkpoint-${{ inputs.checkpoint_source_sha }}-${{ inputs.disk_checkpoint_run_id }}-1
@@ -448,7 +597,7 @@ jobs:
           run-id: ${{ inputs.disk_checkpoint_run_id }}
 
       - name: Download prerequisite data evidence
-        if: inputs.phase != 'dry-run'
+        if: inputs.phase != 'incident-restore' && inputs.phase != 'dry-run'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-live-data-rollout-${{ inputs.prerequisite_run_id }}-1
@@ -459,6 +608,7 @@ jobs:
 
       - name: Download failed deploy protected baseline
         if: >-
+          inputs.phase != 'incident-restore' &&
           inputs.failed_deploy_run_id != '0' &&
           inputs.failed_activation_run_id == '0' &&
           steps.provenance_request.outputs.resume_maintenance_mode != 'pre-runtime-hold'
@@ -471,7 +621,9 @@ jobs:
           run-id: ${{ steps.provenance_request.outputs.baseline_run_id }}
 
       - name: Download explicitly selected recovery baseline authority
-        if: inputs.baseline_recovery_run_id != '0'
+        if: >-
+          inputs.phase != 'incident-restore' &&
+          inputs.baseline_recovery_run_id != '0'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ${{ steps.provenance_request.outputs.recovery_artifact_name }}
@@ -482,7 +634,9 @@ jobs:
 
       - name: Bind historical recovery source through its exact artifact
         id: recovery_authority
-        if: inputs.baseline_recovery_run_id != '0'
+        if: >-
+          inputs.phase != 'incident-restore' &&
+          inputs.baseline_recovery_run_id != '0'
         env:
           BASELINE_RECOVERY_KIND: ${{ steps.provenance_request.outputs.recovery_kind }}
           GH_TOKEN: ${{ github.token }}
@@ -593,6 +747,7 @@ jobs:
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Verify immutable release and phase provenance
+        if: inputs.phase != 'incident-restore'
         id: provenance
         env:
           BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
@@ -756,7 +911,17 @@ jobs:
             if [ "$HELD_HANDOFF_RUN_ID" != "0" ] || jq -e \
               '.failed_deploy_run_id.no_takeover_handoff_qualification == "expired-own-handoff"' \
               "$RUNNER_TEMP/live-data-upstream-result.json" >/dev/null; then
-              resume_native_dispatch_inputs="$DISPATCH_INPUTS"
+              resume_native_dispatch_inputs="$(
+                jq -c '
+                  del(
+                    .incident_continuation_run_id,
+                    .incident_continuation_authority_sha256,
+                    .incident_continuation_control_sha,
+                    .incident_continuation_journal_identity_sha256,
+                    .incident_continuation_generation
+                  )
+                ' <<<"$DISPATCH_INPUTS"
+              )"
               resume_successor_run_id="$GITHUB_RUN_ID"
             fi
             resume_resolution="$(
@@ -833,11 +998,12 @@ jobs:
           fi
 
       - name: Install pinned OCI CLI
+        if: inputs.phase != 'incident-restore'
         id: oci_cli
         run: ./infra/oci/scripts/install-cli.sh
 
       - name: Verify OKE identity
-        if: env.OCI_RUNTIME_MODE == 'oke'
+        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -852,7 +1018,7 @@ jobs:
             >/dev/null
 
       - name: Verify k3s identity
-        if: env.OCI_RUNTIME_MODE == 'k3s'
+        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -867,7 +1033,7 @@ jobs:
             >/dev/null
 
       - name: Reconcile expired and authorize current runner IPv4
-        if: env.OCI_RUNTIME_MODE == 'oke'
+        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -884,7 +1050,7 @@ jobs:
           ./infra/oci/scripts/authorize-github-runner.sh authorize
 
       - name: Configure kubectl from exact cluster OCID
-        if: env.OCI_RUNTIME_MODE == 'oke'
+        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
         uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -896,7 +1062,7 @@ jobs:
           cluster: ${{ steps.provenance.outputs.cluster_ocid }}
 
       - name: Open ephemeral OCI Bastion access to k3s
-        if: env.OCI_RUNTIME_MODE == 'k3s'
+        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -918,6 +1084,7 @@ jobs:
 
       - name: Verify exact failed-deploy resume state
         if: >-
+          inputs.phase != 'incident-restore' &&
           inputs.failed_deploy_run_id != '0' &&
           inputs.failed_activation_run_id == '0'
         env:
@@ -1328,6 +1495,7 @@ jobs:
           fi
 
       - name: Capture and validate pre-mutation rollback baseline
+        if: inputs.phase != 'incident-restore'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1385,7 +1553,9 @@ jobs:
             >> "$GITHUB_ENV"
 
       - name: Verify reader-qualified released activation state
-        if: steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account'
+        if: >-
+          inputs.phase != 'incident-restore' &&
+          steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account'
         env:
           MODE: dark
           EXPECTED_LIVE_KICKOFFS_ENABLED: "false"
@@ -1503,7 +1673,7 @@ jobs:
           PY
 
       - name: Revalidate exact release disk checkpoint before lock mutation
-        if: env.OCI_RUNTIME_MODE == 'k3s'
+        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
           RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
@@ -1538,6 +1708,7 @@ jobs:
             ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
 
       - name: Acquire database operation lock
+        if: inputs.phase != 'incident-restore'
         id: operation_lock
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1938,7 +2109,7 @@ jobs:
 
       - name: Enter or re-establish live data maintenance
         id: maintenance_enter
-        if: inputs.phase != 'dry-run'
+        if: inputs.phase != 'incident-restore' && inputs.phase != 'dry-run'
         env:
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
@@ -1959,6 +2130,7 @@ jobs:
 
       - name: Demote and verify exact retained live-acceptance account
         if: >-
+          inputs.phase != 'incident-restore' &&
           inputs.failed_activation_run_id != '0' &&
           steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'
         run: |
@@ -2042,6 +2214,7 @@ jobs:
 
       - name: Delete exact orphaned live-acceptance slips
         if: >-
+          inputs.phase != 'incident-restore' &&
           inputs.failed_activation_run_id != '0' &&
           steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'
         env:
@@ -2056,6 +2229,7 @@ jobs:
             ./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh
 
       - name: Execute exact-digest live data phase
+        if: inputs.phase != 'incident-restore'
         id: data
         env:
           IMAGE_PROVENANCE_FILE: artifacts/oci-live-data-rollout/images.tsv
@@ -2075,7 +2249,10 @@ jobs:
 
       - name: Restore runtime or verify final deploy handoff
         id: maintenance
-        if: always() && steps.maintenance_enter.outcome == 'success'
+        if: >-
+          always() &&
+          inputs.phase != 'incident-restore' &&
+          steps.maintenance_enter.outcome == 'success'
         env:
           DATA_OUTCOME: ${{ steps.data.outcome }}
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
@@ -2138,6 +2315,7 @@ jobs:
 
       - name: Capture post-phase runtime baseline
         if: >-
+          inputs.phase != 'incident-restore' &&
           steps.data.outcome == 'success' &&
           inputs.phase != 'apply-slip-index' &&
           (inputs.phase == 'dry-run' || steps.maintenance.outcome == 'success')
@@ -2158,7 +2336,10 @@ jobs:
           fi
 
       - name: Require executed data-step evidence
-        if: always() && steps.data.outcome != 'skipped'
+        if: >-
+          always() &&
+          inputs.phase != 'incident-restore' &&
+          steps.data.outcome != 'skipped'
         run: |
           test -f artifacts/oci-live-data-rollout/evidence/SHA256SUMS || {
             echo "Executed live-data step did not produce checksummed evidence" >&2
@@ -2166,7 +2347,7 @@ jobs:
           }
 
       - name: Upload exact sanitized data evidence
-        if: always()
+        if: always() && inputs.phase != 'incident-restore'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-live-data-rollout-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2175,7 +2356,7 @@ jobs:
           retention-days: 30
 
       - name: Upload protected rollout baselines
-        if: always()
+        if: always() && inputs.phase != 'incident-restore'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-live-data-baselines-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2191,6 +2372,7 @@ jobs:
         id: abort_handoff
         if: >-
           always() &&
+          inputs.phase != 'incident-restore' &&
           (failure() || cancelled()) &&
           inputs.phase == 'apply-slip-index' &&
           steps.maintenance_enter.outcome == 'success'
@@ -2215,6 +2397,7 @@ jobs:
       - name: Release database operation lock unless handed to deploy
         if: >-
           always() &&
+          inputs.phase != 'incident-restore' &&
           steps.operation_lock.outcome == 'success' &&
           (inputs.phase != 'apply-slip-index' ||
            steps.maintenance_enter.outcome != 'success')
@@ -2231,7 +2414,10 @@ jobs:
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
 
       - name: Revoke exact runner rule
-        if: always() && env.OCI_RUNTIME_MODE == 'oke'
+        if: >-
+          always() &&
+          inputs.phase != 'incident-restore' &&
+          env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -2247,6 +2433,7 @@ jobs:
       - name: Close ephemeral OCI Bastion access
         if: >-
           always() &&
+          inputs.phase != 'incident-restore' &&
           env.OCI_RUNTIME_MODE == 'k3s' &&
           steps.oci_cli.outcome == 'success'
         env:
@@ -2260,5 +2447,1047 @@ jobs:
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
       - name: Remove isolated OCI client state
-        if: always()
+        if: always() && inputs.phase != 'incident-restore'
+        run: rm -rf "$RUNNER_TEMP/oci-home"
+
+      - name: Verify fixed incident manifest and immutable evidence
+        if: inputs.phase == 'incident-restore'
+        id: incident_manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
+          git fetch --quiet --no-tags origin \
+            +refs/heads/master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse refs/remotes/origin/master)" ]
+          jq -e 'type == "object"' <<<"$DISPATCH_INPUTS" \
+            >"$RUNNER_TEMP/incident-dispatch-inputs.json"
+          ./infra/oci/scripts/incident_manifest_stan.py verify \
+            --repository "$GITHUB_REPOSITORY" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --control-sha "$SOURCE_SHA" \
+            --dispatch-inputs-json "$DISPATCH_INPUTS" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --output-dir artifacts/incident-authenticated \
+            --result-json artifacts/incident-authenticated/verification-result.json
+          cp artifacts/incident-authenticated/verification-result.json \
+            "$RUNNER_TEMP/incident-verification.json"
+          jq -er '
+            [
+              "manifest_sha256=\(.manifestSha256)",
+              "journal_identity_sha256=\(.continuationJournalIdentitySha256)",
+              "current_run_metadata_sha256=\(.currentRun.metadataSha256)",
+              "request_created_at_epoch=\(.currentRun.createdAtEpoch)",
+              "lock_uid=\(.heldLock.uid)",
+              "lock_resource_version=\(.heldLock.resourceVersion)",
+              "lock_holder=\(.heldLock.holder)",
+              "lock_operation=\(.heldLock.operationId)",
+              "lock_source_sha=\(.heldLock.sourceSha)",
+              "lock_acquired_at=\(.heldLock.acquiredAtEpoch)",
+              "lock_lease_duration=\(.heldLock.leaseDurationSeconds)",
+              "lock_lease_until=\(.heldLock.leaseUntilEpoch)",
+              "lock_released_at=\(.heldLock.releasedAtEpoch)",
+              "lock_generation=\(.heldLock.fencingGeneration)"
+            ] | .[]
+          ' "$RUNNER_TEMP/incident-verification.json" >>"$GITHUB_OUTPUT"
+          printf 'baseline_dir=%s\n' \
+            "$GITHUB_WORKSPACE/artifacts/incident-authenticated/baseline" \
+            >>"$GITHUB_OUTPUT"
+          {
+            printf 'INCIDENT_MANIFEST_SHA256=%s\n' \
+              "$(jq -er .manifestSha256 "$RUNNER_TEMP/incident-verification.json")"
+            printf 'INCIDENT_OWNER_RUN_ID=39945618182\n'
+            printf 'INCIDENT_RESTORE_RUN_ID=%s\n' "$GITHUB_RUN_ID"
+            printf 'INCIDENT_RUN_ATTEMPT=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'INCIDENT_CONTROL_SHA=%s\n' "$SOURCE_SHA"
+            printf 'INCIDENT_JOURNAL_IDENTITY_SHA256=%s\n' \
+              "$(jq -er .continuationJournalIdentitySha256 \
+                "$RUNNER_TEMP/incident-verification.json")"
+            printf 'INCIDENT_CURRENT_RUN_METADATA_SHA256=%s\n' \
+              "$(jq -er .currentRun.metadataSha256 \
+                "$RUNNER_TEMP/incident-verification.json")"
+            printf 'REQUEST_CREATED_AT_EPOCH=%s\n' \
+              "$(jq -er .currentRun.createdAtEpoch \
+                "$RUNNER_TEMP/incident-verification.json")"
+          } >>"$GITHUB_ENV"
+
+      - name: Reject competing production activity
+        if: inputs.phase == 'incident-restore'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EXCLUDE_RUN_ID: ${{ github.run_id }}
+        run: ./infra/azure/agents/production-run-exclusivity-stan.sh
+
+      - name: Verify fixed infrastructure checkpoint
+        if: inputs.phase == 'incident-restore'
+        id: infrastructure
+        run: |
+          set -euo pipefail
+          python3 - \
+            artifacts/incident-authenticated/infrastructure/provenance.env \
+            "$GITHUB_OUTPUT" \
+            "$OCI_RUNTIME_MODE" \
+            "$OCI_COMPARTMENT_OCID" \
+            "$OCI_K8S_NAMESPACE" <<'PY'
+          import os
+          import re
+          import stat
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          expected_runtime, expected_compartment, expected_namespace = sys.argv[3:]
+          mode = path.lstat().st_mode
+          if not stat.S_ISREG(mode) or stat.S_ISLNK(mode) or path.stat().st_size > 32768:
+              raise SystemExit("infrastructure provenance is missing or unsafe")
+          values = {}
+          for raw in path.read_text(encoding="utf-8").splitlines():
+              match = re.fullmatch(r"([a-z][a-z0-9_]*)=([^\r\n]*)", raw)
+              if not match or match.group(1) in values:
+                  raise SystemExit("infrastructure provenance is malformed")
+              values[match.group(1)] = match.group(2)
+          expected = {
+              "source_sha": "1bf86112ba2458161e6039091b1aa6289fdfce1d",
+              "infrastructure_run_id": "37582984293",
+              "infrastructure_run_attempt": "1",
+              "compartment_ocid": expected_compartment,
+              "namespace": expected_namespace,
+              "runtime_mode": expected_runtime,
+              "infrastructure_finalized": "true",
+              "application_registry_provider": "ghcr",
+              "application_registry_host": "ghcr.io",
+              "application_registry_repository":
+                  "ghcr.io/vasilyevstan/betstan-images",
+              "application_registry_public_anonymous": "true",
+              "ocir_application_repository_absent": "true",
+          }
+          for key, value in expected.items():
+              if values.get(key) != value:
+                  raise SystemExit(f"infrastructure provenance mismatch: {key}")
+          if expected_runtime not in {"oke", "k3s"}:
+              raise SystemExit("unsupported OCI runtime mode")
+          output_values = {
+              "public_host": values.get("public_host", ""),
+              "redirect_host": values.get("redirect_host", ""),
+              "diagnostic_host": values.get("diagnostic_host", ""),
+          }
+          if expected_runtime == "oke":
+              output_values.update(
+                  cluster_ocid=values.get("cluster_ocid", ""),
+                  endpoint_nsg_ocid=values.get("endpoint_nsg_ocid", ""),
+              )
+          else:
+              output_values.update(
+                  instance_ocid=values.get("instance_ocid", ""),
+                  bastion_ocid=values.get("bastion_ocid", ""),
+              )
+          safe = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,255}")
+          if any(not safe.fullmatch(value) for value in output_values.values()):
+              raise SystemExit("infrastructure access identity is malformed")
+          with output.open("a", encoding="utf-8") as handle:
+              for key, value in output_values.items():
+                  handle.write(f"{key}={value}\n")
+          PY
+
+      - name: Install pinned OCI CLI
+        if: inputs.phase == 'incident-restore'
+        id: incident_oci_cli
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Verify OKE identity
+        if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_CLUSTER_OCID: ${{ steps.infrastructure.outputs.cluster_ocid }}
+        run: |
+          oci ce cluster get \
+            --cluster-id "$OCI_CLUSTER_OCID" \
+            --query 'data.{type:type,state:"lifecycle-state"}' \
+            >/dev/null
+
+      - name: Verify k3s identity
+        if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_INSTANCE_OCID: ${{ steps.infrastructure.outputs.instance_ocid }}
+        run: |
+          oci compute instance get \
+            --instance-id "$OCI_INSTANCE_OCID" \
+            --query 'data.{shape:shape,state:"lifecycle-state"}' \
+            >/dev/null
+
+      - name: Reconcile bounded incident access-cleanup lineage
+        if: inputs.phase == 'incident-restore'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.infrastructure.outputs.endpoint_nsg_ocid }}
+          OCI_BASTION_OCID: ${{ steps.infrastructure.outputs.bastion_ocid }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$INCIDENT_ACCESS_CLEANUP_LINEAGE_JSON" \
+            > artifacts/oci-live-data-incident-restore/access-cleanup-lineage.json
+          chmod 600 \
+            artifacts/oci-live-data-incident-restore/access-cleanup-lineage.json
+          ./infra/oci/scripts/incident_access_stan.py \
+            cleanup-lineage \
+            --runtime-mode "$OCI_RUNTIME_MODE" \
+            --lineage-file \
+              artifacts/oci-live-data-incident-restore/access-cleanup-lineage.json \
+            --output artifacts/oci-live-data-incident-restore/access-lineage-cleanup.json
+
+      - name: Reconcile expired and authorize current runner IPv4
+        if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.infrastructure.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: ${{ runner.temp }}/incident-runner-rule.env
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure kubectl from exact cluster OCID
+        if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'oke'
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.infrastructure.outputs.cluster_ocid }}
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        if: inputs.phase == 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          OCI_K3S_RETAIN_TARGET_SSH: "true"
+          INFRA_PROVENANCE_FILE: artifacts/incident-authenticated/infrastructure/provenance.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/incident-k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/incident-k3s-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Capture exact current incident access identity
+        if: inputs.phase == 'incident-restore'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        run: |
+          set -euo pipefail
+          if [ "$OCI_RUNTIME_MODE" = "oke" ]; then
+            access_state="$RUNNER_TEMP/incident-runner-rule.env"
+          else
+            access_state="$RUNNER_TEMP/incident-k3s-access.env"
+          fi
+          ./infra/oci/scripts/incident_access_stan.py capture \
+            --runtime-mode "$OCI_RUNTIME_MODE" \
+            --state-file "$access_state" \
+            --output "$INCIDENT_ACCESS_RECORD_FILE"
+
+      - name: Authenticate incident journal control handoff
+        if: inputs.phase == 'incident-restore'
+        run: |
+          set -euo pipefail
+          journal_file="$RUNNER_TEMP/incident-live-journal.json"
+          journal_error="$RUNNER_TEMP/incident-live-journal.err"
+          if kubectl get configmap gaming-oci-live-data-incident-restore \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$journal_file" 2>"$journal_error"; then
+            journal_control="$(
+              jq -er '.data["control-sha"] |
+                select(test("^[0-9a-f]{40}$"))' "$journal_file"
+            )"
+          else
+            grep -Eiq 'not.?found' "$journal_error" || {
+              cat "$journal_error" >&2
+              exit 1
+            }
+            journal_control="$SOURCE_SHA"
+            if [ "$INCIDENT_CONTINUATION_CONTROL_SHA" != "none" ]; then
+              journal_control="$INCIDENT_CONTINUATION_CONTROL_SHA"
+            fi
+          fi
+          handoff_dir="$RUNNER_TEMP/incident-journal-control-handoff"
+          mkdir -m 700 "$handoff_dir"
+          ./infra/oci/scripts/incident_manifest_stan.py \
+            verify-control-handoff \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --from-control-sha "$journal_control" \
+            --to-control-sha "$SOURCE_SHA" \
+            --scratch-dir "$handoff_dir" \
+            >artifacts/oci-live-data-incident-restore/journal-control-handoff.json
+          printf 'INCIDENT_AUTHENTICATED_JOURNAL_CONTROL_SHA=%s\n' \
+            "$journal_control" >>"$GITHUB_ENV"
+          printf 'INCIDENT_JOURNAL_CONTROL_HANDOFF_FILE=%s\n' \
+            "$GITHUB_WORKSPACE/artifacts/oci-live-data-incident-restore/journal-control-handoff.json" \
+            >>"$GITHUB_ENV"
+
+      - name: Classify exact incident continuation state
+        if: inputs.phase == 'incident-restore'
+        id: incident_state
+        env:
+          HELD_LOCK_UID: ${{ steps.incident_manifest.outputs.lock_uid }}
+          HELD_RESOURCE_VERSION: ${{ steps.incident_manifest.outputs.lock_resource_version }}
+          HELD_LOCK_HOLDER: ${{ steps.incident_manifest.outputs.lock_holder }}
+          HELD_LOCK_OPERATION_ID: ${{ steps.incident_manifest.outputs.lock_operation }}
+          HELD_LOCK_SOURCE_SHA: ${{ steps.incident_manifest.outputs.lock_source_sha }}
+          HELD_ACQUIRED_AT_EPOCH: ${{ steps.incident_manifest.outputs.lock_acquired_at }}
+          HELD_LEASE_DURATION_SECONDS: ${{ steps.incident_manifest.outputs.lock_lease_duration }}
+          HELD_LEASE_UNTIL_EPOCH: ${{ steps.incident_manifest.outputs.lock_lease_until }}
+          HELD_RELEASED_AT_EPOCH: ${{ steps.incident_manifest.outputs.lock_released_at }}
+          HELD_FENCING_GENERATION: ${{ steps.incident_manifest.outputs.lock_generation }}
+        run: |
+          set -euo pipefail
+          fence_result="$(./infra/oci/scripts/live-data-maintenance-stan.sh fence-status)"
+          case "$fence_result" in
+            *" fence=true") observed_fence=true ;;
+            *" fence=false") observed_fence=false ;;
+            *) echo "Unable to classify the exact incident fence" >&2; exit 1 ;;
+          esac
+          kubectl get configmap gaming-mongo-migration-lock \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$RUNNER_TEMP/incident-live-lock.json"
+          OBSERVED_FENCE_STATUS="$observed_fence" \
+            ./infra/oci/scripts/incident_restore_state_stan.py classify \
+            >"$RUNNER_TEMP/incident-classification.json"
+          classification="$(
+            jq -er .classification "$RUNNER_TEMP/incident-classification.json"
+          )"
+          journal_phase="$(
+            jq -er '.journalPhase // "none"' \
+              "$RUNNER_TEMP/incident-classification.json"
+          )"
+          successor_control_sha="$(
+            jq -er '.successorControlSha // "none"' \
+              "$RUNNER_TEMP/incident-classification.json"
+          )"
+          case "$classification" in
+            held-predecessor|incident-active-fenced|incident-active-successor-fenced)
+              takeover_required=true
+              ;;
+            released-fenced-recovery|released-unfenced-recovery)
+              takeover_required=false
+              ;;
+            released-fenced|released-unfenced-pending-publication|published)
+              takeover_required=false
+              ;;
+            *)
+              echo "Unsupported incident continuation classification" >&2
+              exit 1
+              ;;
+          esac
+          {
+            printf 'classification=%s\n' "$classification"
+            printf 'journal_phase=%s\n' "$journal_phase"
+            printf 'observed_fence=%s\n' "$observed_fence"
+            printf 'takeover_required=%s\n' "$takeover_required"
+            printf 'successor_control_sha=%s\n' "$successor_control_sha"
+          } >>"$GITHUB_OUTPUT"
+          jq -er '
+            .metadata as $metadata |
+            .data as $data |
+            [
+              "preimage_uid=\($metadata.uid)",
+              "preimage_resource_version=\($metadata.resourceVersion)",
+              "preimage_holder=\($data.holder)",
+              "preimage_operation=\($data[\"operation-id\"])",
+              "preimage_source_sha=\($data[\"source-sha\"])",
+              "preimage_acquired_at=\($data[\"acquired-at-epoch\"])",
+              "preimage_lease_duration=\($data[\"lease-duration-seconds\"])",
+              "preimage_lease_until=\($data[\"lease-until-epoch\"])",
+              "preimage_released_at=\($data[\"released-at-epoch\"])",
+              "preimage_generation=\($data[\"fencing-generation\"])",
+              "predecessor_manifest=\($data[\"incident-manifest-sha256\"] // \"\")",
+              "predecessor_owner_run=\($data[\"incident-owner-run-id\"] // \"\")",
+              "predecessor_restore_run=\($data[\"incident-restore-run-id\"] // \"\")",
+              "predecessor_control_sha=\($data[\"incident-control-sha\"] // \"\")",
+              "predecessor_run_metadata_sha256=\($data[\"incident-current-run-metadata-sha256\"] // \"\")",
+              "predecessor_request_created_at=\($data[\"incident-request-created-at-epoch\"] // \"\")",
+              "predecessor_transition_epoch=\($data[\"incident-provider-transition-epoch\"] // \"\")",
+              "predecessor_cutoff_epoch=\($data[\"incident-predecessor-lease-until-epoch\"] // \"\")",
+              "predecessor_new_lease_epoch=\($data[\"incident-new-lease-until-epoch\"] // \"\")"
+            ] | .[]
+          ' "$RUNNER_TEMP/incident-live-lock.json" >>"$GITHUB_OUTPUT"
+
+      - name: Adopt authenticated active incident successor
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification == 'incident-active-successor-fenced'
+        run: |
+          set -euo pipefail
+          adopted_control="${{ steps.incident_state.outputs.successor_control_sha }}"
+          [ "$adopted_control" = "$INCIDENT_CONTINUATION_CONTROL_SHA" ] || {
+            echo "Adopted incident control differs from continuation authority" >&2
+            exit 1
+          }
+          cp "$RUNNER_TEMP/incident-live-lock.json" \
+            artifacts/oci-live-data-incident-restore/adopted-active-lock.json
+          OBSERVED_FENCE_STATUS=true \
+            ./infra/oci/scripts/incident_restore_state_stan.py \
+              adopt-active "$RUNNER_TEMP/incident-live-lock.json"
+          handoff_dir="$RUNNER_TEMP/incident-adopted-control-handoff"
+          mkdir -m 700 "$handoff_dir"
+          adopted_proof="$GITHUB_WORKSPACE/artifacts/oci-live-data-incident-restore/adopted-control-handoff.json"
+          ./infra/oci/scripts/incident_manifest_stan.py \
+            verify-control-handoff \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --from-control-sha "$adopted_control" \
+            --to-control-sha "$SOURCE_SHA" \
+            --scratch-dir "$handoff_dir" \
+            >"$adopted_proof"
+          {
+            printf 'INCIDENT_AUTHENTICATED_JOURNAL_CONTROL_SHA=%s\n' \
+              "$adopted_control"
+            printf 'INCIDENT_JOURNAL_CONTROL_HANDOFF_FILE=%s\n' \
+              "$adopted_proof"
+          } >>"$GITHUB_ENV"
+
+      - name: Persist current incident access identity
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification != 'held-predecessor'
+        run: |
+          ./infra/oci/scripts/incident_restore_state_stan.py \
+            record-access "$INCIDENT_ACCESS_RECORD_FILE"
+
+      - name: Reconstruct authenticated incident baseline state
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification != 'published'
+        env:
+          STATE_FILE: ${{ runner.temp }}/incident-maintenance.tsv
+          BASELINE_DEPLOYMENTS_FILE: ${{ format('{0}/betstan/betstan/artifacts/oci-data-baseline-before/deployments.tsv', steps.incident_manifest.outputs.baseline_dir) }}
+          BASELINE_LIVE_IMAGES_FILE: ${{ format('{0}/betstan/betstan/artifacts/oci-data-baseline-before/live-images.tsv', steps.incident_manifest.outputs.baseline_dir) }}
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh reconstruct-baseline
+
+      - name: Verify original held fence writers and images
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification == 'held-predecessor'
+        env:
+          STATE_FILE: ${{ runner.temp }}/incident-maintenance.tsv
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-baseline-images
+
+      - name: Replace exact expired held lock
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.takeover_required == 'true'
+        id: incident_lock
+        env:
+          EXPECTED_LOCK_UID: ${{ steps.incident_state.outputs.preimage_uid }}
+          EXPECTED_RESOURCE_VERSION: ${{ steps.incident_state.outputs.preimage_resource_version }}
+          EXPECTED_LOCK_HOLDER: ${{ steps.incident_state.outputs.preimage_holder }}
+          EXPECTED_LOCK_OPERATION_ID: ${{ steps.incident_state.outputs.preimage_operation }}
+          EXPECTED_LOCK_SOURCE_SHA: ${{ steps.incident_state.outputs.preimage_source_sha }}
+          EXPECTED_ACQUIRED_AT_EPOCH: ${{ steps.incident_state.outputs.preimage_acquired_at }}
+          EXPECTED_LEASE_DURATION_SECONDS: ${{ steps.incident_state.outputs.preimage_lease_duration }}
+          EXPECTED_LEASE_UNTIL_EPOCH: ${{ steps.incident_state.outputs.preimage_lease_until }}
+          EXPECTED_RELEASED_AT_EPOCH: ${{ steps.incident_state.outputs.preimage_released_at }}
+          EXPECTED_FENCING_GENERATION: ${{ steps.incident_state.outputs.preimage_generation }}
+          EXPECTED_PREDECESSOR_INCIDENT_MANIFEST_SHA256: ${{ steps.incident_state.outputs.predecessor_manifest }}
+          EXPECTED_PREDECESSOR_INCIDENT_OWNER_RUN_ID: ${{ steps.incident_state.outputs.predecessor_owner_run }}
+          EXPECTED_PREDECESSOR_INCIDENT_RESTORE_RUN_ID: ${{ steps.incident_state.outputs.predecessor_restore_run }}
+          EXPECTED_PREDECESSOR_INCIDENT_CONTROL_SHA: ${{ steps.incident_state.outputs.predecessor_control_sha }}
+          EXPECTED_PREDECESSOR_INCIDENT_CURRENT_RUN_METADATA_SHA256: ${{ steps.incident_state.outputs.predecessor_run_metadata_sha256 }}
+          EXPECTED_PREDECESSOR_INCIDENT_REQUEST_CREATED_AT_EPOCH: ${{ steps.incident_state.outputs.predecessor_request_created_at }}
+          EXPECTED_PREDECESSOR_INCIDENT_PROVIDER_TRANSITION_EPOCH: ${{ steps.incident_state.outputs.predecessor_transition_epoch }}
+          EXPECTED_PREDECESSOR_INCIDENT_PREDECESSOR_LEASE_UNTIL_EPOCH: ${{ steps.incident_state.outputs.predecessor_cutoff_epoch }}
+          EXPECTED_PREDECESSOR_INCIDENT_NEW_LEASE_UNTIL_EPOCH: ${{ steps.incident_state.outputs.predecessor_new_lease_epoch }}
+          EXPECTED_INCIDENT_MANIFEST_SHA256: ${{ steps.incident_manifest.outputs.manifest_sha256 }}
+          EXPECTED_INCIDENT_OWNER_RUN_ID: "39945618182"
+          EXPECTED_INCIDENT_RUN_ID: ${{ github.run_id }}
+          EXPECTED_INCIDENT_CONTROL_SHA: ${{ inputs.approved_sha }}
+          REQUEST_CURRENT_RUN_METADATA_SHA256: ${{ steps.incident_manifest.outputs.current_run_metadata_sha256 }}
+          REQUEST_CREATED_AT_EPOCH: ${{ steps.incident_manifest.outputs.request_created_at_epoch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          transition_file="$GITHUB_WORKSPACE/artifacts/oci-live-data-incident-restore/provider-transition.json"
+          ./infra/oci/scripts/incident_manifest_stan.py \
+            provider-transition-time \
+            --repository "$GITHUB_REPOSITORY" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --control-sha "$SOURCE_SHA" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --expected-metadata-sha256 \
+              "$REQUEST_CURRENT_RUN_METADATA_SHA256" \
+            --expected-created-at-epoch "$REQUEST_CREATED_AT_EPOCH" \
+            --result-json "$transition_file"
+          PROVIDER_TRANSITION_EPOCH="$(
+            jq -er .providerTransitionEpoch "$transition_file"
+          )"
+          export PROVIDER_TRANSITION_EPOCH
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$INCIDENT_LOCK_TOKEN" \
+          OPERATION_ID="$INCIDENT_LOCK_OPERATION" \
+          LOCK_LEASE_SECONDS="$INCIDENT_LOCK_LEASE_SECONDS" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh \
+              replace-expired-active |
+            tee artifacts/oci-live-data-incident-restore/lock-takeover.txt
+          kubectl get configmap gaming-mongo-migration-lock \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$RUNNER_TEMP/incident-active-lock.json"
+          python3 - \
+            "$RUNNER_TEMP/incident-active-lock.json" \
+            "$GITHUB_OUTPUT" \
+            "$INCIDENT_LOCK_TOKEN" \
+            "$INCIDENT_LOCK_OPERATION" \
+            "$SOURCE_SHA" \
+            "$INCIDENT_LOCK_LEASE_SECONDS" \
+            "${{ steps.incident_manifest.outputs.manifest_sha256 }}" \
+            "$GITHUB_RUN_ID" \
+            "${{ steps.incident_manifest.outputs.current_run_metadata_sha256 }}" \
+            "${{ steps.incident_manifest.outputs.request_created_at_epoch }}" \
+            "$PROVIDER_TRANSITION_EPOCH" \
+            "${{ steps.incident_state.outputs.preimage_lease_until }}" <<'PY'
+          import json
+          import re
+          import sys
+
+          (
+              path,
+              output,
+              holder,
+              operation,
+              source,
+              duration,
+              manifest,
+              run_id,
+              metadata_sha256,
+              request_created,
+              transition,
+              predecessor_cutoff,
+          ) = sys.argv[1:]
+          document = json.load(open(path, encoding="utf-8"))
+          metadata = document.get("metadata", {})
+          data = document.get("data", {})
+          lease_until = str(int(transition) + int(duration))
+          expected = {
+              "state": "active",
+              "holder": holder,
+              "operation-id": operation,
+              "source-sha": source,
+              "lease-duration-seconds": duration,
+              "released-at-epoch": "0",
+              "incident-manifest-sha256": manifest,
+              "incident-owner-run-id": "39945618182",
+              "incident-restore-run-id": run_id,
+              "incident-control-sha": source,
+              "incident-current-run-metadata-sha256": metadata_sha256,
+              "incident-request-created-at-epoch": request_created,
+              "incident-provider-transition-epoch": transition,
+              "incident-predecessor-lease-until-epoch": predecessor_cutoff,
+              "incident-new-lease-until-epoch": lease_until,
+          }
+          exact_keys = {
+              "state",
+              "holder",
+              "operation-id",
+              "source-sha",
+              "acquired-at-epoch",
+              "lease-duration-seconds",
+              "lease-until-epoch",
+              "released-at-epoch",
+              "fencing-generation",
+              *expected.keys(),
+          }
+          if (
+              set(data) != exact_keys
+              or any(data.get(key) != value for key, value in expected.items())
+              or data.get("acquired-at-epoch") != transition
+              or data.get("lease-until-epoch") != lease_until
+              or int(request_created) <= int(predecessor_cutoff)
+              or int(transition) < int(request_created)
+          ):
+              raise SystemExit("incident lock postimage is invalid")
+          numeric = {
+              "resource_version": metadata.get("resourceVersion", ""),
+              "acquired_at": data.get("acquired-at-epoch", ""),
+              "lease_until": data.get("lease-until-epoch", ""),
+              "generation": data.get("fencing-generation", ""),
+          }
+          uid = metadata.get("uid", "")
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", uid):
+              raise SystemExit("incident lock UID is invalid")
+          if any(not re.fullmatch(r"[1-9][0-9]*", value) for value in numeric.values()):
+              raise SystemExit("incident lock postimage counters are invalid")
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"uid={uid}\n")
+              for key, value in numeric.items():
+                  handle.write(f"{key}={value}\n")
+              handle.write(
+                  f"current_run_metadata_sha256={metadata_sha256}\n"
+              )
+              handle.write(f"request_created_at={request_created}\n")
+              handle.write(f"provider_transition={transition}\n")
+              handle.write(f"predecessor_cutoff={predecessor_cutoff}\n")
+              handle.write(f"new_lease={lease_until}\n")
+          PY
+          cp "$RUNNER_TEMP/incident-active-lock.json" \
+            artifacts/oci-live-data-incident-restore/active-lock-postimage.json
+          OBSERVED_FENCE_STATUS=true \
+            ./infra/oci/scripts/incident_restore_state_stan.py \
+              record-active "$RUNNER_TEMP/incident-active-lock.json"
+
+      - name: Reconcile incident writers under exact lock and fence
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.takeover_required == 'true' &&
+          steps.incident_lock.outcome == 'success'
+        env:
+          STATE_FILE: ${{ runner.temp }}/incident-maintenance.tsv
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh \
+            reconcile-incident-writers
+          ./infra/oci/scripts/live-data-maintenance-stan.sh \
+            verify-baseline-images
+
+      - name: Restore authenticated baseline while retaining fence
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.takeover_required == 'true' &&
+          steps.incident_lock.outcome == 'success'
+        env:
+          STATE_FILE: ${{ runner.temp }}/incident-maintenance.tsv
+          RESTORE_KEEP_FENCE: "true"
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-baseline-images
+
+      - name: Release incident lock before fence
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.takeover_required == 'true' &&
+          steps.incident_lock.outcome == 'success'
+        id: incident_release
+        env:
+          EXPECTED_LOCK_UID: ${{ steps.incident_lock.outputs.uid }}
+          EXPECTED_RESOURCE_VERSION: ${{ steps.incident_lock.outputs.resource_version }}
+          EXPECTED_FENCING_GENERATION: ${{ steps.incident_lock.outputs.generation }}
+          EXPECTED_LEASE_UNTIL_EPOCH: ${{ steps.incident_lock.outputs.lease_until }}
+          EXPECTED_PREDECESSOR_INCIDENT_MANIFEST_SHA256: ${{ steps.incident_manifest.outputs.manifest_sha256 }}
+          EXPECTED_PREDECESSOR_INCIDENT_OWNER_RUN_ID: "39945618182"
+          EXPECTED_PREDECESSOR_INCIDENT_RESTORE_RUN_ID: ${{ github.run_id }}
+          EXPECTED_PREDECESSOR_INCIDENT_CONTROL_SHA: ${{ inputs.approved_sha }}
+          EXPECTED_PREDECESSOR_INCIDENT_CURRENT_RUN_METADATA_SHA256: ${{ steps.incident_lock.outputs.current_run_metadata_sha256 }}
+          EXPECTED_PREDECESSOR_INCIDENT_REQUEST_CREATED_AT_EPOCH: ${{ steps.incident_lock.outputs.request_created_at }}
+          EXPECTED_PREDECESSOR_INCIDENT_PROVIDER_TRANSITION_EPOCH: ${{ steps.incident_lock.outputs.provider_transition }}
+          EXPECTED_PREDECESSOR_INCIDENT_PREDECESSOR_LEASE_UNTIL_EPOCH: ${{ steps.incident_lock.outputs.predecessor_cutoff }}
+          EXPECTED_PREDECESSOR_INCIDENT_NEW_LEASE_UNTIL_EPOCH: ${{ steps.incident_lock.outputs.new_lease }}
+        run: |
+          set -euo pipefail
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$INCIDENT_LOCK_TOKEN" \
+          OPERATION_ID="$INCIDENT_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release |
+            tee artifacts/oci-live-data-incident-restore/lock-release.txt
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$INCIDENT_LOCK_TOKEN" \
+          OPERATION_ID="$INCIDENT_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
+          kubectl get configmap gaming-mongo-migration-lock \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$RUNNER_TEMP/incident-released-lock.json"
+          cp "$RUNNER_TEMP/incident-released-lock.json" \
+            artifacts/oci-live-data-incident-restore/released-lock-postimage.json
+          OBSERVED_FENCE_STATUS=true \
+            ./infra/oci/scripts/incident_restore_state_stan.py \
+              record-released "$RUNNER_TEMP/incident-released-lock.json"
+
+      - name: Persist recovered released-lock transition
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          (steps.incident_state.outputs.classification == 'released-fenced-recovery' ||
+           steps.incident_state.outputs.classification == 'released-unfenced-recovery')
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/incident-live-lock.json" \
+            "$RUNNER_TEMP/incident-released-lock.json"
+          cp "$RUNNER_TEMP/incident-released-lock.json" \
+            artifacts/oci-live-data-incident-restore/released-lock-postimage.json
+          OBSERVED_FENCE_STATUS="${{ steps.incident_state.outputs.observed_fence }}" \
+            ./infra/oci/scripts/incident_restore_state_stan.py \
+              record-released "$RUNNER_TEMP/incident-released-lock.json"
+
+      - name: Capture persisted incident lock postimages
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.takeover_required != 'true'
+        run: |
+          set -euo pipefail
+          kubectl get configmap gaming-oci-live-data-incident-restore \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$RUNNER_TEMP/incident-state-before-continuation.json"
+          jq -er '.data["active-lock-json"] | fromjson' \
+            "$RUNNER_TEMP/incident-state-before-continuation.json" \
+            >artifacts/oci-live-data-incident-restore/active-lock-postimage.json
+          jq -er '.data["released-lock-json"] | fromjson' \
+            "$RUNNER_TEMP/incident-state-before-continuation.json" \
+            >artifacts/oci-live-data-incident-restore/released-lock-postimage.json
+
+      - name: Reconcile published incident access resources
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification == 'published'
+        id: incident_published_access_cleanup
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.infrastructure.outputs.endpoint_nsg_ocid }}
+          OCI_BASTION_OCID: ${{ steps.infrastructure.outputs.bastion_ocid }}
+          RULE_STATE_FILE: ${{ runner.temp }}/incident-runner-rule.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/incident-k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/incident-k3s-access
+        run: |
+          set -euo pipefail
+          records="$RUNNER_TEMP/incident-access-records.json"
+          ./infra/oci/scripts/incident_restore_state_stan.py \
+            access-records >"$records"
+          if [ "$OCI_RUNTIME_MODE" = "oke" ]; then
+            current_state="$RULE_STATE_FILE"
+          else
+            current_state="$SESSION_STATE_FILE"
+          fi
+          [ -f "$current_state" ] || {
+            echo "Current incident access cleanup state is missing" >&2
+            exit 1
+          }
+          ./infra/oci/scripts/incident_access_stan.py \
+            cleanup-published \
+            --runtime-mode "$OCI_RUNTIME_MODE" \
+            --records-file "$records" \
+            --current-record-file "$INCIDENT_ACCESS_RECORD_FILE" \
+            --current-state-file "$current_state" \
+            --lineage-cleanup-receipt-file \
+              artifacts/oci-live-data-incident-restore/access-lineage-cleanup.json \
+            --cleanup-lineage-file \
+              artifacts/oci-live-data-incident-restore/access-cleanup-lineage.json \
+            --output \
+              artifacts/oci-live-data-incident-restore/access-published-cleanup.json
+          if [ "$OCI_RUNTIME_MODE" = "oke" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          else
+            ./infra/oci/scripts/configure-k3s-access.sh cleanup
+          fi
+
+      - name: Release fence after lock
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          (steps.incident_release.outcome == 'success' ||
+           steps.incident_state.outputs.classification == 'released-fenced' ||
+           steps.incident_state.outputs.classification == 'released-fenced-recovery')
+        id: incident_fence_release
+        env:
+          STATE_FILE: ${{ runner.temp }}/incident-maintenance.tsv
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh release
+          OBSERVED_FENCE_STATUS=false \
+            ./infra/oci/scripts/incident_restore_state_stan.py record-unfenced
+
+      - name: Persist recovered unfenced transition
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification == 'released-unfenced-recovery'
+        run: |
+          OBSERVED_FENCE_STATUS=false \
+            ./infra/oci/scripts/incident_restore_state_stan.py record-unfenced
+
+      - name: Capture restored readiness and public availability
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          (steps.incident_fence_release.outcome == 'success' ||
+           steps.incident_state.outputs.classification == 'released-unfenced-recovery' ||
+           steps.incident_state.outputs.classification == 'released-unfenced-pending-publication')
+        id: incident_readiness
+        env:
+          STATE_FILE: ${{ runner.temp }}/incident-maintenance.tsv
+          READINESS_FILE: artifacts/oci-live-data-incident-restore/readiness.tsv
+          MODE: dark
+          EXPECTED_LIVE_KICKOFFS_ENABLED: "false"
+          BASE_URL: ${{ format('https://{0}', steps.infrastructure.outputs.public_host) }}
+          SECONDARY_PUBLIC_URL: ${{ format('https://{0}', steps.infrastructure.outputs.redirect_host) }}
+          DIAGNOSTIC_URL: ${{ format('https://{0}', steps.infrastructure.outputs.diagnostic_host) }}
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          IMAGE_PROVENANCE_FILE: ${{ format('{0}/betstan/betstan/artifacts/oci-data-baseline-before/images.tsv', steps.incident_manifest.outputs.baseline_dir) }}
+          OUTPUT_DIR: artifacts/oci-live-data-incident-restore/readiness
+        run: |
+          set -euo pipefail
+          ./infra/oci/agents/live-betting-readiness-stan.sh
+          ./infra/oci/scripts/live-data-maintenance-stan.sh capture-readiness
+          evidence=artifacts/oci-live-data-incident-restore
+          (
+            cd "$evidence"
+            find readiness -type f -print0 |
+              sort -z |
+              xargs -0 sha256sum
+            sha256sum readiness.tsv
+          ) >"$evidence/readiness-SHA256SUMS"
+          readiness_sha="$(
+            sha256sum "$evidence/readiness-SHA256SUMS" | awk '{print $1}'
+          )"
+          READINESS_SHA256="$readiness_sha" \
+          OBSERVED_FENCE_STATUS=false \
+            ./infra/oci/scripts/incident_restore_state_stan.py record-readiness
+
+      - name: Seal non-deployable incident evidence
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_readiness.outcome == 'success'
+        id: incident_seal
+        run: |
+          set -euo pipefail
+          evidence=artifacts/oci-live-data-incident-restore
+          cp infra/oci/incident/manifest.json "$evidence/incident-manifest.json"
+          jq . "$RUNNER_TEMP/incident-verification.json" \
+            >"$evidence/manifest-verification.json"
+          {
+            printf 'schema_version=oci-live-data-incident-restore-evidence-v1\n'
+            printf 'operation=oci-live-data-incident-restore\n'
+            printf 'control_sha=%s\n' "$SOURCE_SHA"
+            printf 'held_owner_run_id=39945618182\n'
+            printf 'incident_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'incident_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'deployable=false\n'
+          } >"$evidence/operation.env"
+          payload_sums="$RUNNER_TEMP/incident-payload-SHA256SUMS"
+          (
+            cd "$evidence"
+            find . -type f \
+              ! -name SHA256SUMS \
+              ! -name payload-SHA256SUMS \
+              ! -name incident-state-postimage.json \
+              -print0 |
+              sort -z |
+              xargs -0 sha256sum |
+              sed 's#  \\./#  #'
+          ) >"$payload_sums"
+          mv "$payload_sums" "$evidence/payload-SHA256SUMS"
+          evidence_sha="$(
+            sha256sum "$evidence/payload-SHA256SUMS" | awk '{print $1}'
+          )"
+          EVIDENCE_SHA256="$evidence_sha" \
+          OBSERVED_FENCE_STATUS=false \
+            ./infra/oci/scripts/incident_restore_state_stan.py record-sealed
+          kubectl get configmap gaming-oci-live-data-incident-restore \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$evidence/incident-state-postimage.json"
+          final_sums="$RUNNER_TEMP/incident-final-SHA256SUMS"
+          (
+            cd "$evidence"
+            find . -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum |
+              sed 's#  \\./#  #'
+          ) >"$final_sums"
+          mv "$final_sums" "$evidence/SHA256SUMS"
+
+      - name: Seal already-published incident continuation evidence
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification == 'published' &&
+          steps.incident_published_access_cleanup.outcome == 'success'
+        run: |
+          set -euo pipefail
+          evidence=artifacts/oci-live-data-incident-restore
+          cp infra/oci/incident/manifest.json "$evidence/incident-manifest.json"
+          jq . "$RUNNER_TEMP/incident-verification.json" \
+            >"$evidence/manifest-verification.json"
+          jq . "$RUNNER_TEMP/incident-classification.json" \
+            >"$evidence/incident-classification.json"
+          jq . "$RUNNER_TEMP/incident-state-before-continuation.json" \
+            >"$evidence/incident-state-postimage.json"
+          {
+            printf 'schema_version=oci-live-data-incident-restore-evidence-v1\n'
+            printf 'operation=oci-live-data-incident-restore\n'
+            printf 'control_sha=%s\n' "$SOURCE_SHA"
+            printf 'held_owner_run_id=39945618182\n'
+            printf 'incident_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'incident_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'outcome=already-published\n'
+            printf 'deployable=false\n'
+          } >"$evidence/operation.env"
+          published_sums="$RUNNER_TEMP/incident-published-SHA256SUMS"
+          (
+            cd "$evidence"
+            find . -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum |
+              sed 's#  \./#  #'
+          ) >"$published_sums"
+          mv "$published_sums" "$evidence/SHA256SUMS"
+
+      - name: Re-quiesce incident writers after restoration failure
+        if: >-
+          always() &&
+          inputs.phase == 'incident-restore' &&
+          failure() &&
+          steps.incident_lock.outcome == 'success' &&
+          steps.incident_release.outcome != 'success'
+        continue-on-error: true
+        env:
+          STATE_FILE: ${{ runner.temp }}/incident-maintenance.tsv
+        run: |
+          ./infra/oci/scripts/live-data-maintenance-stan.sh \
+            reconcile-incident-writers
+
+      - name: Seal checksummed incident failure evidence
+        if: >-
+          always() &&
+          inputs.phase == 'incident-restore' &&
+          steps.incident_manifest.outcome == 'success' &&
+          (steps.incident_state.outputs.classification != 'published' ||
+           steps.incident_published_access_cleanup.outcome != 'success') &&
+          steps.incident_seal.outcome != 'success'
+        run: |
+          set -euo pipefail
+          evidence=artifacts/oci-live-data-incident-restore
+          mkdir -p "$evidence"
+          cp infra/oci/incident/manifest.json "$evidence/incident-manifest.json"
+          cp "$RUNNER_TEMP/incident-verification.json" \
+            "$evidence/manifest-verification.json"
+          if [ -f "$RUNNER_TEMP/incident-classification.json" ]; then
+            cp "$RUNNER_TEMP/incident-classification.json" \
+              "$evidence/incident-classification.json"
+          fi
+          kubectl get configmap gaming-mongo-migration-lock \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$evidence/failure-live-lock.json" 2>/dev/null || true
+          kubectl get configmap gaming-oci-live-data-incident-restore \
+            -n "$OCI_K8S_NAMESPACE" -o json \
+            >"$evidence/failure-incident-state.json" 2>/dev/null || true
+          find "$evidence" -type f -empty -delete
+          {
+            printf 'schema_version=oci-live-data-incident-restore-evidence-v1\n'
+            printf 'operation=oci-live-data-incident-restore\n'
+            printf 'control_sha=%s\n' "$SOURCE_SHA"
+            printf 'held_owner_run_id=39945618182\n'
+            printf 'incident_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'incident_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'outcome=failure\n'
+            printf 'deployable=false\n'
+          } >"$evidence/operation.env"
+          rm -f "$evidence/SHA256SUMS"
+          failure_sums="$RUNNER_TEMP/incident-failure-SHA256SUMS"
+          (
+            cd "$evidence"
+            find . -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum |
+              sed 's#  \\./#  #'
+          ) >"$failure_sums"
+          mv "$failure_sums" "$evidence/SHA256SUMS"
+
+      - name: Upload bounded incident restoration evidence
+        if: >-
+          always() &&
+          inputs.phase == 'incident-restore' &&
+          steps.incident_manifest.outcome == 'success'
+        id: incident_upload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-live-data-incident-restore-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-live-data-incident-restore
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Mark incident evidence publication complete
+        if: >-
+          inputs.phase == 'incident-restore' &&
+          steps.incident_seal.outcome == 'success' &&
+          steps.incident_upload.outcome == 'success'
+        run: |
+          OBSERVED_FENCE_STATUS=false \
+            ./infra/oci/scripts/incident_restore_state_stan.py record-published
+
+      - name: Revoke exact runner rule
+        if: >-
+          always() &&
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification != 'published' &&
+          env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: ${{ runner.temp }}/incident-runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Close ephemeral OCI Bastion access
+        if: >-
+          always() &&
+          inputs.phase == 'incident-restore' &&
+          steps.incident_state.outputs.classification != 'published' &&
+          env.OCI_RUNTIME_MODE == 'k3s' &&
+          steps.incident_oci_cli.outcome == 'success'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: ${{ runner.temp }}/incident-k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/incident-k3s-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated OCI client state
+        if: always() && inputs.phase == 'incident-restore'
         run: rm -rf "$RUNNER_TEMP/oci-home"

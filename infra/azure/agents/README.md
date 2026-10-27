@@ -29,7 +29,7 @@
 - `validation-loop-stan.sh` — repeats health + HTTPS + E2E checks until pass/fail limit.
 - `ingress-routing-guard-stan.sh` — static guard that fails when prod ingress host/path routing is unsafe.
 - `shared-mongo-topology-guard-stan.sh` — blocks normal deployment unless the validated one-Mongo topology and eight shared URIs are live.
-- `shared-mongo-operation-lock-stan.sh` — serializes migration, rollback, cleanup, and deployment through a resource-versioned ConfigMap lock with a bounded lease/expiry handoff.
+- `shared-mongo-operation-lock-stan.sh` — serializes migration, rollback, cleanup, and deployment through a resource-versioned ConfigMap lock with a bounded lease/expiry handoff; its incident-only `replace-expired-active` mode performs one complete-preimage active-to-active replacement and never falls back to generic acquisition.
 - `consolidate-production-mongo-stan.sh` — exact-SHA preflight, migrate, cleanup, and rollback operator for the seven-database move into auth Mongo.
 - `test-shared-mongo-consolidation-stan.sh` — validates manifests/mappings and runs a synthetic eight-database dump/restore parity test.
 - `provision-stage-stan.sh` — creates isolated `betstan-rg-stage` AKS and configures autoscaler 1→3 with a larger baseline node size for 1-node stage operation.
@@ -392,6 +392,75 @@ materialization of the freshly verified claimed record passes its exact bound ru
 ID to prerequisite validation, including captured and explicit-run resume. An
 ambient run ID is not that context, and authority issuance is not approval or proof
 that the job has materialized.
+
+`oci-live-data-incident-restore` is a separate fixed-manifest operation with
+no `upstreamRunBindings`. Dispatch and approval run
+`incident_manifest_stan.py` at their existing prerequisite boundaries before
+intent/authority use and again after an approval claim; approval-time drift
+releases the claim without POSTing. Its only dynamic input is exact current
+`approved_sha`; six continuation fields remain neutral in the caller request
+and can be populated only from a protected authority successor. Every
+historical run, artifact, source, phase, held owner, and confirmation is
+policy-fixed.
+
+A successor authority is reachable only from the unique exact incident
+authority leaf whose first workflow attempt is terminal `failure` or
+`cancelled`. It binds the predecessor authority digest and state, exact run
+response, workflow identity, manifest and journal identity, generation, and a
+fresh production-exclusivity proof. A consumed predecessor must retain its
+exact direct approval receipt. The repository claim lock admits only one new
+generation in a race. Same-control continuation is permitted; a later control
+also requires predecessor ancestry, byte-identical fixed manifest, unchanged
+canonical image inputs, and the explicit journal-control handoff proof.
+Ordinary consumed operations retain their existing one-use blocking, and no
+workflow rerun bypass exists. Approval re-reads the exact predecessor run,
+revalidates the recursive authority chain, and proves current exclusivity
+before consuming the successor.
+
+The protected workflow retains its one canonical `rollout` job. Its first
+step explicitly rejects every invalid phase/confirmation pair, every ordinary
+step excludes incident mode, and every incident-only step requires it. The
+incident path does not build or deploy a new generation and performs no data,
+index, or backfill mutation. It accepts only a manifest-bound expired active
+lock, records exact active and released postimages in a resource-versioned
+continuation ConfigMap, restores the authenticated ten-deployment baseline
+while the ingress write fence remains active, releases the lock before the
+fence, runs complete live-betting readiness, and emits a distinct
+non-deployable checksummed artifact. Interrupted runs continue from the
+authenticated lock/fence/publication phase without replaying the takeover
+CAS. A protected successor that finds the exact journal already `published`
+records a checksummed non-deployable already-published receipt and retries
+only runner cleanup. If a takeover was applied before `record-active`, the next protected
+generation authenticates the live active successor by UID, strictly advanced
+numeric resource version, exact generation increment, acquisition no earlier
+than the predecessor lease expiry, owner/run/control, fixed lease duration,
+field set, and active fence, then records it resource-versionedly before any
+further takeover. The first unjournaled successor is proven directly against
+the fixed held preimage. Adoption rebinds the authenticated journal control to
+that exact successor and requires a new descendant handoff proof before the
+next CAS; arbitrary caller controls remain invalid.
+
+Each incident generation persists its exact OKE NSG rule or k3s Bastion
+session identity in the authenticated journal. The protected successor
+authority also carries a canonical cleanup lineage, fixed at no more than 32
+generations, containing every predecessor run, control, generation, and
+authority digest. It inherits
+that entire lineage and appends the immediate predecessor even when the latter
+failed cleanup before opening access or writing the journal. Before opening
+current access, the successor reconciles every exact lineage resource
+oldest-first; a not-applied cleanup remains terminal and the next protected
+generation inherits the same unresolved obligation. If the journal is already
+`published`, cleanup also removes and confirms absence of every journaled
+predecessor resource plus its own, requires exact current cleanup state,
+preserves unrelated resources, and handles applied-then-error deletion or
+restart without replaying restore, readiness, or publication. No run search or
+open-ended resource discovery is used. Repeated takeover/hard-kill cycles
+remain adoptable; lock or access drift is terminal.
+An active failure re-quiesces writers before exit. This one bounded
+operation must not be generalized by adding caller manifest paths, digests,
+run search, pagination, history traversal, lock retry, force release, or
+acquire fallback. Disabled-workflow evidence remains bound to the canonical
+single-job shape.
 
 Native validation retains the authenticated profile's slots 1-37, 74 and 75.
 Older nonterminal records remain counted and untouched. Only records last updated

@@ -161,6 +161,96 @@ checks those values against both the workflow run and Azure journal. Set and
 clear these variables in the `azure-migration-recovery` environment; an
 environment value overrides a repository value with the same name.
 
+## Bounded held-baseline incident restoration
+
+`oci-live-data-incident-restore` is the single reviewed recovery path for the
+authenticated held baseline sealed in
+`infra/oci/incident/manifest.json`. It is not a reusable rollback framework:
+the manifest path, owner run, two owner artifacts, historical image/build
+root, infrastructure checkpoint, base control, lock preimage, and confirmation
+are fixed in the checked-out control commit. There is no caller-supplied
+manifest or digest and no upstream-run-binding fallback.
+
+`incident_manifest_stan.py` accepts only exact run and artifact endpoints,
+uses at most 24 GitHub requests, and binds the rollout, baseline, and
+infrastructure artifacts by exact ID, name, owner run, digest, size, expiry,
+member set, and member hashes. It rejects unsafe ZIPs and expired or drifting
+evidence, proves current-control ancestry and canonical image-input equality,
+and reconstructs the ten-service baseline only after its checksums and
+semantics pass. The single rollout job then proves exclusivity, the active
+ingress write fence, seven quiesced writers, all ten live images, and the
+complete expired lock preimage before any mutation.
+
+The initial request keeps all incident-continuation inputs neutral. After an
+exact first-attempt incident run ends in `failure` or `cancelled`, the
+protected dispatcher may issue one successor from the unique authority leaf.
+That successor binds the prior issued/consumed authority and approval receipt,
+exact run response, generation, manifest/journal identity, and fresh
+production exclusivity. Same-SHA races have one winner. A descendant control
+is accepted only after explicit journal-control handoff proof establishes
+ancestry, identical fixed manifest bytes, and unchanged canonical image
+inputs. Approval repeats the exact predecessor and exclusivity checks; direct
+workflow reruns are not continuation authority.
+
+The only takeover is `replace-expired-active`: one resource-versioned
+active-to-active replacement with generation increment and incident
+manifest/run/control bindings. It never uses generic acquisition, retry,
+force release, or a released intermediate state. A named predecessor may be
+another exact manifest-bound incident generation; strict release removes all
+incident fields so the ordinary lock shape remains canonical.
+
+Restoration keeps the HTTP fence active while exact images and replica counts
+return. A normal failure re-quiesces every writer while the exact incident
+lock and fence remain. A resource-versioned continuation ConfigMap records
+the active and released lock postimages and the fenced, unfenced, readiness,
+sealed, and published phases. A later first-attempt run can therefore
+reconcile cancellation, uncertain release responses, fence-release crashes,
+readiness or sealing interruption, and ambiguous artifact publication without
+replaying the takeover CAS. A terminal run whose journal is already
+`published` authenticates that state, emits a checksummed non-deployable
+already-published receipt, and completes only the remaining runner cleanup;
+it does not replay restoration or publication transitions. If the active CAS
+succeeded before the journal was
+updated, classification authenticates and adopts the live successor only when
+its UID is unchanged, numeric resource version strictly advances, generation
+is exactly incremented, acquisition is not earlier than the authenticated
+predecessor lease expiry, owner/run/control and fields are exact, and the lease
+uses the fixed takeover duration. The first unjournaled successor is compared
+directly with the fixed held preimage. After adoption, only the adopted
+authority-derived control and a fresh handoff proof may authenticate the next
+CAS, allowing strict A-to-B-to-C generations without accepting a caller
+substitution. The journal can repeat that adoption across multiple
+takeover/hard-kill cycles; changed identity, skipped generation, foreign
+binding, malformed lease, unknown fields, or an unfenced successor fails
+without a journal write.
+
+Every generation also journals its exact runner-access identity: the OKE NSG
+rule ID and bound description/CIDR/expiry, or the k3s Bastion session ID and
+deterministic session name. Before opening current access, a continuation
+reconciles the complete bounded authority-linked predecessor lineage by exact
+identity. Each protected generation inherits the prior canonical lineage and
+appends its immediate predecessor authority digest, run, control, and
+generation, even when that predecessor failed cleanup before opening any
+resource or reaching the journal. A genuine not-applied delete therefore
+cannot discard an older obligation: the next continuation retries every exact
+lineage resource oldest-first, preserves unrelated resources, and cannot
+complete while one remains. A continuation that finds `published` also
+removes and confirms absence of every journaled predecessor and current
+access resource and requires the local cleanup state before it can emit the
+already-published receipt. Applied-then-error deletion and process restart are
+reconciled by one exact reread without replaying restoration, readiness, or
+publication. The 32-generation fixed lineage bound and authority records
+replace any open-ended resource discovery.
+
+Success requires the complete live-betting
+readiness contract: exact workloads and images, API and SSE behavior,
+RabbitMQ queues and consumers, shared topology, and primary/redirect/
+diagnostic routing. The workflow then uploads only the non-deployable
+`oci-live-data-incident-restore-<run>-1` evidence with nested checksum
+manifests and exact lock/state postimages; failures after manifest
+authentication also produce checksummed non-deployable evidence. Deploy,
+activate, rollback, build, and trusted-CI paths are not part of this operation.
+
 The capacity-acquirer identity needs only `VOLUME_INSPECT`, `VOLUME_UPDATE`,
 and `VOLUME_DELETE` in the deployment compartment for boot-volume
 reconciliation. OCI authorizes boot-volume operations with `VOLUME_*`

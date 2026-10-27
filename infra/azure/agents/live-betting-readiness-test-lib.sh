@@ -173,12 +173,16 @@ emit_retry_payload() {
 
 if [[ "$args" == *"get deploy,sts"* ]]; then
   [[ "$fail_command" != "workloads" ]] || exit 1
-  python3 - "$IMAGE_PROVENANCE_FILE" "${STUB_FLAG_VALUE:-false}" "${STUB_FLAG_MISSING:-0}" <<'PY'
+  python3 - \
+    "$IMAGE_PROVENANCE_FILE" \
+    "${STUB_FLAG_VALUE:-false}" \
+    "${STUB_FLAG_MISSING:-0}" \
+    "${STUB_WORKLOAD_IMAGE_DRIFT:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-images_path, flag_value, flag_missing = sys.argv[1:]
+images_path, flag_value, flag_missing, drift_service = sys.argv[1:]
 items = []
 rows = []
 for raw_line in Path(images_path).read_text(encoding='utf-8').splitlines():
@@ -187,6 +191,8 @@ for raw_line in Path(images_path).read_text(encoding='utf-8').splitlines():
     parts = raw_line.split('\t')
     rows.append((parts[0], parts[2]))
 for service, image_ref in rows:
+    if service == drift_service:
+        image_ref = image_ref.rsplit("sha256:", 1)[0] + "sha256:" + ("0" * 64)
     env = []
     if service == 'gamemaster' and flag_missing != '1':
         env.append({'name': 'LIVE_KICKOFFS_ENABLED', 'value': flag_value})
@@ -693,6 +699,7 @@ run_live_betting_scenario() {
     export STUB_CLOCK_SCENARIO=healthy
     export STUB_FLAG_VALUE=false
     export STUB_FLAG_MISSING=0
+    export STUB_WORKLOAD_IMAGE_DRIFT=
     export STUB_TOPOLOGY_MODE=shared
     export STUB_TOPOLOGY_VALIDATED=true
     export STUB_TOPOLOGY_MISSING=0

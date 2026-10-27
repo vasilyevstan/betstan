@@ -129,7 +129,35 @@ replace_lock_state() {
   local next_fencing_generation="${15}"
   local expected_uid="${16:-*}"
   local expected_resource_version="${17:-*}"
-  kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" -o json |
+  local expected_acquired_at_epoch="${18:-*}"
+  local expected_lease_duration_seconds="${19:-*}"
+  local expected_released_at_epoch="${20:-*}"
+  local next_incident_manifest_sha256="${21:-*}"
+  local next_incident_owner_run_id="${22:-*}"
+  local next_incident_restore_run_id="${23:-*}"
+  local next_incident_control_sha="${24:-*}"
+  local exact_core_preimage="${25:-false}"
+  local expected_predecessor_incident_manifest_sha256="${26:-__ABSENT__}"
+  local expected_predecessor_incident_owner_run_id="${27:-__ABSENT__}"
+  local expected_predecessor_incident_restore_run_id="${28:-__ABSENT__}"
+  local expected_predecessor_incident_control_sha="${29:-__ABSENT__}"
+  local next_incident_current_run_metadata_sha256="${30:-*}"
+  local next_incident_request_created_at_epoch="${31:-*}"
+  local next_incident_provider_transition_epoch="${32:-*}"
+  local next_incident_predecessor_lease_until_epoch="${33:-*}"
+  local next_incident_new_lease_until_epoch="${34:-*}"
+  local expected_predecessor_incident_current_run_metadata_sha256="${35:-__ABSENT__}"
+  local expected_predecessor_incident_request_created_at_epoch="${36:-__ABSENT__}"
+  local expected_predecessor_incident_provider_transition_epoch="${37:-__ABSENT__}"
+  local expected_predecessor_incident_predecessor_lease_until_epoch="${38:-__ABSENT__}"
+  local expected_predecessor_incident_new_lease_until_epoch="${39:-__ABSENT__}"
+  {
+    if [[ -n "${LOCK_REPLACE_PREIMAGE_JSON:-}" ]]; then
+      printf '%s' "$LOCK_REPLACE_PREIMAGE_JSON"
+    else
+      kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" -o json
+    fi
+  } |
     python3 -c '
 import json
 import sys
@@ -152,6 +180,28 @@ import sys
     next_fencing_generation,
     expected_uid,
     expected_resource_version,
+    expected_acquired_at_epoch,
+    expected_lease_duration_seconds,
+    expected_released_at_epoch,
+    next_incident_manifest_sha256,
+    next_incident_owner_run_id,
+    next_incident_restore_run_id,
+    next_incident_control_sha,
+    exact_core_preimage,
+    expected_predecessor_incident_manifest_sha256,
+    expected_predecessor_incident_owner_run_id,
+    expected_predecessor_incident_restore_run_id,
+    expected_predecessor_incident_control_sha,
+    next_incident_current_run_metadata_sha256,
+    next_incident_request_created_at_epoch,
+    next_incident_provider_transition_epoch,
+    next_incident_predecessor_lease_until_epoch,
+    next_incident_new_lease_until_epoch,
+    expected_predecessor_incident_current_run_metadata_sha256,
+    expected_predecessor_incident_request_created_at_epoch,
+    expected_predecessor_incident_provider_transition_epoch,
+    expected_predecessor_incident_predecessor_lease_until_epoch,
+    expected_predecessor_incident_new_lease_until_epoch,
 ) = sys.argv[1:]
 document = json.load(sys.stdin)
 data = document.setdefault("data", {})
@@ -169,12 +219,54 @@ checks = {
     "holder": expected_holder,
     "operation-id": expected_operation_id,
     "source-sha": expected_source_sha,
+    "acquired-at-epoch": expected_acquired_at_epoch,
+    "lease-duration-seconds": expected_lease_duration_seconds,
     "lease-until-epoch": expected_lease_until_epoch,
+    "released-at-epoch": expected_released_at_epoch,
     "fencing-generation": expected_fencing_generation,
 }
+incident_keys = (
+    "incident-manifest-sha256",
+    "incident-owner-run-id",
+    "incident-restore-run-id",
+    "incident-control-sha",
+    "incident-current-run-metadata-sha256",
+    "incident-request-created-at-epoch",
+    "incident-provider-transition-epoch",
+    "incident-predecessor-lease-until-epoch",
+    "incident-new-lease-until-epoch",
+)
+expected_incident_values = (
+    expected_predecessor_incident_manifest_sha256,
+    expected_predecessor_incident_owner_run_id,
+    expected_predecessor_incident_restore_run_id,
+    expected_predecessor_incident_control_sha,
+    expected_predecessor_incident_current_run_metadata_sha256,
+    expected_predecessor_incident_request_created_at_epoch,
+    expected_predecessor_incident_provider_transition_epoch,
+    expected_predecessor_incident_predecessor_lease_until_epoch,
+    expected_predecessor_incident_new_lease_until_epoch,
+)
+if any(key.startswith("incident-") and key not in incident_keys for key in data):
+    raise SystemExit("lock preimage contains an unknown incident field")
+if all(value == "__ABSENT__" for value in expected_incident_values):
+    if any(key in data for key in incident_keys):
+        raise SystemExit("lock preimage contains an unnamed incident predecessor")
+    expected_incident = {}
+elif any(value in {"*", "__ABSENT__"} for value in expected_incident_values):
+    raise SystemExit("lock incident predecessor binding is incomplete")
+else:
+    expected_incident = dict(zip(incident_keys, expected_incident_values))
+    if any(data.get(key) != value for key, value in expected_incident.items()):
+        raise SystemExit("lock incident predecessor binding differs")
 for key, expected in checks.items():
     if expected != "*" and data.get(key, "") != expected:
         raise SystemExit("lock compare-and-swap precondition failed")
+allowed_keys = set(checks) | set(expected_incident)
+if exact_core_preimage == "true" and set(data) != allowed_keys:
+    raise SystemExit("lock compare-and-swap preimage contains unexpected fields")
+if exact_core_preimage not in {"true", "false"}:
+    raise SystemExit("lock compare-and-swap exact-preimage mode is invalid")
 
 data["state"] = next_state
 data["holder"] = next_holder
@@ -185,6 +277,31 @@ data["lease-duration-seconds"] = next_lease_duration_seconds
 data["lease-until-epoch"] = next_lease_until_epoch
 data["released-at-epoch"] = next_released_at_epoch
 data["fencing-generation"] = next_fencing_generation
+incident_values = {
+    "incident-manifest-sha256": next_incident_manifest_sha256,
+    "incident-owner-run-id": next_incident_owner_run_id,
+    "incident-restore-run-id": next_incident_restore_run_id,
+    "incident-control-sha": next_incident_control_sha,
+    "incident-current-run-metadata-sha256":
+        next_incident_current_run_metadata_sha256,
+    "incident-request-created-at-epoch":
+        next_incident_request_created_at_epoch,
+    "incident-provider-transition-epoch":
+        next_incident_provider_transition_epoch,
+    "incident-predecessor-lease-until-epoch":
+        next_incident_predecessor_lease_until_epoch,
+    "incident-new-lease-until-epoch":
+        next_incident_new_lease_until_epoch,
+}
+for key in incident_keys:
+    data.pop(key, None)
+next_incident = tuple(incident_values.values())
+if all(value == "*" for value in next_incident):
+    pass
+elif any(value == "*" for value in next_incident):
+    raise SystemExit("next incident binding is incomplete")
+else:
+    data.update(incident_values)
 document.get("metadata", {}).pop("managedFields", None)
 json.dump(document, sys.stdout)
 ' "$expected_state" "$expected_holder" "$expected_operation_id" \
@@ -193,11 +310,404 @@ json.dump(document, sys.stdout)
       "$next_operation_id" "$next_source_sha" "$next_acquired_at_epoch" \
       "$next_lease_duration_seconds" "$next_lease_until_epoch" \
       "$next_released_at_epoch" "$next_fencing_generation" "$expected_uid" \
-      "$expected_resource_version" |
+      "$expected_resource_version" "$expected_acquired_at_epoch" \
+      "$expected_lease_duration_seconds" "$expected_released_at_epoch" \
+      "$next_incident_manifest_sha256" "$next_incident_owner_run_id" \
+      "$next_incident_restore_run_id" "$next_incident_control_sha" \
+      "$exact_core_preimage" \
+      "$expected_predecessor_incident_manifest_sha256" \
+      "$expected_predecessor_incident_owner_run_id" \
+      "$expected_predecessor_incident_restore_run_id" \
+      "$expected_predecessor_incident_control_sha" \
+      "$next_incident_current_run_metadata_sha256" \
+      "$next_incident_request_created_at_epoch" \
+      "$next_incident_provider_transition_epoch" \
+      "$next_incident_predecessor_lease_until_epoch" \
+      "$next_incident_new_lease_until_epoch" \
+      "$expected_predecessor_incident_current_run_metadata_sha256" \
+      "$expected_predecessor_incident_request_created_at_epoch" \
+      "$expected_predecessor_incident_provider_transition_epoch" \
+      "$expected_predecessor_incident_predecessor_lease_until_epoch" \
+      "$expected_predecessor_incident_new_lease_until_epoch" |
     kubectl replace -f - >/dev/null
 }
 
 case "$ACTION" in
+  replace-expired-active)
+    validate_identity
+    validate_lease
+    [[ "$OPERATION_ID" = "live-data-incident-restore" ]] ||
+      fail "replace-expired-active is restricted to live-data-incident-restore"
+    [[ "${EXPECTED_LOCK_UID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ &&
+       "${EXPECTED_RESOURCE_VERSION:-}" =~ ^[1-9][0-9]{0,127}$ &&
+       "${EXPECTED_LOCK_HOLDER:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ &&
+       "${EXPECTED_LOCK_OPERATION_ID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ &&
+       "${EXPECTED_LOCK_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ &&
+       "${EXPECTED_ACQUIRED_AT_EPOCH:-}" =~ ^[1-9][0-9]{0,15}$ &&
+       "${EXPECTED_LEASE_DURATION_SECONDS:-}" =~ ^[1-9][0-9]{0,4}$ &&
+       "${EXPECTED_LEASE_UNTIL_EPOCH:-}" =~ ^[1-9][0-9]{0,15}$ &&
+       "${EXPECTED_RELEASED_AT_EPOCH:-}" = "0" &&
+       "${EXPECTED_FENCING_GENERATION:-}" =~ ^[1-9][0-9]{0,15}$ ]] ||
+      fail "replace-expired-active requires the complete expected active preimage"
+    [[ "${EXPECTED_INCIDENT_MANIFEST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
+      fail "EXPECTED_INCIDENT_MANIFEST_SHA256 is invalid"
+    [[ "${EXPECTED_INCIDENT_OWNER_RUN_ID:-}" =~ ^[1-9][0-9]*$ &&
+       "${EXPECTED_INCIDENT_RUN_ID:-}" =~ ^[1-9][0-9]*$ &&
+       "${EXPECTED_INCIDENT_CONTROL_SHA:-}" =~ ^[0-9a-f]{40}$ ]] ||
+      fail "replace-expired-active incident run/control binding is invalid"
+    [[ "${REQUEST_CURRENT_RUN_METADATA_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
+      fail "REQUEST_CURRENT_RUN_METADATA_SHA256 is invalid"
+    [[ "${REQUEST_CREATED_AT_EPOCH:-}" =~ ^[1-9][0-9]{0,15}$ ]] ||
+      fail "REQUEST_CREATED_AT_EPOCH must be a positive integer"
+    [[ "${PROVIDER_TRANSITION_EPOCH:-}" =~ ^[1-9][0-9]{0,15}$ ]] ||
+      fail "PROVIDER_TRANSITION_EPOCH must be a positive integer"
+    [[ "$LOCK_TOKEN" = "live-data-incident-${EXPECTED_INCIDENT_RUN_ID}-1" &&
+       "$SOURCE_SHA" = "$EXPECTED_INCIDENT_CONTROL_SHA" ]] ||
+      fail "replace-expired-active owner does not match the incident run/control binding"
+    predecessor_manifest="${EXPECTED_PREDECESSOR_INCIDENT_MANIFEST_SHA256:-__ABSENT__}"
+    predecessor_owner="${EXPECTED_PREDECESSOR_INCIDENT_OWNER_RUN_ID:-__ABSENT__}"
+    predecessor_restore="${EXPECTED_PREDECESSOR_INCIDENT_RESTORE_RUN_ID:-__ABSENT__}"
+    predecessor_control="${EXPECTED_PREDECESSOR_INCIDENT_CONTROL_SHA:-__ABSENT__}"
+    predecessor_run_metadata="${EXPECTED_PREDECESSOR_INCIDENT_CURRENT_RUN_METADATA_SHA256:-__ABSENT__}"
+    predecessor_request_created="${EXPECTED_PREDECESSOR_INCIDENT_REQUEST_CREATED_AT_EPOCH:-__ABSENT__}"
+    predecessor_transition="${EXPECTED_PREDECESSOR_INCIDENT_PROVIDER_TRANSITION_EPOCH:-__ABSENT__}"
+    predecessor_cutoff="${EXPECTED_PREDECESSOR_INCIDENT_PREDECESSOR_LEASE_UNTIL_EPOCH:-__ABSENT__}"
+    predecessor_new_lease="${EXPECTED_PREDECESSOR_INCIDENT_NEW_LEASE_UNTIL_EPOCH:-__ABSENT__}"
+    predecessor_absent="__ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT__"
+    if [[ "$predecessor_manifest$predecessor_owner$predecessor_restore$predecessor_control$predecessor_run_metadata$predecessor_request_created$predecessor_transition$predecessor_cutoff$predecessor_new_lease" != "$predecessor_absent" ]]; then
+      [[ "$predecessor_manifest" =~ ^[0-9a-f]{64}$ &&
+         "$predecessor_owner" =~ ^[1-9][0-9]*$ &&
+         "$predecessor_restore" =~ ^[1-9][0-9]*$ &&
+         "$predecessor_control" =~ ^[0-9a-f]{40}$ &&
+         "$predecessor_run_metadata" =~ ^[0-9a-f]{64}$ ]] ||
+        fail "replace-expired-active predecessor incident binding is incomplete or invalid"
+      is_positive_integer "$predecessor_request_created" ||
+        fail "replace-expired-active predecessor request epoch is invalid"
+      is_positive_integer "$predecessor_transition" ||
+        fail "replace-expired-active predecessor transition epoch is invalid"
+      is_positive_integer "$predecessor_cutoff" ||
+        fail "replace-expired-active predecessor cutoff is invalid"
+      is_positive_integer "$predecessor_new_lease" ||
+        fail "replace-expired-active predecessor new lease is invalid"
+      (( predecessor_request_created > predecessor_cutoff &&
+         predecessor_transition >= predecessor_request_created &&
+         predecessor_transition == EXPECTED_ACQUIRED_AT_EPOCH &&
+         predecessor_new_lease == EXPECTED_LEASE_UNTIL_EPOCH &&
+         predecessor_new_lease ==
+           predecessor_transition + EXPECTED_LEASE_DURATION_SECONDS )) ||
+        fail "replace-expired-active predecessor timing binding is inconsistent"
+    fi
+    (( EXPECTED_LEASE_DURATION_SECONDS >= 60 &&
+       EXPECTED_LEASE_DURATION_SECONDS <= 86400 &&
+       EXPECTED_FENCING_GENERATION < 9007199254740991 )) ||
+      fail "replace-expired-active preimage lease or generation is out of range"
+
+    (( EXPECTED_ACQUIRED_AT_EPOCH < EXPECTED_LEASE_UNTIL_EPOCH &&
+       REQUEST_CREATED_AT_EPOCH > EXPECTED_LEASE_UNTIL_EPOCH )) ||
+      fail "incident request was not created strictly after the exact expired lease"
+    (( PROVIDER_TRANSITION_EPOCH >= REQUEST_CREATED_AT_EPOCH &&
+       PROVIDER_TRANSITION_EPOCH > EXPECTED_LEASE_UNTIL_EPOCH )) ||
+      fail "provider transition epoch is stale for the exact expired lease"
+    lease_until_epoch="$(( PROVIDER_TRANSITION_EPOCH + LOCK_LEASE_SECONDS ))"
+    next_fencing_generation="$(( EXPECTED_FENCING_GENERATION + 1 ))"
+    if ! lock_json="$(
+      kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" -o json
+    )"; then
+      fail "replace-expired-active could not read the expected preimage"
+    fi
+    if ! python3 - \
+      "$lock_json" \
+      "$EXPECTED_LOCK_UID" \
+      "$EXPECTED_RESOURCE_VERSION" \
+      "$EXPECTED_LOCK_HOLDER" \
+      "$EXPECTED_LOCK_OPERATION_ID" \
+      "$EXPECTED_LOCK_SOURCE_SHA" \
+      "$EXPECTED_ACQUIRED_AT_EPOCH" \
+      "$EXPECTED_LEASE_DURATION_SECONDS" \
+      "$EXPECTED_LEASE_UNTIL_EPOCH" \
+      "$EXPECTED_RELEASED_AT_EPOCH" \
+      "$EXPECTED_FENCING_GENERATION" \
+      "$predecessor_manifest" \
+      "$predecessor_owner" \
+      "$predecessor_restore" \
+      "$predecessor_control" \
+      "$predecessor_run_metadata" \
+      "$predecessor_request_created" \
+      "$predecessor_transition" \
+      "$predecessor_cutoff" \
+      "$predecessor_new_lease" <<'PY'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+expected = sys.argv[2:12]
+predecessor = sys.argv[12:]
+metadata = document.get("metadata")
+data = document.get("data")
+if not isinstance(metadata, dict) or not isinstance(data, dict):
+    raise SystemExit("lock preimage is malformed")
+if metadata.get("uid") != expected[0] or metadata.get("resourceVersion") != expected[1]:
+    raise SystemExit("lock preimage identity changed")
+keys = (
+    "holder",
+    "operation-id",
+    "source-sha",
+    "acquired-at-epoch",
+    "lease-duration-seconds",
+    "lease-until-epoch",
+    "released-at-epoch",
+    "fencing-generation",
+)
+expected_data = {"state": "active", **dict(zip(keys, expected[2:]))}
+incident_keys = (
+    "incident-manifest-sha256",
+    "incident-owner-run-id",
+    "incident-restore-run-id",
+    "incident-control-sha",
+    "incident-current-run-metadata-sha256",
+    "incident-request-created-at-epoch",
+    "incident-provider-transition-epoch",
+    "incident-predecessor-lease-until-epoch",
+    "incident-new-lease-until-epoch",
+)
+if all(value == "__ABSENT__" for value in predecessor):
+    pass
+elif any(value == "__ABSENT__" for value in predecessor):
+    raise SystemExit("lock predecessor incident binding is incomplete")
+else:
+    expected_data.update(dict(zip(incident_keys, predecessor)))
+if data != expected_data:
+    raise SystemExit("lock preimage changed")
+PY
+    then
+      fail "replace-expired-active observed a lock that differs from the complete expected preimage"
+    fi
+
+    export LOCK_REPLACE_PREIMAGE_JSON="$lock_json"
+    if replace_lock_state \
+      active \
+      "$EXPECTED_LOCK_HOLDER" \
+      "$EXPECTED_LOCK_OPERATION_ID" \
+      "$EXPECTED_LOCK_SOURCE_SHA" \
+      "$EXPECTED_LEASE_UNTIL_EPOCH" \
+      "$EXPECTED_FENCING_GENERATION" \
+      active \
+      "$LOCK_TOKEN" \
+      "$OPERATION_ID" \
+      "$SOURCE_SHA" \
+      "$PROVIDER_TRANSITION_EPOCH" \
+      "$LOCK_LEASE_SECONDS" \
+      "$lease_until_epoch" \
+      "0" \
+      "$next_fencing_generation" \
+      "$EXPECTED_LOCK_UID" \
+      "$EXPECTED_RESOURCE_VERSION" \
+      "$EXPECTED_ACQUIRED_AT_EPOCH" \
+      "$EXPECTED_LEASE_DURATION_SECONDS" \
+      "$EXPECTED_RELEASED_AT_EPOCH" \
+      "$EXPECTED_INCIDENT_MANIFEST_SHA256" \
+      "$EXPECTED_INCIDENT_OWNER_RUN_ID" \
+      "$EXPECTED_INCIDENT_RUN_ID" \
+      "$EXPECTED_INCIDENT_CONTROL_SHA" \
+      true \
+      "$predecessor_manifest" \
+      "$predecessor_owner" \
+      "$predecessor_restore" \
+      "$predecessor_control" \
+      "$REQUEST_CURRENT_RUN_METADATA_SHA256" \
+      "$REQUEST_CREATED_AT_EPOCH" \
+      "$PROVIDER_TRANSITION_EPOCH" \
+      "$EXPECTED_LEASE_UNTIL_EPOCH" \
+      "$lease_until_epoch" \
+      "$predecessor_run_metadata" \
+      "$predecessor_request_created" \
+      "$predecessor_transition" \
+      "$predecessor_cutoff" \
+      "$predecessor_new_lease"; then
+      unset LOCK_REPLACE_PREIMAGE_JSON
+      echo "shared_mongo_lock=replace-expired-active status=PASS result=applied current_run_metadata_sha256=$REQUEST_CURRENT_RUN_METADATA_SHA256 request_created_at_epoch=$REQUEST_CREATED_AT_EPOCH provider_transition_epoch=$PROVIDER_TRANSITION_EPOCH predecessor_lease_until_epoch=$EXPECTED_LEASE_UNTIL_EPOCH lease_until_epoch=$lease_until_epoch fencing_generation=$next_fencing_generation"
+      exit 0
+    fi
+    unset LOCK_REPLACE_PREIMAGE_JSON
+
+    if ! observed_json="$(
+      kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" -o json
+    )"; then
+      fail "replace-expired-active result is ambiguous after the single replace"
+    fi
+    classification="$(
+      python3 - \
+        "$observed_json" \
+        "$EXPECTED_LOCK_UID" \
+        "$EXPECTED_RESOURCE_VERSION" \
+        "$EXPECTED_LOCK_HOLDER" \
+        "$EXPECTED_LOCK_OPERATION_ID" \
+        "$EXPECTED_LOCK_SOURCE_SHA" \
+        "$EXPECTED_ACQUIRED_AT_EPOCH" \
+        "$EXPECTED_LEASE_DURATION_SECONDS" \
+        "$EXPECTED_LEASE_UNTIL_EPOCH" \
+        "$EXPECTED_RELEASED_AT_EPOCH" \
+        "$EXPECTED_FENCING_GENERATION" \
+        "$LOCK_TOKEN" \
+        "$OPERATION_ID" \
+        "$SOURCE_SHA" \
+        "$PROVIDER_TRANSITION_EPOCH" \
+        "$LOCK_LEASE_SECONDS" \
+        "$lease_until_epoch" \
+        "$next_fencing_generation" \
+        "$EXPECTED_INCIDENT_MANIFEST_SHA256" \
+        "$EXPECTED_INCIDENT_OWNER_RUN_ID" \
+        "$EXPECTED_INCIDENT_RUN_ID" \
+        "$EXPECTED_INCIDENT_CONTROL_SHA" \
+        "$predecessor_manifest" \
+        "$predecessor_owner" \
+        "$predecessor_restore" \
+        "$predecessor_control" \
+        "$REQUEST_CURRENT_RUN_METADATA_SHA256" \
+        "$REQUEST_CREATED_AT_EPOCH" \
+        "$PROVIDER_TRANSITION_EPOCH" \
+        "$EXPECTED_LEASE_UNTIL_EPOCH" \
+        "$lease_until_epoch" \
+        "$predecessor_run_metadata" \
+        "$predecessor_request_created" \
+        "$predecessor_transition" \
+        "$predecessor_cutoff" \
+        "$predecessor_new_lease" <<'PY'
+import json
+import re
+import sys
+
+(
+    uid,
+    resource_version,
+    old_holder,
+    old_operation,
+    old_source,
+    old_acquired,
+    old_duration,
+    old_until,
+    old_released,
+    old_generation,
+    new_holder,
+    new_operation,
+    new_source,
+    new_acquired,
+    new_duration,
+    new_until,
+    new_generation,
+    manifest_sha256,
+    owner_run_id,
+    restore_run_id,
+    control_sha,
+    predecessor_manifest_sha256,
+    predecessor_owner_run_id,
+    predecessor_restore_run_id,
+    predecessor_control_sha,
+    current_run_metadata_sha256,
+    request_created_at_epoch,
+    provider_transition_epoch,
+    predecessor_lease_until_epoch,
+    new_lease_until_epoch,
+    predecessor_run_metadata_sha256,
+    predecessor_request_created_at_epoch,
+    predecessor_provider_transition_epoch,
+    predecessor_predecessor_lease_until_epoch,
+    predecessor_new_lease_until_epoch,
+) = sys.argv[2:]
+document = json.loads(sys.argv[1])
+metadata = document.get("metadata")
+data = document.get("data")
+if not isinstance(metadata, dict) or not isinstance(data, dict):
+    print("ambiguous")
+    raise SystemExit
+preimage = {
+    "state": "active",
+    "holder": old_holder,
+    "operation-id": old_operation,
+    "source-sha": old_source,
+    "acquired-at-epoch": old_acquired,
+    "lease-duration-seconds": old_duration,
+    "lease-until-epoch": old_until,
+    "released-at-epoch": old_released,
+    "fencing-generation": old_generation,
+}
+predecessor = (
+    predecessor_manifest_sha256,
+    predecessor_owner_run_id,
+    predecessor_restore_run_id,
+    predecessor_control_sha,
+    predecessor_run_metadata_sha256,
+    predecessor_request_created_at_epoch,
+    predecessor_provider_transition_epoch,
+    predecessor_predecessor_lease_until_epoch,
+    predecessor_new_lease_until_epoch,
+)
+if not all(value == "__ABSENT__" for value in predecessor):
+    preimage.update({
+        "incident-manifest-sha256": predecessor_manifest_sha256,
+        "incident-owner-run-id": predecessor_owner_run_id,
+        "incident-restore-run-id": predecessor_restore_run_id,
+        "incident-control-sha": predecessor_control_sha,
+        "incident-current-run-metadata-sha256":
+            predecessor_run_metadata_sha256,
+        "incident-request-created-at-epoch":
+            predecessor_request_created_at_epoch,
+        "incident-provider-transition-epoch":
+            predecessor_provider_transition_epoch,
+        "incident-predecessor-lease-until-epoch":
+            predecessor_predecessor_lease_until_epoch,
+        "incident-new-lease-until-epoch":
+            predecessor_new_lease_until_epoch,
+    })
+postimage = {
+    "state": "active",
+    "holder": new_holder,
+    "operation-id": new_operation,
+    "source-sha": new_source,
+    "acquired-at-epoch": new_acquired,
+    "lease-duration-seconds": new_duration,
+    "lease-until-epoch": new_until,
+    "released-at-epoch": "0",
+    "fencing-generation": new_generation,
+    "incident-manifest-sha256": manifest_sha256,
+    "incident-owner-run-id": owner_run_id,
+    "incident-restore-run-id": restore_run_id,
+    "incident-control-sha": control_sha,
+    "incident-current-run-metadata-sha256": current_run_metadata_sha256,
+    "incident-request-created-at-epoch": request_created_at_epoch,
+    "incident-provider-transition-epoch": provider_transition_epoch,
+    "incident-predecessor-lease-until-epoch":
+        predecessor_lease_until_epoch,
+    "incident-new-lease-until-epoch": new_lease_until_epoch,
+}
+observed_uid = metadata.get("uid")
+observed_version = metadata.get("resourceVersion")
+if observed_uid == uid and observed_version == resource_version and data == preimage:
+    print("not-applied")
+elif (
+    observed_uid == uid
+    and isinstance(observed_version, str)
+    and re.fullmatch(r"[1-9][0-9]*", observed_version)
+    and observed_version != resource_version
+    and data == postimage
+):
+    print("applied")
+else:
+    print("ambiguous")
+PY
+    )" || fail "replace-expired-active result classification failed"
+    case "$classification" in
+      applied)
+        echo "shared_mongo_lock=replace-expired-active status=PASS result=applied-after-reread current_run_metadata_sha256=$REQUEST_CURRENT_RUN_METADATA_SHA256 request_created_at_epoch=$REQUEST_CREATED_AT_EPOCH provider_transition_epoch=$PROVIDER_TRANSITION_EPOCH predecessor_lease_until_epoch=$EXPECTED_LEASE_UNTIL_EPOCH lease_until_epoch=$lease_until_epoch fencing_generation=$next_fencing_generation"
+        ;;
+      not-applied)
+        fail "replace-expired-active was not applied; no retry is permitted"
+        ;;
+      *)
+        fail "replace-expired-active result is ambiguous after the single replace"
+        ;;
+    esac
+    ;;
   acquire-released)
     validate_identity
     validate_lease
@@ -427,12 +937,48 @@ print("|".join([
       [[ "$acquired_at_epoch" =~ ^[1-9][0-9]*$ ]] || acquired_at_epoch=0
     fi
     next_fencing_generation="$(next_generation "$fencing_generation")"
+    predecessor_manifest="${EXPECTED_PREDECESSOR_INCIDENT_MANIFEST_SHA256:-__ABSENT__}"
+    predecessor_owner="${EXPECTED_PREDECESSOR_INCIDENT_OWNER_RUN_ID:-__ABSENT__}"
+    predecessor_restore="${EXPECTED_PREDECESSOR_INCIDENT_RESTORE_RUN_ID:-__ABSENT__}"
+    predecessor_control="${EXPECTED_PREDECESSOR_INCIDENT_CONTROL_SHA:-__ABSENT__}"
+    predecessor_run_metadata="${EXPECTED_PREDECESSOR_INCIDENT_CURRENT_RUN_METADATA_SHA256:-__ABSENT__}"
+    predecessor_request_created="${EXPECTED_PREDECESSOR_INCIDENT_REQUEST_CREATED_AT_EPOCH:-__ABSENT__}"
+    predecessor_transition="${EXPECTED_PREDECESSOR_INCIDENT_PROVIDER_TRANSITION_EPOCH:-__ABSENT__}"
+    predecessor_cutoff="${EXPECTED_PREDECESSOR_INCIDENT_PREDECESSOR_LEASE_UNTIL_EPOCH:-__ABSENT__}"
+    predecessor_new_lease="${EXPECTED_PREDECESSOR_INCIDENT_NEW_LEASE_UNTIL_EPOCH:-__ABSENT__}"
+    predecessor_absent="__ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT____ABSENT__"
+    if [[ "$predecessor_manifest$predecessor_owner$predecessor_restore$predecessor_control$predecessor_run_metadata$predecessor_request_created$predecessor_transition$predecessor_cutoff$predecessor_new_lease" != "$predecessor_absent" ]]; then
+      [[ "$predecessor_manifest" =~ ^[0-9a-f]{64}$ &&
+         "$predecessor_owner" =~ ^[1-9][0-9]*$ &&
+         "$predecessor_restore" =~ ^[1-9][0-9]*$ &&
+         "$predecessor_control" =~ ^[0-9a-f]{40}$ &&
+         "$predecessor_run_metadata" =~ ^[0-9a-f]{64}$ &&
+         "$predecessor_request_created" =~ ^[1-9][0-9]*$ &&
+         "$predecessor_transition" =~ ^[1-9][0-9]*$ &&
+         "$predecessor_cutoff" =~ ^[1-9][0-9]*$ &&
+         "$predecessor_new_lease" =~ ^[1-9][0-9]*$ ]] ||
+        fail "release predecessor incident binding is incomplete or invalid"
+      (( predecessor_request_created > predecessor_cutoff &&
+         predecessor_transition >= predecessor_request_created &&
+         predecessor_transition == acquired_at_epoch &&
+         predecessor_new_lease == lease_until_epoch &&
+         predecessor_new_lease ==
+           predecessor_transition + lease_duration_seconds )) ||
+        fail "release predecessor incident timing binding is inconsistent"
+    fi
     replace_lock_state active "$LOCK_TOKEN" "$OPERATION_ID" "$SOURCE_SHA" \
       "$(cas_expected_value "$lease_until_epoch")" \
       "$(cas_expected_value "$fencing_generation")" \
       released "" "$OPERATION_ID" "$SOURCE_SHA" \
       "$acquired_at_epoch" "0" "0" "$now_epoch" "$next_fencing_generation" \
-      "${EXPECTED_LOCK_UID:-*}" "${EXPECTED_RESOURCE_VERSION:-*}" ||
+      "${EXPECTED_LOCK_UID:-*}" "${EXPECTED_RESOURCE_VERSION:-*}" \
+      "*" "*" "*" "*" "*" "*" "*" false \
+      "$predecessor_manifest" "$predecessor_owner" "$predecessor_restore" \
+      "$predecessor_control" \
+      "*" "*" "*" "*" "*" \
+      "$predecessor_run_metadata" "$predecessor_request_created" \
+      "$predecessor_transition" "$predecessor_cutoff" \
+      "$predecessor_new_lease" ||
       fail "lock changed while releasing"
     if [[ "$strict_release" == "true" ]]; then
       echo "shared_mongo_lock=release status=PASS released_at_epoch=$now_epoch strict_snapshot=true fencing_generation=$next_fencing_generation"
@@ -465,7 +1011,7 @@ print("|".join([
     echo "shared_mongo_lock=force-release status=PASS released_at_epoch=$now_epoch"
     ;;
   *)
-    echo "usage: $0 {acquire|acquire-released|verify|renew|verify-released|release|force-release}" >&2
+    echo "usage: $0 {acquire|acquire-released|replace-expired-active|verify|renew|verify-released|release|force-release}" >&2
     exit 2
     ;;
 esac

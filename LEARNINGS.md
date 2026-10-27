@@ -1319,6 +1319,33 @@ Durable rules:
 - Report failure state truthfully. Re-hold maintenance on any failure, and never
   claim a database lock that the contract already released.
 
+## Bounded emergency-recovery evidence — 2026-10-26
+
+- Open-ended provider-history closure is unsuitable for emergency recovery.
+  Growing run lists, search, pagination, jobs, or historical traversal make
+  authority latency and completeness depend on mutable remote history. Seal the
+  accepted terminal runs and artifacts in one strict fixed manifest, fetch only
+  their exact endpoints within a request bound, and require that verifier to
+  pass before any intent or authority exists.
+- Recover through exact state transitions, not permissive escape switches.
+  Bind the complete expired lock preimage, perform one resource-versioned
+  active-to-active CAS, persist its postimage and every later phase, restore the
+  authenticated baseline while the fence remains, then release lock before
+  fence and prove full readiness. An uncertain mutation gets one exact reread
+  and a terminal applied/not-applied/ambiguous classification.
+- Queue delay is not lease authority. Bind the exact attempt-one run's immutable
+  GitHub `created_at` and require it to be strictly later than the exact
+  predecessor cutoff; fetch a fresh provider `Date` immediately before CAS and
+  derive the successor lease from that epoch. Runner wall-clock skew must be
+  irrelevant to the takeover decision.
+- Cleanup obligations must survive generations that fail before they can write
+  a receipt or open their own resource. Carry a fixed-bounded,
+  authority-authenticated lineage of every exact predecessor OKE rule or k3s
+  session, append cleanup-only predecessors, retry oldest-first after restart,
+  preserve unrelated resources, and never declare success while any obligation
+  remains. Immediate-predecessor-only cleanup can silently orphan an older
+  resource.
+
 ## Progress reporting is a separate obligation from progress — 2026-09-07
 
 A long recovery turn executed continuously and correctly, yet returned nothing

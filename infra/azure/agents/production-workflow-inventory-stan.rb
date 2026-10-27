@@ -1316,13 +1316,74 @@ def validate_live_data_rollout_workflow!(file, document, content)
       failed_activation_user_id
       held_handoff_run_id
       held_handoff_source_sha
+      incident_continuation_run_id
+      incident_continuation_authority_sha256
+      incident_continuation_control_sha
+      incident_continuation_journal_identity_sha256
+      incident_continuation_generation
+      incident_access_cleanup_lineage_json
       confirmation
     ]
   )
   validate_exact_permissions!(name, document, { "actions" => "read", "contents" => "read" })
   validate_expected_action_pins!(name, content)
 
-  { "held_handoff_run_id" => "0", "held_handoff_source_sha" => "none" }.each do |input, neutral|
+  jobs = document["jobs"]
+  unless jobs.is_a?(Hash) && jobs.keys == ["rollout"]
+    fail_inventory("#{name} must retain exactly its canonical rollout job")
+  end
+  rollout = jobs["rollout"]
+  unless rollout.is_a?(Hash) && rollout["if"] == "github.run_attempt == 1"
+    fail_inventory("#{name} rollout job must retain its first-attempt guard")
+  end
+  steps = rollout["steps"]
+  unless steps.is_a?(Array) && steps.length >= 4 &&
+         steps.first["name"] == "Validate dispatch phase and confirmation routing"
+    fail_inventory("#{name} must validate phase/confirmation routing first")
+  end
+  route = steps.first["run"].to_s
+  expected_pairs = [
+    "dry-run|DRY RUN LIVE DATA EXACT SHA",
+    "apply-backfills|APPLY LIVE BACKFILLS EXACT SHA",
+    "apply-slip-index|APPLY LIVE SLIP INDEX EXACT SHA",
+    "apply-slip-index|CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA",
+    "apply-slip-index|RESUME APPLIED LIVE DATA EXACT SHA",
+    "apply-slip-index|RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA",
+    "apply-slip-index|RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA",
+    "apply-slip-index|RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA",
+    "incident-restore|RESTORE AUTHENTICATED HELD BASELINE EXACT SHA"
+  ].sort
+  observed_pairs = route.scan(
+    /"((?:dry-run|apply-backfills|apply-slip-index|incident-restore)\|[^"]+)"(?=\s*(?:\||\)))/
+  ).flatten.sort
+  unless observed_pairs == expected_pairs &&
+         route.include?("Invalid live-data phase/confirmation pair") &&
+         route.match?(/exit 1/)
+    fail_inventory("#{name} phase/confirmation routing is not fail-closed")
+  end
+  incident_start = steps.index do |step|
+    step["name"] == "Verify fixed incident manifest and immutable evidence"
+  end
+  ordinary_guarded = incident_start && steps[3...incident_start].all? do |step|
+    step["if"].to_s.include?("inputs.phase != 'incident-restore'")
+  end
+  incident_guarded = incident_start && steps[incident_start..].all? do |step|
+    step["if"].to_s.include?("inputs.phase == 'incident-restore'")
+  end
+  unless ordinary_guarded && incident_guarded
+    fail_inventory("#{name} ordinary and incident step guards are incomplete")
+  end
+
+  {
+    "held_handoff_run_id" => "0",
+    "held_handoff_source_sha" => "none",
+    "incident_continuation_run_id" => "0",
+    "incident_continuation_authority_sha256" => "none",
+    "incident_continuation_control_sha" => "none",
+    "incident_continuation_journal_identity_sha256" => "none",
+    "incident_continuation_generation" => "0",
+    "incident_access_cleanup_lineage_json" => "[]"
+  }.each do |input, neutral|
     definition = workflow_dispatch_inputs(document)[input]
     unless definition.is_a?(Hash) && definition["type"] == "string" &&
            definition["required"] == true && definition["default"] == neutral
@@ -1333,14 +1394,32 @@ def validate_live_data_rollout_workflow!(file, document, content)
   phase = workflow_dispatch_inputs(document)["phase"]
   unless phase.is_a?(Hash) &&
          phase["type"] == "choice" &&
-         phase["options"] == %w[dry-run apply-backfills apply-slip-index]
-    fail_inventory("#{name} must expose only the three reviewed rollout phases")
+         phase["options"] == %w[
+           dry-run
+           apply-backfills
+           apply-slip-index
+           incident-restore
+         ]
+    fail_inventory("#{name} must expose only the four reviewed rollout phases")
   end
 
   {
     "DRY RUN LIVE DATA EXACT SHA" => "read-only confirmation",
     "APPLY LIVE BACKFILLS EXACT SHA" => "backfill confirmation",
     "APPLY LIVE SLIP INDEX EXACT SHA" => "index confirmation",
+    "RESTORE AUTHENTICATED HELD BASELINE EXACT SHA" =>
+      "bounded incident restoration confirmation",
+    "incident_manifest_stan.py" => "fixed incident manifest verification",
+    "verify-control-handoff" => "authenticated incident journal control handoff",
+    "adopt-active" => "authenticated active successor adoption",
+    "cleanup-lineage" => "bounded authority-linked access cleanup",
+    "access-cleanup-lineage.json" =>
+      "durable bounded access-cleanup obligation",
+    "access-lineage-cleanup.json" =>
+      "authenticated aggregate access-cleanup receipt",
+    "replace-expired-active" => "strict held-lock replacement",
+    "oci-live-data-incident-restore-${{ github.run_id }}-${{ github.run_attempt }}" =>
+      "non-deployable incident evidence",
     "RESUME APPLIED LIVE DATA EXACT SHA" => "failed-deploy resume confirmation",
     "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" =>
       "failed-activation cleanup confirmation",
@@ -1407,12 +1486,14 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "run-id" => "${{ steps.provenance_request.outputs.baseline_run_id }}"
   }
   expected_condition = [
+    "inputs.phase != 'incident-restore'",
     "inputs.failed_deploy_run_id != '0'",
     "inputs.failed_activation_run_id == '0'",
     "steps.provenance_request.outputs.resume_maintenance_mode != 'pre-runtime-hold'"
   ].join(" && ")
   unless steps.index(producer) < steps.index(download) &&
-         !producer.key?("if") && !producer.key?("continue-on-error") &&
+         producer["if"] == "inputs.phase != 'incident-restore'" &&
+         !producer.key?("continue-on-error") &&
          !download.key?("continue-on-error") &&
          download["uses"].to_s.start_with?("actions/download-artifact@") &&
          download["with"] == expected_download &&
@@ -1427,11 +1508,24 @@ def validate_live_data_rollout_workflow!(file, document, content)
   expected_validator = %w[
     ./infra/oci/scripts/upstream_run_binding_stan.py validate-all
     --repository $REPOSITORY --policy-json $policy_json --subject-sha $SOURCE_SHA
-    --dispatch-inputs $DISPATCH_INPUTS --runtime-mode $OCI_RUNTIME_MODE
+    --dispatch-inputs $ordinary_dispatch_inputs --runtime-mode $OCI_RUNTIME_MODE
     --result-json $RUNNER_TEMP/live-data-upstream-result.json
     --baseline-dir artifacts/oci-data-baseline-before
     ${continuation_args[@]}
   ]
+  sanitizer = <<~'SH'
+    ordinary_dispatch_inputs="$(
+      jq -c '
+        del(
+          .incident_continuation_run_id,
+          .incident_continuation_authority_sha256,
+          .incident_continuation_control_sha,
+          .incident_continuation_journal_identity_sha256,
+          .incident_continuation_generation
+        )
+      ' <<<"$DISPATCH_INPUTS"
+    )"
+  SH
   continuation = <<~'SH'
     continuation_args=()
     if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
@@ -1471,10 +1565,14 @@ def validate_live_data_rollout_workflow!(file, document, content)
     end
   end
   publication = script.match(/^\s*#{publisher_pattern}\s*$/)
+  sanitizer_pattern = sanitizer.split.map { |word| Regexp.escape(word) }.join('\s+')
+  sanitizer_binding = script.match(/^\s*#{sanitizer_pattern}\s*$/)
   unless commands.first == "set -euo pipefail" &&
          validator_calls.length == 1 &&
          continuation_binding &&
          continuation_binding.end(0) <= script.index("./infra/oci/scripts/upstream_run_binding_stan.py") &&
+         sanitizer_binding &&
+         sanitizer_binding.end(0) <= script.index("./infra/oci/scripts/upstream_run_binding_stan.py") &&
          publication &&
          publication.begin(0) > script.index("./infra/oci/scripts/upstream_run_binding_stan.py")
     fail_inventory(binding_error)

@@ -37,6 +37,44 @@ assert "revalidate_upstream_bindings approval-2" not in approval_text
 print("route_specific_approval_boundaries_share_sealed_history_proof=PASS")
 PY
 
+python3 -I - "$APPROVER" "$POLICY" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+policy = json.loads(subprocess.check_output(
+    [sys.argv[2], "get", "oci-live-data-incident-restore"], text=True
+))
+assert policy["upstreamRunBindings"] == []
+start = text.index("revalidate_upstream_bindings() {")
+function = text[start:text.index("\n}\n", start) + 3]
+assert function.index('operation" = "oci-live-data-incident-restore') < function.index(
+    '[[ "$bindings" != "[]" ]] || return 0'
+)
+assert "--current-run-id" in function
+assert "--result-json" in function
+assert ".currentRun.createdAtEpoch" in function
+assert ".currentRun.metadataSha256" in function
+assert ".dispatchInputs" in function
+continuation_start = text.index("validate_incident_continuation_authority() {")
+continuation = text[
+    continuation_start:text.index("\n}\n", continuation_start) + 3
+]
+assert "verify-incident-continuation" in continuation
+assert 'actions/runs/$predecessor_run_id' in continuation
+assert 'EXCLUDE_RUN_ID="$RUN_ID"' in continuation
+assert "production_run_exclusivity=PASS" in continuation
+post_claim = text[text.index("if ! approval_revalidation_error="):]
+release = post_claim.index('"$AUTHORITY_HELPER" release-approval')
+failure = post_claim.index('fail "$approval_revalidation_error"')
+post = post_claim.index("--method POST")
+assert release < failure < post
+assert "revalidate_upstream_bindings approval-3" in post_claim[:release]
+print("incident_manifest_approval_prerequisite=PASS empty_upstream=true drift_releases_claim=true continuation=true")
+PY
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-approval-test.XXXXXX")"
 chmod 700 "$tmp_dir"
 authority_dir="$tmp_dir/authority"
@@ -217,8 +255,8 @@ assert dispatched.returncode == 0, dispatched.stderr
 assert "authority_state=issued" in dispatched.stdout
 assert "job_gate_materialization=UNPROVEN" in dispatched.stdout
 approved = run(approver, "7001", "--approve")
-assert approved.returncode == 0, approved.stderr
-assert "status=APPROVED" in approved.stdout
+assert approved.returncode == 0, approved.stdout + approved.stderr
+assert "status=APPROVED" in approved.stdout, approved.stdout + approved.stderr
 waiting = run(approver, "7001", "--approve")
 assert waiting.returncode == 3, waiting.stderr
 assert "status=WAIT" in waiting.stdout and "reason=approved-provider" in waiting.stdout
@@ -2477,6 +2515,7 @@ for name in policy["objectIdOrLiterals"]:
 for name, forbidden in policy["forbiddenInputValues"].items():
     if inputs[name] in forbidden:
         inputs[name] = "approved-test-reason"
+inputs.update(policy["fixedInputs"])
 
 subject_sha = None
 if policy["subjectInput"]:
@@ -2850,7 +2889,14 @@ while IFS= read -r operation; do
   fi
 done < <(
   "$POLICY" all |
-    jq -r '.[] | select(.authority == "dispatch-record") | .operation'
+    jq -r '
+      .[] |
+      select(
+        .authority == "dispatch-record" and
+        .operation != "oci-live-data-incident-restore"
+      ) |
+      .operation
+    '
 )
 
 partial_recovery_dispatch_run=8901

@@ -10,6 +10,10 @@ TESTS_DIR="$ROOT_DIR/infra/oci/tests"
 # Deterministic suite order
 suites=(
   "$TESTS_DIR/test-contract.sh"
+  "$TESTS_DIR/test_incident_manifest_stan.py"
+  "$TESTS_DIR/test-incident-restore-state-stan.sh"
+  "$TESTS_DIR/test-incident-access-stan.sh"
+  "$TESTS_DIR/test-incident-restore-workflow-stan.sh"
   "$TESTS_DIR/test-service-ops-stan.sh"
   "$TESTS_DIR/test-install-cli-stan.sh"
   "$TESTS_DIR/test-agent-governance-contract.sh"

@@ -360,6 +360,34 @@ skip, force, or bypass switch, and standard rollback behaviour is unchanged. A
 generation that failed its own deployment is never an accepted rollback
 baseline.
 
+### Exceptional fixed-manifest incident restoration
+
+`oci-live-data-incident-restore` is an exceptional, incident-specific path for
+the single held baseline fixed in `infra/oci/incident/manifest.json`. It is not
+a normal release, rollback, deploy, activation, build, or trusted-CI bypass.
+Do not add caller-selected manifests, digests, runs, artifacts, search,
+pagination, or provider-history traversal. The bounded
+`incident_manifest_stan.py` verifier must prove the exact finite evidence,
+current-control ancestry, and unchanged image inputs at the existing dispatcher
+and approver prerequisite boundaries before any intent, claim, or authority can
+be issued. Approval and workflow verification must also bind the exact
+attempt-one current-run metadata digest and immutable GitHub `created_at`.
+Takeover is allowed only when that creation epoch is strictly after the exact
+preimage lease cutoff; immediately before CAS, bind a fresh exact-run GitHub
+response `Date` and derive the new lease from that provider epoch. Runner wall
+clock never grants incident takeover authority.
+
+Continuation is permitted only from the exact first-attempt terminal failed or
+cancelled predecessor and its issued or consumed authority. One protected
+successor generation may win; a descendant control additionally requires the
+exact journal-control handoff with unchanged manifest and image inputs. Persist
+and classify exact lock/fence/publication phases rather than replaying the
+takeover CAS. Every generation must inherit the complete authority-linked,
+maximum-32-entry OKE/k3s access-cleanup lineage, append its immediate
+predecessor even when that predecessor opened no resource, reconcile all exact
+obligations oldest-first, preserve unrelated resources, and refuse terminal
+success while any obligation remains.
+
 ## Production safety
 
 Merging to `master` runs validation, then queues the first-attempt image build for approval through the master-only `production-emergency` environment. Production never deploys automatically. After the build succeeds, dispatch `production-deploy` from `master` with the exact full SHA and build run ID; the same environment requires a second approval. The workflow validates all nine build artifacts and deploys immutable tag-plus-digest image references. Rerun builds are not deployable, and retired workflow identities remain disabled.
