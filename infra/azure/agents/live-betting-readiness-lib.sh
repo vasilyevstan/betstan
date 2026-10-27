@@ -1039,6 +1039,7 @@ for service, image_ref, platform_digest in image_rows:
     if actual_image != image_ref:
         raise SystemExit(f"deployment {deployment_name} image does not match provenance")
     pods_for_app = pod_items_by_app.get(container_name, [])
+    ready_pods = 0
     ready_digest_pods = 0
     for pod in pods_for_app:
         for status_entry in (pod.get("status") or {}).get("containerStatuses") or []:
@@ -1054,13 +1055,14 @@ for service, image_ref, platform_digest in image_rows:
             if (
                 status_entry.get("name") == container_name
                 and status_entry.get("ready") is True
-                and observed_digest == platform_digest
             ):
-                ready_digest_pods += 1
-    if ready_digest_pods < 1:
+                ready_pods += 1
+                if observed_digest == platform_digest:
+                    ready_digest_pods += 1
+    if ready_digest_pods < replicas or ready_digest_pods != ready_pods:
         raise SystemExit(
-            f"deployment {deployment_name} has no ready pod whose imageID "
-            "matches the authenticated platform digest"
+            f"deployment {deployment_name} has a ready pod whose imageID "
+            "does not match the authenticated platform digest"
         )
 
 gamemaster = workloads_by_name.get("gaming-gamemaster-depl")

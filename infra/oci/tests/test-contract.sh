@@ -2495,7 +2495,8 @@ for path, expected_count in zip(map(Path, sys.argv[1:]), (2, 1)):
     access_starts = [
         match.start()
         for match in re.finditer(
-            "      - name: Open ephemeral OCI Bastion access to k3s",
+            "      - name: Open ephemeral(?: incident)? "
+            "OCI Bastion access to k3s",
             workflow,
         )
     ]
@@ -2515,7 +2516,8 @@ for path, expected_count in zip(map(Path, sys.argv[1:]), (2, 1)):
     cleanup_starts = [
         match.start()
         for match in re.finditer(
-            "      - name: Close ephemeral OCI Bastion access",
+            "      - name: Close ephemeral(?: incident)? "
+            "OCI Bastion access",
             workflow,
         )
     ]

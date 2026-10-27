@@ -1568,8 +1568,6 @@ if mutation in {"commented-validator", "wrong-policy", "both-successor-bindings"
     end = text.index("\n      - name:", start + 1)
     prefix, text, suffix = text[:start], text[start:end], text[end:]
 expected_count = 2 if mutation == "both-successor-bindings" else 1
-if mutation == "duplicate-producer":
-    expected_count = 2
 assert text.count(old) == expected_count, (mutation, text.count(old))
 text = text.replace(old, new, 1) if mutation == "duplicate-producer" else text.replace(old, new)
 if mutation == "successor-binding":

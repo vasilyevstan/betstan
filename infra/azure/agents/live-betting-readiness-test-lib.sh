@@ -180,12 +180,15 @@ if [[ "$args" == *"get deploy,sts"* ]]; then
     "$IMAGE_PROVENANCE_FILE" \
     "${STUB_FLAG_VALUE:-false}" \
     "${STUB_FLAG_MISSING:-0}" \
-    "${STUB_WORKLOAD_IMAGE_DRIFT:-}" <<'PY'
+    "${STUB_WORKLOAD_IMAGE_DRIFT:-}" \
+    "${STUB_MULTI_REPLICA_SERVICE:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-images_path, flag_value, flag_missing, drift_service = sys.argv[1:]
+images_path, flag_value, flag_missing, drift_service, multi_replica_service = (
+    sys.argv[1:]
+)
 items = []
 rows = []
 for raw_line in Path(images_path).read_text(encoding='utf-8').splitlines():
@@ -199,15 +202,19 @@ for service, image_ref in rows:
     env = []
     if service == 'gamemaster' and flag_missing != '1':
         env.append({'name': 'LIVE_KICKOFFS_ENABLED', 'value': flag_value})
+    replicas = 2 if service == multi_replica_service else 1
     items.append({
         'apiVersion': 'apps/v1',
         'kind': 'Deployment',
         'metadata': {'name': f'gaming-{service}-depl'},
         'spec': {
-            'replicas': 1,
+            'replicas': replicas,
             'template': {'spec': {'containers': [{'name': f'gaming-{service}', 'image': image_ref, 'env': env}]}}
         },
-        'status': {'readyReplicas': 1, 'availableReplicas': 1},
+        'status': {
+            'readyReplicas': replicas,
+            'availableReplicas': replicas,
+        },
     })
 items.append({
     'apiVersion': 'apps/v1',
@@ -278,7 +285,9 @@ if [[ "$args" == *"get pods"* ]]; then
   python3 - \
     "$IMAGE_PROVENANCE_FILE" \
     "${STUB_TOPOLOGY_MODE:-shared}" \
-    "${STUB_POD_IMAGE_DIGEST_MISMATCH_SERVICE:-}" <<'PY'
+    "${STUB_POD_IMAGE_DIGEST_MISMATCH_SERVICE:-}" \
+    "${STUB_MULTI_REPLICA_SERVICE:-}" \
+    "${STUB_MIXED_POD_DIGEST_SERVICE:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -286,6 +295,8 @@ from pathlib import Path
 images_path = Path(sys.argv[1])
 topology_mode = sys.argv[2]
 mismatch_service = sys.argv[3]
+multi_replica_service = sys.argv[4]
+mixed_digest_service = sys.argv[5]
 items = []
 for raw_line in images_path.read_text(encoding='utf-8').splitlines():
     if not raw_line.strip():
@@ -293,16 +304,24 @@ for raw_line in images_path.read_text(encoding='utf-8').splitlines():
     parts = raw_line.split('\t')
     service, _repository, image_ref, digest = parts[:4]
     platform_digest = parts[4] if len(parts) >= 5 else digest
-    if service == mismatch_service:
-        platform_digest = "sha256:" + ("0" * 64)
-    runtime_image = image_ref.rsplit("@", 1)[0] + "@" + platform_digest
     name = f'gaming-{service}'
-    items.append({
-        'metadata': {'name': f'{name}-pod-0', 'labels': {'app': name}},
-        'status': {'containerStatuses': [{
-            'name': name, 'ready': True, 'imageID': runtime_image
-        }]},
-    })
+    replicas = 2 if service == multi_replica_service else 1
+    for replica in range(replicas):
+        runtime_digest = platform_digest
+        if service == mismatch_service or (
+            service == mixed_digest_service and replica == replicas - 1
+        ):
+            runtime_digest = "sha256:" + ("0" * 64)
+        runtime_image = image_ref.rsplit("@", 1)[0] + "@" + runtime_digest
+        items.append({
+            'metadata': {
+                'name': f'{name}-pod-{replica}',
+                'labels': {'app': name},
+            },
+            'status': {'containerStatuses': [{
+                'name': name, 'ready': True, 'imageID': runtime_image
+            }]},
+        })
 items.append({
     'metadata': {'name': 'gaming-rabbitmq-pod-0', 'labels': {'app': 'gaming-rabbitmq'}},
     'status': {'containerStatuses': [{'name': 'gaming-rabbitmq', 'ready': True, 'imageID': 'docker.io/library/rabbitmq@sha256:' + ('f' * 64)}]},

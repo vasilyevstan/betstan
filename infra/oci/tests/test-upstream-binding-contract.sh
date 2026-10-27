@@ -38,11 +38,17 @@ ok() {
 }
 
 ensure_historical_reader_blobs() {
-  local blob missing=false
+  local blob fixture_commit missing=false
   local -a blobs=(
     2900c649bdb3b529d357a4df274482295695c8cd
     d5afe224080abecda336f1b3d190c83674835ebf
     b587fa03960422a0a73e3dd65b955a3a716c5480
+    27a98e345050fefb799c706fde03d8f79e14ed6c
+    1752489383424fa4bd55bbc7d36e4cac95e14d31
+  )
+  local -a fixture_commits=(
+    e524317441d29ddd06ef3196e030442979600eb1
+    2a632ebe47c3250c26081a23113fd95390afe912
   )
   for blob in "${blobs[@]}"; do
     git -C "$ROOT_DIR" cat-file -e "$blob^{blob}" 2>/dev/null || missing=true
@@ -50,9 +56,12 @@ ensure_historical_reader_blobs() {
   if [[ "$missing" == true ]]; then
     [[ "$(git -C "$ROOT_DIR" rev-parse --is-shallow-repository)" == true ]] ||
       fail "historical reader blobs are missing from a complete repository"
-    git -C "$ROOT_DIR" fetch --quiet --no-tags --deepen=1 \
-      origin "$(git -C "$ROOT_DIR" rev-parse HEAD)" ||
-      fail "could not deepen the shallow checkout for historical reader fixtures"
+    for fixture_commit in "${fixture_commits[@]}"; do
+      git -C "$ROOT_DIR" cat-file -e "$fixture_commit^{commit}" 2>/dev/null ||
+        git -C "$ROOT_DIR" fetch --quiet --no-tags --depth=1 \
+          origin "$fixture_commit" ||
+        fail "could not fetch pinned historical reader fixture $fixture_commit"
+    done
   fi
   for blob in "${blobs[@]}"; do
     git -C "$ROOT_DIR" cat-file -e "$blob^{blob}" 2>/dev/null ||

@@ -1521,7 +1521,8 @@ def validate_live_data_rollout_workflow!(file, document, content)
           .incident_continuation_authority_sha256,
           .incident_continuation_control_sha,
           .incident_continuation_journal_identity_sha256,
-          .incident_continuation_generation
+          .incident_continuation_generation,
+          .incident_access_cleanup_lineage_json
         )
       ' <<<"$DISPATCH_INPUTS"
     )"
