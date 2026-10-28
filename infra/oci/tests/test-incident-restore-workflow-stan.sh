@@ -256,6 +256,14 @@ incident_text = incident_steps.to_s
 unless incident_text.include?('([A-Za-z][A-Za-z0-9_]*)=')
   fail_contract("incident infrastructure provenance rejects uppercase keys")
 end
+access_cleanup = incident_steps.find do |step|
+  step["name"] == "Reconcile bounded incident access-cleanup lineage"
+end.fetch("run").to_s
+unless access_cleanup.include?(
+  "mkdir -p artifacts/oci-live-data-incident-restore"
+)
+  fail_contract("incident access cleanup does not create its artifact directory")
+end
 for forbidden in [
   "upstream_run_binding_stan.py",
   "/actions/runs?",
