@@ -2643,6 +2643,7 @@ jobs:
           OCI_BASTION_OCID: ${{ steps.infrastructure.outputs.bastion_ocid }}
         run: |
           set -euo pipefail
+          mkdir -p artifacts/oci-live-data-incident-restore
           printf '%s\n' "$INCIDENT_ACCESS_CLEANUP_LINEAGE_JSON" \
             > artifacts/oci-live-data-incident-restore/access-cleanup-lineage.json
           chmod 600 \
