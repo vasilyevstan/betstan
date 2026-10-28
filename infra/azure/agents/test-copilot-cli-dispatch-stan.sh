@@ -61,13 +61,20 @@ post_claim = main[main.index('"$AUTHORITY_HELPER" claim-request'):]
 assert post_claim.index("validate_protected_prerequisites") < post_claim.index(
     '"$AUTHORITY_HELPER" cancel-intent'
 )
-candidate = main.index("incident-continuation-candidate")
+collector_start = text.index("collect_incident_continuation() {")
+collector = text[collector_start:text.index("\n}\n", collector_start) + 3]
+assert "incident-continuation-candidate" in collector
+assert 'actions/runs/$incident_predecessor_run_id' in collector
+assert "--incident-predecessor-run-json" in collector
+assert "--incident-exclusivity-json" in collector
+candidate = main.index("collect_incident_continuation")
 blocking = main.index('"$AUTHORITY_HELPER" blocking-record')
 claim = main.index('"$AUTHORITY_HELPER" claim-request')
 assert candidate < blocking < claim
-assert 'actions/runs/$incident_predecessor_run_id' in main
-assert "--incident-predecessor-run-json" in main
-assert "--incident-exclusivity-json" in main
+prepare = main[main.index('elif [[ "$ACTION" = "--prepare-disabled-ghosts" ]]'):]
+assert prepare.index("collect_incident_continuation") < prepare.index(
+    "prepared_checkpoint prepare-disabled-ghosts"
+)
 assert "continuationInputs" in main
 assert "gh run rerun" not in main
 assert "incident_manifest_stan.py" in text

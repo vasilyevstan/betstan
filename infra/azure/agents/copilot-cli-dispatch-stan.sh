@@ -287,6 +287,47 @@ os.chmod(path, 0o600)
 PY
 }
 
+incident_continuation=""
+incident_predecessor_run_id=""
+incident_predecessor_state=""
+incident_claim_args=()
+
+collect_incident_continuation() {
+  [[ "$operation" = "oci-live-data-incident-restore" ]] || return 0
+  incident_continuation="$(
+    "$AUTHORITY_HELPER" incident-continuation-candidate \
+      --normalized "$normalized_file" \
+      --policy-json "$policy_json" \
+      --repository "$repository" \
+      --current-master "$current_master" \
+      --workflow-id "$workflow_id" \
+      --workflow-blob-sha "$workflow_blob_sha" \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR"
+  )"
+  [[ -n "$incident_continuation" ]] || return 0
+  incident_predecessor_run_id="$(
+    jq -er '.predecessorRunId | tostring |
+      select(test("^[1-9][0-9]*$"))' <<<"$incident_continuation"
+  )" || fail "incident continuation candidate run ID is invalid"
+  incident_predecessor_state="$(
+    jq -er '.predecessorAuthorityState |
+      select(. == "issued" or . == "consumed")' \
+      <<<"$incident_continuation"
+  )" || fail "incident continuation candidate state is invalid"
+  gh api \
+    "repos/$repository/actions/runs/$incident_predecessor_run_id" \
+    >"$incident_predecessor_run_file" ||
+    fail "unable to read the exact incident continuation predecessor run"
+  chmod 600 "$incident_predecessor_run_file"
+  validate_production_exclusivity \
+    "$incident_exclusivity_file" "$incident_predecessor_run_id"
+  incident_claim_args=(
+    --incident-predecessor-run-json "$incident_predecessor_run_file"
+    --incident-exclusivity-json "$incident_exclusivity_file"
+  )
+}
+
 collect_zero_execution() {
   local destination="$1" count attempt
   gh api "repos/$repository/actions/workflows/$workflow" >"$zero_workflow_file"
@@ -1579,7 +1620,10 @@ if [[ "$ACTION" = "--dispatch-prepared" ]]; then
   )"
 elif [[ "$ACTION" = "--prepare-disabled-ghosts" ]]; then
   validate_protected_prerequisites
-  prepared_checkpoint prepare-disabled-ghosts disabled_manually --owner-pid "$$"
+  collect_incident_continuation
+  prepared_checkpoint prepare-disabled-ghosts disabled_manually \
+    --owner-pid "$$" \
+    ${incident_claim_args[@]+"${incident_claim_args[@]}"}
   printf 'dispatch=PREPARED authority_state=prepared next_action=external-enable\n'
   exit 0
 else
@@ -1592,39 +1636,7 @@ printf 'dispatch=READY operation=%s workflow=%s environment=%s control_sha=%s in
 [[ "$ACTION" = "--dispatch" || "$ACTION" = "--dispatch-prepared" ]] || exit 0
 
 if [[ "$ACTION" = "--dispatch" ]]; then
-incident_continuation=""
-incident_predecessor_run_id=""
-incident_predecessor_state=""
-incident_claim_args=()
-if [[ "$operation" = "oci-live-data-incident-restore" ]]; then
-  incident_continuation="$(
-    "$AUTHORITY_HELPER" incident-continuation-candidate \
-      --normalized "$normalized_file" \
-      --policy-json "$policy_json" \
-      --repository "$repository" \
-      --current-master "$current_master" \
-      --workflow-id "$workflow_id" \
-      --workflow-blob-sha "$workflow_blob_sha" \
-      --authority-dir "$AUTHORITY_DIR" \
-      --repo-root "$ROOT_DIR"
-  )"
-  if [[ -n "$incident_continuation" ]]; then
-    incident_predecessor_run_id="$(
-      jq -er '.predecessorRunId | tostring | select(test("^[1-9][0-9]*$"))' \
-        <<<"$incident_continuation"
-    )" || fail "incident continuation candidate run ID is invalid"
-    incident_predecessor_state="$(
-      jq -er '.predecessorAuthorityState |
-        select(. == "issued" or . == "consumed")' \
-        <<<"$incident_continuation"
-    )" || fail "incident continuation candidate state is invalid"
-    gh api \
-      "repos/$repository/actions/runs/$incident_predecessor_run_id" \
-      >"$incident_predecessor_run_file" ||
-      fail "unable to read the exact incident continuation predecessor run"
-    chmod 600 "$incident_predecessor_run_file"
-  fi
-fi
+collect_incident_continuation
 blocking_record="$(
   "$AUTHORITY_HELPER" blocking-record \
     --normalized "$normalized_file" \
@@ -1641,14 +1653,7 @@ if [[ -n "$blocking_record" ]]; then
 fi
 
 revalidate_dispatch_target
-if [[ -n "$incident_continuation" ]]; then
-  validate_production_exclusivity \
-    "$incident_exclusivity_file" "$incident_predecessor_run_id"
-  incident_claim_args=(
-    --incident-predecessor-run-json "$incident_predecessor_run_file"
-    --incident-exclusivity-json "$incident_exclusivity_file"
-  )
-else
+if [[ -z "$incident_continuation" ]]; then
   validate_production_exclusivity
 fi
 revalidate_dispatch_target
@@ -1671,13 +1676,6 @@ if [[ "$(jq -r '.created' <<<"$intent_summary")" != "true" ]]; then
 fi
 capture_path="$(jq -r '.capturePath' <<<"$intent_summary")"
 intent_version="$(jq -r '.version' <<<"$intent_summary")"
-continuation_inputs="$(jq -c '.continuationInputs // {}' <<<"$intent_summary")"
-if [[ "$continuation_inputs" != "{}" ]]; then
-  jq --argjson continuation "$continuation_inputs" \
-    '. + $continuation' "$inputs_file" >"$incident_inputs_file"
-  chmod 600 "$incident_inputs_file"
-  mv "$incident_inputs_file" "$inputs_file"
-fi
 
 if ! dispatch_revalidation_error="$(
   {
@@ -1708,6 +1706,14 @@ else
     fail "prepared CAS did not claim dispatch authority"
   capture_path="$(jq -r '.capturePath' <<<"$intent_summary")"
   intent_version="$(jq -r '.version' <<<"$intent_summary")"
+fi
+
+continuation_inputs="$(jq -c '.continuationInputs // {}' <<<"$intent_summary")"
+if [[ "$continuation_inputs" != "{}" ]]; then
+  jq --argjson continuation "$continuation_inputs" \
+    '. + $continuation' "$inputs_file" >"$incident_inputs_file"
+  chmod 600 "$incident_inputs_file"
+  mv "$incident_inputs_file" "$inputs_file"
 fi
 
 set +e
