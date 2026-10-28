@@ -3576,7 +3576,7 @@ def build_incident_continuation(
     ):
         fail("consumed incident predecessor lacks its exact approval receipt")
     selected, lineage_predecessors = incident_continuation_resolution(
-        directory, normalized, args.repo_root
+        directory, normalized, getattr(args, "repo_root", None)
     )
     if (
         selected is None
@@ -3725,7 +3725,7 @@ def claim_request_under_lock(
     continuation = None
     predecessor = (
         incident_continuation_candidate(
-            directory, normalized, args.repo_root
+            directory, normalized, getattr(args, "repo_root", None)
         )
     )
     if predecessor is not None:
@@ -3804,7 +3804,7 @@ def claim_request_under_lock(
             )
             return
     blocking_matches = find_blocking_authorities(
-        directory, normalized, args.repo_root
+        directory, normalized, getattr(args, "repo_root", None)
     )
     if continuation is not None:
         blocking_matches = [
@@ -4017,7 +4017,7 @@ def command_prepare_disabled_ghosts(args):
         # A repeated prepare must never renew a prepared generation. Only an
         # exact retired bound record can admit a distinct, newly sealed one.
         if find_blocking_authorities(
-            directory, normalized, args.repo_root
+            directory, normalized, getattr(args, "repo_root", None)
         ):
             fail("prepared request is blocked by existing repository authority")
         special_request(args, policy, normalized)
@@ -4080,7 +4080,7 @@ def verify_prepared_checkpoint(args, *, dispatch):
         ):
             fail("prepared sealed request/policy/inventory/evidence drift")
         blockers = find_blocking_authorities(
-            directory, normalized, args.repo_root
+            directory, normalized, getattr(args, "repo_root", None)
         )
         if blockers != [(f"intent:{key}", "prepared")]:
             fail("prepared intent no longer owns repository exclusivity")
@@ -4392,7 +4392,7 @@ def command_retire_zero_execution(args):
             policy, args.repository, record["controlSha"],
         )
         if find_blocking_authorities(
-            directory, normalized, args.repo_root
+            directory, normalized, getattr(args, "repo_root", None)
         ) != [
             (f"intent:{key}", "bound"), (str(record["runId"]), "consumed"),
         ]:
@@ -5032,7 +5032,7 @@ def command_retire_preflight_read(args):
             policy, args.repository, record["controlSha"],
         )
         if find_blocking_authorities(
-            directory, normalized, args.repo_root
+            directory, normalized, getattr(args, "repo_root", None)
         ) != [
             (f"intent:{key}", "bound"), (str(record["runId"]), "consumed"),
         ]:
