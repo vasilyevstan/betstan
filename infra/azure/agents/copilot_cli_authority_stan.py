@@ -890,7 +890,27 @@ def validate_incident_access_cleanup_lineage(
     return normalized
 
 
-def build_incident_access_cleanup_lineage(predecessor):
+def build_incident_access_cleanup_lineage(
+    predecessor, *, lineage_predecessors=None
+):
+    if lineage_predecessors and len(lineage_predecessors) > 1:
+        if (
+            lineage_predecessors[-1] != predecessor
+            or any(
+                record["schemaVersion"] != RECORD_SCHEMA_V1
+                for record in lineage_predecessors
+            )
+        ):
+            fail("incident legacy continuation lineage is invalid")
+        return [
+            {
+                "runId": int(record["runId"]),
+                "controlSha": record["controlSha"],
+                "authorityGeneration": generation,
+                "authoritySha256": evidence_digest(record),
+            }
+            for generation, record in enumerate(lineage_predecessors)
+        ]
     if predecessor.get("schemaVersion") == RECORD_SCHEMA_V6:
         predecessor_continuation = predecessor.get("continuation")
         if not isinstance(predecessor_continuation, dict):
@@ -926,6 +946,64 @@ def build_incident_access_cleanup_lineage(predecessor):
             "authoritySha256": evidence_digest(predecessor),
         },
     ]
+
+
+def validate_collapsed_legacy_incident_lineage(
+    directory, record, predecessor, continuation, stack
+):
+    lineage = continuation["accessCleanupLineage"]
+    if (
+        predecessor["schemaVersion"] != RECORD_SCHEMA_V1
+        or len(lineage) <= 1
+        or continuation["generation"] != len(lineage)
+        or lineage[-1]["runId"] != int(predecessor["runId"])
+    ):
+        return None
+    authorities = [
+        load_record(directory, item["runId"], _stack=stack)
+        for item in lineage
+    ]
+    if (
+        authorities[-1] != predecessor
+        or len({authority["controlSha"] for authority in authorities})
+        != len(authorities)
+        or any(
+            authority["schemaVersion"] != RECORD_SCHEMA_V1
+            or authority["operation"] != INCIDENT_OPERATION
+            or authority["state"] != "consumed"
+            or authority["runAttempt"] != 1
+            or authority["inflightApproval"] is not None
+            or authority["repository"] != record["repository"]
+            or authority["workflow"] != record["workflow"]
+            or authority["event"] != record["event"]
+            or authority["environment"] != record["environment"]
+            or incident_lineage_inputs(authority["inputs"])
+            != incident_lineage_inputs(record["inputs"])
+            or not any(
+                receipt["operation"] == INCIDENT_OPERATION
+                and str(receipt["runId"]) == str(authority["runId"])
+                for receipt in authority["approvals"]
+            )
+            for authority in authorities
+        )
+        or any(
+            int(earlier["runId"]) >= int(later["runId"])
+            for earlier, later in zip(authorities, authorities[1:])
+        )
+    ):
+        fail("incident collapsed legacy authority lineage differs")
+    expected = [
+        {
+            "runId": int(authority["runId"]),
+            "controlSha": authority["controlSha"],
+            "authorityGeneration": generation,
+            "authoritySha256": evidence_digest(authority),
+        }
+        for generation, authority in enumerate(authorities)
+    ]
+    if lineage != expected:
+        fail("incident collapsed legacy access-cleanup lineage differs")
+    return expected
 
 
 def validate_incident_continuation_shape(continuation):
@@ -1544,11 +1622,14 @@ def require_digest(value, label):
 
 
 def immutable_intent_digest(intent):
-    return evidence_digest({
+    immutable = {
         name: intent[name] for name in INTENT_KEYS - {
             "state", "version", "ownerPid", "dispatchStatus", "runId", "runUrl",
         }
-    })
+    }
+    if "continuation" in intent:
+        immutable["continuation"] = intent["continuation"]
+    return evidence_digest(immutable)
 
 
 def validate_prepared_seal(intent):
@@ -1627,6 +1708,8 @@ def load_intent_file(path, key):
     schema = intent.get("schemaVersion")
     if schema == PREPARED_INTENT_SCHEMA:
         expected_keys = INTENT_KEYS | {"preparedSeal"}
+        if "continuation" in intent:
+            expected_keys |= {"continuation"}
     elif schema == INCIDENT_CONTINUATION_INTENT_SCHEMA:
         expected_keys = CONTINUATION_INTENT_KEYS
     else:
@@ -1639,7 +1722,9 @@ def load_intent_file(path, key):
         INCIDENT_CONTINUATION_INTENT_SCHEMA,
     }:
         fail("dispatch intent schema version is unsupported")
-    if schema == INCIDENT_CONTINUATION_INTENT_SCHEMA:
+    if schema == INCIDENT_CONTINUATION_INTENT_SCHEMA or (
+        schema == PREPARED_INTENT_SCHEMA and "continuation" in intent
+    ):
         validate_incident_continuation_shape(intent["continuation"])
         if intent["operation"] != INCIDENT_OPERATION:
             fail("incident continuation intent operation is invalid")
@@ -1723,7 +1808,7 @@ def verify_intent(
     for name, value in expected.items():
         if intent[name] != value:
             fail(f"dispatch intent {name} mismatch")
-    if intent["schemaVersion"] == INCIDENT_CONTINUATION_INTENT_SCHEMA:
+    if "continuation" in intent:
         continuation = validate_incident_continuation_shape(
             intent["continuation"]
         )
@@ -2132,10 +2217,19 @@ def load_record(directory, run_id, _stack=None):
         predecessor = load_record(
             directory, predecessor_run_id, _stack=stack
         )
+        collapsed_legacy_lineage = (
+            validate_collapsed_legacy_incident_lineage(
+                directory, record, predecessor, continuation, stack
+            )
+        )
         expected_generation = (
-            predecessor["continuation"]["generation"] + 1
-            if predecessor["schemaVersion"] == RECORD_SCHEMA_V6
-            else 1
+            len(collapsed_legacy_lineage)
+            if collapsed_legacy_lineage is not None
+            else (
+                predecessor["continuation"]["generation"] + 1
+                if predecessor["schemaVersion"] == RECORD_SCHEMA_V6
+                else 1
+            )
         )
         if continuation["generation"] != expected_generation:
             fail("incident continuation generation is not sequential")
@@ -2166,7 +2260,9 @@ def load_record(directory, run_id, _stack=None):
         ):
             fail("incident continuation predecessor authority differs")
         expected_access_cleanup_lineage = (
-            build_incident_access_cleanup_lineage(predecessor)
+            collapsed_legacy_lineage
+            if collapsed_legacy_lineage is not None
+            else build_incident_access_cleanup_lineage(predecessor)
         )
         if (
             continuation["accessCleanupLineage"]
@@ -3256,9 +3352,67 @@ def command_write_inputs(args):
         raise
 
 
-def incident_continuation_candidate(directory, normalized):
+def git_is_ancestor(repo_root, ancestor, descendant):
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(repo_root), "merge-base",
+                "--is-ancestor", ancestor, descendant,
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        fail("incident continuation control ancestry is unavailable")
+    if result.returncode not in {0, 1}:
+        fail("incident continuation control ancestry is unavailable")
+    return result.returncode == 0
+
+
+def order_legacy_incident_leaves(leaves, repo_root):
+    if not leaves:
+        return []
+    if repo_root is None:
+        fail("incident continuation control ancestry is unavailable")
+    if any(
+        record["schemaVersion"] != RECORD_SCHEMA_V1
+        or record["state"] != "consumed"
+        or record["inflightApproval"] is not None
+        or not any(
+            receipt["operation"] == INCIDENT_OPERATION
+            and str(receipt["runId"]) == str(record["runId"])
+            for receipt in record["approvals"]
+        )
+        for record in leaves
+    ):
+        fail("incident continuation authority lineage is ambiguous")
+    ordered = sorted(
+        leaves,
+        key=lambda record: (
+            parse_utc(record["createdAt"], "authority creation time"),
+            int(record["runId"]),
+        ),
+    )
+    if len({record["controlSha"] for record in ordered}) != len(ordered):
+        fail("incident continuation authority lineage is ambiguous")
+    for earlier, later in zip(ordered, ordered[1:]):
+        if (
+            int(earlier["runId"]) >= int(later["runId"])
+            or not git_is_ancestor(
+                repo_root, earlier["controlSha"], later["controlSha"]
+            )
+        ):
+            fail("incident continuation authority lineage is ambiguous")
+    return ordered
+
+
+def incident_continuation_resolution(
+    directory, normalized, repo_root=None
+):
     if normalized["operation"] != INCIDENT_OPERATION:
-        return None
+        return None, []
     eligible = []
     referenced = set()
     for candidate in sorted(directory.glob("*.json")):
@@ -3278,6 +3432,10 @@ def incident_continuation_candidate(directory, normalized):
             continue
         if record["schemaVersion"] == RECORD_SCHEMA_V6:
             referenced.add(str(record["continuation"]["predecessorRunId"]))
+            referenced.update(
+                str(item["runId"])
+                for item in record["continuation"]["accessCleanupLineage"]
+            )
         if (
             record["state"] in {"issued", "consumed"}
             and incident_lineage_inputs(record["inputs"])
@@ -3290,10 +3448,20 @@ def incident_continuation_candidate(directory, normalized):
         if str(record["runId"]) not in referenced
     ]
     if not eligible:
-        return None
-    if len(leaves) != 1:
-        fail("incident continuation authority lineage is ambiguous")
-    return leaves[0]
+        return None, []
+    if len(leaves) == 1:
+        return leaves[0], leaves
+    ordered = order_legacy_incident_leaves(leaves, repo_root)
+    return ordered[-1], ordered
+
+
+def incident_continuation_candidate(
+    directory, normalized, repo_root=None
+):
+    candidate, _ = incident_continuation_resolution(
+        directory, normalized, repo_root
+    )
+    return candidate
 
 
 def load_incident_predecessor_run(path, predecessor):
@@ -3407,6 +3575,24 @@ def build_incident_continuation(
         for receipt in predecessor["approvals"]
     ):
         fail("consumed incident predecessor lacks its exact approval receipt")
+    selected, lineage_predecessors = incident_continuation_resolution(
+        directory, normalized, args.repo_root
+    )
+    if (
+        selected is None
+        or evidence_digest(selected) != evidence_digest(predecessor)
+    ):
+        fail("incident continuation predecessor changed")
+    for lineage_predecessor in lineage_predecessors:
+        verify_record(
+            lineage_predecessor,
+            policy,
+            args.repository,
+            lineage_predecessor["controlSha"],
+            lineage_predecessor["workflowId"],
+            lineage_predecessor["workflowBlobSha"],
+            retirement_only=True,
+        )
     predecessor_run = load_incident_predecessor_run(
         args.incident_predecessor_run_json, predecessor
     )
@@ -3421,14 +3607,11 @@ def build_incident_continuation(
         normalized,
         predecessor["runId"],
     )
-    generation = (
-        predecessor["continuation"]["generation"] + 1
-        if predecessor["schemaVersion"] == RECORD_SCHEMA_V6
-        else 1
-    )
     access_cleanup_lineage = build_incident_access_cleanup_lineage(
-        predecessor
+        predecessor,
+        lineage_predecessors=lineage_predecessors,
     )
+    generation = len(access_cleanup_lineage)
     continuation = {
         "schemaVersion": INCIDENT_CONTINUATION_SCHEMA,
         "generation": generation,
@@ -3541,9 +3724,9 @@ def claim_request_under_lock(
     spent_intent = None
     continuation = None
     predecessor = (
-        incident_continuation_candidate(directory, normalized)
-        if prepared is None
-        else None
+        incident_continuation_candidate(
+            directory, normalized, args.repo_root
+        )
     )
     if predecessor is not None:
         continuation = build_incident_continuation(
@@ -3620,7 +3803,9 @@ def claim_request_under_lock(
                 )
             )
             return
-    blocking_matches = find_blocking_authorities(directory, normalized)
+    blocking_matches = find_blocking_authorities(
+        directory, normalized, args.repo_root
+    )
     if continuation is not None:
         blocking_matches = [
             match
@@ -3831,7 +4016,9 @@ def command_prepare_disabled_ghosts(args):
         # Includes every repository intent, including stale/expired prepares.
         # A repeated prepare must never renew a prepared generation. Only an
         # exact retired bound record can admit a distinct, newly sealed one.
-        if find_blocking_authorities(directory, normalized):
+        if find_blocking_authorities(
+            directory, normalized, args.repo_root
+        ):
             fail("prepared request is blocked by existing repository authority")
         special_request(args, policy, normalized)
         prepared = {
@@ -3892,7 +4079,9 @@ def verify_prepared_checkpoint(args, *, dispatch):
             or seal["candidates"] != observation["candidates"]
         ):
             fail("prepared sealed request/policy/inventory/evidence drift")
-        blockers = find_blocking_authorities(directory, normalized)
+        blockers = find_blocking_authorities(
+            directory, normalized, args.repo_root
+        )
         if blockers != [(f"intent:{key}", "prepared")]:
             fail("prepared intent no longer owns repository exclusivity")
         snapshot = prepared_snapshot(directory, key, intent)
@@ -3912,6 +4101,11 @@ def verify_prepared_checkpoint(args, *, dispatch):
             "state": intent["state"],
             "version": intent["version"],
             "capturePath": str(directory / intent["captureFile"]),
+            "continuationInputs": (
+                intent["continuation"]["dispatchInputs"]
+                if "continuation" in intent
+                else {}
+            ),
         }))
 
 
@@ -4197,7 +4391,9 @@ def command_retire_zero_execution(args):
             {name: (REQUEST_SCHEMA if name == "schemaVersion" else intent[name]) for name in REQUEST_KEYS},
             policy, args.repository, record["controlSha"],
         )
-        if find_blocking_authorities(directory, normalized) != [
+        if find_blocking_authorities(
+            directory, normalized, args.repo_root
+        ) != [
             (f"intent:{key}", "bound"), (str(record["runId"]), "consumed"),
         ]:
             fail("zero-execution retirement is blocked by other repository authority")
@@ -4835,7 +5031,9 @@ def command_retire_preflight_read(args):
             {name: (REQUEST_SCHEMA if name == "schemaVersion" else intent[name]) for name in REQUEST_KEYS},
             policy, args.repository, record["controlSha"],
         )
-        if find_blocking_authorities(directory, normalized) != [
+        if find_blocking_authorities(
+            directory, normalized, args.repo_root
+        ) != [
             (f"intent:{key}", "bound"), (str(record["runId"]), "consumed"),
         ]:
             fail("preflight-read retirement is blocked by other repository authority")
@@ -5293,10 +5491,12 @@ def preserve_incident_spent_intent(directory, intent, predecessor):
         atomic_create(archive, intent)
 
 
-def find_blocking_authorities(directory, normalized):
+def find_blocking_authorities(
+    directory, normalized, repo_root=None
+):
     matches = []
     incident_candidate = (
-        incident_continuation_candidate(directory, normalized)
+        incident_continuation_candidate(directory, normalized, repo_root)
         if normalized["operation"] == INCIDENT_OPERATION
         else None
     )
@@ -5394,7 +5594,9 @@ def command_blocking_record(args):
         fail("normalized request has an unexpected schema")
     if normalized["schemaVersion"] != NORMALIZED_SCHEMA:
         fail("normalized request schema version is unsupported")
-    matches = find_blocking_authorities(directory, normalized)
+    matches = find_blocking_authorities(
+        directory, normalized, args.repo_root
+    )
     if matches:
         print(f"{matches[0][0]}\t{matches[0][1]}")
 
@@ -5417,7 +5619,9 @@ def command_incident_continuation_candidate(args):
         args.repo_root,
         create=False,
     )
-    predecessor = incident_continuation_candidate(directory, normalized)
+    predecessor = incident_continuation_candidate(
+        directory, normalized, args.repo_root
+    )
     if predecessor is None:
         return
     print(
@@ -6438,6 +6642,9 @@ def build_parser():
             special.add_argument(f"--{argument}", required=True)
         if name != "verify-prepared":
             special.add_argument("--owner-pid", required=True, type=int)
+        if name == "prepare-disabled-ghosts":
+            special.add_argument("--incident-predecessor-run-json")
+            special.add_argument("--incident-exclusivity-json")
         if name == "dispatch-prepared":
             special.add_argument("--expected-snapshot", required=True)
         special.set_defaults(function=function)
