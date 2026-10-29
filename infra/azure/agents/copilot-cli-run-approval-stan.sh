@@ -517,7 +517,7 @@ revalidate_upstream_bindings() {
 }
 
 validate_incident_continuation_authority() {
-  local predecessor_run_id continuation
+  local predecessor_run_id continuation captured result sentinel=$'\036'
   [[ "$(jq -r '.operation // ""' <<<"$record_summary")" == \
     "oci-live-data-incident-restore" ]] || return 0
   continuation="$(jq -c '.continuation // null' <<<"$record_summary")"
@@ -526,11 +526,33 @@ validate_incident_continuation_authority() {
     jq -er '.predecessorRunId | tostring |
       select(test("^[1-9][0-9]*$"))' <<<"$continuation"
   )" || fail "incident continuation predecessor identity is invalid"
-  [[ "$(
+  captured="$(
     REPO="$repository" EXCLUDE_RUN_ID="$RUN_ID" \
       PROSPECTIVE_PROMOTION_PR="" "$RUN_EXCLUSIVITY_SCRIPT"
-  )" = "production_run_exclusivity=PASS" ]] ||
+    status=$?
+    printf '\036'
+    exit "$status"
+  )" ||
     fail "incident continuation lost current production exclusivity"
+  [[ "$captured" == *"$sentinel" ]] ||
+    fail "incident continuation exclusivity output sentinel is missing"
+  result="${captured%"$sentinel"}"
+  python3 - "$result" <<'PY' ||
+import sys
+
+raw = sys.argv[1]
+if not raw.endswith("\n"):
+    raise SystemExit(1)
+lines = raw[:-1].split("\n")
+if (
+    not lines
+    or lines[-1] != "production_run_exclusivity=PASS"
+    or any(not line.startswith("ignored_inert_run=") for line in lines[:-1])
+):
+    raise SystemExit(1)
+PY
+    fail "incident continuation lost current production exclusivity"
+  printf '%s' "$result"
   gh api \
     "repos/$repository/actions/runs/$predecessor_run_id" \
     >"$incident_predecessor_run_file" ||
