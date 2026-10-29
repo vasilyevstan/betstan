@@ -67,6 +67,13 @@ assert "incident-continuation-candidate" in collector
 assert 'actions/runs/$incident_predecessor_run_id' in collector
 assert "--incident-predecessor-run-json" in collector
 assert "--incident-exclusivity-json" in collector
+exclusivity_start = text.index("validate_production_exclusivity() {")
+exclusivity = text[
+    exclusivity_start:text.index("\n}\n", exclusivity_start) + 3
+]
+assert 'lines[-1] != "production_run_exclusivity=PASS"' in exclusivity
+assert 'line.startswith("ignored_inert_run=")' in exclusivity
+assert '"$predecessor_run_id" "$canonical_result"' in exclusivity
 candidate = main.index("collect_incident_continuation")
 blocking = main.index('"$AUTHORITY_HELPER" blocking-record')
 claim = main.index('"$AUTHORITY_HELPER" claim-request')
@@ -80,6 +87,114 @@ assert "gh run rerun" not in main
 assert "incident_manifest_stan.py" in text
 print("incident_manifest_dispatch_prerequisite=PASS pre_intent=true post_claim_cancel=true continuation=true")
 PY
+
+(
+set -euo pipefail
+
+EXCLUSIVITY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/betstan-exclusivity-output-test.XXXXXX")"
+chmod 700 "$EXCLUSIVITY_TMP"
+trap 'rm -rf "$EXCLUSIVITY_TMP"' EXIT
+
+python3 - "$DISPATCHER" "$EXCLUSIVITY_TMP/function.sh" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("validate_production_exclusivity() {")
+end = text.index('\nincident_continuation=""', start)
+Path(sys.argv[2]).write_text(text[start:end], encoding="utf-8")
+PY
+
+EXCLUSIVITY_OUTPUT="$EXCLUSIVITY_TMP/output"
+EXCLUSIVITY_RUNNER="$EXCLUSIVITY_TMP/runner.sh"
+cat >"$EXCLUSIVITY_RUNNER" <<'EOF'
+#!/usr/bin/env bash
+cat "$EXCLUSIVITY_OUTPUT"
+EOF
+chmod 700 "$EXCLUSIVITY_RUNNER"
+export EXCLUSIVITY_OUTPUT
+
+repository="example/repo"
+current_master="1111111111111111111111111111111111111111"
+RUN_EXCLUSIVITY_SCRIPT="$EXCLUSIVITY_RUNNER"
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+# shellcheck source=/dev/null
+source "$EXCLUSIVITY_TMP/function.sh"
+
+assert_exclusivity_accepts() {
+  local name="$1" value="$2" evidence="$EXCLUSIVITY_TMP/$1.json"
+  local actual="$EXCLUSIVITY_TMP/$1.actual"
+  printf '%s\n' "$value" >"$EXCLUSIVITY_OUTPUT"
+  validate_production_exclusivity "$evidence" 42 >"$actual"
+  cmp -s "$EXCLUSIVITY_OUTPUT" "$actual" || {
+    echo "$name did not preserve exact diagnostic output" >&2
+    exit 1
+  }
+  python3 - "$evidence" <<'PY'
+import hashlib
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = "production_run_exclusivity=PASS"
+assert value["result"] == expected
+assert value["outputSha256"] == hashlib.sha256(
+    (expected + "\n").encode("utf-8")
+).hexdigest()
+PY
+}
+
+assert_exclusivity_rejects() {
+  local name="$1" value="$2" evidence="$EXCLUSIVITY_TMP/$1.json"
+  printf '%s\n' "$value" >"$EXCLUSIVITY_OUTPUT"
+  if (validate_production_exclusivity "$evidence" 42) \
+    >"$EXCLUSIVITY_TMP/$1.out" 2>"$EXCLUSIVITY_TMP/$1.err"; then
+    echo "$name unexpectedly accepted malformed exclusivity output" >&2
+    exit 1
+  fi
+  [[ ! -e "$evidence" ]]
+  grep -qF "production exclusivity returned an unexpected result" \
+    "$EXCLUSIVITY_TMP/$1.err"
+}
+
+assert_exclusivity_accepts one-diagnostic "$(printf '%s\n' \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes' \
+  'production_run_exclusivity=PASS')"
+assert_exclusivity_accepts two-diagnostics "$(printf '%s\n' \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes' \
+  'ignored_inert_run=2 path=.github/workflows/b.yml status=queued inert=yes' \
+  'production_run_exclusivity=PASS')"
+assert_exclusivity_rejects missing-pass \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes'
+assert_exclusivity_rejects non-final-pass "$(printf '%s\n' \
+  'production_run_exclusivity=PASS' \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes')"
+assert_exclusivity_rejects blank-diagnostic "$(printf '%s\n' \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes' \
+  '' \
+  'production_run_exclusivity=PASS')"
+assert_exclusivity_rejects wrong-prefix "$(printf '%s\n' \
+  'unexpected=diagnostic' \
+  'production_run_exclusivity=PASS')"
+assert_exclusivity_rejects trailing-diagnostic "$(printf '%s\n' \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes' \
+  'production_run_exclusivity=PASS' \
+  'ignored_inert_run=2 path=.github/workflows/b.yml status=queued inert=yes')"
+printf '%s\n\n' 'production_run_exclusivity=PASS' >"$EXCLUSIVITY_OUTPUT"
+if (validate_production_exclusivity "$EXCLUSIVITY_TMP/trailing-blank.json" 42) \
+  >"$EXCLUSIVITY_TMP/trailing-blank.out" \
+  2>"$EXCLUSIVITY_TMP/trailing-blank.err"; then
+  echo "trailing blank line unexpectedly accepted" >&2
+  exit 1
+fi
+[[ ! -e "$EXCLUSIVITY_TMP/trailing-blank.json" ]]
+grep -qF "production exclusivity returned an unexpected result" \
+  "$EXCLUSIVITY_TMP/trailing-blank.err"
+echo "incident_exclusivity_diagnostic_output_tests=PASS"
+)
 
 # Required CI uses a depth-one checkout. Reject fixed historical object reads
 # in this supported test path, including Python argv that bypass shell stubs.
