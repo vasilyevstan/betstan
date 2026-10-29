@@ -241,24 +241,44 @@ release_authority_lock() {
 validate_production_exclusivity() {
   local evidence_file="${1:-}"
   local predecessor_run_id="${2:-}"
-  local result
+  local captured result sentinel=$'\036'
+  local canonical_result="production_run_exclusivity=PASS"
   if [[ -z "$evidence_file" ]]; then
     REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
       "$RUN_EXCLUSIVITY_SCRIPT"
     return
   fi
-  result="$(
+  captured="$(
     REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
       "$RUN_EXCLUSIVITY_SCRIPT"
+    status=$?
+    printf '\036'
+    exit "$status"
   )" || return
-  [[ "$result" = "production_run_exclusivity=PASS" ]] ||
+  [[ "$captured" == *"$sentinel" ]] ||
+    fail "production exclusivity output sentinel is missing"
+  result="${captured%"$sentinel"}"
+  python3 - "$result" <<'PY' ||
+import sys
+
+raw = sys.argv[1]
+if not raw.endswith("\n"):
+    raise SystemExit(1)
+lines = raw[:-1].split("\n")
+if (
+    not lines
+    or lines[-1] != "production_run_exclusivity=PASS"
+    or any(not line.startswith("ignored_inert_run=") for line in lines[:-1])
+):
+    raise SystemExit(1)
+PY
     fail "production exclusivity returned an unexpected result"
-  printf '%s\n' "$result"
+  printf '%s' "$result"
   [[ "$predecessor_run_id" =~ ^[1-9][0-9]*$ ]] ||
     fail "incident continuation predecessor run ID is invalid"
   python3 - \
     "$evidence_file" "$repository" "$current_master" \
-    "$predecessor_run_id" "$result" <<'PY'
+    "$predecessor_run_id" "$canonical_result" <<'PY'
 import datetime
 import hashlib
 import json

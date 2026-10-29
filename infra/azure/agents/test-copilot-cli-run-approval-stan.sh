@@ -81,6 +81,102 @@ assert post_claim[:release].rindex(
 print("incident_manifest_approval_prerequisite=PASS empty_upstream=true drift_releases_claim=true continuation=true")
 PY
 
+(
+set -euo pipefail
+
+APPROVAL_EXCLUSIVITY_TMP="$(
+  mktemp -d "${TMPDIR:-/tmp}/betstan-approval-exclusivity-test.XXXXXX"
+)"
+chmod 700 "$APPROVAL_EXCLUSIVITY_TMP"
+trap 'rm -rf "$APPROVAL_EXCLUSIVITY_TMP"' EXIT
+
+python3 - "$APPROVER" "$APPROVAL_EXCLUSIVITY_TMP/function.sh" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("validate_incident_continuation_authority() {")
+end = text.index('\nrecord_summary=""', start)
+Path(sys.argv[2]).write_text(text[start:end], encoding="utf-8")
+PY
+
+APPROVAL_EXCLUSIVITY_OUTPUT="$APPROVAL_EXCLUSIVITY_TMP/output"
+APPROVAL_EXCLUSIVITY_RUNNER="$APPROVAL_EXCLUSIVITY_TMP/runner.sh"
+APPROVAL_AUTHORITY_HELPER="$APPROVAL_EXCLUSIVITY_TMP/authority.sh"
+cat >"$APPROVAL_EXCLUSIVITY_RUNNER" <<'EOF'
+#!/usr/bin/env bash
+cat "$APPROVAL_EXCLUSIVITY_OUTPUT"
+EOF
+cat >"$APPROVAL_AUTHORITY_HELPER" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 700 "$APPROVAL_EXCLUSIVITY_RUNNER" "$APPROVAL_AUTHORITY_HELPER"
+export APPROVAL_EXCLUSIVITY_OUTPUT
+
+record_summary='{"operation":"oci-live-data-incident-restore","continuation":{"predecessorRunId":41}}'
+repository="example/repo"
+RUN_ID=42
+RUN_EXCLUSIVITY_SCRIPT="$APPROVAL_EXCLUSIVITY_RUNNER"
+incident_predecessor_run_file="$APPROVAL_EXCLUSIVITY_TMP/predecessor.json"
+AUTHORITY_HELPER="$APPROVAL_AUTHORITY_HELPER"
+AUTHORITY_DIR="$APPROVAL_EXCLUSIVITY_TMP/authority"
+ROOT_DIR="$APPROVAL_EXCLUSIVITY_TMP"
+authority_run_id=42
+policy_json='{}'
+current_master="1111111111111111111111111111111111111111"
+workflow_id=301
+workflow_blob_sha="2222222222222222222222222222222222222222"
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+gh() {
+  [[ "$1" = "api" ]]
+  printf '{}\n'
+}
+export -f gh
+# shellcheck source=/dev/null
+source "$APPROVAL_EXCLUSIVITY_TMP/function.sh"
+
+approval_exclusivity_accepts() {
+  local value="$1" actual="$APPROVAL_EXCLUSIVITY_TMP/accepted"
+  printf '%s\n' "$value" >"$APPROVAL_EXCLUSIVITY_OUTPUT"
+  validate_incident_continuation_authority >"$actual"
+  cmp -s "$APPROVAL_EXCLUSIVITY_OUTPUT" "$actual"
+}
+
+approval_exclusivity_rejects_file() {
+  local name="$1"
+  if (validate_incident_continuation_authority) \
+    >"$APPROVAL_EXCLUSIVITY_TMP/$name.out" \
+    2>"$APPROVAL_EXCLUSIVITY_TMP/$name.err"; then
+    echo "$name unexpectedly passed approval exclusivity" >&2
+    exit 1
+  fi
+  grep -qF "incident continuation lost current production exclusivity" \
+    "$APPROVAL_EXCLUSIVITY_TMP/$name.err"
+}
+
+approval_exclusivity_accepts "$(printf '%s\n' \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes' \
+  'ignored_inert_run=2 path=.github/workflows/b.yml status=queued inert=yes' \
+  'production_run_exclusivity=PASS')"
+printf '%s\n' \
+  'unexpected=diagnostic' \
+  'production_run_exclusivity=PASS' >"$APPROVAL_EXCLUSIVITY_OUTPUT"
+approval_exclusivity_rejects_file wrong-prefix
+printf '%s\n\n' 'production_run_exclusivity=PASS' \
+  >"$APPROVAL_EXCLUSIVITY_OUTPUT"
+approval_exclusivity_rejects_file trailing-blank
+printf '%s\n' \
+  'production_run_exclusivity=PASS' \
+  'ignored_inert_run=1 path=.github/workflows/a.yml status=queued inert=yes' \
+  >"$APPROVAL_EXCLUSIVITY_OUTPUT"
+approval_exclusivity_rejects_file non-final-pass
+echo "incident_approval_exclusivity_diagnostic_output_tests=PASS"
+)
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-approval-test.XXXXXX")"
 chmod 700 "$tmp_dir"
 authority_dir="$tmp_dir/authority"
