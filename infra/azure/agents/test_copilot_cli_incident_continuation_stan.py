@@ -88,6 +88,32 @@ class IncidentContinuationAuthorityTests(unittest.TestCase):
             encoding="utf-8",
         )
         verifier.chmod(0o700)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "master", str(self.repo)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "config", "user.email",
+             "copilot-test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "config", "user.name",
+             "Copilot Test"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "."],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "commit", "-q", "-m", "initial"],
+            check=True,
+        )
+        self.control = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
         self.policy = json.loads(
             subprocess.check_output(
                 [str(POLICY), "get", authority.INCIDENT_OPERATION],
@@ -130,6 +156,22 @@ class IncidentContinuationAuthorityTests(unittest.TestCase):
         return self.private_json(
             f"normalized-{control}.json", normalized
         )
+
+    def descendant_control(self, name: str) -> str:
+        marker = self.repo / name
+        marker.write_text(name + "\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", name],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "commit", "-q", "-m", name],
+            check=True,
+        )
+        return subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
 
     def run_helper(
         self, *arguments: str, check: bool = True
@@ -664,6 +706,311 @@ class IncidentContinuationAuthorityTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requires exact predecessor", result.stderr)
+
+    def test_orders_legacy_leaves_and_seals_complete_lineage(self):
+        saved = self.work / "saved-authority"
+        shutil.copytree(self.directory, saved)
+        shutil.rmtree(self.directory)
+        self.directory.mkdir(mode=0o700)
+
+        second_control = self.descendant_control("second-control")
+        second_normalized = self.write_normalized(second_control)
+        second_claim = json.loads(
+            self.run_helper(
+                *self.claim_args(second_normalized, second_control)
+            ).stdout
+        )
+        self.bind_and_issue(
+            second_normalized, second_control, second_claim, 5002
+        )
+        self.consume(5002)
+        for source in saved.iterdir():
+            shutil.copy2(source, self.directory / source.name)
+
+        current_control = self.descendant_control("current-control")
+        current_normalized = self.write_normalized(current_control)
+        candidate = json.loads(
+            self.run_helper(
+                "incident-continuation-candidate",
+                "--normalized",
+                str(current_normalized),
+                "--policy-json",
+                self.policy_json,
+                "--repository",
+                self.repository,
+                "--current-master",
+                current_control,
+                "--workflow-id",
+                self.workflow_id,
+                "--workflow-blob-sha",
+                self.workflow_blob,
+                *self.authority_args(),
+            ).stdout
+        )
+        self.assertEqual(candidate["predecessorRunId"], 5002)
+
+        predecessor, exclusivity = self.predecessor_evidence(
+            5002, current_control, "failure"
+        )
+        claim = json.loads(
+            self.run_helper(
+                *self.claim_args(
+                    current_normalized,
+                    current_control,
+                    predecessor=predecessor,
+                    exclusivity=exclusivity,
+                )
+            ).stdout
+        )
+        continuation = claim["continuationInputs"]
+        self.assertEqual(continuation["incident_continuation_generation"], "2")
+        lineage = json.loads(
+            continuation["incident_access_cleanup_lineage_json"]
+        )
+        self.assertEqual(
+            [item["runId"] for item in lineage],
+            [5001, 5002],
+        )
+        self.assertEqual(
+            [item["authorityGeneration"] for item in lineage],
+            [0, 1],
+        )
+        record = self.bind_and_issue(
+            current_normalized, current_control, claim, 6001
+        )
+        self.assertEqual(record["schemaVersion"], authority.RECORD_SCHEMA_V6)
+        self.assertEqual(record["continuation"]["generation"], 2)
+        loaded = authority.load_record(self.directory, 6001)
+        self.assertEqual(
+            [
+                item["runId"]
+                for item in loaded["continuation"]["accessCleanupLineage"]
+            ],
+            [5001, 5002],
+        )
+        verified = json.loads(
+            self.run_helper(
+                "verify-incident-continuation",
+                "--run-id",
+                "6001",
+                "--predecessor-run-json",
+                str(predecessor),
+                "--policy-json",
+                self.policy_json,
+                "--repository",
+                self.repository,
+                "--current-master",
+                current_control,
+                "--workflow-id",
+                self.workflow_id,
+                "--workflow-blob-sha",
+                self.workflow_blob,
+                *self.authority_args(),
+            ).stdout
+        )
+        self.assertEqual(verified["generation"], 2)
+        self.consume(6001)
+
+    def test_prepared_intent_seals_incident_continuation(self):
+        current_control = self.descendant_control("prepared-control")
+        normalized_path = self.write_normalized(current_control)
+        normalized = json.loads(
+            normalized_path.read_text(encoding="utf-8")
+        )
+        request = self.private_json(
+            "prepared-request.json",
+            {
+                "schemaVersion": authority.REQUEST_SCHEMA,
+                "repository": self.repository,
+                "operation": authority.INCIDENT_OPERATION,
+                "controlSha": current_control,
+                "subjectSha": current_control,
+                "targetSha": None,
+                "inputs": normalized["inputs"],
+            },
+        )
+        inputs = self.private_json(
+            "prepared-inputs.json", normalized["dispatchInputs"]
+        )
+        observation = self.private_json(
+            "prepared-observation.json",
+            {
+                "schemaVersion": authority.TRANSITION_OBSERVATION_SCHEMA,
+                "repository": self.repository,
+                "controlSha": current_control,
+                "inventorySha256": "f" * 64,
+                "target": {
+                    "workflow": self.policy["workflow"],
+                    "path": authority.PREPARED_TRANSITION_WORKFLOWS[
+                        self.policy["workflow"]
+                    ],
+                },
+                "candidates": [
+                    {
+                        "runId": 4001,
+                        "headSha": current_control,
+                        "historicalWorkflowBlobSha": self.workflow_blob,
+                        "evidenceSha256": "e" * 64,
+                    }
+                ],
+                "workflows": [
+                    {
+                        "id": int(self.workflow_id),
+                        "path": authority.PREPARED_TRANSITION_WORKFLOWS[
+                            self.policy["workflow"]
+                        ],
+                        "state": "disabled_manually",
+                    }
+                ],
+                "blockers": [],
+            },
+        )
+        predecessor, exclusivity = self.predecessor_evidence(
+            5001, current_control, "failure"
+        )
+        result = json.loads(
+            self.run_helper(
+                "prepare-disabled-ghosts",
+                "--request",
+                str(request),
+                "--normalized",
+                str(normalized_path),
+                "--inputs-file",
+                str(inputs),
+                "--policy-json",
+                self.policy_json,
+                "--repository",
+                self.repository,
+                "--current-master",
+                current_control,
+                "--workflow-id",
+                self.workflow_id,
+                "--workflow-blob-sha",
+                self.workflow_blob,
+                "--observation-json",
+                str(observation),
+                "--owner-pid",
+                str(os.getpid()),
+                "--incident-predecessor-run-json",
+                str(predecessor),
+                "--incident-exclusivity-json",
+                str(exclusivity),
+                *self.authority_args(),
+            ).stdout
+        )
+        self.assertEqual(result["state"], "prepared")
+        self.assertEqual(
+            result["continuationInputs"]["incident_continuation_run_id"],
+            "5001",
+        )
+        intent = authority.load_intent(
+            self.directory, authority.request_key(normalized)
+        )
+        self.assertEqual(
+            intent["schemaVersion"], authority.PREPARED_INTENT_SCHEMA
+        )
+        self.assertEqual(intent["continuation"]["generation"], 1)
+        active_observation = json.loads(
+            observation.read_text(encoding="utf-8")
+        )
+        active_observation["workflows"][0]["state"] = "active"
+        active_observation_path = self.private_json(
+            "prepared-active-observation.json", active_observation
+        )
+        common = [
+            "--request",
+            str(request),
+            "--normalized",
+            str(normalized_path),
+            "--inputs-file",
+            str(inputs),
+            "--policy-json",
+            self.policy_json,
+            "--repository",
+            self.repository,
+            "--current-master",
+            current_control,
+            "--workflow-id",
+            self.workflow_id,
+            "--workflow-blob-sha",
+            self.workflow_blob,
+            "--observation-json",
+            str(active_observation_path),
+            *self.authority_args(),
+        ]
+        verified_prepared = json.loads(
+            self.run_helper("verify-prepared", *common).stdout
+        )
+        dispatched = json.loads(
+            self.run_helper(
+                "dispatch-prepared",
+                *common,
+                "--owner-pid",
+                str(os.getpid()),
+                "--expected-snapshot",
+                verified_prepared["snapshot"],
+            ).stdout
+        )
+        self.assertEqual(dispatched["state"], "dispatching")
+        self.assertEqual(
+            dispatched["continuationInputs"],
+            result["continuationInputs"],
+        )
+        capture = Path(dispatched["capturePath"])
+        capture.write_text(
+            f"https://github.com/{self.repository}/actions/runs/6002\n",
+            encoding="utf-8",
+        )
+        self.run_helper(
+            "record-dispatch-status",
+            "--normalized",
+            str(normalized_path),
+            "--policy-json",
+            self.policy_json,
+            "--repository",
+            self.repository,
+            "--current-master",
+            current_control,
+            "--workflow-id",
+            self.workflow_id,
+            "--workflow-blob-sha",
+            self.workflow_blob,
+            "--expected-version",
+            str(dispatched["version"]),
+            "--dispatch-status",
+            "0",
+            "--expected-capture-file",
+            capture.name,
+            *self.authority_args(),
+        )
+        record = self.bind_and_issue(
+            normalized_path, current_control, dispatched, 6002
+        )
+        self.assertEqual(record["schemaVersion"], authority.RECORD_SCHEMA_V6)
+        self.assertEqual(record["continuation"]["generation"], 1)
+        authority.load_record(self.directory, 6002)
+        verified = json.loads(
+            self.run_helper(
+                "verify-incident-continuation",
+                "--run-id",
+                "6002",
+                "--predecessor-run-json",
+                str(predecessor),
+                "--policy-json",
+                self.policy_json,
+                "--repository",
+                self.repository,
+                "--current-master",
+                current_control,
+                "--workflow-id",
+                self.workflow_id,
+                "--workflow-blob-sha",
+                self.workflow_blob,
+                *self.authority_args(),
+            ).stdout
+        )
+        self.assertEqual(verified["generation"], 1)
+        self.consume(6002)
 
     def test_every_persisted_phase_completes_protected_lifecycle(self):
         seed = self.work / "seed-authority"
