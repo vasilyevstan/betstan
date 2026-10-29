@@ -70,7 +70,8 @@ resolve_session_id() {
     oci bastion session list \
       --bastion-id "$bastion_id" \
       --display-name "$display_name" \
-      --all
+      --all \
+      --output json
   )"
   sessions="$(oci_normalize_list_json "$sessions")"
   jq -er '
@@ -91,7 +92,8 @@ wait_active_session_id() {
       oci bastion session list \
         --bastion-id "$bastion_id" \
         --display-name "$display_name" \
-        --all
+        --all \
+        --output json
     )"
     sessions="$(oci_normalize_list_json "$sessions")"
     count="$(
@@ -215,7 +217,8 @@ printf "%s\n%s\n%s\n%s\n" \
   for attempt in $(seq 1 "$OCI_INSTANCE_COMMAND_POLL_ATTEMPTS"); do
     oci instance-agent command-execution get \
       --command-id "$command_id" \
-      --instance-id "$instance_ocid" >"$execution_json"
+      --instance-id "$instance_ocid" \
+      --output json >"$execution_json"
     lifecycle_state="$(jq -r '.data."lifecycle-state" // empty' "$execution_json")"
     case "$lifecycle_state" in
       SUCCEEDED)
@@ -285,7 +288,11 @@ session_connection_metadata() {
   local api_public_key public_key
   expected_endpoint="host.bastion.${OCI_CLI_REGION}.oci.oraclecloud.com"
   expected_command="ssh -i <privateKey> -N -L <localPort>:${instance_private_ip}:${target_port} -p 22 ${session_id}@${expected_endpoint}"
-  session="$(oci bastion session get --session-id "$session_id")"
+  session="$(
+    oci bastion session get \
+      --session-id "$session_id" \
+      --output json
+  )"
   jq -e \
     --arg session_id "$session_id" \
     --arg instance_id "$instance_ocid" \
@@ -496,7 +503,9 @@ oci_require_ocid bastion_ocid
   oci_die "k3s target SSH public-key fingerprint is invalid"
 
 instance="$(
-  oci compute instance get --instance-id "$instance_ocid"
+  oci compute instance get \
+    --instance-id "$instance_ocid" \
+    --output json
 )"
 jq -e \
   --arg compartment "$OCI_COMPARTMENT_OCID" \
@@ -513,7 +522,8 @@ vnic_attachments="$(
   oci compute vnic-attachment list \
     --compartment-id "$OCI_COMPARTMENT_OCID" \
     --instance-id "$instance_ocid" \
-    --all
+    --all \
+    --output json
 )"
 vnic_attachments="$(oci_normalize_list_json "$vnic_attachments")"
 vnic_id="$(
@@ -526,13 +536,19 @@ vnic_id="$(
   ' <<<"$vnic_attachments"
 )"
 [[ -n "$vnic_id" ]] || oci_die "k3s instance primary VNIC is missing"
-vnic="$(oci network vnic get --vnic-id "$vnic_id")"
+vnic="$(
+  oci network vnic get \
+    --vnic-id "$vnic_id" \
+    --output json
+)"
 live_private_ip="$(jq -r '.data."private-ip" // empty' <<<"$vnic")"
 [[ "$live_private_ip" == "$instance_private_ip" ]] ||
   oci_die "live k3s private IP differs from provenance"
 
 bastion="$(
-  oci bastion bastion get --bastion-id "$bastion_ocid"
+  oci bastion bastion get \
+    --bastion-id "$bastion_ocid" \
+    --output json
 )"
 jq -e \
   --arg compartment "$OCI_COMPARTMENT_OCID" \

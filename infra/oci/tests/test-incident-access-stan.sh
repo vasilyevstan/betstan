@@ -31,6 +31,7 @@ import sys
 root = Path(os.environ["MOCK_CLOUD_DIR"])
 args = sys.argv[1:]
 mode = os.environ.get("MOCK_REMOVE_MODE", "success")
+read_mode = os.environ.get("MOCK_READ_MODE", "")
 (root / "calls.log").open("a", encoding="utf-8").write(" ".join(args) + "\n")
 
 
@@ -49,7 +50,30 @@ def option(name):
     return args[args.index(name) + 1]
 
 
+json_read = (
+    args[:4] == ["network", "nsg", "rules", "list"]
+    or args[:3] == ["bastion", "session", "get"]
+    or args[:3] == ["bastion", "session", "list"]
+)
+mutation = (
+    args[:4] == ["network", "nsg", "rules", "remove"]
+    or args[:3] == ["bastion", "session", "delete"]
+    or args[:3] == ["bastion", "bastion", "update"]
+)
+if json_read and (
+    args.count("--output") != 1
+    or args[-2:] != ["--output", "json"]
+):
+    print("JSON read did not pin terminal --output json", file=sys.stderr)
+    raise SystemExit(2)
+if mutation and "--output" in args:
+    print("mutation unexpectedly received --output", file=sys.stderr)
+    raise SystemExit(2)
+
+
 if args[:4] == ["network", "nsg", "rules", "list"]:
+    if read_mode == "blank-rules-list":
+        raise SystemExit(0)
     print(json.dumps({"data": load("rules.json")}))
     raise SystemExit(0)
 
@@ -67,6 +91,11 @@ if args[:4] == ["network", "nsg", "rules", "remove"]:
     raise SystemExit(0)
 
 if args[:3] == ["bastion", "session", "get"]:
+    if read_mode == "blank-session-get":
+        raise SystemExit(0)
+    if read_mode == "malformed-session-get":
+        print("not-json")
+        raise SystemExit(0)
     session_id = option("--session-id")
     matches = [
         item for item in load("sessions.json")
@@ -78,8 +107,16 @@ if args[:3] == ["bastion", "session", "get"]:
     raise SystemExit(0)
 
 if args[:3] == ["bastion", "session", "list"]:
+    if read_mode == "malformed-session-list":
+        print("not-json")
+        raise SystemExit(0)
+    if read_mode == "failed-session-list":
+        print("simulated list failure", file=sys.stderr)
+        raise SystemExit(1)
     bastion_id = option("--bastion-id")
     display_name = option("--display-name")
+    if display_name == os.environ.get("MOCK_EMPTY_SESSION_NAME", ""):
+        raise SystemExit(0)
     matches = [
         item for item in load("sessions.json")
         if item.get("bastion-id") == bastion_id
@@ -301,6 +338,16 @@ run_access oke cleanup-lineage \
    "$(jq -r '[.[] | select(.id == "unrelated-rule")] | length' \
       "$CLOUD_DIR/rules.json")" == "1" ]] ||
   fail "OKE predecessor cleanup did not remove only A"
+
+MOCK_READ_MODE=blank-rules-list \
+  run_access oke cleanup-lineage \
+    --lineage-file "$LINEAGE_A" \
+    --output "$WORK_DIR/oke-empty-list.json" >/dev/null
+[[ "$(jq -r .obligations[0].result \
+      "$WORK_DIR/oke-empty-list.json")" == "already-absent" &&
+   "$(jq -r '[.[] | select(.id == "unrelated-rule")] | length' \
+      "$CLOUD_DIR/rules.json")" == "1" ]] ||
+  fail "OKE blank successful rules list was not treated as absent"
 
 python3 - "$CLOUD_DIR/rules.json" <<'PY'
 import json
@@ -590,6 +637,18 @@ instance_private_ip=10.0.0.10
 os_user=ubuntu
 local_ssh_port=22022
 EOF
+for read_mode in blank-session-get malformed-session-get; do
+  output="$WORK_DIR/k3s-current-${read_mode}.json"
+  rm -f "$output"
+  if MOCK_READ_MODE="$read_mode" \
+    run_access k3s capture \
+      --state-file "$WORK_DIR/k3s-current.env" \
+      --output "$output" >/dev/null 2>&1; then
+    fail "$read_mode unexpectedly produced an incident access record"
+  fi
+  [[ ! -e "$output" ]] ||
+    fail "$read_mode retained a failed incident access record"
+done
 run_access k3s capture \
   --state-file "$WORK_DIR/k3s-current.env" \
   --output "$WORK_DIR/k3s-current.json" >/dev/null
@@ -713,5 +772,40 @@ TEST_PREDECESSOR_AUTHORITY_SHA256="$AUTHORITY_B" \
 [[ "$(jq -r '[.obligations[].result] | all(. == "already-absent")' \
       "$WORK_DIR/k3s-lineage-c-restart.json")" == "true" ]] ||
   fail "k3s inherited cleanup was not restart-idempotent"
+
+MOCK_EMPTY_SESSION_NAME=betstan-k3s-ssh-5001-1 \
+TEST_RESTORE_RUN_ID=5002 \
+TEST_CONTROL_SHA="$CONTROL_C" \
+TEST_GENERATION=2 \
+TEST_PREDECESSOR_RUN_ID=5001 \
+TEST_PREDECESSOR_CONTROL_SHA="$CONTROL_B" \
+TEST_PREDECESSOR_AUTHORITY_SHA256="$AUTHORITY_B" \
+  run_access k3s cleanup-lineage \
+    --lineage-file "$LINEAGE_AB" \
+    --output "$WORK_DIR/k3s-lineage-c-empty-list.json" >/dev/null
+[[ "$(jq -r '[.obligations[].result] | all(. == "already-absent")' \
+      "$WORK_DIR/k3s-lineage-c-empty-list.json")" == "true" &&
+   "$(jq -r '[.[] | select(.id == "unrelated-session")] | length' \
+      "$CLOUD_DIR/sessions.json")" == "1" ]] ||
+  fail "k3s blank successful session list was not treated as absent"
+
+for read_mode in malformed-session-list failed-session-list; do
+  output="$WORK_DIR/k3s-lineage-c-${read_mode}.json"
+  rm -f "$output"
+  if MOCK_READ_MODE="$read_mode" \
+    TEST_RESTORE_RUN_ID=5002 \
+    TEST_CONTROL_SHA="$CONTROL_C" \
+    TEST_GENERATION=2 \
+    TEST_PREDECESSOR_RUN_ID=5001 \
+    TEST_PREDECESSOR_CONTROL_SHA="$CONTROL_B" \
+    TEST_PREDECESSOR_AUTHORITY_SHA256="$AUTHORITY_B" \
+      run_access k3s cleanup-lineage \
+        --lineage-file "$LINEAGE_AB" \
+        --output "$output" >/dev/null 2>&1; then
+    fail "$read_mode unexpectedly produced a cleanup receipt"
+  fi
+  [[ ! -e "$output" ]] ||
+    fail "$read_mode retained a failed cleanup receipt"
+done
 
 echo "incident_access_tests=PASS"
