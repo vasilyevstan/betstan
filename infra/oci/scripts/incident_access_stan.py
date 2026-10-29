@@ -160,10 +160,17 @@ def oci(arguments: list[str]) -> subprocess.CompletedProcess[str]:
         fail("unable to execute OCI CLI")
 
 
-def oci_json(arguments: list[str], label: str) -> Any:
-    result = oci(arguments)
+def oci_json(
+    arguments: list[str],
+    label: str,
+    *,
+    normalize_empty_list: bool = False,
+) -> Any:
+    result = oci([*arguments, "--output", "json"])
     if result.returncode != 0:
         fail(f"unable to read {label}")
+    if normalize_empty_list and not result.stdout.strip():
+        return {"data": []}
     return load_json_text(result.stdout, label)
 
 
@@ -264,6 +271,7 @@ def list_rules(nsg_id: str) -> list[dict[str, Any]]:
                 "--all",
             ],
             "OKE NSG rules",
+            normalize_empty_list=True,
         ),
         "OKE NSG rules",
     )
@@ -285,6 +293,7 @@ def list_sessions(
                 "--all",
             ],
             "Bastion sessions",
+            normalize_empty_list=True,
         ),
         "Bastion sessions",
     )

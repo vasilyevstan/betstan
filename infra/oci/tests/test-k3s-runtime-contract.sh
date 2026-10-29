@@ -94,13 +94,17 @@ case "$*" in
   "artifacts container image list "*) response=images.json ;;
   "os bucket list "*) response=buckets.json ;;
   "bastion session delete "*)
+    [[ "$*" != *" --output "* ]] || exit 97
     if [[ -n "${MOCK_OCI_FAIL_SESSION_ID:-}" &&
           "$*" == *"$MOCK_OCI_FAIL_SESSION_ID"* ]]; then
       exit 1
     fi
     exit 0
     ;;
-  "bastion bastion update "*) exit 0 ;;
+  "bastion bastion update "*)
+    [[ "$*" != *" --output "* ]] || exit 97
+    exit 0
+    ;;
   *) echo "unexpected mock OCI command: $*" >&2; exit 1 ;;
 esac
 cat "${MOCK_OCI_RESPONSES:?}/$response"
@@ -595,6 +599,13 @@ grep -Fq 'OCI_BASTION_SESSION_TTL="${OCI_BASTION_SESSION_TTL:-10800}"' \
 [[ "$(grep -Fc 'bastion session create-port-forwarding' \
   "$OCI_DIR/scripts/configure-k3s-access.sh")" == "1" ]] ||
   fail "k3s access must create exactly one SSH port-forwarding session"
+[[ "$(grep -Fc -- '--output json' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh")" == "8" ]] ||
+  fail "k3s access does not pin every parsed OCI response to JSON"
+! grep -A10 -F 'oci instance-agent command create \' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" |
+  grep -Fq -- '--output json' ||
+  fail "k3s raw command creation unexpectedly uses the full JSON contract"
 ! grep -Fq 'create-managed-ssh' "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s access still uses managed SSH, which is unsupported on Ubuntu A1"
 grep -Fq '.data."ssh-metadata".command' \
