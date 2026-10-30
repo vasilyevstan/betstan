@@ -287,7 +287,9 @@ if [[ "$args" == *"get pods"* ]]; then
     "${STUB_TOPOLOGY_MODE:-shared}" \
     "${STUB_POD_IMAGE_DIGEST_MISMATCH_SERVICE:-}" \
     "${STUB_MULTI_REPLICA_SERVICE:-}" \
-    "${STUB_MIXED_POD_DIGEST_SERVICE:-}" <<'PY'
+    "${STUB_MIXED_POD_DIGEST_SERVICE:-}" \
+    "${STUB_POD_IMAGE_DIGEST_SOURCE:-platform}" \
+    "${STUB_POD_IMAGE_ID_FORMAT:-reference}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -297,6 +299,12 @@ topology_mode = sys.argv[2]
 mismatch_service = sys.argv[3]
 multi_replica_service = sys.argv[4]
 mixed_digest_service = sys.argv[5]
+digest_source = sys.argv[6]
+image_id_format = sys.argv[7]
+if digest_source not in {"manifest", "platform"}:
+    raise SystemExit(f"unsupported pod image digest source: {digest_source}")
+if image_id_format not in {"digest", "malformed", "reference", "scheme"}:
+    raise SystemExit(f"unsupported pod image ID format: {image_id_format}")
 items = []
 for raw_line in images_path.read_text(encoding='utf-8').splitlines():
     if not raw_line.strip():
@@ -307,12 +315,19 @@ for raw_line in images_path.read_text(encoding='utf-8').splitlines():
     name = f'gaming-{service}'
     replicas = 2 if service == multi_replica_service else 1
     for replica in range(replicas):
-        runtime_digest = platform_digest
+        runtime_digest = digest if digest_source == "manifest" else platform_digest
         if service == mismatch_service or (
             service == mixed_digest_service and replica == replicas - 1
         ):
             runtime_digest = "sha256:" + ("0" * 64)
-        runtime_image = image_ref.rsplit("@", 1)[0] + "@" + runtime_digest
+        if image_id_format == "digest":
+            runtime_image = runtime_digest
+        elif image_id_format == "scheme":
+            runtime_image = f"containerd://{runtime_digest}"
+        elif image_id_format == "malformed":
+            runtime_image = f"%%%@@{runtime_digest}"
+        else:
+            runtime_image = image_ref.rsplit("@", 1)[0] + "@" + runtime_digest
         items.append({
             'metadata': {
                 'name': f'{name}-pod-{replica}',

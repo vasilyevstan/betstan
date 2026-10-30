@@ -22,7 +22,7 @@ run_live_betting_scenario azure-runtime-digest-drift "$SCRIPT" azure \
   STUB_POD_IMAGE_DIGEST_MISMATCH_SERVICE=auth
 assert_eq 1 "$RUN_RC" "dark mode should reject a different runtime platform digest"
 assert_contains "$RUN_SCENARIO_DIR/output/workloads-check.stderr" \
-  'does not match the authenticated platform digest' \
+  'does not match an authenticated image digest' \
   'runtime readiness should bind pod imageID to authenticated provenance'
 
 run_live_betting_scenario azure-mixed-runtime-digest "$SCRIPT" azure \
@@ -32,7 +32,7 @@ run_live_betting_scenario azure-mixed-runtime-digest "$SCRIPT" azure \
   STUB_MIXED_POD_DIGEST_SERVICE=auth
 assert_eq 1 "$RUN_RC" "dark mode should reject one stale ready replica"
 assert_contains "$RUN_SCENARIO_DIR/output/workloads-check.stderr" \
-  'does not match the authenticated platform digest' \
+  'does not match an authenticated image digest' \
   'every ready replica should bind to authenticated provenance'
 
 while IFS='|' read -r identity_case services; do
