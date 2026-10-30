@@ -59,22 +59,26 @@ it.each(['v1', 'v2', 'v3'])(
   },
 );
 
-it.each([
-  ['v1', 'Standard'],
-  ['v2', 'Compact'],
-  ['v3', 'Spacious'],
-])('shows human layout choices and marks %s as %s', (uiVariant, label) => {
+it.each(['v1', 'v2', 'v3'])('keeps one labelled, icon-supported header without layout controls in %s', (uiVariant) => {
   renderHeader(undefined, uiVariant);
 
-  expect(screen.getByText('Layout')).toBeVisible();
-  expect(screen.getByRole('link', { name: 'Standard' })).toBeVisible();
-  expect(screen.getByRole('link', { name: 'Compact' })).toBeVisible();
-  expect(screen.getByRole('link', { name: 'Spacious' })).toBeVisible();
-  const activeLayout = screen.getByRole('link', { name: label });
-  const layoutMark = activeLayout.querySelector('.state-mark');
-  expect(activeLayout).toHaveAttribute('aria-current', 'true');
-  expect(layoutMark).toHaveAttribute('aria-hidden', 'true');
-  expect(layoutMark).toBeEmptyDOMElement();
+  expect(screen.queryByRole('group', { name: 'Layout' })).not.toBeInTheDocument();
+  expect(screen.queryByText('Layout')).not.toBeInTheDocument();
+  for (const label of ['Standard', 'Compact', 'Spacious']) {
+    expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument();
+  }
+  expect(screen.getByRole('img', { name: 'BetStan home' }))
+    .toHaveAttribute('src', '/brand/betstan-wordmark-light.svg');
+  expect(screen.getByRole('link', { name: 'Events' }).querySelector('img')).toBeNull();
+  for (const [label, icon] of [
+    ['Backoffice', 'backoffice'], ['Telemetry', 'telemetry'],
+    ['Create account', 'signup'], ['Log in', 'login'], ['Dark', 'theme-dark'], ['Light', 'theme-light'],
+  ]) {
+    const link = screen.getByRole('link', { name: label, exact: true });
+    expect(link).toHaveTextContent(label);
+    expect(link.querySelector('img')).toHaveAttribute('src', `/icons/${icon}.svg`);
+    expect(link.querySelector('img')).toHaveAttribute('alt', '');
+  }
   expect(screen.getByText('Theme')).toBeVisible();
   expect(screen.getByRole('link', { name: 'Dark' })).toBeVisible();
   const activeTheme = screen.getByRole('link', { name: 'Light' });
@@ -82,12 +86,10 @@ it.each([
   expect(activeTheme).toHaveAttribute('aria-current', 'true');
   expect(themeMark).toHaveAttribute('aria-hidden', 'true');
   expect(themeMark).toBeEmptyDOMElement();
-  expect(screen.getByRole('link', { name: uiVariant === 'v1' ? 'Compact' : 'Standard' })
-    .querySelector('.state-mark')).toBeNull();
   expect(screen.getByRole('link', { name: 'Dark' }).querySelector('.state-mark')).toBeNull();
 });
 
-it('preserves unrelated query keys while changing the layout or theme', () => {
+it('preserves density and unrelated query keys on home, navigation and theme changes', () => {
   render(
     <MemoryRouter initialEntries={[
       '/?ui=v2&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained',
@@ -96,16 +98,28 @@ it('preserves unrelated query keys while changing the layout or theme', () => {
     </MemoryRouter>
   );
 
-  const spacious = screen.getByRole('link', { name: 'Spacious' });
   const dark = screen.getByRole('link', { name: 'Dark' });
-  expect(spacious).toHaveAttribute(
-    'href',
-    '/?ui=v3&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained'
-  );
+  for (const [name, pathname] of [['BetStan home', '/'], ['Events', '/'], ['Backoffice', '/backoffice'], ['Telemetry', '/telemetry']]) {
+    expect(screen.getByRole('link', { name })).toHaveAttribute(
+      'href', `${pathname}?ui=v2&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained`
+    );
+  }
   expect(dark).toHaveAttribute(
     'href',
     '/?ui=v2&theme=dark&acceptanceEventIds=event-1%2Cevent-2&review=retained'
   );
+});
+
+it('retains authenticated display name and labelled bet/logout icons', () => {
+  renderHeader({ email: 'long-display-name@example.com' });
+  expect(screen.getByText('long-display-nam')).toBeVisible();
+  for (const [name, icon] of [['My bets', 'bets'], ['Log out', 'logout']]) {
+    const link = screen.getByRole('link', { name });
+    expect(link).toHaveTextContent(name);
+    expect(link.querySelector('img')).toHaveAttribute('src', `/icons/${icon}.svg`);
+    expect(link.querySelector('img')).toHaveAttribute('alt', '');
+  }
+  expect(screen.queryByRole('link', { name: 'Log in' })).not.toBeInTheDocument();
 });
 
 it('marks Telemetry as the current page without losing valid navigation query parameters', () => {
