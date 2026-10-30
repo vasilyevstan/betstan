@@ -28,6 +28,15 @@ assert_eq 0 "$RUN_RC" "OCI dark mode should accept authenticated manifest runtim
 assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'OCI manifest runtime digests should report GO'
 assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'OCI manifest runtime digests should verify every deployment'
 
+run_live_betting_scenario oci-mixed-authenticated-runtime-digests "$SCRIPT" oci \
+  MODE=dark \
+  IMAGE_PROVENANCE_FILE="$current_images" \
+  STUB_MULTI_REPLICA_SERVICE=auth \
+  STUB_MIXED_AUTHENTICATED_DIGEST_SERVICE=auth
+assert_eq 0 "$RUN_RC" "OCI dark mode should accept mixed authenticated digest representations"
+assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'OCI mixed authenticated runtime digests should report GO'
+assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'OCI mixed authenticated runtime digests should verify every deployment'
+
 for image_id_format in digest scheme; do
   run_live_betting_scenario "oci-runtime-image-id-$image_id_format" "$SCRIPT" oci \
     MODE=dark \
@@ -251,4 +260,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=27'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=28'

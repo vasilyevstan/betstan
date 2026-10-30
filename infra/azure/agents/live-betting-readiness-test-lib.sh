@@ -287,6 +287,7 @@ if [[ "$args" == *"get pods"* ]]; then
     "${STUB_TOPOLOGY_MODE:-shared}" \
     "${STUB_POD_IMAGE_DIGEST_MISMATCH_SERVICE:-}" \
     "${STUB_MULTI_REPLICA_SERVICE:-}" \
+    "${STUB_MIXED_AUTHENTICATED_DIGEST_SERVICE:-}" \
     "${STUB_MIXED_POD_DIGEST_SERVICE:-}" \
     "${STUB_POD_IMAGE_DIGEST_SOURCE:-platform}" \
     "${STUB_POD_IMAGE_ID_FORMAT:-reference}" <<'PY'
@@ -298,9 +299,10 @@ images_path = Path(sys.argv[1])
 topology_mode = sys.argv[2]
 mismatch_service = sys.argv[3]
 multi_replica_service = sys.argv[4]
-mixed_digest_service = sys.argv[5]
-digest_source = sys.argv[6]
-image_id_format = sys.argv[7]
+mixed_authenticated_digest_service = sys.argv[5]
+mixed_digest_service = sys.argv[6]
+digest_source = sys.argv[7]
+image_id_format = sys.argv[8]
 if digest_source not in {"manifest", "platform"}:
     raise SystemExit(f"unsupported pod image digest source: {digest_source}")
 if image_id_format not in {
@@ -318,6 +320,11 @@ for raw_line in images_path.read_text(encoding='utf-8').splitlines():
     replicas = 2 if service == multi_replica_service else 1
     for replica in range(replicas):
         runtime_digest = digest if digest_source == "manifest" else platform_digest
+        if (
+            service == mixed_authenticated_digest_service
+            and replica == replicas - 1
+        ):
+            runtime_digest = platform_digest if digest_source == "manifest" else digest
         if service == mismatch_service or (
             service == mixed_digest_service and replica == replicas - 1
         ):
