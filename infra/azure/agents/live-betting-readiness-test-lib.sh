@@ -303,7 +303,9 @@ digest_source = sys.argv[6]
 image_id_format = sys.argv[7]
 if digest_source not in {"manifest", "platform"}:
     raise SystemExit(f"unsupported pod image digest source: {digest_source}")
-if image_id_format not in {"digest", "malformed", "reference", "scheme"}:
+if image_id_format not in {
+    "digest", "malformed", "malformed-port", "malformed-tag", "reference", "scheme"
+}:
     raise SystemExit(f"unsupported pod image ID format: {image_id_format}")
 items = []
 for raw_line in images_path.read_text(encoding='utf-8').splitlines():
@@ -326,6 +328,10 @@ for raw_line in images_path.read_text(encoding='utf-8').splitlines():
             runtime_image = f"containerd://{runtime_digest}"
         elif image_id_format == "malformed":
             runtime_image = f"%%%@@{runtime_digest}"
+        elif image_id_format == "malformed-port":
+            runtime_image = f"registry:notaport/repo@{runtime_digest}"
+        elif image_id_format == "malformed-tag":
+            runtime_image = f"repo:tag:extra@{runtime_digest}"
         else:
             runtime_image = image_ref.rsplit("@", 1)[0] + "@" + runtime_digest
         items.append({

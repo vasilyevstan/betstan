@@ -38,15 +38,17 @@ for image_id_format in digest scheme; do
   assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' "OCI $image_id_format runtime image IDs should report GO"
 done
 
-run_live_betting_scenario oci-malformed-runtime-image-id "$SCRIPT" oci \
-  MODE=dark \
-  IMAGE_PROVENANCE_FILE="$current_images" \
-  STUB_POD_IMAGE_ID_FORMAT=malformed
-assert_eq 1 "$RUN_RC" "OCI dark mode should reject malformed runtime image IDs"
-assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=workload_images' 'OCI malformed runtime image IDs should fail workload readiness'
-assert_contains "$RUN_SCENARIO_DIR/output/workloads-check.stderr" \
-  'does not match an authenticated image digest' \
-  'OCI runtime image IDs must match a supported complete format'
+for image_id_format in malformed malformed-port malformed-tag; do
+  run_live_betting_scenario "oci-runtime-image-id-$image_id_format" "$SCRIPT" oci \
+    MODE=dark \
+    IMAGE_PROVENANCE_FILE="$current_images" \
+    STUB_POD_IMAGE_ID_FORMAT="$image_id_format"
+  assert_eq 1 "$RUN_RC" "OCI dark mode should reject $image_id_format runtime image IDs"
+  assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=workload_images' "OCI $image_id_format runtime image IDs should fail workload readiness"
+  assert_contains "$RUN_SCENARIO_DIR/output/workloads-check.stderr" \
+    'does not match an authenticated image digest' \
+    'OCI runtime image IDs must match a supported complete format'
+done
 
 for clock_case in missing backward malformed identity-change process-change slow timeout; do
   run_live_betting_scenario "oci-clock-$clock_case" "$SCRIPT" oci \
@@ -249,4 +251,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=25'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=27'
