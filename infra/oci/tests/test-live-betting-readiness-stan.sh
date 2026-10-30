@@ -20,6 +20,45 @@ assert_contains "$RUN_SUMMARY_FILE" 'mongo_clock_evidence_sha256=' 'OCI readines
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-clock.js" 'clockPerformance.now()' 'clock probe must use monotonic brackets'
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-clock.js" 'runCommand({hello: 1})' 'clock probe must read the actual Mongo clock'
 
+run_live_betting_scenario oci-manifest-runtime-digests "$SCRIPT" oci \
+  MODE=dark \
+  IMAGE_PROVENANCE_FILE="$current_images" \
+  STUB_POD_IMAGE_DIGEST_SOURCE=manifest
+assert_eq 0 "$RUN_RC" "OCI dark mode should accept authenticated manifest runtime digests"
+assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'OCI manifest runtime digests should report GO'
+assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'OCI manifest runtime digests should verify every deployment'
+
+run_live_betting_scenario oci-mixed-authenticated-runtime-digests "$SCRIPT" oci \
+  MODE=dark \
+  IMAGE_PROVENANCE_FILE="$current_images" \
+  STUB_MULTI_REPLICA_SERVICE=auth \
+  STUB_MIXED_AUTHENTICATED_DIGEST_SERVICE=auth
+assert_eq 0 "$RUN_RC" "OCI dark mode should accept mixed authenticated digest representations"
+assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'OCI mixed authenticated runtime digests should report GO'
+assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'OCI mixed authenticated runtime digests should verify every deployment'
+
+for image_id_format in digest scheme; do
+  run_live_betting_scenario "oci-runtime-image-id-$image_id_format" "$SCRIPT" oci \
+    MODE=dark \
+    IMAGE_PROVENANCE_FILE="$current_images" \
+    STUB_POD_IMAGE_DIGEST_SOURCE=manifest \
+    STUB_POD_IMAGE_ID_FORMAT="$image_id_format"
+  assert_eq 0 "$RUN_RC" "OCI dark mode should accept $image_id_format runtime image IDs"
+  assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' "OCI $image_id_format runtime image IDs should report GO"
+done
+
+for image_id_format in malformed malformed-port malformed-tag; do
+  run_live_betting_scenario "oci-runtime-image-id-$image_id_format" "$SCRIPT" oci \
+    MODE=dark \
+    IMAGE_PROVENANCE_FILE="$current_images" \
+    STUB_POD_IMAGE_ID_FORMAT="$image_id_format"
+  assert_eq 1 "$RUN_RC" "OCI dark mode should reject $image_id_format runtime image IDs"
+  assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=workload_images' "OCI $image_id_format runtime image IDs should fail workload readiness"
+  assert_contains "$RUN_SCENARIO_DIR/output/workloads-check.stderr" \
+    'does not match an authenticated image digest' \
+    'OCI runtime image IDs must match a supported complete format'
+done
+
 for clock_case in missing backward malformed identity-change process-change slow timeout; do
   run_live_betting_scenario "oci-clock-$clock_case" "$SCRIPT" oci \
     MODE=dark STUB_CLOCK_SCENARIO="$clock_case"
@@ -221,4 +260,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=23'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=28'

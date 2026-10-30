@@ -1611,7 +1611,10 @@ The restoration preserves these ordering rules:
    queues and consumers, shared storage topology, and public, redirect, and
    diagnostic routing. Automatic live kickoffs remain disabled during this
    validation. The resulting evidence is checksummed and explicitly
-   non-deployable.
+   non-deployable. The deployment image reference must still match exactly;
+   a ready pod's complete runtime image ID may resolve to either its
+   authenticated image-reference digest or authenticated platform-child
+   digest. Malformed identifiers and any other digest drift fail closed.
 
 Continuation is state-based rather than a replay. A resource-versioned journal
 records the authenticated active and released lock postimages, fence state,
