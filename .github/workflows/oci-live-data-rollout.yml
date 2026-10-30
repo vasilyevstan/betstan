@@ -2856,6 +2856,17 @@ jobs:
         if: >-
           inputs.phase == 'incident-restore' &&
           steps.incident_state.outputs.classification == 'incident-active-successor-fenced'
+        env:
+          HELD_LOCK_UID: ${{ steps.incident_manifest.outputs.lock_uid }}
+          HELD_RESOURCE_VERSION: ${{ steps.incident_manifest.outputs.lock_resource_version }}
+          HELD_LOCK_HOLDER: ${{ steps.incident_manifest.outputs.lock_holder }}
+          HELD_LOCK_OPERATION_ID: ${{ steps.incident_manifest.outputs.lock_operation }}
+          HELD_LOCK_SOURCE_SHA: ${{ steps.incident_manifest.outputs.lock_source_sha }}
+          HELD_ACQUIRED_AT_EPOCH: ${{ steps.incident_manifest.outputs.lock_acquired_at }}
+          HELD_LEASE_DURATION_SECONDS: ${{ steps.incident_manifest.outputs.lock_lease_duration }}
+          HELD_LEASE_UNTIL_EPOCH: ${{ steps.incident_manifest.outputs.lock_lease_until }}
+          HELD_RELEASED_AT_EPOCH: ${{ steps.incident_manifest.outputs.lock_released_at }}
+          HELD_FENCING_GENERATION: ${{ steps.incident_manifest.outputs.lock_generation }}
         run: |
           set -euo pipefail
           adopted_control="${{ steps.incident_state.outputs.successor_control_sha }}"
@@ -2922,6 +2933,16 @@ jobs:
           steps.incident_state.outputs.takeover_required == 'true'
         id: incident_lock
         env:
+          HELD_LOCK_UID: ${{ steps.incident_state.outputs.preimage_uid }}
+          HELD_RESOURCE_VERSION: ${{ steps.incident_state.outputs.preimage_resource_version }}
+          HELD_LOCK_HOLDER: ${{ steps.incident_state.outputs.preimage_holder }}
+          HELD_LOCK_OPERATION_ID: ${{ steps.incident_state.outputs.preimage_operation }}
+          HELD_LOCK_SOURCE_SHA: ${{ steps.incident_state.outputs.preimage_source_sha }}
+          HELD_ACQUIRED_AT_EPOCH: ${{ steps.incident_state.outputs.preimage_acquired_at }}
+          HELD_LEASE_DURATION_SECONDS: ${{ steps.incident_state.outputs.preimage_lease_duration }}
+          HELD_LEASE_UNTIL_EPOCH: ${{ steps.incident_state.outputs.preimage_lease_until }}
+          HELD_RELEASED_AT_EPOCH: ${{ steps.incident_state.outputs.preimage_released_at }}
+          HELD_FENCING_GENERATION: ${{ steps.incident_state.outputs.preimage_generation }}
           EXPECTED_LOCK_UID: ${{ steps.incident_state.outputs.preimage_uid }}
           EXPECTED_RESOURCE_VERSION: ${{ steps.incident_state.outputs.preimage_resource_version }}
           EXPECTED_LOCK_HOLDER: ${{ steps.incident_state.outputs.preimage_holder }}
