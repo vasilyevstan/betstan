@@ -340,6 +340,9 @@ const getContrastEvidence = (page) => page.evaluate(() => {
       width: refreshStyle.outlineWidth,
     },
     graphs: ratiosFor('.telemetry-metric__bar', 'fill'),
+    neutralBars: [...document.querySelectorAll('.telemetry-metric__bar')].every((bar) => (
+      getComputedStyle(bar).fill === getComputedStyle(bar).color
+    )),
     indicators: ratiosFor(
       '.telemetry-health__indicator',
       'backgroundColor',
@@ -974,6 +977,7 @@ const expectTelemetryLayout = async (page, viewport) => {
   await expectMetricContentsInsideCards(page.locator('.telemetry-metric'));
   await expectRequiredLabelsNotClipped(page);
   await expectContrast(page);
+  expect((await getContrastEvidence(page)).neutralBars).toBe(true);
 };
 
 const expectRefreshFocusAfterSuccessAndFailure = async (page, state) => {
@@ -995,7 +999,7 @@ const expectRefreshFocusAfterSuccessAndFailure = async (page, state) => {
 
 for (const uiVariant of UI_VARIANTS) {
   for (const theme of THEMES) {
-    test(`Telemetry fits ${uiVariant} ${theme} across desktop, tablet, and mobile`, async ({ page }) => {
+    test(`Telemetry fits ${uiVariant} ${theme} across desktop, tablet, and mobile`, async ({ page }, testInfo) => {
       await installFakeEventSource(page);
       const state = createShellMockState();
       await installAppApiMocks(page, state);
@@ -1025,6 +1029,10 @@ for (const uiVariant of UI_VARIANTS) {
 
         await expectNavigationFits(page);
         await expectTelemetryLayout(page, viewport);
+        await page.screenshot({
+          path: testInfo.outputPath(`telemetry-${uiVariant}-${theme}-${viewport.width}.png`),
+          fullPage: true,
+        });
 
         if (viewport.width === 1600) {
           await expectRefreshFocusAfterSuccessAndFailure(page, state);
@@ -1032,6 +1040,7 @@ for (const uiVariant of UI_VARIANTS) {
         await expectStableCardStates(page, state, `${uiVariant}/${theme}/${viewport.width}`, viewport.width === 1600);
         // Reuse this layout matrix, not a second screenshot matrix.
         const hourly = await expectMixedState(page);
+        expect((await getContrastEvidence(page)).neutralBars).toBe(true);
         const card = page.locator('.telemetry-metric').first();
         const measured = await expectTooltipGeometry(
           page, card, card.locator('rect').last(), state.telemetrySummary.dates[13], state.telemetrySummary.metrics[0].values[13]

@@ -44,11 +44,14 @@ Primary routes are:
 | `/login` | Login |
 | `/logout` | Session logout |
 
-The header keeps visibly labelled **Events**, **Backoffice**, **Telemetry**,
-authentication, **Layout**, and **Theme** choices discoverable. Signed-in
-users also receive **My bets**. Backoffice and Telemetry remain visibly
-labelled and usable for anonymous visitors as well as signed-in users. Header
-navigation and presentation choices preserve the current query parameters. The
+The header uses one theme-appropriate wordmark and the established route-icon
+composition across all density profiles. It keeps visibly labelled **Events**,
+**Backoffice**, **Telemetry**, authentication, and **Theme** choices discoverable.
+Signed-in users also receive **My bets**. Backoffice and Telemetry remain
+visibly labelled and usable for anonymous visitors as well as signed-in users.
+Header links preserve the current query parameters; theme changes retain the
+active route. Authentication-aware navigation, current-route marking, and
+accessibility cues remain intact. The
 browser tab uses a dedicated 48 x 48 square SVG emblem derived from the
 existing header wordmark, while install and touch icons remain unchanged.
 
@@ -198,11 +201,15 @@ server authority and availability limits.
 
 ## UI variants
 
-The existing `ui` query parameter selects a user-facing density layout:
+The existing `ui` query parameter selects a density profile:
 
 - `?ui=v1` - **Standard**, the default spacing and composition;
 - `?ui=v2` - **Compact**, with tighter gaps, padding, and corners;
 - `?ui=v3` - **Spacious**, with more breathing room and larger corners.
+
+These profiles remain fully supported through URLs. The header does not render
+a **Layout** label or Standard/Compact/Spacious selector; those controls are
+absent from the DOM, not merely visually hidden.
 
 Unsupported or missing values fall back to `v1`. All variants use the same
 React routes, event/slip data, semantic controls, selected-state keys, and
@@ -217,8 +224,8 @@ The Client applies the choice to the document through Bootstrap's
 `data-bs-theme` attribute and to the application shell.
 
 Both themes use the same semantic roles for base, soft, and elevated surfaces;
-keylines; primary and secondary text; pitch-teal accent; focus; and positive,
-warning, danger, and informational states. Light mode changes role values
+keylines; primary and secondary text; blue brand/action accent; focus; and
+positive, warning, danger, and informational states. Light mode changes role values
 rather than creating a second markup tree or a separate variant identity.
 
 Header artwork uses the corresponding light or dark wordmark. Theme changes
@@ -226,7 +233,7 @@ preserve the active route and selected layout.
 
 ## Match Desk visual grammar
 
-Routes share opaque ink/slate surfaces, restrained pitch-teal emphasis, and
+Routes share opaque ink/slate surfaces, restrained blue emphasis, and
 semantic keylines or state rails. Live, pre-match, warning, failure, success,
 and informational states retain text or another non-color cue alongside their
 color role. Changing numeric readouts use tabular numerals where alignment
@@ -245,14 +252,21 @@ state treatment remain independent of that decoration. These shared refinements
 preserve all three densities, both themes, responsive behavior, and the
 existing semantic rails.
 
+Backoffice task panels use normal 1-pixel keylines rather than decorative
+3-pixel left accent or information rails. Removing this decoration does not
+remove the explicit **Recorded** and **Online** cues or unrelated domain-state
+rails. Intentional peer and shared-column alignment remains part of the
+consistency contract.
+
 ## Preserving presentation choices
 
 Header links rebuild their query strings from the current location. Moving
 between Events, My Bets, Backoffice, Telemetry, login, signup, and logout
-therefore preserves valid `ui` and `theme` values. The layout and theme choices
-update one value without discarding the other or unrelated accepted query
-state. Successful logout returns to Events with that query intact; its safe
-failure navigation does the same.
+therefore preserves valid `ui` and `theme` values. Theme choices update `theme`
+without discarding the URL-selected density or unrelated accepted query state;
+density profiles remain selectable through `ui` URLs. Successful logout
+returns to Events with that query intact; its safe failure navigation does
+the same.
 
 Examples:
 
@@ -288,8 +302,14 @@ slips created, bets placed, results settled, Gamecenter events emitted,
 users created, and user logins.
 
 In overview mode, each card contains a dependency-free graph and all fourteen
-exact date/value pairs. All eight cards use an immediate, theme-matched,
-two-line tooltip: **UTC date or time first, exact count second**. Daily
+exact date/value pairs. All daily and hourly bars use the neutral primary-text
+role (`--text-main`): near-white in dark mode and dark ink in light mode, not
+the shared blue action accent. This graph exception separates activity counts
+from action or status emphasis without changing exact counts, zero values, or
+interactions.
+
+All eight cards use an immediate, theme-matched, two-line tooltip:
+**UTC date or time first, exact count second**. Daily
 tooltips show `YYYY-MM-DD UTC`, identifying the accepted UTC calendar day,
 including today's in-progress day, not a claim that the day is complete.
 Hourly tooltips show `HH:mm UTC`, the accepted hour bucket's UTC start.
