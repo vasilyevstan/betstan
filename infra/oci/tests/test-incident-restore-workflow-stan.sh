@@ -404,6 +404,43 @@ unless replace_guard.include?("takeover_required == 'true'") &&
        !replace_guard.include?("released-unfenced")
   fail_contract("continuation can replay the strict takeover CAS")
 end
+held_outputs = {
+  "HELD_LOCK_UID" => "uid",
+  "HELD_RESOURCE_VERSION" => "resource_version",
+  "HELD_LOCK_HOLDER" => "holder",
+  "HELD_LOCK_OPERATION_ID" => "operation",
+  "HELD_LOCK_SOURCE_SHA" => "source_sha",
+  "HELD_ACQUIRED_AT_EPOCH" => "acquired_at",
+  "HELD_LEASE_DURATION_SECONDS" => "lease_duration",
+  "HELD_LEASE_UNTIL_EPOCH" => "lease_until",
+  "HELD_RELEASED_AT_EPOCH" => "released_at",
+  "HELD_FENCING_GENERATION" => "generation",
+}
+{
+  "Adopt authenticated active incident successor" => [
+    "incident_manifest",
+    "lock",
+  ],
+  "Replace exact expired held lock" => [
+    "incident_state",
+    "preimage",
+  ],
+}.each do |step_name, (step_id, output_prefix)|
+  step = steps.find { |candidate| candidate["name"] == step_name }
+  fail_contract("incident path lost #{step_name}") unless step
+  expected = held_outputs.to_h do |env_name, suffix|
+    [
+      env_name,
+      "${{ steps.#{step_id}.outputs.#{output_prefix}_#{suffix} }}",
+    ]
+  end
+  actual = step.fetch("env", {}).select do |env_name, _|
+    env_name.start_with?("HELD_")
+  end
+  unless actual == expected
+    fail_contract("#{step_name} lost exact held-lock environment")
+  end
+end
 release_position = names.index("Release incident lock before fence")
 fence_position = names.index("Release fence after lock")
 unless release_position && fence_position && release_position < fence_position
