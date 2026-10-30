@@ -213,6 +213,56 @@ unless ordinary_text.include?('resume_native_dispatch_inputs="$(') &&
   fail_contract("ordinary resume validator retained incident-only inputs")
 end
 
+classification_step = steps.find do |step|
+  step["name"] == "Classify exact incident continuation state"
+end
+classification_run = classification_step.fetch("run").to_s
+preimage_filter_match = classification_run.match(
+  /jq -er '\n(?<filter>.*?)\n\s*' "\$RUNNER_TEMP\/incident-live-lock\.json" >>"\$GITHUB_OUTPUT"/m
+)
+unless preimage_filter_match
+  fail_contract("incident lock preimage jq filter is missing")
+end
+preimage_fixture = {
+  "metadata" => {
+    "uid" => "lock-uid",
+    "resourceVersion" => "17",
+  },
+  "data" => {
+    "holder" => "restore-owner",
+    "operation-id" => "live-data-incident-restore",
+    "source-sha" => "a" * 40,
+    "acquired-at-epoch" => "100",
+    "lease-duration-seconds" => "600",
+    "lease-until-epoch" => "700",
+    "released-at-epoch" => "0",
+    "fencing-generation" => "519",
+    "incident-manifest-sha256" => "b" * 64,
+    "incident-owner-run-id" => "5001",
+    "incident-restore-run-id" => "5002",
+    "incident-control-sha" => "c" * 40,
+    "incident-current-run-metadata-sha256" => "d" * 64,
+    "incident-request-created-at-epoch" => "80",
+    "incident-provider-transition-epoch" => "90",
+    "incident-predecessor-lease-until-epoch" => "95",
+    "incident-new-lease-until-epoch" => "700",
+  },
+}
+preimage_output, preimage_error, preimage_status = Open3.capture3(
+  "jq",
+  "-er",
+  preimage_filter_match[:filter],
+  stdin_data: JSON.generate(preimage_fixture),
+)
+unless preimage_status.success?
+  fail_contract("incident lock preimage jq filter does not compile: #{preimage_error}")
+end
+unless preimage_output.lines.map(&:chomp).include?(
+  "preimage_operation=live-data-incident-restore"
+)
+  fail_contract("incident lock preimage jq filter lost operation output")
+end
+
 ordered = [
   "Verify fixed incident manifest and immutable evidence",
   "Reject competing incident production activity",
