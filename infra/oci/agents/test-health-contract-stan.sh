@@ -20,6 +20,170 @@ grep -Fq 'service, _, _, manifest_digest, platform_digest = row' "$HEALTH" &&
   exit 1
 }
 
+python3 - "$HEALTH" "$WORK_DIR/pod-projector.py" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+marker = '  python3 - "$pods_json" "$IMAGE_PROVENANCE_FILE" <<\'PY\'\n'
+start = source.index(marker) + len(marker)
+end = source.index('\nPY\n)"', start)
+pathlib.Path(sys.argv[2]).write_text(source[start:end] + "\n", encoding="utf-8")
+PY
+
+cat > "$WORK_DIR/images.tsv" <<'EOF'
+auth	fixture	fixture	sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bet	fixture	fixture	sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee	sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+EOF
+cat > "$WORK_DIR/projector-pods.json" <<'EOF'
+{
+  "items": [
+    {
+      "metadata": {"name": "gaming-auth-pod"},
+      "spec": {
+        "containers": [
+          {"name": "gaming-auth"},
+          {"name": "unrelated-sidecar"}
+        ]
+      },
+      "status": {
+        "conditions": [{"type": "Ready", "status": "False"}],
+        "containerStatuses": [
+          {
+            "name": "gaming-auth",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "fixture.invalid/auth@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "name": "unrelated-sidecar",
+            "ready": false,
+            "restartCount": 9,
+            "imageID": "fixture.invalid/sidecar@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "state": {"waiting": {"reason": "CrashLoopBackOff"}}
+          }
+        ]
+      }
+    },
+    {
+      "metadata": {"name": "gaming-auth-mongo-pod"},
+      "spec": {"containers": [{"name": "gaming-auth-mongo"}]},
+      "status": {
+        "conditions": [{"type": "Ready", "status": "True"}],
+        "containerStatuses": [{
+          "name": "gaming-auth-mongo",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "fixture.invalid/mongo@sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3"
+        }]
+      }
+    },
+    {
+      "metadata": {"name": "gaming-rabbitmq-pod"},
+      "spec": {"containers": [{"name": "gaming-rabbitmq"}]},
+      "status": {
+        "conditions": [{"type": "Ready", "status": "True"}],
+        "containerStatuses": [{
+          "name": "gaming-rabbitmq",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "fixture.invalid/rabbitmq@sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b"
+        }]
+      }
+    },
+    {
+      "metadata": {"name": "cm-acme-http-solver-fixture"},
+      "spec": {"containers": [{"name": "acmesolver"}]},
+      "status": {
+        "conditions": [{"type": "Ready", "status": "True"}],
+        "containerStatuses": [{
+          "name": "acmesolver",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "fixture.invalid/acmesolver@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }]
+      }
+    },
+    {
+      "metadata": {"name": "cm-acme-http-solver-pending"},
+      "spec": {"containers": [{"name": "acmesolver"}]},
+      "status": {}
+    },
+    {
+      "metadata": {"name": "gaming-bet-evicted"},
+      "spec": {"containers": [{"name": "gaming-bet"}]},
+      "status": {"reason": "Evicted"}
+    },
+    {
+      "metadata": {"name": "gaming-auth-replacement"},
+      "spec": {
+        "containers": [
+          {"name": "gaming-auth"},
+          {"name": "unrelated-sidecar"}
+        ]
+      },
+      "status": {
+        "conditions": [{"type": "Ready", "status": "False"}],
+        "containerStatuses": [{
+          "name": "unrelated-sidecar",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "fixture.invalid/sidecar@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }]
+      }
+    }
+  ]
+}
+EOF
+python3 "$WORK_DIR/pod-projector.py" \
+  "$WORK_DIR/projector-pods.json" "$WORK_DIR/images.tsv" \
+  > "$WORK_DIR/projector-output.json"
+jq -e '
+  any(.[]; .name == "gaming-auth-pod" and .ready and .digest_match and
+    .restarts == 0 and .last_reason == "") and
+  all(.[]; .name != "cm-acme-http-solver-fixture") and
+  all(.[]; .name != "cm-acme-http-solver-pending") and
+  any(.[]; .name == "gaming-bet-evicted" and
+    (.ready | not) and (.digest_match | not) and
+    .last_reason == "MissingContainerStatus,Evicted") and
+  any(.[]; .name == "gaming-auth-replacement" and
+    (.ready | not) and (.digest_match | not) and
+    .last_reason == "MissingContainerStatus")
+' "$WORK_DIR/projector-output.json" >/dev/null || {
+  echo "embedded pod projector did not isolate relevant statuses" >&2
+  exit 1
+}
+
+jq '
+  (.items[] | select(.metadata.name == "gaming-auth-pod") |
+    .status.containerStatuses[] | select(.name == "gaming-auth") |
+    .imageID) = "fixture.invalid/auth@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+' "$WORK_DIR/projector-pods.json" > "$WORK_DIR/projector-wrong-digest.json"
+python3 "$WORK_DIR/pod-projector.py" \
+  "$WORK_DIR/projector-wrong-digest.json" "$WORK_DIR/images.tsv" \
+  > "$WORK_DIR/projector-wrong-digest-output.json"
+jq -e '
+  any(.[]; .name == "gaming-auth-pod" and (.digest_match | not))
+' "$WORK_DIR/projector-wrong-digest-output.json" >/dev/null || {
+  echo "embedded pod projector accepted a wrong expected digest" >&2
+  exit 1
+}
+
+jq '
+  .items |= map(select(.metadata.name != "gaming-rabbitmq-pod"))
+' "$WORK_DIR/projector-pods.json" > "$WORK_DIR/projector-missing-container.json"
+python3 "$WORK_DIR/pod-projector.py" \
+  "$WORK_DIR/projector-missing-container.json" "$WORK_DIR/images.tsv" \
+  > "$WORK_DIR/projector-missing-container-output.json"
+jq -e '
+  any(.[]; .name == "missing-container:gaming-rabbitmq" and
+    (.ready | not) and (.digest_match | not) and
+    .last_reason == "MissingContainer")
+' "$WORK_DIR/projector-missing-container-output.json" >/dev/null || {
+  echo "embedded pod projector did not fail closed for a missing container" >&2
+  exit 1
+}
+
 OCI_HEALTH_FIXTURE_FILE="$HEALTHY" "$HEALTH" | grep -qx DEPLOYED_HEALTHY
 jq '
   .context.runtime_mode="k3s" |
@@ -506,4 +670,4 @@ if OCI_ALLOW_LEGACY_ADMIN_UI=unexpected \
   exit 1
 fi
 
-echo "oci_health_fixture_contract=PASS scenarios=43"
+echo "oci_health_fixture_contract=PASS scenarios=47"
