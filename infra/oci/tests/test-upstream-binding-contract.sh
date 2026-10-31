@@ -4746,8 +4746,29 @@ common = dict(phase="apply-slip-index", build_run_id="21", infrastructure_run_id
               failed_activation_run_id="0", failed_activation_user_id="0",
               baseline_recovery_run_id="0", baseline_recovery_source_sha="none")
 native = m.live_data_native_inputs(
-    dict(common, approved_sha=old, confirmation="RESUME APPLIED LIVE DATA EXACT SHA"),
+    dict(
+        common,
+        approved_sha=old,
+        confirmation="RESUME APPLIED LIVE DATA EXACT SHA",
+        **m.INCIDENT_CONTINUATION_DEFAULTS,
+    ),
     policies["oci-live-data-resume-deploy"]["inputNames"])
+assert not set(m.INCIDENT_CONTINUATION_DEFAULTS) & set(native)
+for key, value in m.INCIDENT_CONTINUATION_DEFAULTS.items():
+    bad = dict(
+        common,
+        approved_sha=old,
+        confirmation="RESUME APPLIED LIVE DATA EXACT SHA",
+        **m.INCIDENT_CONTINUATION_DEFAULTS,
+    )
+    bad[key] = "1" if value != "0" else "2"
+    try:
+        m.live_data_native_inputs(
+            bad, policies["oci-live-data-resume-deploy"]["inputNames"])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError(f"non-neutral incident continuation accepted for {key}")
 dispatch = m.live_data_native_inputs(
     dict(common, approved_sha=new, held_handoff_run_id="77", held_handoff_source_sha=old,
          confirmation=m.HELD_HANDOFF_CONFIRMATION),
@@ -16021,7 +16042,7 @@ PATH="$WORK/bin:$PATH" python3 -I - "$VALIDATOR" "$FIXTURE_DIR" "$WORK" \
   "$REPO" "$APPLIED_SOURCE_SHA" "$earlier_source" "$SUBJECT_SHA" \
   "$released_binding" "$(profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA")" \
   "$WORK/repository" "$("$POLICY" get oci-live-data-resume-activation-released)" <<'PY'
-import base64, copy, datetime as dt, hashlib, io, json, os, pathlib, re, shutil, subprocess, sys, zipfile
+import base64, copy, datetime as dt, hashlib, importlib.util, io, json, os, pathlib, re, shutil, subprocess, sys, zipfile
 
 validator, fixtures, work, repo, root_source, earlier_source, current_source, binding, inputs, checkout, policy_raw = sys.argv[1:]
 base = pathlib.Path(work) / "profile-artifacts-623"
@@ -16860,8 +16881,22 @@ output = io.BytesIO()
 with zipfile.ZipFile(output, "w") as bundle:
     bundle.writestr("0_deploy.txt", raw)
 log_file.write_bytes(output.getvalue())
-request = dict(resume, approved_sha=control_source, resume_source_sha=expired_source,
-               prerequisite_run_id="53", failed_deploy_run_id="54")
+incident_continuation_defaults = {
+    "incident_continuation_run_id": "0",
+    "incident_continuation_authority_sha256": "none",
+    "incident_continuation_control_sha": "none",
+    "incident_continuation_journal_identity_sha256": "none",
+    "incident_continuation_generation": "0",
+    "incident_access_cleanup_lineage_json": "[]",
+}
+request = dict(
+    resume,
+    approved_sha=control_source,
+    resume_source_sha=expired_source,
+    prerequisite_run_id="53",
+    failed_deploy_run_id="54",
+    **incident_continuation_defaults,
+)
 workflows = subprocess.check_output([
     str(root / "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"),
     "workflows",
@@ -17028,6 +17063,38 @@ write(f"{prefix}/actions/runs/55/attempts/1/jobs?per_page=100", {
     "steps": [{"name": "Validate exact SHA phase and trusted upstream runs", "conclusion": "success",
                "started_at": "2026-01-01T01:32:00Z", "completed_at": "2026-01-01T01:33:00Z"}]}]})
 native(55, "rollout", request, "2026-01-01T01:32:30Z")
+spec = importlib.util.spec_from_file_location("incident_default_reader", validator)
+incident_default_reader = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(incident_default_reader)
+assert incident_default_reader.failed_deploy_native_inputs(
+    repo, "55", control_source, "neutral incident defaults", resume_dispatch=True,
+) == {
+    key: value
+    for key, value in request.items()
+    if key not in incident_continuation_defaults
+}
+native_log = path(f"{prefix}/actions/runs/55/attempts/1/logs")
+saved_native_log = native_log.read_bytes()
+with zipfile.ZipFile(io.BytesIO(saved_native_log)) as bundle:
+    native_raw = bundle.read("0_rollout.txt")
+native_raw = native_raw.replace(
+    b"  INCIDENT_CONTINUATION_RUN_ID: 0\n",
+    b"  INCIDENT_CONTINUATION_RUN_ID: 1\n",
+)
+tampered_native_log = io.BytesIO()
+with zipfile.ZipFile(tampered_native_log, "w") as bundle:
+    bundle.writestr("0_rollout.txt", native_raw)
+native_log.write_bytes(tampered_native_log.getvalue())
+try:
+    incident_default_reader.failed_deploy_native_inputs(
+        repo, "55", control_source, "tampered incident default", resume_dispatch=True,
+    )
+except SystemExit:
+    pass
+else:
+    raise AssertionError("incident continuation environment mismatch was accepted")
+finally:
+    native_log.write_bytes(saved_native_log)
 for workflow in set(workflows) - {
     "common-package-publish.yml", "production-build.yml", "oci-production-build.yml",
 }:

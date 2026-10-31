@@ -1323,6 +1323,14 @@ HELD_HANDOFF_DEFAULTS = {
     "held_handoff_run_id": "0",
     "held_handoff_source_sha": "none",
 }
+INCIDENT_CONTINUATION_DEFAULTS = {
+    "incident_continuation_run_id": "0",
+    "incident_continuation_authority_sha256": "none",
+    "incident_continuation_control_sha": "none",
+    "incident_continuation_journal_identity_sha256": "none",
+    "incident_continuation_generation": "0",
+    "incident_access_cleanup_lineage_json": "[]",
+}
 
 
 def fail(message):
@@ -1373,6 +1381,19 @@ def live_data_native_inputs(inputs, expected_names):
                for key, value in HELD_HANDOFF_DEFAULTS.items()):
             fail("legacy live data inputs require exact neutral held-handoff defaults")
         for key in held_fields:
+            del values[key]
+    incident_fields = set(INCIDENT_CONTINUATION_DEFAULTS)
+    if incident_fields & expected:
+        if not incident_fields <= expected:
+            fail("live data incident-continuation input contract is incomplete")
+    elif incident_fields & values.keys():
+        if any(type(values.get(key)) is not str or values[key] != value
+               for key, value in INCIDENT_CONTINUATION_DEFAULTS.items()):
+            fail(
+                "legacy live data inputs require exact neutral "
+                "incident-continuation defaults"
+            )
+        for key in incident_fields:
             del values[key]
     if set(values) != expected or any(type(value) is not str for value in values.values()):
         fail("live data native input key set or types are invalid")
@@ -5032,6 +5053,11 @@ def failed_deploy_native_inputs(
             mapping.update({key: key.upper() for key in HELD_HANDOFF_DEFAULTS})
         normalized = live_data_native_inputs(inputs, mapping)
         mapping.update({key: key.upper() for key in HELD_HANDOFF_DEFAULTS if key in inputs})
+        mapping.update({
+            key: key.upper()
+            for key in INCIDENT_CONTINUATION_DEFAULTS
+            if key in inputs
+        })
     else:
         normalized = inputs
     if not isinstance(inputs, dict) or set(inputs) != set(mapping):
