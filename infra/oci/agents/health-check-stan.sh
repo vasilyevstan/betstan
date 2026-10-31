@@ -305,10 +305,25 @@ with open(sys.argv[2], encoding="utf-8") as handle:
         expected[f"gaming-{service}"] = {manifest_digest, platform_digest}
 
 result = []
+observed = set()
 for pod in pods.get("items", []):
-    statuses = pod.get("status", {}).get("containerStatuses") or []
+    expected_names = {
+        container.get("name")
+        for container in pod.get("spec", {}).get("containers", [])
+        if container.get("name") in expected
+    }
+    if not expected_names:
+        continue
+    all_statuses = pod.get("status", {}).get("containerStatuses") or []
+    statuses = [
+        status for status in all_statuses
+        if status.get("name") in expected_names
+    ]
+    observed.update(status.get("name") for status in statuses)
     reasons = []
-    digest_match = True
+    status_names = {status.get("name") for status in statuses}
+    missing_statuses = expected_names - status_names
+    digest_match = not missing_statuses
     for status in statuses:
         waiting = status.get("state", {}).get("waiting", {}).get("reason")
         terminated = status.get("lastState", {}).get("terminated", {}).get("reason")
@@ -322,16 +337,26 @@ for pod in pods.get("items", []):
             for digest in digests
         ):
             digest_match = False
+    if missing_statuses:
+        reasons.append("MissingContainerStatus")
     if pod.get("status", {}).get("reason"):
         reasons.append(pod["status"]["reason"])
-    conditions = {item.get("type"): item.get("status") for item in pod.get("status", {}).get("conditions", [])}
     result.append({
         "name": pod.get("metadata", {}).get("name"),
-        "ready": conditions.get("Ready") == "True" and bool(statuses) and all(item.get("ready") for item in statuses),
+        "ready": not missing_statuses and bool(statuses) and all(item.get("ready") for item in statuses),
         "architecture": "arm64",
         "digest_match": digest_match,
         "restarts": sum(int(item.get("restartCount", 0)) for item in statuses),
         "last_reason": ",".join(reasons),
+    })
+for name in sorted(set(expected) - observed):
+    result.append({
+        "name": f"missing-container:{name}",
+        "ready": False,
+        "architecture": "arm64",
+        "digest_match": False,
+        "restarts": 0,
+        "last_reason": "MissingContainer",
     })
 print(json.dumps(result))
 PY
