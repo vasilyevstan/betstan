@@ -27,6 +27,7 @@ POLICY_PUBLISHER="$ROOT_DIR/.github/scripts/publish-pr-policy.js"
 BRANCH_POLICY="$ROOT_DIR/.github/workflows/branch-policy.yml"
 QUALITY_GATES="$ROOT_DIR/docs/wiki/Quality-Gates.md"
 RELEASE_ORCHESTRATION="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
+PUBLIC_AGENTS="$ROOT_DIR/docs/wiki/Agents.md"
 
 fail() {
   echo "agent governance contract failed: $*" >&2
@@ -139,6 +140,31 @@ for forbidden in ("## Universal quality chain", "The fixed quality gates are:"):
         raise SystemExit(f"universal quality policy remains: {forbidden}")
 PY
   fail "agent README does not define risk-conditional validation"
+
+python3 - "$PUBLIC_AGENTS" <<'PY' ||
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+flat = " ".join(text.split())
+required = [
+    "## Risk-conditional workflow",
+    "BetStan does not require the former six-stage chain for every change",
+    "| Low risk | One implementation owner, one independent critic or test pass, and exact required CI |",
+    "Use the conductor only for parallel, asynchronous, external, or mutating work",
+    "PerfettoStan is a process challenger, not a universal quality gate",
+]
+missing = [token for token in required if token not in flat]
+if missing:
+    raise SystemExit(f"public agent policy is incomplete: {missing}")
+for forbidden in (
+    "The six universal gates remain",
+    "## Universal quality-chain agents",
+    "Keep the conductor active for blocking work",
+):
+    if forbidden in text:
+        raise SystemExit(f"public agent policy remains unconditional: {forbidden}")
+PY
+  fail "public Agents page does not define risk-conditional validation"
 
 for marker in \
   '## Work-unit taxonomy' \

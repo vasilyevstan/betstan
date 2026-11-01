@@ -42,10 +42,12 @@ shortest safe continuation. It cannot remove or bypass mandatory technical
 safeguards or active incident-safety work.
 
 The bounded consolidated design review described in [[Agents]] supports the
-design-to-implementation handoff; it does not add a seventh universal gate.
-Design acceptance and supporting test measurements cannot replace formal
-candidate review or test acceptance. Snapshot creation is an authorized
-orchestrator action, not permission for a file-editing developer to commit.
+design-to-implementation handoff when the complex profile requires it.
+Neither that review nor PerfettoStan is a universal gate. Design acceptance
+and supporting test measurements cannot replace the independent candidate
+review or test evidence selected by the profile. Snapshot creation is an
+authorized orchestrator action, not permission for a file-editing developer
+to commit.
 
 ## Risk-conditional review profiles
 

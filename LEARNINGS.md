@@ -482,7 +482,7 @@ Retry tests must keep `submittedAt` fixed while changing `event.timestamp` and p
 cd resulting && npm ci && npm run test:ci
 ```
 
-`production-build.yml` runs coverage gates for every backend service and the client on pull requests into `dev` or `master`. Per-service `tests-*.yaml` workflows provide additional path-scoped feedback.
+`production-build.yml` runs coverage only for changed services, expands shared or unknown service-impacting paths to every service, and skips coverage for documentation, governance, and unrelated infrastructure changes. Per-service `tests-*.yaml` workflows provide additional path-scoped feedback.
 
 ---
 
