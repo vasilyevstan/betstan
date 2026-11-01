@@ -709,9 +709,12 @@ fi
 grep -Fq 'group: oci-control-plane' \
   "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" ||
   fail "GHCR package mutations do not share production control-plane concurrency"
-grep -A8 -F 'name: Validate then apply explicit package-generation prune' \
-  "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" |
-  grep -Fq 'GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}' ||
+prune_step="$(
+  grep -A8 -F 'name: Validate then apply explicit package-generation prune' \
+    "$ROOT_DIR/.github/workflows/ghcr-package-management.yml"
+)" || fail "GHCR package validation/prune step is missing"
+grep -Fq 'GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}' \
+  <<<"$prune_step" ||
   fail "GHCR package validation/prune does not authenticate GitHub API calls"
 for literal in \
   'actions/workflows/ghcr-package-management.yml' \
@@ -850,9 +853,11 @@ fi
 grep -Fq '.github/workflows/ghcr-package-management.yml' \
   "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
   fail "OCI pull-request lint omits the production-capable GHCR package workflow"
-grep -A8 -F 'name: Record exact partial-build repair authorization' \
-  "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" |
-  grep -Fq 'mkdir -p "$OUTPUT_DIR"' ||
+repair_authorization_step="$(
+  grep -A8 -F 'name: Record exact partial-build repair authorization' \
+    "$ROOT_DIR/.github/workflows/ghcr-package-management.yml"
+)" || fail "partial-build repair authorization step is missing"
+grep -Fq 'mkdir -p "$OUTPUT_DIR"' <<<"$repair_authorization_step" ||
   fail "partial-build repair writes evidence before creating its output directory"
 grep -Fq "inputs.phase == 'prune'" \
   "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" ||

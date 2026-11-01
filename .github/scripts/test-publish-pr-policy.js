@@ -5147,32 +5147,32 @@ async function main() {
   ];
   const activeLeanDeliveryWorkflowAuthorizations = [
     {
-      id: "lean-delivery-production-build-pr-916-v3",
+      id: "lean-delivery-production-build-source-selector-v1",
       repository: "vasilyevstan/betstan",
       headRepository: "vasilyevstan/betstan",
       workflowPath: ".github/workflows/production-build.yml",
       trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
       authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-      pullNumber: 916,
-      headRef: "fix/lean-delivery-recovery",
+      pullNumber: null,
+      headRef: "fix/lean-delivery-workflow-restoration",
       baseRef: "dev",
-      issuedAt: "2026-11-01T15:02:22.000Z",
-      expiresAt: "2026-11-02T15:02:22.000Z",
-      receiptSha: "10c99cf4a95a65ec82eed6d86d921a141aef59ac",
+      issuedAt: "2026-11-01T18:39:23.000Z",
+      expiresAt: "2026-11-02T18:39:23.000Z",
+      receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
     },
     {
-      id: "lean-delivery-production-build-promotion-918-v1",
+      id: "lean-delivery-production-build-promotion-selector-v1",
       repository: "vasilyevstan/betstan",
       headRepository: "vasilyevstan/betstan",
       workflowPath: ".github/workflows/production-build.yml",
       trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
       authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-      pullNumber: 918,
+      pullNumber: null,
       headRef: "dev",
       baseRef: "master",
-      issuedAt: "2026-11-01T04:14:23.000Z",
-      expiresAt: "2026-11-02T01:50:05.000Z",
-      receiptSha: "580e92607e345c1704d058c24a215e0643706def",
+      issuedAt: "2026-11-01T18:39:23.000Z",
+      expiresAt: "2026-11-02T18:39:23.000Z",
+      receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
     },
   ];
   assert.deepEqual(
@@ -5188,14 +5188,33 @@ async function main() {
         trustedBlob: authorization.trustedBlob,
         authorizedBlob: authorization.authorizedBlob,
         pull: {
-          number: authorization.pullNumber,
+          number: 999,
+          state: "open",
           headRepository: authorization.headRepository,
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: "2026-11-01T16:02:22.000Z",
+        now: "2026-11-01T19:00:00.000Z",
       }),
       authorization,
+    );
+    assert.equal(
+      publishPrPolicy.findWorkflowAuthorization({
+        authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+        repository: authorization.repository,
+        workflowPath: authorization.workflowPath,
+        trustedBlob: authorization.trustedBlob,
+        authorizedBlob: authorization.authorizedBlob,
+        pull: {
+          number: 999,
+          state: "closed",
+          headRepository: authorization.headRepository,
+          headRef: authorization.headRef,
+          baseRef: authorization.baseRef,
+        },
+        now: "2026-11-01T19:00:00.000Z",
+      }),
+      null,
     );
   }
   for (const authorization of historicalNode24WorkflowAuthorizations) {
@@ -5276,7 +5295,7 @@ async function main() {
           headRef: retired.headRef,
           baseRef: retired.baseRef,
         },
-        now: "2026-11-01T16:02:22.000Z",
+        now: "2026-11-01T19:00:00.000Z",
       }),
       null,
     );
@@ -5323,11 +5342,13 @@ async function main() {
     false,
   );
   assert(
-    publisherSource.includes('id: "lean-delivery-production-build-pr-916-v3"'),
+    publisherSource.includes(
+      'id: "lean-delivery-production-build-source-selector-v1"',
+    ),
   );
   assert(
     publisherSource.includes(
-      'id: "lean-delivery-production-build-promotion-918-v1"',
+      'id: "lean-delivery-production-build-promotion-selector-v1"',
     ),
   );
   assert(
@@ -6501,6 +6522,155 @@ async function main() {
       )
       .map(({ state }) => state),
     ["pending", "success"],
+  );
+
+  const preIssueSelectorCompletion = await execute({
+    eventName: "workflow_run",
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [
+      workflowAuthorization({
+        pullNumber: null,
+        issuedAt: "2026-09-02T09:30:00.000Z",
+      }),
+    ],
+  });
+  assertNoQualitySuccess(preIssueSelectorCompletion);
+  assert.equal(
+    preIssueSelectorCompletion.statuses.some(({ context }) =>
+      context.startsWith("trusted-workflow-authorization/"),
+    ),
+    false,
+  );
+
+  const selectorAuthorizationStatuses = [];
+  const exactSelectorCompletion = await execute({
+    eventName: "workflow_run",
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [
+      workflowAuthorization({
+        pullNumber: null,
+        issuedAt: "2026-09-02T08:30:00.000Z",
+      }),
+    ],
+    authorizationStatuses: selectorAuthorizationStatuses,
+  });
+  assert.deepEqual(
+    exactSelectorCompletion.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success", "success"],
+  );
+  assert.deepEqual(
+    selectorAuthorizationStatuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-workflow-authorization/"),
+      )
+      .map(({ state }) => state),
+    ["success", "pending"],
+  );
+
+  const ambiguousSelectorStatuses = [];
+  const ambiguousSelectorCompletion = await execute({
+    eventName: "workflow_run",
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [
+      workflowAuthorization({
+        pullNumber: null,
+        issuedAt: "2026-09-02T08:30:00.000Z",
+      }),
+    ],
+    openPulls: [
+      pull(),
+      pull({ number: 64 }),
+    ],
+    authorizationStatuses: ambiguousSelectorStatuses,
+  });
+  assertQualityFailure(ambiguousSelectorCompletion);
+  assert.equal(ambiguousSelectorStatuses.length, 0);
+
+  const changingSelectorPulls = [pull()];
+  const changingSelectorStatuses = [];
+  const changingSelectorCompletion = await execute({
+    eventName: "workflow_run",
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [
+      workflowAuthorization({
+        pullNumber: null,
+        issuedAt: "2026-09-02T08:30:00.000Z",
+      }),
+    ],
+    openPulls: changingSelectorPulls,
+    authorizationStatuses: changingSelectorStatuses,
+    beforeStatusWrite: (status) => {
+      if (
+        status.context.startsWith("trusted-workflow-authorization/") &&
+        status.state === "pending"
+      ) {
+        changingSelectorPulls.push(pull({ number: 64 }));
+      }
+    },
+  });
+  assertQualityFailure(changingSelectorCompletion);
+  assert.deepEqual(
+    changingSelectorStatuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-workflow-authorization/"),
+      )
+      .map(({ state }) => state),
+    ["pending"],
+  );
+
+  const postReceiptSelectorPulls = [pull()];
+  const postReceiptSelectorStatuses = [];
+  const postReceiptPublishedStatuses = [];
+  let selectorQualitySuccessWrites = 0;
+  await assert.rejects(
+    execute({
+      eventName: "workflow_run",
+      headBlob: CHANGED_BLOB,
+      workflowAuthorizations: [
+        workflowAuthorization({
+          pullNumber: null,
+          issuedAt: "2026-09-02T08:30:00.000Z",
+        }),
+      ],
+      openPulls: postReceiptSelectorPulls,
+      authorizationStatuses: postReceiptSelectorStatuses,
+      statusSink: postReceiptPublishedStatuses,
+      beforeStatusWrite: (status) => {
+        if (
+          status.context.startsWith("pr-quality-gates/") &&
+          status.state === "success"
+        ) {
+          selectorQualitySuccessWrites += 1;
+          if (selectorQualitySuccessWrites === 2) {
+            postReceiptSelectorPulls.push(pull({ number: 64 }));
+          }
+        }
+      },
+    }),
+    /workflow selector authorization does not match exactly one open pull request/,
+  );
+  assert.deepEqual(
+    postReceiptSelectorStatuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-workflow-authorization/"),
+      )
+      .map(({ state }) => state),
+    ["success", "pending"],
+  );
+  const postReceiptLatestStates = new Map();
+  for (const status of postReceiptPublishedStatuses) {
+    if (status.context.startsWith("pr-quality-gates/")) {
+      postReceiptLatestStates.set(
+        `${status.sha}:${status.context}`,
+        status.state,
+      );
+    }
+  }
+  assert.deepEqual(
+    [...postReceiptLatestStates.values()],
+    ["pending", "pending"],
   );
 
   const mismatchedAuthorizations = [

@@ -23,6 +23,18 @@ image tag, a stale branch name, or an unverified workflow rerun.
 Direct pushes to `dev` or `master` are not part of the supported flow. Only
 `dev` may be promoted to `master`.
 
+### Protected-workflow bootstrap
+
+When a protected quality workflow must change, first promote the fail-closed
+publisher support while retaining the currently trusted workflow bytes. A
+short-lived selector may then bind the first eligible open PR with the exact
+repository, refs, trusted blob, and authorized blob instead of reserving a PR
+number before issuance. The PR transition and quality run must postdate
+issuance, and receipt publication revalidates live refs, the complete snapshot,
+and promotion ancestry. Source integration and `dev`-to-`master` promotion use
+separate one-use receipts. The workflow restoration removes the temporary
+declarations while preserving generic selector support.
+
 ### Concurrent feature delivery
 
 Several development sessions may prepare and merge compatible features at the

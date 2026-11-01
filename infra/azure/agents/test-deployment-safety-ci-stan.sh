@@ -1517,8 +1517,8 @@ coverage_review_fixture_sequence_bootstrap_region="$(
 for coverage_review_fixture_sequence_required_definition in \
     'reset_coverage_review_fixture_sequence() {' \
     'allocate_coverage_review_fixture_root() {'; do
-  if ! printf '%s\n' "$coverage_review_fixture_sequence_bootstrap_region" |
-      grep -qxF "$coverage_review_fixture_sequence_required_definition"; then
+  if ! grep -qxF "$coverage_review_fixture_sequence_required_definition" \
+      <<<"$coverage_review_fixture_sequence_bootstrap_region"; then
     echo "ERROR: the production fixture sequence bootstrap region did not capture the real helper definitions" >&2
     exit 1
   fi
@@ -4237,6 +4237,7 @@ PY
 
 python3 -I - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
 import copy
+import hashlib
 import json
 import os
 import pathlib
@@ -4247,8 +4248,18 @@ import tempfile
 
 azure_workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 oci_workflow = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-build_workflow = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+build_workflow_path = pathlib.Path(sys.argv[3])
+build_workflow_bytes = build_workflow_path.read_bytes()
+build_workflow = build_workflow_bytes.decode("utf-8")
+build_workflow_blob = hashlib.sha1(
+    f"blob {len(build_workflow_bytes)}\0".encode("utf-8")
+    + build_workflow_bytes
+).hexdigest()
 oci_deploy_script = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+
+trusted_build_workflow_blob = "1e3118276cc4746e824303245339c25de4411c15"
+lean_build_workflow_blob = "7f036e038c780d929417ea7e9f6227bdf9d5fb89"
+trusted_build_restoration = build_workflow_blob == trusted_build_workflow_blob
 
 expected_azure_order = [
     "auth",
@@ -4287,6 +4298,16 @@ full_sha_pattern = re.compile(r"^[0-9a-f]{40}$")
 
 def fail(message: str) -> None:
     raise SystemExit(message)
+
+
+if build_workflow_blob not in (
+    trusted_build_workflow_blob,
+    lean_build_workflow_blob,
+):
+    fail(
+        "production-build.yml is neither the trusted restoration nor "
+        "the reviewed lean workflow"
+    )
 
 
 def parse_rollouts(text: str) -> list[str]:
@@ -4463,6 +4484,43 @@ build_document = json.loads(subprocess.check_output(
 output_errors = validate_build_output_defaults(build_document)
 if output_errors:
     fail("\n".join(output_errors))
+
+for text, label in (
+    (azure_workflow, "Azure deploy workflow"),
+    (oci_deploy_script, "OCI deploy script"),
+):
+    if "gamemaster must rollout last" not in text:
+        fail(f"{label} lost the gamemaster-last guard")
+
+for expected_fragment in (
+    "IMAGE_PROVENANCE_FILE: artifacts/deploy-provenance/images.tsv",
+    "SECONDARY_PUBLIC_URL: ${{ format('https://www.{0}', env.APP_DOMAIN) }}",
+    "LIVE_BETTING_READINESS_MODE: dark",
+    "LIVE_READINESS_REQUEST_TIMEOUT: \"15\"",
+    "LIVE_READINESS_SSE_TIMEOUT: \"20\"",
+    "path: artifacts/deploy-validation/live-readiness",
+):
+    if expected_fragment not in azure_workflow:
+        fail(f"Azure deploy workflow missing readiness wiring: {expected_fragment}")
+
+for expected_fragment in (
+    "IMAGE_PROVENANCE_FILE: artifacts/oci-deploy/images.tsv",
+    "OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}",
+    "OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}",
+    "OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}",
+    "LIVE_BETTING_READINESS_MODE: dark",
+    "LIVE_READINESS_REQUEST_TIMEOUT: \"15\"",
+    "LIVE_READINESS_SSE_TIMEOUT: \"20\"",
+    "path: artifacts/oci-deploy-validation/live-readiness",
+):
+    if expected_fragment not in oci_workflow:
+        fail(f"OCI deploy workflow missing readiness wiring: {expected_fragment}")
+
+if trusted_build_restoration:
+    print("production_build_trusted_restoration=PASS")
+    print(f"production_build_action_pins=PASS cases={len(negative_cases) + 1}")
+    print("deployment_safety_ci_tests=PASS")
+    sys.exit(0)
 
 scope_step = next(
     step for step in build_document["jobs"]["change-scope"]["steps"]
@@ -4720,37 +4778,6 @@ wrong_scope["jobs"]["build"]["env"] = wrong_scope_step.pop("env")
 if not validate_build_output_defaults(wrong_scope):
     fail("job-wide build output settings unexpectedly passed")
 print("production_build_output_defaults=PASS cases=6")
-
-for text, label in (
-    (azure_workflow, "Azure deploy workflow"),
-    (oci_deploy_script, "OCI deploy script"),
-):
-    if "gamemaster must rollout last" not in text:
-        fail(f"{label} lost the gamemaster-last guard")
-
-for expected_fragment in (
-    "IMAGE_PROVENANCE_FILE: artifacts/deploy-provenance/images.tsv",
-    "SECONDARY_PUBLIC_URL: ${{ format('https://www.{0}', env.APP_DOMAIN) }}",
-    "LIVE_BETTING_READINESS_MODE: dark",
-    "LIVE_READINESS_REQUEST_TIMEOUT: \"15\"",
-    "LIVE_READINESS_SSE_TIMEOUT: \"20\"",
-    "path: artifacts/deploy-validation/live-readiness",
-):
-    if expected_fragment not in azure_workflow:
-        fail(f"Azure deploy workflow missing readiness wiring: {expected_fragment}")
-
-for expected_fragment in (
-    "IMAGE_PROVENANCE_FILE: artifacts/oci-deploy/images.tsv",
-    "OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}",
-    "OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}",
-    "OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}",
-    "LIVE_BETTING_READINESS_MODE: dark",
-    "LIVE_READINESS_REQUEST_TIMEOUT: \"15\"",
-    "LIVE_READINESS_SSE_TIMEOUT: \"20\"",
-    "path: artifacts/oci-deploy-validation/live-readiness",
-):
-    if expected_fragment not in oci_workflow:
-        fail(f"OCI deploy workflow missing readiness wiring: {expected_fragment}")
 
 for required_test in (
     "./infra/azure/agents/pre-commit-infra-check-stan.sh",

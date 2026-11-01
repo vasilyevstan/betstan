@@ -57,6 +57,12 @@ When changing a trusted required-check workflow, follow the exact bootstrap in
 mechanism without changing the protected workflow; then authorize only the
 intended workflow blob, promote it normally, remove the authorization, and
 verify fresh statuses before changing protection or disabling an old identity.
+If a future PR number cannot be reserved, `pullNumber: null` may select only
+the first eligible open PR matching the exact repository, refs, and workflow
+blobs. Its transition and quality run must postdate issuance; receipt
+publication revalidates live refs, the complete PR snapshot, and promotion
+ancestry. Keep source and promotion selectors and receipts separate, and
+remove both temporary declarations with the workflow restoration.
 The first completed exact quality run created after authorization consumes its
 durable receipt. Workflow-producing pull-request events publish pending until
 their own run completes. They first publish an unbound exact-snapshot barrier,

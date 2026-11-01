@@ -3074,10 +3074,14 @@ else
 fi
 
 snapshot="$work_dir/snapshot"
+snapshot_archive="$work_dir/snapshot.tar"
 mkdir -p "$snapshot"
-git archive --format=tar "$checkout_sha" 2>/dev/null |
-  tar -xf - -C "$snapshot" 2>/dev/null ||
+git archive --format=tar --output="$snapshot_archive" "$checkout_sha" \
+  2>/dev/null ||
   fail "cannot-materialize-merge-snapshot"
+tar -xf "$snapshot_archive" -C "$snapshot" 2>/dev/null ||
+  fail "cannot-materialize-merge-snapshot"
+rm -f "$snapshot_archive"
 require_regular_file "$snapshot/$ENGINE_PATH"
 require_regular_file "$snapshot/$HARNESS_PATH"
 [[ "$(hash_file "$snapshot/$ENGINE_PATH")" == "$current_engine_blob" ]] ||
