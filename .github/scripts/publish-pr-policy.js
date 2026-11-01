@@ -143,32 +143,32 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 // short-lived policy change and removed immediately after their intended PR.
 const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
   {
-    id: "lean-delivery-production-build-pr-916-v3",
+    id: "lean-delivery-production-build-source-selector-v1",
     repository: "vasilyevstan/betstan",
     headRepository: "vasilyevstan/betstan",
     workflowPath: ".github/workflows/production-build.yml",
     trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
     authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-    pullNumber: 916,
-    headRef: "fix/lean-delivery-recovery",
+    pullNumber: null,
+    headRef: "fix/lean-delivery-workflow-restoration",
     baseRef: "dev",
-    issuedAt: "2026-11-01T15:02:22.000Z",
-    expiresAt: "2026-11-02T15:02:22.000Z",
-    receiptSha: "10c99cf4a95a65ec82eed6d86d921a141aef59ac",
+    issuedAt: "2026-11-01T18:39:23.000Z",
+    expiresAt: "2026-11-02T18:39:23.000Z",
+    receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
   },
   {
-    id: "lean-delivery-production-build-promotion-918-v1",
+    id: "lean-delivery-production-build-promotion-selector-v1",
     repository: "vasilyevstan/betstan",
     headRepository: "vasilyevstan/betstan",
     workflowPath: ".github/workflows/production-build.yml",
     trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
     authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-    pullNumber: 918,
+    pullNumber: null,
     headRef: "dev",
     baseRef: "master",
-    issuedAt: "2026-11-01T04:14:23.000Z",
-    expiresAt: "2026-11-02T01:50:05.000Z",
-    receiptSha: "580e92607e345c1704d058c24a215e0643706def",
+    issuedAt: "2026-11-01T18:39:23.000Z",
+    expiresAt: "2026-11-02T18:39:23.000Z",
+    receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
   },
 ]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
@@ -464,8 +464,9 @@ function validateWorkflowAuthorization(authorization, nowMilliseconds) {
     throw new Error("workflow authorization does not authorize a change");
   }
   if (
-    !Number.isSafeInteger(authorization.pullNumber) ||
-    authorization.pullNumber < 1
+    authorization.pullNumber !== null &&
+    (!Number.isSafeInteger(authorization.pullNumber) ||
+      authorization.pullNumber < 1)
   ) {
     throw new Error("workflow authorization pullNumber is invalid");
   }
@@ -538,7 +539,8 @@ function findWorkflowAuthorization({
       authorization.workflowPath === workflowPath &&
       authorization.trustedBlob === trustedBlob &&
       authorization.authorizedBlob === authorizedBlob &&
-      authorization.pullNumber === pull.number &&
+      (authorization.pullNumber === pull.number ||
+        (authorization.pullNumber === null && pull.state === "open")) &&
       authorization.headRepository === pull.headRepository &&
       authorization.headRef === pull.headRef &&
       authorization.baseRef === pull.baseRef,
@@ -2209,7 +2211,13 @@ async function getBranchSha(github, owner, repo, branch) {
   return sha;
 }
 
-async function listOpenPromotionPulls(github, owner, repo, repository) {
+async function listOpenPulls(
+  github,
+  owner,
+  repo,
+  baseRef,
+  budget,
+) {
   const pulls = [];
   const seenNumbers = new Set();
   for (let page = 1; Number.isSafeInteger(page); page += 1) {
@@ -2217,13 +2225,23 @@ async function listOpenPromotionPulls(github, owner, repo, repository) {
       owner,
       repo,
       state: "open",
-      base: "master",
+      base: baseRef,
       per_page: 100,
       page,
+      ...(budget && {
+        request: {
+          signal: budget.signal(
+            Math.min(
+              RECEIPT_REQUEST_TIMEOUT_MS,
+              receiptTimeRemaining(budget),
+            ),
+          ),
+        },
+      }),
     });
     const pagePulls = response.data;
     if (!Array.isArray(pagePulls) || pagePulls.length > 100) {
-      throw new Error("open promotion inventory is malformed");
+      throw new Error("open pull request inventory is malformed");
     }
     for (const candidate of pagePulls) {
       if (
@@ -2238,22 +2256,62 @@ async function listOpenPromotionPulls(github, owner, repo, repository) {
         typeof candidate.head?.repo?.full_name !== "string" ||
         seenNumbers.has(candidate.number)
       ) {
-        throw new Error("open promotion inventory entry is malformed");
+        throw new Error("open pull request inventory entry is malformed");
       }
       seenNumbers.add(candidate.number);
-      if (
-        candidate.head.ref === "dev" &&
-        candidate.base.ref === "master" &&
-        candidate.head.repo.full_name === repository
-      ) {
-        pulls.push(candidate.number);
-      }
+      pulls.push(candidate);
     }
     if (pagePulls.length < 100) {
-      return pulls.sort((left, right) => left - right);
+      return pulls.sort((left, right) => left.number - right.number);
     }
   }
-  throw new Error("open promotion inventory exceeds safe pagination");
+  throw new Error("open pull request inventory exceeds safe pagination");
+}
+
+async function listOpenPromotionPulls(github, owner, repo, repository) {
+  const pulls = await listOpenPulls(
+    github,
+    owner,
+    repo,
+    "master",
+  );
+  return pulls
+    .filter(
+      (candidate) =>
+        candidate.head.ref === "dev" &&
+        candidate.base.ref === "master" &&
+        candidate.head.repo.full_name === repository,
+    )
+    .map(({ number }) => number);
+}
+
+async function assertUniqueWorkflowSelectorPull(
+  github,
+  owner,
+  repo,
+  authorization,
+  pull,
+  budget,
+) {
+  const matches = (
+    await listOpenPulls(
+      github,
+      owner,
+      repo,
+      authorization.baseRef,
+      budget,
+    )
+  ).filter(
+    (candidate) =>
+      candidate.head.ref === authorization.headRef &&
+      candidate.base.ref === authorization.baseRef &&
+      candidate.head.repo.full_name === authorization.headRepository,
+  );
+  if (matches.length !== 1 || matches[0].number !== pull.number) {
+    throw new Error(
+      "workflow selector authorization does not match exactly one open pull request",
+    );
+  }
 }
 
 function completedCoverageReceipt({
@@ -3838,6 +3896,37 @@ function assertCoverageAuthorizationRunEligibility(
   }
 }
 
+function assertWorkflowAuthorizationRunEligibility(
+  authorization,
+  transition,
+  run,
+) {
+  const issuedAt = parseAuthorizationTime(authorization.issuedAt, "issuedAt");
+  const expiresAt = parseAuthorizationTime(
+    authorization.expiresAt,
+    "expiresAt",
+  );
+  const createdAt = githubTimestampMilliseconds(
+    run.created_at,
+    "quality workflow run created_at",
+  );
+  const startedAt = githubTimestampMilliseconds(
+    run.run_started_at,
+    "quality workflow run run_started_at",
+  );
+  if (
+    authorization.pullNumber !== null ||
+    issuedAt >= transition.transitionAt ||
+    transition.transitionAt >= createdAt ||
+    createdAt >= expiresAt ||
+    startedAt >= expiresAt
+  ) {
+    throw new Error(
+      "workflow selector authorization does not contain the immutable transition and run",
+    );
+  }
+}
+
 function transitionMatchesPullIdentity(transition, pull) {
   return (
     transition.contentFingerprint === pull.contentFingerprint &&
@@ -4630,6 +4719,22 @@ async function qualityDecision({
         };
       }
     } else {
+      if (authorization.value.pullNumber === null) {
+        try {
+          assertWorkflowAuthorizationRunEligibility(
+            authorization.value,
+            transition,
+            run,
+          );
+        } catch (error) {
+          return {
+            state: "pending",
+            description: `PR #${pull.number} awaits post-authorization transition`,
+            targetUrl: fallbackUrl,
+            reason: error.message,
+          };
+        }
+      }
       const authorizationIssuedAt = parseAuthorizationTime(
         authorization.value.issuedAt,
         "issuedAt",
@@ -5068,6 +5173,8 @@ module.exports = async function publishPrPolicy({
     }
     let claimedReceipt;
     let assertClaimFresh;
+    let revalidateClaim;
+    let selectorClaim = false;
     if (quality.state === "success" && quality.authorization) {
       try {
         const expectedControlSha = await getBranchSha(
@@ -5079,6 +5186,18 @@ module.exports = async function publishPrPolicy({
         const expectedClaimEvidence = authorizationClaimEvidence(
           quality.authorization,
         );
+        const selectorAuthorization =
+          quality.authorization.kind === "workflow" &&
+          quality.authorization.value.pullNumber === null;
+        selectorClaim = selectorAuthorization;
+        if (
+          selectorAuthorization &&
+          await getBranchSha(github, owner, repo, pull.headRef) !== pull.headSha
+        ) {
+          throw new Error(
+            "workflow selector authorization head is not the live protected ref",
+          );
+        }
         assertClaimFresh = () => {
           if (quality.authorization.kind === "workflow") {
             const now = getAuthorizationNow();
@@ -5090,7 +5209,7 @@ module.exports = async function publishPrPolicy({
             validateWorkflowAuthorization(quality.authorization.value, milliseconds);
           }
         };
-        const revalidate = async (receipt) => {
+        revalidateClaim = async (receipt) => {
           assertOwnedReceiptLedger(receipt.ledger, receipt);
           const currentPull = await getCurrentPull(
             github,
@@ -5127,16 +5246,50 @@ module.exports = async function publishPrPolicy({
               "authorization authority changed immediately before receipt claim",
             );
           }
+          if (selectorAuthorization) {
+            await assertUniqueWorkflowSelectorPull(
+              github,
+              owner,
+              repo,
+              quality.authorization.value,
+              pull,
+              receipt.budget,
+            );
+          }
           await assertCurrentPullSnapshot(github, owner, repo, pull);
-          const [currentControlSha, currentBaseSha] = await Promise.all([
+          const [currentControlSha, currentBaseSha, currentHeadSha] = await Promise.all([
             getBranchSha(github, owner, repo, "master"),
             getBranchSha(github, owner, repo, pull.baseRef),
+            selectorAuthorization
+              ? getBranchSha(github, owner, repo, pull.headRef)
+              : Promise.resolve(null),
           ]);
           if (
             currentControlSha !== expectedControlSha ||
-            currentBaseSha !== pull.baseSha
+            currentBaseSha !== pull.baseSha ||
+            (selectorAuthorization && currentHeadSha !== pull.headSha)
           ) {
             throw new Error("authorization protected source changed before publication");
+          }
+          if (
+            selectorAuthorization &&
+            pull.headRef === "dev" &&
+            pull.baseRef === "master"
+          ) {
+            const comparison =
+              await github.rest.repos.compareCommitsWithBasehead({
+                owner,
+                repo,
+                basehead: `${pull.baseSha}...${pull.headSha}`,
+              });
+            if (
+              !["ahead", "identical"].includes(comparison.data.status) ||
+              comparison.data.merge_base_commit?.sha !== pull.baseSha
+            ) {
+              throw new Error(
+                "workflow selector promotion does not descend from live master",
+              );
+            }
           }
           receiptTimeRemaining(receipt.budget);
         };
@@ -5148,7 +5301,7 @@ module.exports = async function publishPrPolicy({
             authorization: quality.authorization.value,
             pull,
             targetUrl: policyRunUrl,
-            revalidate,
+            revalidate: revalidateClaim,
             assertCanWrite: assertClaimFresh,
             receiptIO,
             receiptBudget,
@@ -5165,13 +5318,13 @@ module.exports = async function publishPrPolicy({
             run: quality.authorization.run,
             transition: quality.authorization.transition,
             targetUrl: policyRunUrl,
-            revalidate,
+            revalidate: revalidateClaim,
             assertCanWrite: assertClaimFresh,
             receiptIO,
             receiptBudget,
           });
         }
-        await revalidate(claimedReceipt);
+        await revalidateClaim(claimedReceipt);
       } catch (error) {
         const label = authorizationLabel(quality.authorization);
         quality.state = "failure";
@@ -5200,6 +5353,9 @@ module.exports = async function publishPrPolicy({
       try {
         for (const target of targets) {
           if (quality.state === "success" && claimedReceipt) {
+            if (selectorClaim) {
+              await revalidateClaim(claimedReceipt);
+            }
             receiptTimeRemaining(claimedReceipt.budget);
             assertClaimFresh();
           }
@@ -5213,6 +5369,9 @@ module.exports = async function publishPrPolicy({
             quality.description,
             quality.targetUrl,
           );
+        }
+        if (quality.state === "success" && claimedReceipt && selectorClaim) {
+          await revalidateClaim(claimedReceipt);
         }
       } catch (error) {
         await invalidatePublishedSnapshot({

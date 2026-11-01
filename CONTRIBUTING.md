@@ -433,6 +433,16 @@ The trusted publisher currently requires the protected quality workflow to be by
 
 If the workflow file itself must change, first add and independently review a fail-closed, one-use exact-blob authorization mechanism in the trusted publisher without changing the workflow. Promote that policy separately, then authorize and merge only the intended workflow blob, remove the authorization, and verify fresh statuses come from the expected workflow IDs. Do not invent or document an authorization variable before the publisher implements and tests it.
 
+When the future pull-request number cannot be reserved safely, a workflow
+authorization may use `pullNumber: null` to select the first eligible open PR
+matching the exact repository, head repository, head ref, base ref, trusted
+blob, and authorized blob. The matching PR transition and bound quality run
+must both be created after authorization issuance. Before receipt publication,
+the publisher revalidates the live head and base refs, the complete PR
+snapshot, and `dev` ancestry over `master` for promotions. Source and promotion
+selectors use separate declarations and receipt contexts; a closed, stale,
+pre-issuance, ambiguous, or already-consumed match grants no authority.
+
 An exact-blob authorization is consumed by the first successful exact quality
 run for its PR transition. A workflow-producing pull-request event first
 publishes an unbound pending transition barrier, then binds the exact newly

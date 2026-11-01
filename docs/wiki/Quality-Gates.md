@@ -413,6 +413,17 @@ merge snapshot, receipt anchor, scope and operation gates, required fresh CI
 and applicable first-attempt provenance. Permitted source deltas belong in
 review evidence, not new declaration fields.
 
+A protected-workflow declaration can identify one exact PR number or, when the
+number cannot be reserved safely, the first eligible open PR matching its
+exact repository, head repository, refs, and workflow blobs. Selector matches
+require a PR transition and bound quality run created after issuance. Receipt
+and quality-success publication require exactly one matching candidate in the
+complete open-PR inventory and revalidate the live head, base, and control
+refs, complete PR snapshot, and `dev` ancestry over `master` for promotion.
+Source and promotion selectors remain separate one-use authorities and receipt
+contexts; closed, stale, pre-issuance, ambiguous, or consumed matches grant no
+authority and fail closed.
+
 Workflow expiry is checked on a fresh clock immediately before every receipt
 POST and quality-success POST. Expiry between receipt success and quality
 publication leaves the receipt spent and prevents quality success. Coverage
