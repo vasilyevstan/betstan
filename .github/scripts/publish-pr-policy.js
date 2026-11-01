@@ -143,7 +143,7 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 // short-lived policy change and removed immediately after their intended PR.
 const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
   {
-    id: "lean-delivery-production-build-pr-916-v1",
+    id: "lean-delivery-production-build-pr-916-v2",
     repository: "vasilyevstan/betstan",
     headRepository: "vasilyevstan/betstan",
     workflowPath: ".github/workflows/production-build.yml",
@@ -152,9 +152,9 @@ const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
     pullNumber: 916,
     headRef: "fix/lean-delivery-recovery",
     baseRef: "dev",
-    issuedAt: "2026-11-01T01:50:05.000Z",
-    expiresAt: "2026-11-02T01:50:05.000Z",
-    receiptSha: "300a8b197856df9dc3505a8e59a607af5a9d20fd",
+    issuedAt: "2026-11-01T07:55:06.000Z",
+    expiresAt: "2026-11-02T07:55:06.000Z",
+    receiptSha: "e4f0786d490bd79a4bf0652caca7608cd21d5069",
   },
   {
     id: "lean-delivery-production-build-promotion-918-v1",
