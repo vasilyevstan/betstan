@@ -47,13 +47,13 @@ const CLI_MANAGED_LABEL = "copilot-cli-managed";
 const INFORMATIONAL_CONTEXT_LABEL_PATTERN =
   /^(?:feature|session):[a-z0-9](?:[a-z0-9-]{0,40}[a-z0-9])?$/;
 const QUALITY_TRIGGER_ACTIONS = new Set([
-  "edited",
   "opened",
   "reopened",
   "synchronize",
 ]);
 const SUPPORTED_PULL_REQUEST_TARGET_ACTIONS = new Set([
   ...QUALITY_TRIGGER_ACTIONS,
+  "edited",
   "labeled",
   "ready_for_review",
   "unlabeled",
@@ -256,7 +256,7 @@ function pullIdentity(pull) {
     changedFiles: pull.changed_files,
     updatedAt: pull.updated_at,
     contentFingerprint: fingerprint(
-      `${pull.title || ""}\0${pull.body || ""}`,
+      `${pull.head.sha}\0${pull.base.sha}`,
     ),
     labels,
     labelsFingerprint: labelsFingerprint(labels),

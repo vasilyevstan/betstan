@@ -2543,6 +2543,12 @@ assert_secret_fixture_rejected() {
   grep -qF "possible hard-coded secret value" "$test_output"
 }
 
+grep -qF 'INFRA_DIRS="${INFRA_DIRS:-infra .github/workflows}"' \
+  "$PRE_COMMIT_CHECK" || {
+    echo "ERROR: infrastructure secret scan no longer covers every infra tree" >&2
+    exit 1
+  }
+
 if BRANCH_NAME=master GITHUB_ACTIONS=false "$PRE_COMMIT_CHECK" >"$test_output" 2>&1; then
   echo "ERROR: local master pre-commit check unexpectedly passed" >&2
   exit 1
@@ -2582,6 +2588,7 @@ SSH_PRIVATE_KEY: "${SSH_PRIVATE_KEY:-}"
 "NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"
 'MONGO_PASSWORD': '${MONGO_PASSWORD}'
 {"authToken":"${AUTH_TOKEN}"}
+az ad sp credential reset --query "{clientId: appId, clientSecret: password, subscriptionId: '$SUBSCRIPTION_ID', tenantId: tenant}"
 YAML
 BRANCH_NAME=feature/test \
   INFRA_DIRS="$secret_fixture_dir" \
@@ -2615,6 +2622,14 @@ printf '%s%s\n' \
 assert_secret_fixture_rejected "commented hard-coded token fixture"
 printf '%s%s\n' 'to' 'ken: hunter2xyz' >"$secret_fixture_dir/unsafe.yml"
 assert_secret_fixture_rejected "hard-coded token fixture"
+printf '%s\n' \
+  'token=hunter2xyz' \
+  'az resource show --query "{clientSecret: hunter2xyz}"' \
+  'clientSecret=password az account show --query name' \
+  'az account show --query name clientSecret=password' \
+  "printf 'authToken=hunter2xyz\\n'" \
+  >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "line-context bypass fixtures"
 printf '%s%s\n%s%s\n%s%s\n%s%s\n' \
   'MONGO_PASS' 'WORD: hunter2xyz' \
   'JWT_SEC' 'RET=hunter2xyz' \
@@ -2630,6 +2645,12 @@ printf '{"authTo%s":"hunter2xyz"}\n' 'ken' \
   >>"$secret_fixture_dir/unsafe.yml"
 assert_secret_fixture_rejected "quoted secret-key fixtures"
 rm -f "$secret_fixture_dir/unsafe.yml"
+
+if grep -Fq 'if "--query" in original' "$PRE_COMMIT_CHECK" ||
+    grep -Fq 'if "printf" in original and "%q" in original' "$PRE_COMMIT_CHECK"; then
+  echo "ERROR: infrastructure secret scan retains a line-wide bypass" >&2
+  exit 1
+fi
 
 cp "$ROOT_DIR"/.github/workflows/*.yml "$permission_fixture_dir/"
 WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
@@ -4217,10 +4238,12 @@ PY
 python3 -I - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
 import copy
 import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 azure_workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 oci_workflow = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
@@ -4440,6 +4463,241 @@ build_document = json.loads(subprocess.check_output(
 output_errors = validate_build_output_defaults(build_document)
 if output_errors:
     fail("\n".join(output_errors))
+
+scope_step = next(
+    step for step in build_document["jobs"]["change-scope"]["steps"]
+    if step.get("id") == "scope"
+)
+scope_run = scope_step["run"]
+scope_prefix = "python3 - <<'PY'\n"
+scope_suffix = "\nPY\n"
+if not scope_run.startswith(scope_prefix) or not scope_run.endswith(scope_suffix):
+    fail("production-build change-scope step no longer exposes its classifier")
+scope_code = scope_run[len(scope_prefix):-len(scope_suffix)]
+
+def run_change_scope(paths, event_name="pull_request"):
+    with tempfile.TemporaryDirectory() as directory:
+        fixture_dir = pathlib.Path(directory)
+        git_stub = fixture_dir / "git"
+        git_stub.write_text(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"${STUB_CHANGED_PATHS:-}\"\n",
+            encoding="utf-8",
+        )
+        git_stub.chmod(0o755)
+        output_path = fixture_dir / "github-output"
+        environment = os.environ.copy()
+        environment.update({
+            "BASE_SHA": "0" * 40,
+            "HEAD_SHA": "1" * 40,
+            "GITHUB_EVENT_NAME": event_name,
+            "GITHUB_OUTPUT": str(output_path),
+            "PATH": f"{fixture_dir}:{environment['PATH']}",
+            "STUB_CHANGED_PATHS": "\n".join(paths),
+        })
+        subprocess.run(
+            [sys.executable, "-c", scope_code],
+            check=True,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+        )
+        outputs = dict(
+            line.split("=", 1)
+            for line in output_path.read_text(encoding="utf-8").splitlines()
+        )
+        return outputs
+
+deployment_scope_fixtures = {
+    "none": (["docs/wiki/Quality-Gates.md"], "none"),
+    "meta": ([".github/workflows/production-build.yml"], "meta"),
+    "deploy": ([".github/workflows/production-deploy.yml"], "full"),
+    "rollback-workflow": (
+        [".github/workflows/production-rollback.yml"], "full"
+    ),
+    "baseline": (["infra/azure/agents/baseline-capture-stan.sh"], "full"),
+    "deploy-operator": (["infra/azure/agents/deploy-stan.sh"], "full"),
+    "rollback": (["infra/azure/agents/rollback-application-stan.sh"], "full"),
+    "shared-lock": (
+        ["infra/azure/agents/shared-mongo-operation-lock-stan.sh"], "full"
+    ),
+    "shared-lock-test": (
+        ["infra/azure/agents/test-shared-mongo-operation-lock-stan.sh"], "full"
+    ),
+    "rename-old-and-new": (
+        [
+            "infra/azure/agents/rollback-application-stan.sh",
+            "docs/archive/rollback-application-stan.sh",
+        ],
+        "full",
+    ),
+}
+for name, (paths, expected_scope) in deployment_scope_fixtures.items():
+    actual_scope = run_change_scope(paths)["deployment_safety"]
+    if actual_scope != expected_scope:
+        fail(
+            f"deployment scope fixture {name} selected {actual_scope}, "
+            f"expected {expected_scope}"
+        )
+print(
+    "production_build_deployment_scope=PASS "
+    f"cases={len(deployment_scope_fixtures)}"
+)
+
+all_services = [
+    "auth", "bet", "backoffice", "event", "gamemaster",
+    "moderation", "resulting", "slip", "telemetry", "client",
+]
+selector_fixtures = {
+    "unrelated": (
+        ["docs/wiki/Quality-Gates.md"],
+        "pull_request",
+        {
+            "auth_smoke": "false",
+            "coverage_needed": "false",
+            "coverage_matrix": {"service": ["none"]},
+            "deployment_safety": "none",
+            "runtime_validation": "false",
+        },
+    ),
+    "service": (
+        ["auth/src/index.js"],
+        "pull_request",
+        {
+            "auth_smoke": "true",
+            "coverage_needed": "true",
+            "coverage_matrix": {"service": ["auth"]},
+            "deployment_safety": "none",
+            "runtime_validation": "false",
+        },
+    ),
+    "common": (
+        ["common/src/contracts.ts"],
+        "pull_request",
+        {
+            "auth_smoke": "true",
+            "coverage_needed": "true",
+            "coverage_matrix": {"service": all_services},
+            "deployment_safety": "none",
+            "runtime_validation": "false",
+        },
+    ),
+    "unknown": (
+        ["package.json"],
+        "pull_request",
+        {
+            "auth_smoke": "true",
+            "coverage_needed": "true",
+            "coverage_matrix": {"service": all_services},
+            "deployment_safety": "none",
+            "runtime_validation": "false",
+        },
+    ),
+    "rename-old-and-new": (
+        ["auth/src/legacy.js", "docs/archive/legacy.js"],
+        "pull_request",
+        {
+            "auth_smoke": "true",
+            "coverage_needed": "true",
+            "coverage_matrix": {"service": ["auth"]},
+            "deployment_safety": "none",
+            "runtime_validation": "false",
+        },
+    ),
+    "push-full": (
+        [],
+        "push",
+        {
+            "auth_smoke": "true",
+            "coverage_needed": "true",
+            "coverage_matrix": {"service": all_services},
+            "deployment_safety": "full",
+            "runtime_validation": "true",
+        },
+    ),
+}
+for name, (paths, event_name, expected) in selector_fixtures.items():
+    actual = run_change_scope(paths, event_name)
+    actual["coverage_matrix"] = json.loads(actual["coverage_matrix"])
+    if actual != expected:
+        fail(f"change-scope fixture {name} selected {actual}, expected {expected}")
+print(f"production_build_change_scope=PASS cases={len(selector_fixtures)}")
+
+quality_gate_step = next(
+    step for step in build_document["jobs"]["pr-quality-gates"]["steps"]
+    if step.get("name") == "Require every validation gate"
+)
+quality_gate_script = quality_gate_step["run"]
+quality_environment = {
+    "SCOPE_RESULT": "success",
+    "MANIFEST_RESULT": "success",
+    "INGRESS_RESULT": "success",
+    "RUNTIME_NEEDED": "false",
+    "SCRIPT_RESULT": "skipped",
+    "WORKFLOW_RESULT": "success",
+    "DEPLOYMENT_SAFETY_NEEDED": "none",
+    "DEPLOYMENT_SAFETY_RESULT": "skipped",
+    "AUTH_NEEDED": "false",
+    "AUTH_CONTAINER_RESULT": "skipped",
+    "COVERAGE_NEEDED": "false",
+    "COVERAGE_RESULT": "skipped",
+}
+
+def quality_gate_result(overrides):
+    environment = os.environ.copy()
+    environment.update(quality_environment)
+    environment.update(overrides)
+    return subprocess.run(
+        ["bash", "-c", quality_gate_script],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode
+
+if quality_gate_result({}) != 0:
+    fail("unaffected quality aggregation fixture failed")
+quality_gate_negative_fixtures = {
+    "runtime-skipped-when-selected": {
+        "RUNTIME_NEEDED": "true",
+        "SCRIPT_RESULT": "skipped",
+    },
+    "auth-skipped-when-selected": {
+        "AUTH_NEEDED": "true",
+        "AUTH_CONTAINER_RESULT": "skipped",
+    },
+    "deployment-skipped-when-selected": {
+        "DEPLOYMENT_SAFETY_NEEDED": "full",
+        "DEPLOYMENT_SAFETY_RESULT": "skipped",
+    },
+    "coverage-skipped-when-selected": {
+        "COVERAGE_NEEDED": "true",
+        "COVERAGE_RESULT": "skipped",
+    },
+}
+for name, overrides in quality_gate_negative_fixtures.items():
+    if quality_gate_result(overrides) == 0:
+        fail(f"quality aggregation accepted {name}")
+if quality_gate_result({
+    "RUNTIME_NEEDED": "true",
+    "SCRIPT_RESULT": "success",
+    "AUTH_NEEDED": "true",
+    "AUTH_CONTAINER_RESULT": "success",
+    "DEPLOYMENT_SAFETY_NEEDED": "full",
+    "DEPLOYMENT_SAFETY_RESULT": "success",
+    "COVERAGE_NEEDED": "true",
+    "COVERAGE_RESULT": "success",
+}) != 0:
+    fail("fully selected quality aggregation fixture failed")
+build_condition = build_document["jobs"]["build"]["if"]
+for required_result in (
+    "needs.deploy-runtime-script-validate.result == 'success'",
+    "needs.auth-container-smoke.result == 'success'",
+):
+    if required_result not in build_condition:
+        fail(f"push build can bypass required result: {required_result}")
+print(
+    "production_build_quality_aggregation=PASS "
+    f"cases={len(quality_gate_negative_fixtures) + 2}"
+)
+
 for key in ("DOCKER_BUILD_SUMMARY", "DOCKER_BUILD_RECORD_UPLOAD"):
     for value in (None, "true"):
         candidate = copy.deepcopy(build_document)
@@ -4501,13 +4759,47 @@ for required_test in (
     "./infra/azure/agents/test-live-betting-readiness-stan.sh",
     "./infra/azure/agents/test-live-betting-rollback-readiness-stan.sh",
     "./infra/azure/agents/test-production-rollback-stan.sh",
+    "./infra/azure/agents/test-shared-mongo-operation-lock-stan.sh",
+):
+    if required_test not in build_workflow:
+        fail(f"production-build.yml is missing {required_test}")
+for duplicated_test in (
     "./infra/oci/tests/test-deploy-validation-loop-stan.sh",
+    "./infra/oci/tests/test-live-data-maintenance-stan.sh",
+    "./infra/oci/tests/test-live-betting-control-stan.sh",
+    "./infra/oci/tests/test-revalidate-live-activation-stan.sh",
+    "./infra/oci/tests/test-live-betting-data-rollout-stan.sh",
     "./infra/oci/tests/test-live-betting-readiness-stan.sh",
     "./infra/oci/tests/rollback-live-readiness-contract.sh",
     "./infra/oci/tests/rollback-contract.sh",
 ):
-    if required_test not in build_workflow:
-        fail(f"production-build.yml is missing {required_test}")
+    if duplicated_test in build_workflow:
+        fail(f"production-build.yml duplicates OCI validation: {duplicated_test}")
+if build_document["jobs"]["deployment-safety-contracts"].get("timeout-minutes") != 45:
+    fail("production-build deployment safety job lacks the 45-minute bound")
+for required_fragment in (
+    "types: [opened, synchronize, reopened]",
+    "change-scope:",
+    "coverage_needed: ${{ steps.scope.outputs.coverage_needed }}",
+    "coverage_matrix: ${{ steps.scope.outputs.coverage_matrix }}",
+    "deployment_safety: ${{ steps.scope.outputs.deployment_safety }}",
+    'matrix: ${{ fromJSON(needs.change-scope.outputs.coverage_matrix) }}',
+    "if: needs.change-scope.outputs.deployment_safety != 'none'",
+    "if: needs.change-scope.outputs.coverage_needed == 'true'",
+    '"git", "diff", "--no-renames", "--name-only"',
+    ".github/workflows/production-rollback.yml",
+    "infra/azure/agents/baseline-capture-stan.sh",
+    "infra/azure/agents/deploy-stan.sh",
+    "infra/azure/agents/rollback-application-stan.sh",
+    "infra/azure/agents/production-run-exclusivity-stan.sh",
+    "infra/azure/agents/shared-mongo-operation-lock-stan.sh",
+):
+    if required_fragment not in build_workflow:
+        fail(f"production-build.yml is missing lean routing: {required_fragment}")
+if "types: [opened, synchronize, reopened, edited]" in build_workflow:
+    fail("production-build.yml reruns source validation on metadata edits")
+if "Record unaffected service coverage" in build_workflow:
+    fail("production-build.yml retains the dummy coverage sentinel job")
 
 print(f"production_build_action_pins=PASS cases={len(negative_cases) + 1}")
 print("deployment_safety_ci_tests=PASS")

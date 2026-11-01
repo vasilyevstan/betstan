@@ -186,9 +186,10 @@ inactive. Fail closed when either query is incomplete or fails.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - Require every PR title to be a short, understandable outcome. Reject
   ambiguous category prefixes such as `chore`, `misc`, or `wip`.
-  Check this and the 72-character limit before PR creation or a
-  workflow-producing metadata edit; retain the final canonical merge check.
-- After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
+  Check this and the 72-character limit before PR creation or a metadata edit;
+  retain the final canonical merge check.
+- Do not create a post-squash synchronization PR solely to restore ancestry.
+  Require current `master` to be incorporated before the next promotion.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
 - Preserve unrelated tracked, untracked, and staged user work.
 
@@ -530,9 +531,8 @@ A Running broker with missing consumers is not healthy production.
 - Require implementation, promotion, synchronization, and intentionally closed
   PRs to satisfy the canonical evidence structure in
   `.github/pull_request_template.md` and `CONTRIBUTING.md`.
-- Treat PR title/body changes as workflow-producing when the workflow trigger
-  includes `edited`. Never repair historical PR metadata during a live-data
-  handoff or another production-exclusivity window.
+- Treat PR title/body changes as lightweight branch-policy events. They cannot
+  create, bind, recover, or consume source-quality transitions.
 - Opening-label reconciliation is authorized only when the server-owned label
   timestamp is at or after the original `opened` transition cutoff and no more
   than 300,000 ms (five minutes) after it; queueing, replay, or re-execution
@@ -547,7 +547,7 @@ A Running broker with missing consumers is not healthy production.
   an out-of-window replay without a marker stays pending, an existing mismatch
   writes the permanent tombstone, and any intervening `updated_at` change fails
   closed. A same-cutoff tombstone cannot be replaced or revived; only a strictly
-  later `edited`, `synchronize`, or `reopened` transition can recover the
+  later `synchronize` or `reopened` transition can recover the
   lineage. Preserve the original transition cutoff, run binding, and policy-run
   target. `labeled` and `unlabeled` remain non-producing refreshes; every other
   post-marker label drift permanently tombstones that lineage.
@@ -587,9 +587,9 @@ A Running broker with missing consumers is not healthy production.
   action, content, policy-run target, or label progression fail closed, and a
   lower state cannot downgrade a higher state. Version 1 and version 2 markers
   cannot newly bind, succeed, or consume an authorization receipt; a version 2
-  `x` remains a permanent tombstone. Only a strictly later `edited`,
-  `synchronize`, or `reopened` transition may recover, never a later or
-  replayed `opened` event.
+  `x` remains a permanent tombstone. Only a strictly later `synchronize` or
+  `reopened` transition may recover, never a metadata edit or a later or replayed
+  `opened` event.
 - Once any version 3 marker exists, operational rollback must retain version 3
   parsing and ledger authority: recovered opening-label authority is not
   durable in marker v3, so every publisher able to bind or succeed such a

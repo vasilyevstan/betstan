@@ -169,7 +169,8 @@ RabbitMQ runs as an ephemeral Deployment. Replacing its broker can leave queue d
   deployment is a separate exact-SHA `production-deploy` dispatch after a
   successful approved build; production never deploys automatically.
 - Review all infra changes with `pre-commit-infra-check-stan.sh` before pushing.
-- After a squash promotion, immediately merge the new `master` commit back into `dev`.
+- Do not create a standalone post-squash synchronization PR. Incorporate the
+  current `master` into the exact candidate before the next promotion.
 - Manual emergency deployment uses only the central workflows, a full approved master SHA, and the reviewer-protected `production-emergency` environment.
 
 ### Required validation sequence for production changes
@@ -183,8 +184,6 @@ branch-policy + quality gates    ← matching head and merge snapshots
 dev → master promotion PR       ← exact-SHA production approval required
     ↓
 post-merge-verification-stan.sh  ← required after every production merge
-    ↓
-master → dev synchronization     ← required after squash promotion
     ↓
 rollback-readiness-stan.sh       ← required before any rollback action
 ```

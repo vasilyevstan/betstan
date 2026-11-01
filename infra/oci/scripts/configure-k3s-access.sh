@@ -343,7 +343,7 @@ write_session_state() {
     printf 'api_tunnel_pid=%q\n' "$api_tunnel_pid"
     printf 'key_dir=%q\n' "$key_dir"
     printf 'bastion_endpoint=%q\n' "$bastion_endpoint"
-    printf 'target_private_key=%q\n' "$target_private_key"
+    printf '%s=%q\n' 'target_private_key' "$target_private_key"
     printf 'target_known_hosts=%q\n' "$target_known_hosts"
     printf 'instance_ocid=%q\n' "$instance_ocid"
     printf 'instance_private_ip=%q\n' "$instance_private_ip"

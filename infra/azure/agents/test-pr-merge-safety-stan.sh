@@ -74,7 +74,7 @@ gh() {
     printf '%s\n' \
       "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":$nodes}}}}}"
   elif [[ "$1" == "api" && "$2" == *"/compare/"* ]]; then
-    echo "ahead"
+    echo "${STUB_COMPARE_STATUS:-ahead}"
   else
     echo "unexpected gh invocation: $*" >&2
     return 1
@@ -93,6 +93,17 @@ common_env=(
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   "$MERGE_SAFETY" 224 >/dev/null
+
+env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  STUB_COMPARE_STATUS=identical \
+  "$MERGE_SAFETY" 224 >/dev/null
+
+if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  STUB_COMPARE_STATUS=diverged \
+  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
+  echo "master promotion accepted a candidate without current master ancestry" >&2
+  exit 1
+fi
 
 if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   STUB_TITLE='chore: update files' \

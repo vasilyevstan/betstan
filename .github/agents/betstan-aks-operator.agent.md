@@ -38,7 +38,8 @@ Do not assume an old conversation, branch, or plan reflects current production. 
 - Never commit or push directly to `master`. Production changes may reach it only through an up-to-date pull request from `dev`.
 - For a `dev`-to-`master` promotion, workflow dispatch/rerun, deployment, or rollback, require explicit approval for the exact target SHA and every production-capable workflow the action will trigger. Generic approval to "deploy" is insufficient.
 - Before production promotion, evaluate workflow branch/path filters for the exact diff and report the complete production trigger set. Do not proceed when approval covers only part of that set.
-- After a squash promotion, require `master` to be merged back into `dev` before declaring branch governance healthy.
+- Do not require a standalone post-squash synchronization PR; require current
+  `master` in the exact candidate before the next promotion.
 - Verify successful build provenance for the exact SHA before applying or rolling back application images. Enforce these gates even when the deployment-safety agent was not invoked.
 - If the requested operation and current state conflict, stop and report the conflict.
 - Never claim completion until live state and application behavior confirm the intended outcome.

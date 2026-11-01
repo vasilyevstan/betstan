@@ -161,8 +161,6 @@ dev → master promotion PR       ← explicit exact-SHA production approval
     ↓
 post-merge-verification-stan.sh  ← run immediately after every production merge
     ↓
-master → dev synchronization     ← required after a squash promotion
-    ↓
 rollback-readiness-stan.sh       ← run before taking any rollback action
 ```
 
