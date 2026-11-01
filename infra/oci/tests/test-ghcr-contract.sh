@@ -885,23 +885,78 @@ grep -Fq 'types: [opened, synchronize, reopened]' \
   fail "OCI pull-request validation reruns on metadata edits"
 ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" <<'RUBY'
 workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
-job = workflow.dig("jobs", "offline-contract")
-abort "oci-validate requires an integer 45-minute whole-job limit" unless
-  job["timeout-minutes"].is_a?(Integer) && job["timeout-minutes"] == 45
-step_names = job.fetch("steps").map { |step| step["name"] }.compact
-required_steps = [
-  "Select OCI contract scope",
-  "Run focused OCI contracts",
-  "Run full OCI contracts",
-  "Record unaffected OCI scope",
-]
-missing_steps = required_steps - step_names
-abort "oci-validate routing steps are missing: #{missing_steps.join(', ')}" unless missing_steps.empty?
+jobs = workflow.fetch("jobs")
+scope = jobs.fetch("scope")
+abort "oci-validate scope output is missing" unless
+  scope.dig("outputs", "mode") == "${{ steps.scope.outputs.mode }}"
+full = jobs.fetch("full-contracts")
+abort "OCI full contracts require a bounded 25-minute shard limit" unless
+  full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 25
+abort "OCI full contracts must retain every shard result" unless
+  full.dig("strategy", "fail-fast") == false
+shards = full.dig("strategy", "matrix", "shard")
+abort "OCI full contract shards are incomplete" unless
+  shards == %w[core live provenance rollback]
+aggregate = jobs.fetch("offline-contract")
+abort "required OCI aggregate check changed identity" unless
+  aggregate["name"] == "oci-validate"
+abort "required OCI aggregate must run after skipped or failed shards" unless
+  aggregate["if"] == "always()"
+required_needs = %w[scope syntax focused-contracts full-contracts]
+abort "required OCI aggregate dependencies are incomplete" unless
+  aggregate["needs"] == required_needs
+aggregate_steps = aggregate.fetch("steps").map { |step| step["name"] }.compact
+abort "required OCI aggregate step is missing" unless
+  aggregate_steps.include?("Aggregate OCI validation")
 RUBY
+aggregate_script="$WORK_DIR/aggregate-oci-validation.sh"
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" >"$aggregate_script" <<'RUBY'
+workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
+step = workflow.dig("jobs", "offline-contract", "steps").find do |candidate|
+  candidate["name"] == "Aggregate OCI validation"
+end
+abort "oci-validate aggregate step is missing" unless step
+puts step.fetch("run")
+RUBY
+assert_oci_aggregate_passes() {
+  local mode="$1"
+  local syntax="$2"
+  local focused="$3"
+  local full="$4"
+  env \
+    MODE="$mode" \
+    SCOPE_RESULT=success \
+    SYNTAX_RESULT="$syntax" \
+    FOCUSED_RESULT="$focused" \
+    FULL_RESULT="$full" \
+    bash "$aggregate_script" >/dev/null ||
+    fail "OCI aggregate rejects valid $mode results"
+}
+assert_oci_aggregate_fails() {
+  local mode="$1"
+  local scope="$2"
+  local syntax="$3"
+  local focused="$4"
+  local full="$5"
+  if env \
+    MODE="$mode" \
+    SCOPE_RESULT="$scope" \
+    SYNTAX_RESULT="$syntax" \
+    FOCUSED_RESULT="$focused" \
+    FULL_RESULT="$full" \
+    bash "$aggregate_script" >/dev/null 2>&1; then
+    fail "OCI aggregate accepts invalid $mode results"
+  fi
+}
+assert_oci_aggregate_passes none skipped skipped skipped
+assert_oci_aggregate_passes focused success success skipped
+assert_oci_aggregate_passes full success skipped success
+assert_oci_aggregate_fails full success success skipped failure
+assert_oci_aggregate_fails full failure success skipped success
 selector_script="$WORK_DIR/select-oci-scope.sh"
 ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" >"$selector_script" <<'RUBY'
 workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
-step = workflow.dig("jobs", "offline-contract", "steps").find do |candidate|
+step = workflow.dig("jobs", "scope", "steps").find do |candidate|
   candidate["id"] == "scope"
 end
 abort "oci-validate scope selector is missing" unless step

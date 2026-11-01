@@ -102,10 +102,14 @@ required aggregate gate includes:
 The PR-only, read-only `oci-validate` workflow selects scope first. Changes
 limited to OCI health or validation-routing files check workflow syntax and run
 the focused health and GHCR contracts. Other OCI or OCI-workflow
-changes run the complete offline contract suite. Unaffected changes use an
-explicit no-OCI-impact sentinel without downloading actionlint. Its 45-minute
-whole-job limit bounds the complete suite; timeout or partial completion is not
-passing evidence.
+changes run the complete offline contract suite across isolated `core`, `live`,
+`provenance`, and `rollback` shards. A single fail-closed `oci-validate`
+aggregate remains the required check and succeeds only when the scope,
+workflow-syntax, and selected contract jobs all succeed. Unaffected changes use
+an explicit no-OCI-impact sentinel without downloading actionlint. Each full
+shard has a 25-minute limit; timeout, shard failure, or partial completion is
+not passing evidence. The complete local runner remains available in
+deterministic serial order.
 
 `production-build` similarly routes service coverage to changed services,
 falls back to every service for shared or unknown service-impacting paths, and

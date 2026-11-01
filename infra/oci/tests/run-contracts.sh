@@ -7,37 +7,19 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TESTS_DIR="$ROOT_DIR/infra/oci/tests"
 
-# Deterministic suite order
-suites=(
+# Deterministic suite order within each isolated CI shard.
+core_suites=(
   "$TESTS_DIR/test-contract.sh"
   "$TESTS_DIR/test_incident_manifest_stan.py"
   "$TESTS_DIR/test-incident-restore-state-stan.sh"
   "$TESTS_DIR/test-incident-access-stan.sh"
   "$TESTS_DIR/test-incident-restore-workflow-stan.sh"
-  "$TESTS_DIR/test-service-ops-stan.sh"
   "$TESTS_DIR/test-deploy-validation-loop-stan.sh"
-  "$TESTS_DIR/test-live-data-maintenance-stan.sh"
-  "$TESTS_DIR/test-live-betting-control-stan.sh"
-  "$TESTS_DIR/test-revalidate-live-activation-stan.sh"
-  "$TESTS_DIR/test-live-betting-data-rollout-stan.sh"
-  "$TESTS_DIR/test-live-betting-readiness-stan.sh"
-  "$TESTS_DIR/rollback-live-readiness-contract.sh"
-  "$TESTS_DIR/test-install-cli-stan.sh"
   "$TESTS_DIR/test-agent-governance-contract.sh"
   "$TESTS_DIR/test-migration-success-contract.sh"
   "$TESTS_DIR/test-capacity-contract.sh"
-  "$TESTS_DIR/test-upstream-binding-contract.sh"
   "$TESTS_DIR/test-infrastructure-gate-execution-stan.sh"
   "$TESTS_DIR/test-approval-binding-drift-stan.sh"
-  "$TESTS_DIR/test-dispatch-prerequisite-rejection-stan.sh"
-  "$TESTS_DIR/test-image-reuse-contract.sh"
-  "$TESTS_DIR/test-ghcr-contract.sh"
-  "$TESTS_DIR/rollback-contract.sh"
-  "$TESTS_DIR/test-fenced-rollback-recovery-stan.sh"
-  "$TESTS_DIR/test-k3s-runtime-contract.sh"
-  "$TESTS_DIR/test-k3s-disk-recovery-stan.sh"
-  "$TESTS_DIR/test-registry-prune-contract.sh"
-  "$TESTS_DIR/test-migration-recovery-contract.sh"
   "$TESTS_DIR/test-mongo-upgrade.sh"
   "$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh"
@@ -45,6 +27,63 @@ suites=(
   "$ROOT_DIR/infra/azure/agents/test-record-azure-retirement-billing-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-audit-oci-primary-retirement-stan.sh"
 )
+
+live_suites=(
+  "$TESTS_DIR/test-service-ops-stan.sh"
+  "$TESTS_DIR/test-live-data-maintenance-stan.sh"
+  "$TESTS_DIR/test-live-betting-control-stan.sh"
+  "$TESTS_DIR/test-revalidate-live-activation-stan.sh"
+  "$TESTS_DIR/test-live-betting-data-rollout-stan.sh"
+  "$TESTS_DIR/test-live-betting-readiness-stan.sh"
+  "$TESTS_DIR/rollback-live-readiness-contract.sh"
+  "$TESTS_DIR/test-fenced-rollback-recovery-stan.sh"
+  "$TESTS_DIR/test-k3s-runtime-contract.sh"
+  "$TESTS_DIR/test-k3s-disk-recovery-stan.sh"
+)
+
+provenance_suites=(
+  "$TESTS_DIR/test-install-cli-stan.sh"
+  "$TESTS_DIR/test-upstream-binding-contract.sh"
+  "$TESTS_DIR/test-dispatch-prerequisite-rejection-stan.sh"
+  "$TESTS_DIR/test-image-reuse-contract.sh"
+  "$TESTS_DIR/test-ghcr-contract.sh"
+  "$TESTS_DIR/test-registry-prune-contract.sh"
+  "$TESTS_DIR/test-migration-recovery-contract.sh"
+)
+
+rollback_suites=(
+  "$TESTS_DIR/rollback-contract.sh"
+)
+
+shard="${BETSTAN_CONTRACT_SHARD:-all}"
+case "$shard" in
+  all)
+    suites=(
+      "${core_suites[@]}"
+      "${live_suites[@]}"
+      "${provenance_suites[@]}"
+      "${rollback_suites[@]}"
+    )
+    ;;
+  core)
+    suites=("${core_suites[@]}")
+    ;;
+  live)
+    suites=("${live_suites[@]}")
+    ;;
+  provenance)
+    suites=("${provenance_suites[@]}")
+    ;;
+  rollback)
+    suites=("${rollback_suites[@]}")
+    ;;
+  *)
+    printf 'unknown OCI contract shard: %s\n' "$shard" >&2
+    exit 2
+    ;;
+esac
+
+printf 'oci_contract_shard=%s suites=%d\n' "$shard" "${#suites[@]}"
 
 passed=0
 failed=0
