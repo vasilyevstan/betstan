@@ -142,10 +142,6 @@ with open(path, encoding="utf-8", errors="replace") as source:
     for line_number, original in enumerate(source, start=1):
         if original.lstrip().startswith("#") or oidc_yaml.fullmatch(original.rstrip("\n")):
             continue
-        if "--query" in original:
-            continue
-        if "printf" in original and "%q" in original:
-            continue
         line = oidc_serialized.sub(
             lambda match: f"{match.group(1)}oidc-permission=safe",
             original,
@@ -158,9 +154,9 @@ with open(path, encoding="utf-8", errors="replace") as source:
                 continue
             compact_key = re.sub(r"[-_]", "", match.group("key")).lower()
             if (
-                compact_key == "token"
-                and match.group("key") == "token"
-                and match.group("operator") == "="
+                "--query" in original
+                and match.group("key") == "clientSecret"
+                and value == "password"
             ):
                 continue
             if (

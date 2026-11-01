@@ -95,6 +95,7 @@ jobs:
                           ".github/workflows/production-deploy.yml",
                           ".github/workflows/production-rollback.yml",
                           "infra/azure/agents/baseline-capture-stan.sh",
+                          "infra/azure/agents/deploy-stan.sh",
                           "infra/azure/agents/deploy-validation-loop-stan.sh",
                           "infra/azure/agents/rollback-application-stan.sh",
                           "infra/azure/agents/rollback-readiness-stan.sh",
@@ -257,6 +258,7 @@ jobs:
           bash -n \
             infra/azure/agents/deploy-validation-loop-stan.sh \
             infra/azure/agents/baseline-capture-stan.sh \
+            infra/azure/agents/deploy-stan.sh \
             infra/azure/agents/live-betting-readiness-lib.sh \
             infra/azure/agents/live-betting-readiness-stan.sh \
             infra/azure/agents/live-betting-readiness-test-lib.sh \

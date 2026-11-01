@@ -2621,6 +2621,12 @@ printf '%s%s\n' \
 assert_secret_fixture_rejected "commented hard-coded token fixture"
 printf '%s%s\n' 'to' 'ken: hunter2xyz' >"$secret_fixture_dir/unsafe.yml"
 assert_secret_fixture_rejected "hard-coded token fixture"
+printf '%s\n' \
+  'token=hunter2xyz' \
+  'az resource show --query "{clientSecret: hunter2xyz}"' \
+  "printf 'authToken=hunter2xyz\\n'" \
+  >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "line-context bypass fixtures"
 printf '%s%s\n%s%s\n%s%s\n%s%s\n' \
   'MONGO_PASS' 'WORD: hunter2xyz' \
   'JWT_SEC' 'RET=hunter2xyz' \
@@ -2636,6 +2642,12 @@ printf '{"authTo%s":"hunter2xyz"}\n' 'ken' \
   >>"$secret_fixture_dir/unsafe.yml"
 assert_secret_fixture_rejected "quoted secret-key fixtures"
 rm -f "$secret_fixture_dir/unsafe.yml"
+
+if grep -Fq 'if "--query" in original' "$PRE_COMMIT_CHECK" ||
+    grep -Fq 'if "printf" in original and "%q" in original' "$PRE_COMMIT_CHECK"; then
+  echo "ERROR: infrastructure secret scan retains a line-wide bypass" >&2
+  exit 1
+fi
 
 cp "$ROOT_DIR"/.github/workflows/*.yml "$permission_fixture_dir/"
 WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
@@ -4499,6 +4511,7 @@ deployment_scope_fixtures = {
         [".github/workflows/production-rollback.yml"], "full"
     ),
     "baseline": (["infra/azure/agents/baseline-capture-stan.sh"], "full"),
+    "deploy-operator": (["infra/azure/agents/deploy-stan.sh"], "full"),
     "rollback": (["infra/azure/agents/rollback-application-stan.sh"], "full"),
     "shared-lock": (
         ["infra/azure/agents/shared-mongo-operation-lock-stan.sh"], "full"
@@ -4773,6 +4786,7 @@ for required_fragment in (
     '"git", "diff", "--no-renames", "--name-only"',
     ".github/workflows/production-rollback.yml",
     "infra/azure/agents/baseline-capture-stan.sh",
+    "infra/azure/agents/deploy-stan.sh",
     "infra/azure/agents/rollback-application-stan.sh",
     "infra/azure/agents/production-run-exclusivity-stan.sh",
     "infra/azure/agents/shared-mongo-operation-lock-stan.sh",
