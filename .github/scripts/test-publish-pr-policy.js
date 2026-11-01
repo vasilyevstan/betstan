@@ -5115,7 +5115,7 @@ async function main() {
   ];
   const activeLeanDeliveryWorkflowAuthorizations = [
     {
-      id: "lean-delivery-production-build-pr-916-v2",
+      id: "lean-delivery-production-build-pr-916-v3",
       repository: "vasilyevstan/betstan",
       headRepository: "vasilyevstan/betstan",
       workflowPath: ".github/workflows/production-build.yml",
@@ -5124,9 +5124,9 @@ async function main() {
       pullNumber: 916,
       headRef: "fix/lean-delivery-recovery",
       baseRef: "dev",
-      issuedAt: "2026-11-01T07:55:06.000Z",
-      expiresAt: "2026-11-02T07:55:06.000Z",
-      receiptSha: "e4f0786d490bd79a4bf0652caca7608cd21d5069",
+      issuedAt: "2026-11-01T15:02:22.000Z",
+      expiresAt: "2026-11-02T15:02:22.000Z",
+      receiptSha: "10c99cf4a95a65ec82eed6d86d921a141aef59ac",
     },
     {
       id: "lean-delivery-production-build-promotion-918-v1",
@@ -5161,7 +5161,7 @@ async function main() {
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: "2026-11-01T08:55:06.000Z",
+        now: "2026-11-01T16:02:22.000Z",
       }),
       authorization,
     );
@@ -5244,7 +5244,7 @@ async function main() {
           headRef: retired.headRef,
           baseRef: retired.baseRef,
         },
-        now: "2026-11-01T08:55:06.000Z",
+        now: "2026-11-01T16:02:22.000Z",
       }),
       null,
     );
@@ -5291,7 +5291,7 @@ async function main() {
     false,
   );
   assert(
-    publisherSource.includes('id: "lean-delivery-production-build-pr-916-v2"'),
+    publisherSource.includes('id: "lean-delivery-production-build-pr-916-v3"'),
   );
   assert(
     publisherSource.includes(
