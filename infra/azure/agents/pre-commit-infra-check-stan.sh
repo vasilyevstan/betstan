@@ -153,10 +153,16 @@ with open(path, encoding="utf-8", errors="replace") as source:
             if len(value) < 4:
                 continue
             compact_key = re.sub(r"[-_]", "", match.group("key")).lower()
+            known_client_secret_projection = (
+                "--query \"{clientId: appId, clientSe"
+                "cret: password, "
+                "subscriptionId: '$SUBSCRIPTION_ID', tenantId: tenant}\""
+            )
             if (
-                "--query" in original
+                known_client_secret_projection in original
                 and match.group("key") == "clientSecret"
                 and value == "password"
+                and match.start("key") == original.index("clientSecret")
             ):
                 continue
             if (

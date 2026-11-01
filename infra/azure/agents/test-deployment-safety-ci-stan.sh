@@ -2588,6 +2588,7 @@ SSH_PRIVATE_KEY: "${SSH_PRIVATE_KEY:-}"
 "NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"
 'MONGO_PASSWORD': '${MONGO_PASSWORD}'
 {"authToken":"${AUTH_TOKEN}"}
+az ad sp credential reset --query "{clientId: appId, clientSecret: password, subscriptionId: '$SUBSCRIPTION_ID', tenantId: tenant}"
 YAML
 BRANCH_NAME=feature/test \
   INFRA_DIRS="$secret_fixture_dir" \
@@ -2624,6 +2625,8 @@ assert_secret_fixture_rejected "hard-coded token fixture"
 printf '%s\n' \
   'token=hunter2xyz' \
   'az resource show --query "{clientSecret: hunter2xyz}"' \
+  'clientSecret=password az account show --query name' \
+  'az account show --query name clientSecret=password' \
   "printf 'authToken=hunter2xyz\\n'" \
   >"$secret_fixture_dir/unsafe.yml"
 assert_secret_fixture_rejected "line-context bypass fixtures"
