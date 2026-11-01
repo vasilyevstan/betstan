@@ -58,11 +58,15 @@ const ACTIONS_BOT = Object.freeze({
   login: "github-actions[bot]",
   type: "Bot",
 });
-const PULL_CONTENT_FINGERPRINT = crypto
-  .createHash("sha256")
-  .update(`${PULL_TITLE}\0${PULL_BODY}`)
-  .digest("hex")
-  .slice(0, 32);
+function sourceFingerprint(headSha, baseSha) {
+  return crypto
+    .createHash("sha256")
+    .update(`${headSha}\0${baseSha}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+const PULL_CONTENT_FINGERPRINT = sourceFingerprint(HEAD_SHA, BASE_SHA);
 const PULL_LABELS_FINGERPRINT = publishPrPolicy.labelsFingerprint([]);
 
 function workflowRunUrl(id) {
@@ -88,7 +92,7 @@ function permutations(values) {
 function transitionDescription({
   version = 3,
   number = 63,
-  action = "edited",
+  action = "synchronize",
   timestamp = PULL_UPDATED_AT,
   binding = 102,
   contentFingerprint = PULL_CONTENT_FINGERPRINT,
@@ -423,6 +427,10 @@ function coveragePromotionFixture({
             description: transitionDescription({
               number: promotionPull.number,
               binding: promotionRun.id,
+              contentFingerprint: sourceFingerprint(
+                promotionPull.head.sha,
+                promotionPull.base.sha,
+              ),
             }),
             target_url: workflowRunUrl(400),
           }),
@@ -1519,8 +1527,31 @@ async function testReceiptReadback() {
     ).at(-1).state, "pending");
   }
 
+  const metadataOnly = scenarios[0]();
+  let metadataChanged = false;
+  const metadataPull = pull();
+  const metadataResult = await execute({
+    ...metadataOnly.options,
+    currentPull: metadataPull,
+    statusRead: ({ ref, request, data }) => {
+      if (
+        ref === metadataOnly.anchor &&
+        request &&
+        metadataOnly.ledger.length === 1 &&
+        !metadataChanged
+      ) {
+        metadataChanged = true;
+        metadataPull.title = "Updated title";
+        metadataPull.body = "Updated evidence";
+      }
+      return data;
+    },
+  });
+  assert(metadataChanged);
+  assertSuccess(metadataResult, metadataOnly);
+
   for (const phase of [1, 2]) {
-    for (const field of ["head", "base", "merge", "content", "labels", "run", "transition", "workflow", "control"]) {
+    for (const field of ["head", "base", "merge", "labels", "run", "transition", "workflow", "control"]) {
       const drift = scenarios[0]();
       const currentPull = pull();
       const run = workflowRun();
@@ -1544,7 +1575,6 @@ async function testReceiptReadback() {
             if (field === "head") currentPull.head.sha = ADVANCED_BASE_SHA;
             if (field === "base") currentPull.base.sha = ADVANCED_BASE_SHA;
             if (field === "merge") currentPull.merge_commit_sha = ADVANCED_BASE_SHA;
-            if (field === "content") currentPull.body = "changed content";
             if (field === "labels") currentPull.labels = [{ name: CLI_MANAGED_LABEL }];
             if (field === "run") run.conclusion = "failure";
             if (field === "transition") transitions[0].description = transitionDescription({ binding: 103 });
@@ -1554,7 +1584,7 @@ async function testReceiptReadback() {
           return data;
         },
       });
-      if (["head", "base", "merge", "content", "labels"].includes(field)) {
+      if (["head", "base", "merge", "labels"].includes(field)) {
         await assert.rejects(execution, /changed|snapshot|expected=/);
       } else {
         assertFailure(await execution);
@@ -1660,7 +1690,6 @@ async function main() {
   const editedTransition = await execute({
     eventName: "pull_request_target",
     listedRuns: [workflowRun()],
-    transitionStatuses: [],
   });
   assert.deepEqual(
     editedTransition.statuses
@@ -1673,10 +1702,10 @@ async function main() {
         state,
       })),
     [
-      { context: "pr-quality-gates/master", state: "pending" },
-      { context: "pr-quality-gates/master", state: "pending" },
       { context: "branch-policy/master", state: "success" },
       { context: "branch-policy/master", state: "success" },
+      { context: "pr-quality-gates/master", state: "success" },
+      { context: "pr-quality-gates/master", state: "success" },
     ],
   );
   assert.deepEqual(
@@ -1685,7 +1714,7 @@ async function main() {
         context.startsWith("trusted-quality-transition/"),
       )
       .map(({ state }) => state),
-    ["pending", "pending", "pending", "pending"],
+    [],
   );
 
   const managedLabels = [{ name: CLI_MANAGED_LABEL }];
@@ -2291,17 +2320,6 @@ async function main() {
       pull({
         updated_at: "2026-09-02T09:00:02.000Z",
         labels: [{ name: "copilot-managed" }],
-        head: featureHead,
-        base: devBase,
-      }),
-    ],
-    [
-      "opened",
-      openedEventPull,
-      pull({
-        updated_at: "2026-09-02T09:00:02.000Z",
-        title: "Changed title",
-        labels: managedLabels,
         head: featureHead,
         base: devBase,
       }),
@@ -4312,6 +4330,12 @@ async function main() {
       currentPull: restoredLabelPull,
     },
     {
+      eventName: "pull_request_target",
+      eventAction: "edited",
+      eventPull: restoredLabelPull,
+      currentPull: restoredLabelPull,
+    },
+    {
       eventName: "workflow_dispatch",
       currentPull: restoredLabelPull,
     },
@@ -4327,15 +4351,15 @@ async function main() {
     assertNoQualitySuccess(staleRecovery);
     assert.equal(tombstoneTransitions.length, tombstoneCount);
   }
-  const laterEditPull = pull({
+  const laterReopenPull = pull({
     updated_at: "2026-09-02T11:00:02.000Z",
     labels: managedLabels,
   });
   await execute({
     eventName: "pull_request_target",
-    eventAction: "edited",
-    eventPull: laterEditPull,
-    currentPull: laterEditPull,
+    eventAction: "reopened",
+    eventPull: laterReopenPull,
+    currentPull: laterReopenPull,
     transitionStatuses: tombstoneTransitions,
     contextRunId: 113,
     listedRuns: [
@@ -4345,14 +4369,14 @@ async function main() {
   assert.equal(
     tombstoneTransitions[0].description,
     transitionDescription({
-      action: "edited",
-      timestamp: laterEditPull.updated_at,
+      action: "reopened",
+      timestamp: laterReopenPull.updated_at,
       labelsFingerprint: managedLabelsFingerprint,
     }),
   );
   const postTombstoneCompletion = await execute({
     eventName: "workflow_run",
-    currentPull: laterEditPull,
+    currentPull: laterReopenPull,
     transitionStatuses: tombstoneTransitions,
     run: workflowRun({ created_at: "2026-09-02T12:00:00.000Z" }),
     listedRuns: [
@@ -4536,14 +4560,14 @@ async function main() {
       }),
     }),
   ];
-  const laterEditedPull = pull({
+  const laterReopenedPull = pull({
     updated_at: "2026-09-02T11:00:00.000Z",
   });
   const laterVersionThreeTransition = await execute({
     eventName: "pull_request_target",
-    eventAction: "edited",
-    eventPull: laterEditedPull,
-    currentPull: laterEditedPull,
+    eventAction: "reopened",
+    eventPull: laterReopenedPull,
+    currentPull: laterReopenedPull,
     listedRuns: [
       workflowRun({
         created_at: "2026-09-02T12:00:00.000Z",
@@ -4559,7 +4583,7 @@ async function main() {
   );
   const versionThreeRecoveryCompletion = await execute({
     eventName: "workflow_run",
-    currentPull: laterEditedPull,
+    currentPull: laterReopenedPull,
     run: workflowRun({
       created_at: "2026-09-02T12:00:00.000Z",
     }),
@@ -4783,24 +4807,32 @@ async function main() {
     );
   }
 
-  const contentDriftTransitions = [
+  const sourceIdentityDriftTransitions = [
     qualityTransitionStatus({
       description: transitionDescription({
         binding: null,
       }),
     }),
   ];
-  const contentDrift = await execute({
+  const sourceIdentityDrift = await execute({
     currentPull: pull({
-      title: "Changed title after transition",
+      head: {
+        ref: "dev",
+        sha: ADVANCED_BASE_SHA,
+        repo: { full_name: "example/repo" },
+      },
     }),
+    branchShas: {
+      master: BASE_SHA,
+      dev: ADVANCED_BASE_SHA,
+    },
     listedRuns: [],
-    transitionStatuses: contentDriftTransitions,
+    transitionStatuses: sourceIdentityDriftTransitions,
   });
-  assertNoQualitySuccess(contentDrift);
+  assertNoQualitySuccess(sourceIdentityDrift);
   assert.equal(
-    transitionBinding(contentDriftTransitions[0].description),
-    "x",
+    transitionBinding(sourceIdentityDriftTransitions[0].description),
+    "p",
   );
 
   for (const binding of [null, 103]) {
@@ -4959,7 +4991,7 @@ async function main() {
           contentFingerprint: PULL_CONTENT_FINGERPRINT,
           labelsFingerprint: PULL_LABELS_FINGERPRINT,
         },
-        "edited",
+        "synchronize",
         PULL_UPDATED_AT,
         0,
       ),
@@ -5566,6 +5598,14 @@ async function main() {
       },
     ],
   });
+  const advancedBaseTransitionStatuses = [
+    qualityTransitionStatus({
+      context: "trusted-quality-transition/dev",
+      description: transitionDescription({
+        contentFingerprint: sourceFingerprint(HEAD_SHA, ADVANCED_BASE_SHA),
+      }),
+    }),
+  ];
   const advancedBaseCompletion = await execute({
     eventName: "workflow_run",
     currentPull: advancedBasePull,
@@ -5582,7 +5622,7 @@ async function main() {
     },
     changedFiles: COVERAGE_ALLOWED_PATHS,
     coverageAuthorizations: [coverageAuthorization()],
-    transitionStatuses: sourceTransitionStatuses,
+    transitionStatuses: advancedBaseTransitionStatuses,
     policyRunOverrides: {
       pull_requests: [
         {
@@ -6384,10 +6424,7 @@ async function main() {
     transitionStatuses: immediateAuthorizedTransitions,
   });
   assertNoQualitySuccess(immediateAuthorized);
-  assert.equal(
-    immediateAuthorizedTransitions[0].description,
-    transitionDescription({ binding: 103 }),
-  );
+  assert.equal(immediateAuthorizedTransitions.length, 0);
 
   const exactAuthorizedCompletion = await execute({
     eventName: "workflow_run",
@@ -6579,14 +6616,14 @@ async function main() {
     title: "Updated pull request",
     updated_at: "2026-09-02T11:00:00.000Z",
   });
-  const staleContentRefresh = await execute({
+  const titleOnlyRefresh = await execute({
     currentPull: contentUpdatedPull,
   });
   assert.deepEqual(
-    staleContentRefresh.statuses
+    titleOnlyRefresh.statuses
       .filter(({ context }) => context.startsWith("pr-quality-gates/"))
       .map(({ state }) => state),
-    ["failure", "failure"],
+    ["success", "success"],
   );
 
   const divergedReceipt = await execute({
@@ -7490,6 +7527,7 @@ async function main() {
     await assert.rejects(
       execute({
         eventName: "pull_request_target",
+        eventAction: "synchronize",
         currentPulls: [pull(), pull(), movedPull],
         contextRunId: failedPolicyRunId,
         transitionStatuses: partialMarkers,
@@ -7524,7 +7562,7 @@ async function main() {
       {
         eventName: "pull_request_target",
         eventAction: "edited",
-        updatedAt: PULL_UPDATED_AT,
+        updatedAt: timestampAfter(PULL_UPDATED_AT, 120_000),
       },
       {
         eventName: "pull_request_target",
@@ -7553,7 +7591,7 @@ async function main() {
       );
     }
 
-    for (const eventAction of ["edited", "synchronize", "reopened"]) {
+    for (const eventAction of ["synchronize", "reopened"]) {
       const freshPull = pull({
         updated_at: timestampAfter(PULL_UPDATED_AT, 120_000),
       });
@@ -7672,7 +7710,7 @@ async function main() {
     /const QUALITY_TRIGGER_ACTIONS = new Set\(\[([\s\S]*?)\]\);/,
   );
   assert(qualityTriggerActions);
-  assert.doesNotMatch(qualityTriggerActions[1], /labeled|unlabeled/);
+  assert.doesNotMatch(qualityTriggerActions[1], /edited|labeled|unlabeled/);
 
   console.log("publish_pr_policy_tests=PASS");
 }

@@ -870,9 +870,84 @@ done
 grep -Fq './infra/azure/agents/test-deployment-safety-ci-stan.sh' \
   "$ROOT_DIR/.github/workflows/production-build.yml" ||
   fail "trusted production quality workflow omits its deployment-safety entrypoint"
-grep -Fq './infra/oci/tests/run-contracts.sh' \
+for literal in \
+  'oci_contract_scope=$mode' \
+  './infra/oci/agents/test-health-contract-stan.sh' \
+  './infra/oci/tests/run-contracts.sh'; do
+  grep -Fq "$literal" "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
+    fail "OCI pull-request validation omits routed contract evidence: $literal"
+done
+grep -Fq 'types: [opened, synchronize, reopened]' \
   "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
-  fail "OCI pull-request validation omits the complete contract entrypoint"
+  fail "OCI pull-request validation omits source transition triggers"
+! grep -Fq 'types: [opened, synchronize, reopened, edited]' \
+  "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
+  fail "OCI pull-request validation reruns on metadata edits"
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" <<'RUBY'
+workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
+job = workflow.dig("jobs", "offline-contract")
+abort "oci-validate requires an integer 45-minute whole-job limit" unless
+  job["timeout-minutes"].is_a?(Integer) && job["timeout-minutes"] == 45
+step_names = job.fetch("steps").map { |step| step["name"] }.compact
+required_steps = [
+  "Select OCI contract scope",
+  "Run focused OCI contracts",
+  "Run full OCI contracts",
+  "Record unaffected OCI scope",
+]
+missing_steps = required_steps - step_names
+abort "oci-validate routing steps are missing: #{missing_steps.join(', ')}" unless missing_steps.empty?
+RUBY
+selector_script="$WORK_DIR/select-oci-scope.sh"
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" >"$selector_script" <<'RUBY'
+workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
+step = workflow.dig("jobs", "offline-contract", "steps").find do |candidate|
+  candidate["id"] == "scope"
+end
+abort "oci-validate scope selector is missing" unless step
+puts step.fetch("run")
+RUBY
+cat >"$WORK_DIR/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "diff" && "$2" == "--no-renames" && "$3" == "--name-only" ]]
+printf '%s\n' "${OCI_SCOPE_PATHS:-}"
+SH
+chmod +x "$WORK_DIR/bin/git"
+assert_oci_scope() {
+  local expected="$1"
+  local paths="$2"
+  local output="$WORK_DIR/oci-scope-output"
+  : >"$output"
+  env \
+    PATH="$WORK_DIR/bin:$PATH" \
+    BASE_SHA="$CURRENT_SHA" \
+    HEAD_SHA="$DEPLOYED_SHA" \
+    GITHUB_OUTPUT="$output" \
+    OCI_SCOPE_PATHS="$paths" \
+    bash "$selector_script" >/dev/null
+  local actual
+  actual="$(sed -n 's/^mode=//p' "$output")"
+  [[ "$actual" == "$expected" ]] ||
+    fail "OCI scope expected $expected, got $actual for: $paths"
+}
+assert_oci_scope focused "infra/oci/agents/health-check-stan.sh"
+assert_oci_scope full "infra/oci/tests/test-contract.sh"
+assert_oci_scope none "docs/wiki/Quality-Gates.md"
+assert_oci_scope none ".github/workflows/production-build.yml"
+assert_oci_scope full $'infra/oci/scripts/deploy.sh\ninfra/oci/agents/health-check-stan.sh'
+for moved_contract in \
+  test-deploy-validation-loop-stan.sh \
+  test-live-data-maintenance-stan.sh \
+  test-live-betting-control-stan.sh \
+  test-revalidate-live-activation-stan.sh \
+  test-live-betting-data-rollout-stan.sh \
+  test-live-betting-readiness-stan.sh \
+  rollback-live-readiness-contract.sh; do
+  grep -Fq "\"\$TESTS_DIR/$moved_contract\"" \
+    "$ROOT_DIR/infra/oci/tests/run-contracts.sh" ||
+    fail "OCI full suite omits moved production-safety contract: $moved_contract"
+done
 for literal in \
   'transition_plan_state_sha256' \
   'TRANSITION_PHASE must be plan, rebind, or retire' \

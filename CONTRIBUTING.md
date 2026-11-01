@@ -11,7 +11,9 @@ Use this flow:
 3. Promote production only with an up-to-date pull request from `dev` to `master`.
 4. Require the trusted, base-scoped `branch-policy/master` and `pr-quality-gates/master` statuses on both the promotion head and current merge snapshot to pass.
 5. Before merging a promotion, bind approval to the exact head SHA and every production-capable workflow the diff will trigger.
-6. After a squash promotion, immediately merge the new `master` commit back into `dev`.
+6. Do not open a synchronization PR solely because a promotion was squash
+   merged. Before a later promotion, incorporate the current `master` into that
+   bounded integration candidate and revalidate its exact SHA.
 
 Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
 
@@ -61,8 +63,8 @@ Every PR also carries public-safe informational context labels:
 - `feature:<slug>` groups the durable product or engineering feature, for
   example `feature:live-betting`.
 
-Keep the same pair on the session's implementation, promotion, and
-ancestry-synchronization PRs. A shared promotion may carry multiple session
+Keep the same pair on the session's implementation, promotion, and required
+reconciliation PRs. A shared promotion may carry multiple session
 and feature labels because it can aggregate reviewed work from several
 sessions. Never expose an internal session UUID, local path, user identity,
 credential, private runtime reference, or production identifier in a label.
@@ -106,6 +108,30 @@ security, infrastructure, quality gates, release behavior, UI/UX, or agent
 responsibilities update the relevant canonical `docs/wiki/` pages in the same
 pull request.
 
+## Risk-conditional validation
+
+Use the smallest validation profile that covers the exact diff. Bounded,
+reversible, backward-compatible changes default to one implementation owner,
+one independent critic or test pass, and exact required CI. Add only
+specialists triggered by changed UX, security, contracts, quality gates,
+deployment, data, or architecture boundaries.
+
+Three-model simplifier synthesis is reserved for disputed, materially complex,
+or irreversible design. Final validation is reserved for reconciling multiple
+specialist decisions or an irreversible release decision. Start the conductor
+only for parallel, asynchronous, external, or mutating operations that need
+active checkpoints or recovery; a single synchronous work unit does not need
+one.
+
+PerfettoStan continuously challenges unnecessary agents, handoffs, reviews,
+checks, waits, and repeated evidence. It may stop new optional work when a step
+has no unmet acceptance criterion, mandatory safeguard, or evidenced blocker.
+After `FLOW_STOP_OPTIMIZE`, one model-neutral simplifier process pass supplies
+the reduction evidence and PerfettoStan returns the smaller continuation before
+work resumes. This authority never bypasses protected branches, exact-SHA
+checks, selected independent evidence, production serialization, locks,
+fences, provenance, rollback, or active incident-safety work.
+
 The repository files are the reviewed source of truth. After the exact commit
 is merged, publish `docs/wiki/*.md` byte-for-byte to the GitHub wiki and verify
 the resulting pages and links. Public documentation must omit credentials,
@@ -121,12 +147,9 @@ smallest appropriate rendered evidence. See
 `docs/wiki/UI-UX-Consistency.md`.
 
 Keep this detail on implementation, promotion, synchronization, and closed
-attempt PRs. `production-build`, `oci-validate`, and branch policy run on
-`pull_request.edited`, so title/body restoration is workflow-producing work.
-Do not edit historical PR metadata during an active data-to-deploy handoff or
-other production-exclusivity window. Make the edit before or after that window
-and wait for the resulting checks to become terminal. Derive the exact head SHA
-from Git or GitHub immediately before preparing the final description, and
+attempt PRs. Title/body edits run lightweight branch policy only; they do not
+rerun source, OCI, service coverage, or deployment-safety suites. Derive the
+exact head SHA from Git or GitHub immediately before preparing the final description, and
 prefer one complete metadata edit over repeated corrections that start
 duplicate validation runs.
 
@@ -415,7 +438,7 @@ run for its PR transition. A workflow-producing pull-request event first
 publishes an unbound pending transition barrier, then binds the exact newly
 registered quality run. Only that transition's completed workflow run may
 publish success. The trusted marker is stored on the exact merge snapshot and
-includes a bounded title/body fingerprint. The publisher accepts it only from
+includes a bounded head/base source fingerprint. The publisher accepts it only from
 the GitHub Actions bot with a validated repository `branch-policy` run target,
 and that run must carry the exact PR, head, and base relation. Governance keeps
 `branch-policy.yml` as the sole status-writing workflow and requires every
@@ -464,8 +487,8 @@ The broad opening snapshot mismatch permits only fail-closed inspection and
 never grants reconciliation: an out-of-window replay without a marker stays
 pending, an existing mismatch writes the permanent tombstone, and any
 intervening `updated_at` change fails closed. A same-cutoff tombstone cannot be
-replaced or revived; only a strictly later `edited`, `synchronize`, or
-`reopened` transition can recover the lineage. The original transition cutoff,
+replaced or revived; only a strictly later `synchronize` or `reopened`
+transition can recover the lineage. The original transition cutoff,
 run binding, and policy-run target remain authoritative. `labeled` and
 `unlabeled` are non-producing refreshes. All other post-marker label drift
 appends a permanent pending tombstone, so restoring labels, completing an older
@@ -477,8 +500,8 @@ order. Conflicting positive run IDs or incompatible action, content, policy-run
 target, or label progression fail closed, and a lower state cannot downgrade a
 higher state. Version 1 and version 2 markers cannot newly bind, succeed, or
 consume an authorization receipt; a version 2 `x` remains a permanent
-tombstone. Only a strictly later `edited`, `synchronize`, or `reopened`
-transition may recover, never a later or replayed `opened` event. Once any
+tombstone. Only a strictly later `synchronize` or `reopened` transition may
+recover, never a metadata edit or a later or replayed `opened` event. Once any
 version 3 marker exists, operational rollback must retain version 3 parsing
 and ledger authority: recovered opening-label authority is not durable in
 marker v3, so every publisher able to bind or succeed such a lineage must

@@ -8,14 +8,15 @@ that production is healthy.
 
 ```mermaid
 flowchart LR
-    Request["Accepted requirement"] --> Architect["Architecture gate"]
-    Architect --> Simplifier["Three-model simplifier"]
-    Simplifier --> Developer["Implementation owner"]
-    Developer --> Snapshot["Orchestrator snapshot<br/>code + canonical documentation"]
-    Snapshot --> Critic["Formal validation critic<br/>with applicable exact-head evidence"]
-    Critic --> Tests["Test engineer"]
-    Tests --> Final["Final validator"]
-    Final --> PR["PR and branch checks"]
+    Request["Accepted requirement"] --> Risk["Risk classification"]
+    Risk --> Developer["Implementation owner"]
+    Risk -. architecture boundary .-> Architect["Architecture gate"]
+    Architect --> Developer
+    Architect -. disputed, materially complex, or irreversible design .-> Simplifier["Three-model simplifier"]
+    Simplifier --> Developer
+    Developer --> Snapshot["Immutable candidate<br/>code + canonical documentation"]
+    Snapshot --> Review["One independent critic or test pass"]
+    Review --> PR["PR and branch checks"]
     PR --> Build["Exact-SHA build"]
     Build --> Deploy["Protected deployment"]
     Deploy --> Accept["Production acceptance"]
@@ -25,12 +26,20 @@ flowchart LR
     UX["UX/UI specialist"] -. user-facing evidence .-> Developer
     Contract["Contract specialist"] -. boundary evidence .-> Developer
     Security["Auth/security specialist"] -. security evidence .-> Developer
-    Conductor["Conductor"] -. checkpoints and recovery .-> Architect
+    Final["Final validator"] -. multi-specialist or irreversible reconciliation .-> PR
+    Perfetto["PerfettoStan + simplifier<br/>process challenge"] -. stop and optimize optional flow .-> Risk
+    Conductor["Conductor"] -. parallel or operational checkpoints .-> Risk
     Conductor -.-> Accept
 ```
 
-The conductor coordinates the chain but does not replace a quality gate or
-grant release authority.
+The conductor is used only for parallel, asynchronous, external, or mutating
+work that needs checkpoints and recovery. It does not replace a quality gate
+or grant release authority.
+
+PerfettoStan challenges process friction at each proposed expansion and may
+stop new optional work until it and one simplifier process pass return the
+shortest safe continuation. It cannot remove or bypass mandatory technical
+safeguards or active incident-safety work.
 
 The bounded consolidated design review described in [[Agents]] supports the
 design-to-implementation handoff; it does not add a seventh universal gate.
@@ -38,16 +47,13 @@ Design acceptance and supporting test measurements cannot replace formal
 candidate review or test acceptance. Snapshot creation is an authorized
 orchestrator action, not permission for a file-editing developer to commit.
 
-## Universal review chain
+## Risk-conditional review profiles
 
-| Gate | Purpose | Required outcome |
+| Profile | Purpose | Required outcome |
 |---|---|---|
-| Architect | Define service boundaries, compatibility, dependencies, risks, and acceptance criteria | Bounded implementation contract |
-| Simplifier | Challenge unnecessary scope and conflicting abstractions with three independent model families and one synthesis | Smallest complete design |
-| Developer | Implement one owned slice with focused tests and assemble applicable documentation/specialist evidence | Complete candidate for the orchestrator's immutable snapshot |
-| Validation critic | Search for concrete correctness, concurrency, compatibility, and regression failures | No unresolved required finding |
-| Test engineer | Run the smallest targeted suite, then required regression tiers | Reproducible passing evidence |
-| Final validator | Reconcile all requirements, specialist findings, tests, and exact-head evidence | Ready for release review |
+| Low risk | Keep bounded, reversible, backward-compatible work fast | One implementation owner, one independent critic or test pass, and exact required CI |
+| Triggered specialist | Protect a changed UX, security, contract, quality, deployment, data, or architecture boundary | Low-risk evidence plus only the applicable specialist result |
+| Complex or irreversible | Resolve disputed design, multiple specialist decisions, or irreversible release risk | Architect; three-model synthesis only for disputed, materially complex, or irreversible design; final validator only for reconciliation or irreversible release review |
 
 ## Conditional specialist gates
 
@@ -83,18 +89,36 @@ required aggregate gate includes:
 | CI area | What it proves |
 |---|---|
 | Manifest validation | Kubernetes YAML parses successfully |
-| Ingress routing guard | Production hosts and API paths retain safe routing |
+| Infrastructure hygiene | Operational infrastructure shell/YAML files are scanned for hard-coded secrets, possible public-IP literals are reported for review, and production hosts/API paths retain safe routing |
 | Script validation | Deployment and runtime scripts parse and their focused contract tests pass |
 | Workflow trigger guard | Production-capable workflows keep their intended triggers and trust boundaries |
 | Deployment safety contracts | Readiness, activation, rollback, migration, and recovery invariants remain intact |
 | Auth container smoke | A production-built Auth container typechecks, starts, and serves the expected API shape |
-| Service coverage | Auth, Backoffice, Bet, Event, Gamemaster, Moderation, Resulting, Slip, Telemetry, and Client meet at least 80% line coverage and 80% branch coverage where branches exist |
+| Service coverage | Changed services meet at least 80% line coverage and 80% branch coverage where branches exist; shared or unknown service-impacting paths run every service |
 | Client production build | The React application builds successfully in CI |
 
-The PR-only, read-only `oci-validate` workflow's `offline-contract` job checks
-workflow syntax and runs all 24 offline OCI contract suites in their existing
-order. Its 45-minute whole-job limit includes checkout and syntax validation;
-timeout or partial completion is not passing evidence.
+The PR-only, read-only `oci-validate` workflow selects scope first. Changes
+limited to OCI health or validation-routing files check workflow syntax and run
+the focused health and GHCR contracts. Other OCI or OCI-workflow
+changes run the complete offline contract suite. Unaffected changes use an
+explicit no-OCI-impact sentinel without downloading actionlint. Its 45-minute
+whole-job limit bounds the complete suite; timeout or partial completion is not
+passing evidence.
+
+`production-build` similarly routes service coverage to changed services,
+falls back to every service for shared or unknown service-impacting paths, and
+skips the coverage job for documentation, governance, and unrelated
+infrastructure changes. Auth container smoke runs only when Auth is selected
+directly or through the shared/unknown fallback, and the
+Client production build follows the same Client/shared/unknown selection.
+Runtime validation is selected for Azure agent, GitHub script, or workflow
+changes. Deployment-safety validation uses a meta contract for its own workflow
+or harness and the full contract set only for affected deployment, readiness,
+rollback, or lock paths; its 45-minute ceiling applies only when that job is
+selected. Pull-request title/body edits run lightweight branch
+policy only and do not rerun source, OCI, coverage, or deployment-safety jobs.
+This changes engineering delivery latency only; it does not change public
+product behavior or user-facing documentation.
 
 ### Actions runtime and compatible pins
 
@@ -126,8 +150,10 @@ retain the same protected review and one-use rules. See
 ### Quality-transition recovery
 
 A trusted policy publisher can leave a pending or bound transition before
-its run fails. A genuine, strictly later `edited`, `synchronize`, or
-`reopened` event may establish a fresh transition. A completed older policy
+its run fails. A genuine, strictly later `synchronize` or `reopened` event may
+establish a fresh transition. Metadata-only `edited` events may refresh branch
+policy from existing exact head/base evidence but cannot create, bind, recover,
+or consume a source-quality transition. A completed older policy
 run with `failure`, `cancelled`, or `timed_out` contributes only historical
 ordering at a strictly lower cutoff, never current quality or approval
 authority. Every marker still passes structural and completed-origin checks
@@ -194,9 +220,10 @@ When that pair is activated, the review wrapper and invocation contract must
 each match the trusted default at the pull base, pull head, and merge snapshot.
 They therefore cannot be corrected or introduced in the activation pull
 request. Any required wrapper or invocation correction is first promoted as a
-normal default-equal pull request, synchronized into the trusted default, and
-only then may a separate authorized pull request activate the engine-and-harness
-pair.
+normal default-equal pull request. Only after that promotion may a separate
+authorized pull request activate the engine-and-harness pair; before its later
+promotion, that bounded candidate incorporates current `master` and receives
+fresh exact-SHA validation.
 
 That authority has two distinct, one-use proof legs: source integration into
 `dev`, followed by canonical `dev`-to-`master` promotion. A successful source
@@ -239,16 +266,17 @@ fail-closed, with rate-limit and permission failures distinguishable from
 malformed repository evidence. This inert foundation neither adds that token
 wiring nor changes `production-build.yml`.
 
-After promotion and branch synchronization, the promoted pair becomes the
-ordinary trusted default and validation returns to the inert default-equal
-state. Rollback is a separately reviewed forward correction or revert through
-the normal branch flow, not reuse of an earlier authorization. Once either
-one-use receipt has been spent, later correction must preserve that historical
-interpretation rather than making the consumed authority appear unused.
-Ending or crashing after any receipt row was written permanently fences that
-claim against re-entry. Pending is not consumed or successful. A success
-receipt stays spent even if later quality publication fails; no compensation
-or reset revives it.
+After promotion, the promoted pair becomes the ordinary trusted default and
+validation returns to the inert default-equal state. No standalone post-squash
+synchronization PR is required; a later bounded candidate incorporates current
+`master` before promotion. Rollback is a separately reviewed forward correction
+or revert through the normal branch flow, not reuse of an earlier
+authorization. Once either one-use receipt has been spent, later correction
+must preserve that historical interpretation rather than making the consumed
+authority appear unused. Ending or crashing after any receipt row was written
+permanently fences that claim against re-entry. Pending is not consumed or
+successful. A success receipt stays spent even if later quality publication
+fails; no compensation or reset revives it.
 
 ## Application test layers
 
@@ -388,10 +416,11 @@ Historical coverage integration receipts retain full validation, with
 revalidation reads bounded by the shared deadline and per-request cap.
 
 Receipt-protocol repair and declaration retirement follow normal protected
-integration, promotion and ancestry synchronization; retirement grants no
-replacement authority and preserves all claim history. Replacement
-integration/promotion grants are reviewed and promoted separately into
-trusted `master` before the consuming workflow change enters `dev`.
+integration and promotion; retirement grants no replacement authority and
+preserves all claim history. A standalone post-squash synchronization PR is
+not required, but a later promotion candidate must contain current `master`.
+Replacement integration/promotion grants are reviewed and promoted separately
+into trusted `master` before the consuming workflow change enters `dev`.
 Provisioning alone is not merge or deployment permission.
 
 Old CI, expiry extensions, identity resets or workflow reverts cannot bypass
@@ -419,17 +448,18 @@ nor unnecessary duplicate full-suite runs improve the evidence.
 
 A known regression, unexplained behavior change, or missing required proof
 prevents readiness. Report actual results and unrun checks explicitly.
-Independent critic, test, and final-validation evidence remains required;
-routine routing or design acceptance cannot turn a failed technical gate
-green. See [[Agents]] for bounded corrections and review triggers.
+Independent evidence selected by the risk profile remains required; routine
+routing or design acceptance cannot turn a failed technical gate green. See
+[[Agents]] for bounded corrections and review triggers.
 
 ## Documentation quality
 
 Documentation-impact evidence is mandatory for every change; a separate
 public-wiki supporting unit is not. Canonical wiki pages are reviewed source
 files, and relevant changes join the complete candidate in the same pull
-request as the behavior they describe, before formal critic review and final
-validation. Their tests require the expected handbook pages and navigation, and
+request as the behavior they describe, before the independent review selected
+by the risk profile. Their tests require the expected handbook pages and
+navigation, and
 reject known classes of sensitive public content such as private authority
 mechanics, user-specific paths, and globally routable infrastructure
 addresses. After the exact commit merges, the authorized orchestrator, not

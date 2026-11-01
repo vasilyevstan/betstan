@@ -1,6 +1,6 @@
 ---
 name: betstan-branch-governance
-description: Enforce BetStan's dev-to-master branch flow, exact-SHA CI checks, production promotion approval, and post-squash synchronization.
+description: Enforce BetStan's dev-to-master branch flow, exact-SHA CI checks, and production promotion approval.
 ---
 
 # BetStan branch governance
@@ -23,20 +23,21 @@ Use this skill whenever a task involves branches, commits, pushes, pull requests
   operational fields stay present and say `not applicable` when appropriate.
 - Assign public-safe `session:<slug>` and `feature:<slug>` labels to every PR
   with `pr-context-labels-stan.sh`. Reuse the session pair across
-  implementation, promotion, and ancestry-sync PRs; aggregate promotions may
+  implementation, promotion, and required reconciliation PRs; aggregate promotions may
   carry multiple pairs. The labels are informational only and never affect
   checks, approval, merge, release, or rollback authority.
 - Only CLI-created and CLI-owned PRs may carry `copilot-cli-managed` and use
   automatic mode. Every other PR requires `APPROVED_SHA` equal to its current
   head; human `master` promotions also require the exact workflow inventory.
-- Treat PR title/body edits as workflow-producing when protected workflows
-  subscribe to `pull_request.edited`; schedule them outside production
-  exclusivity and data-to-deploy handoff windows.
+- Treat PR title/body edits as lightweight branch-policy events. They must not
+  rerun source, OCI, coverage, or deployment-safety workflows.
 - Manual central production workflow dispatches are approval-gated through `production-emergency` and require an exact full master SHA. Legacy per-service deploy workflows are not manually dispatchable.
 - Common package publication is separately approval-gated through
   `common-package-release`; only `common-package-publish.yml` may publish, and
   only from an exact current `master` SHA.
-- After a squash promotion, immediately merge `master` back into `dev` and verify `master` is an ancestor of `dev`.
+- Do not create a post-squash synchronization PR solely to restore ancestry.
+  Before a later promotion, incorporate the current `master` into that bounded
+  integration candidate and revalidate the exact resulting SHA.
 
 ## Read-only baseline
 
@@ -60,8 +61,8 @@ The first completed exact quality run created after authorization consumes its
 durable receipt. Workflow-producing pull-request events publish pending until
 their own run completes. They first publish an unbound exact-snapshot barrier,
 then bind the exact newly registered run, which must strictly postdate the
-event. The marker also binds a bounded title/body fingerprint, so another run
-from the same head/base snapshot or stale PR content cannot satisfy it. Accept
+event. The marker also binds a bounded head/base source fingerprint, so
+evidence from another source snapshot cannot satisfy it. Accept
 markers only from the GitHub Actions bot with a validated repository
 `branch-policy` run target carrying the exact PR/head/base relation. Keep
 `branch-policy.yml` as the sole status-writing workflow and require every
@@ -107,8 +108,8 @@ The broad opening snapshot mismatch permits only fail-closed inspection and
 never grants reconciliation: an out-of-window replay without a marker stays
 pending, an existing mismatch writes the permanent tombstone, and any
 intervening `updated_at` change fails closed. A same-cutoff tombstone cannot be
-replaced or revived; only a strictly later `edited`, `synchronize`, or
-`reopened` transition can recover the lineage. Preserve the original cutoff,
+replaced or revived; only a strictly later `synchronize` or `reopened`
+transition can recover the lineage. Preserve the original cutoff,
 run binding, and policy-run target. `labeled` and `unlabeled` are non-producing
 refreshes; any other label drift permanently tombstones that lineage, and
 restoring labels cannot revive it. At the greatest cutoff, `x` dominates every
@@ -119,8 +120,8 @@ positive run IDs or incompatible action, content, policy-run target, or label
 progression fail closed, and a lower state cannot downgrade a higher state.
 Version 1 and version 2 markers cannot newly bind, succeed, or consume an
 authorization receipt; a version 2 `x` remains a permanent tombstone. Only a
-strictly later `edited`, `synchronize`, or `reopened` transition may recover,
-never a later or replayed `opened` event. Once any version 3 marker exists,
+strictly later `synchronize` or `reopened` transition may recover, never a
+metadata edit or a later or replayed `opened` event. Once any version 3 marker exists,
 operational rollback must retain version 3 parsing and ledger authority:
 recovered opening-label authority is not durable in marker v3, so every
 publisher able to bind or succeed such a lineage must revalidate the ledger;
@@ -132,6 +133,6 @@ invalidate concurrent results with pending. Any subsequent edit,
 synchronization, base advance, or refresh needs the applicable short-lived
 authorization and receipt anchor.
 
-Return `NO_GO` for a direct `master` push, a non-`dev` PR into `master`, a stale promotion, missing or stale checks, incomplete production approval, or unsynchronized branches after promotion.
+Return `NO_GO` for a direct `master` push, a non-`dev` PR into `master`, a stale promotion, missing or stale checks, or incomplete production approval.
 
 Never expose secrets, cloud identifiers, kubeconfig data, private logs, or session paths.

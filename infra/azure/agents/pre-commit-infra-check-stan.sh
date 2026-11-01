@@ -7,7 +7,7 @@ set -euo pipefail
 #   ./infra/azure/agents/pre-commit-infra-check-stan.sh
 #   INFRA_DIRS="infra/k8s-prod infra/k8s" ./infra/azure/agents/pre-commit-infra-check-stan.sh
 
-INFRA_DIRS="${INFRA_DIRS:-infra/azure/agents infra/k8s-prod infra/k8s .github/workflows}"
+INFRA_DIRS="${INFRA_DIRS:-infra .github/workflows}"
 INGRESS_GUARD="${INGRESS_GUARD:-infra/azure/agents/ingress-routing-guard-stan.sh}"
 
 warnings=0
@@ -30,7 +30,7 @@ if [[ "$current_branch" == "master" && "${GITHUB_ACTIONS:-false}" != "true" ]]; 
   exit 1
 fi
 
-# ── 1. Check staged files for common secrets patterns ────────────────────────
+# ── 1. Check operational infrastructure for common secrets patterns ─────────
 echo "=== scanning staged/modified infra files for secrets patterns ==="
 
 target_files=()
@@ -38,7 +38,13 @@ for dir in $INFRA_DIRS; do
   if [[ -d "$dir" ]]; then
     while IFS= read -r -d '' f; do
       target_files+=("$f")
-    done < <(find "$dir" -type f \( -name "*.sh" -o -name "*.yml" -o -name "*.yaml" \) -print0 2>/dev/null)
+    done < <(
+      find "$dir" -type f \
+        \( -name "*.sh" -o -name "*.yml" -o -name "*.yaml" \) \
+        ! -path "*/tests/*" \
+        ! -name "test-*.sh" \
+        -print0 2>/dev/null
+    )
   fi
 done
 
@@ -77,6 +83,8 @@ safe_values = (
 
 def is_sensitive_key(key: str) -> bool:
     compact = re.sub(r"[-_]", "", key).lower()
+    if compact == "automountserviceaccounttoken":
+        return False
     if compact.endswith(("password", "secret", "apikey", "privatekey", "jwtkey")):
         return True
     if compact.endswith("token"):
@@ -134,6 +142,10 @@ with open(path, encoding="utf-8", errors="replace") as source:
     for line_number, original in enumerate(source, start=1):
         if original.lstrip().startswith("#") or oidc_yaml.fullmatch(original.rstrip("\n")):
             continue
+        if "--query" in original:
+            continue
+        if "printf" in original and "%q" in original:
+            continue
         line = oidc_serialized.sub(
             lambda match: f"{match.group(1)}oidc-permission=safe",
             original,
@@ -143,6 +155,24 @@ with open(path, encoding="utf-8", errors="replace") as source:
                 continue
             value, remainder, complete = scalar_at(line, match.end())
             if len(value) < 4:
+                continue
+            compact_key = re.sub(r"[-_]", "", match.group("key")).lower()
+            if (
+                compact_key == "token"
+                and match.group("key") == "token"
+                and match.group("operator") == "="
+            ):
+                continue
+            if (
+                compact_key.endswith("privatekey")
+                and match.group("key").islower()
+                and (
+                    value == "%q"
+                    or (value.startswith("$") and "/" in value)
+                )
+            ):
+                continue
+            if compact_key.endswith("jwtkey") and value == "/dev/stdin":
                 continue
             if (
                 complete

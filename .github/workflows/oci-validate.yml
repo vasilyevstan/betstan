@@ -5,7 +5,7 @@ on:
     branches:
       - dev
       - master
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -18,8 +18,37 @@ jobs:
     steps:
       - name: Checkout pull request
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Select OCI contract scope
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mode=none
+          while IFS= read -r path; do
+            case "$path" in
+              infra/oci/agents/health-check-stan.sh|\
+              infra/oci/agents/test-health-contract-stan.sh|\
+              .github/workflows/oci-validate.yml|\
+              infra/oci/tests/test-ghcr-contract.sh)
+                [ "$mode" = full ] || mode=focused
+                ;;
+              infra/oci/*|\
+              .github/workflows/oci-*.yml|\
+              .github/workflows/ghcr-package-management.yml)
+                mode=full
+                ;;
+            esac
+          done < <(git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "oci_contract_scope=$mode"
 
       - name: Validate OCI workflow syntax
+        if: steps.scope.outputs.mode != 'none'
         run: |
           archive="$RUNNER_TEMP/actionlint.tar.gz"
           curl --fail --silent --show-error --location \
@@ -32,5 +61,19 @@ jobs:
             .github/workflows/oci-*.yml \
             .github/workflows/ghcr-package-management.yml
 
-      - name: Run OCI offline contract
+      - name: Run focused OCI contracts
+        if: steps.scope.outputs.mode == 'focused'
+        run: |
+          bash -n \
+            infra/oci/agents/health-check-stan.sh \
+            infra/oci/agents/test-health-contract-stan.sh
+          ./infra/oci/agents/test-health-contract-stan.sh
+          ./infra/oci/tests/test-ghcr-contract.sh
+
+      - name: Run full OCI contracts
+        if: steps.scope.outputs.mode == 'full'
         run: ./infra/oci/tests/run-contracts.sh
+
+      - name: Record unaffected OCI scope
+        if: steps.scope.outputs.mode == 'none'
+        run: echo "OCI contracts unaffected by this pull request"
