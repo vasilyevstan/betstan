@@ -141,7 +141,22 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 
 // Exact workflow authorizations are added only in a separately promoted,
 // short-lived policy change and removed immediately after their intended PR.
-const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);
+const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
+  {
+    id: "lean-delivery-production-build-pr-916-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
+    pullNumber: 916,
+    headRef: "fix/lean-delivery-recovery",
+    baseRef: "dev",
+    issuedAt: "2026-11-01T01:50:05.000Z",
+    expiresAt: "2026-11-02T01:50:05.000Z",
+    receiptSha: "300a8b197856df9dc3505a8e59a607af5a9d20fd",
+  },
+]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS = Object.freeze(
   JSON.parse(TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON),

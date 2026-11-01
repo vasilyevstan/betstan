@@ -5113,9 +5113,41 @@ async function main() {
       receiptSha: "ccd0beaaeb306ef48b86fcb7566dfa8c1e7bd2b1",
     },
   ];
+  const activeLeanDeliveryWorkflowAuthorization = {
+    id: "lean-delivery-production-build-pr-916-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
+    pullNumber: 916,
+    headRef: "fix/lean-delivery-recovery",
+    baseRef: "dev",
+    issuedAt: "2026-11-01T01:50:05.000Z",
+    expiresAt: "2026-11-02T01:50:05.000Z",
+    receiptSha: "300a8b197856df9dc3505a8e59a607af5a9d20fd",
+  };
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    [],
+    [activeLeanDeliveryWorkflowAuthorization],
+  );
+  assert.deepEqual(
+    publishPrPolicy.findWorkflowAuthorization({
+      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+      repository: activeLeanDeliveryWorkflowAuthorization.repository,
+      workflowPath: activeLeanDeliveryWorkflowAuthorization.workflowPath,
+      trustedBlob: activeLeanDeliveryWorkflowAuthorization.trustedBlob,
+      authorizedBlob: activeLeanDeliveryWorkflowAuthorization.authorizedBlob,
+      pull: {
+        number: activeLeanDeliveryWorkflowAuthorization.pullNumber,
+        headRepository:
+          activeLeanDeliveryWorkflowAuthorization.headRepository,
+        headRef: activeLeanDeliveryWorkflowAuthorization.headRef,
+        baseRef: activeLeanDeliveryWorkflowAuthorization.baseRef,
+      },
+      now: "2026-11-01T02:50:05.000Z",
+    }),
+    activeLeanDeliveryWorkflowAuthorization,
   );
   for (const authorization of historicalNode24WorkflowAuthorizations) {
     const lookup = {
@@ -5195,7 +5227,7 @@ async function main() {
           headRef: retired.headRef,
           baseRef: retired.baseRef,
         },
-        now: retired.issuedAt,
+        now: "2026-11-01T02:50:05.000Z",
       }),
       null,
     );
@@ -5242,7 +5274,10 @@ async function main() {
     false,
   );
   assert(
-    publisherSource.includes(
+    publisherSource.includes('id: "lean-delivery-production-build-pr-916-v1"'),
+  );
+  assert(
+    !publisherSource.includes(
       "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
     ),
   );
