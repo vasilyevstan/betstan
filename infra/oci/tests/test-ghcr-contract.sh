@@ -709,9 +709,12 @@ fi
 grep -Fq 'group: oci-control-plane' \
   "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" ||
   fail "GHCR package mutations do not share production control-plane concurrency"
-grep -A8 -F 'name: Validate then apply explicit package-generation prune' \
-  "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" |
-  grep -Fq 'GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}' ||
+prune_step="$(
+  grep -A8 -F 'name: Validate then apply explicit package-generation prune' \
+    "$ROOT_DIR/.github/workflows/ghcr-package-management.yml"
+)" || fail "GHCR package validation/prune step is missing"
+grep -Fq 'GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}' \
+  <<<"$prune_step" ||
   fail "GHCR package validation/prune does not authenticate GitHub API calls"
 for literal in \
   'actions/workflows/ghcr-package-management.yml' \
@@ -850,9 +853,11 @@ fi
 grep -Fq '.github/workflows/ghcr-package-management.yml' \
   "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
   fail "OCI pull-request lint omits the production-capable GHCR package workflow"
-grep -A8 -F 'name: Record exact partial-build repair authorization' \
-  "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" |
-  grep -Fq 'mkdir -p "$OUTPUT_DIR"' ||
+repair_authorization_step="$(
+  grep -A8 -F 'name: Record exact partial-build repair authorization' \
+    "$ROOT_DIR/.github/workflows/ghcr-package-management.yml"
+)" || fail "partial-build repair authorization step is missing"
+grep -Fq 'mkdir -p "$OUTPUT_DIR"' <<<"$repair_authorization_step" ||
   fail "partial-build repair writes evidence before creating its output directory"
 grep -Fq "inputs.phase == 'prune'" \
   "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" ||
@@ -870,9 +875,139 @@ done
 grep -Fq './infra/azure/agents/test-deployment-safety-ci-stan.sh' \
   "$ROOT_DIR/.github/workflows/production-build.yml" ||
   fail "trusted production quality workflow omits its deployment-safety entrypoint"
-grep -Fq './infra/oci/tests/run-contracts.sh' \
+for literal in \
+  'oci_contract_scope=$mode' \
+  './infra/oci/agents/test-health-contract-stan.sh' \
+  './infra/oci/tests/run-contracts.sh'; do
+  grep -Fq "$literal" "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
+    fail "OCI pull-request validation omits routed contract evidence: $literal"
+done
+grep -Fq 'types: [opened, synchronize, reopened]' \
   "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
-  fail "OCI pull-request validation omits the complete contract entrypoint"
+  fail "OCI pull-request validation omits source transition triggers"
+! grep -Fq 'types: [opened, synchronize, reopened, edited]' \
+  "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
+  fail "OCI pull-request validation reruns on metadata edits"
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" <<'RUBY'
+workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
+jobs = workflow.fetch("jobs")
+scope = jobs.fetch("scope")
+abort "oci-validate scope output is missing" unless
+  scope.dig("outputs", "mode") == "${{ steps.scope.outputs.mode }}"
+full = jobs.fetch("full-contracts")
+abort "OCI full contracts require a bounded 25-minute shard limit" unless
+  full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 25
+abort "OCI full contracts must retain every shard result" unless
+  full.dig("strategy", "fail-fast") == false
+shards = full.dig("strategy", "matrix", "shard")
+abort "OCI full contract shards are incomplete" unless
+  shards == %w[core live provenance rollback]
+aggregate = jobs.fetch("offline-contract")
+abort "required OCI aggregate check changed identity" unless
+  aggregate["name"] == "oci-validate"
+abort "required OCI aggregate must run after skipped or failed shards" unless
+  aggregate["if"] == "always()"
+required_needs = %w[scope syntax focused-contracts full-contracts]
+abort "required OCI aggregate dependencies are incomplete" unless
+  aggregate["needs"] == required_needs
+aggregate_steps = aggregate.fetch("steps").map { |step| step["name"] }.compact
+abort "required OCI aggregate step is missing" unless
+  aggregate_steps.include?("Aggregate OCI validation")
+RUBY
+aggregate_script="$WORK_DIR/aggregate-oci-validation.sh"
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" >"$aggregate_script" <<'RUBY'
+workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
+step = workflow.dig("jobs", "offline-contract", "steps").find do |candidate|
+  candidate["name"] == "Aggregate OCI validation"
+end
+abort "oci-validate aggregate step is missing" unless step
+puts step.fetch("run")
+RUBY
+assert_oci_aggregate_passes() {
+  local mode="$1"
+  local syntax="$2"
+  local focused="$3"
+  local full="$4"
+  env \
+    MODE="$mode" \
+    SCOPE_RESULT=success \
+    SYNTAX_RESULT="$syntax" \
+    FOCUSED_RESULT="$focused" \
+    FULL_RESULT="$full" \
+    bash "$aggregate_script" >/dev/null ||
+    fail "OCI aggregate rejects valid $mode results"
+}
+assert_oci_aggregate_fails() {
+  local mode="$1"
+  local scope="$2"
+  local syntax="$3"
+  local focused="$4"
+  local full="$5"
+  if env \
+    MODE="$mode" \
+    SCOPE_RESULT="$scope" \
+    SYNTAX_RESULT="$syntax" \
+    FOCUSED_RESULT="$focused" \
+    FULL_RESULT="$full" \
+    bash "$aggregate_script" >/dev/null 2>&1; then
+    fail "OCI aggregate accepts invalid $mode results"
+  fi
+}
+assert_oci_aggregate_passes none skipped skipped skipped
+assert_oci_aggregate_passes focused success success skipped
+assert_oci_aggregate_passes full success skipped success
+assert_oci_aggregate_fails full success success skipped failure
+assert_oci_aggregate_fails full failure success skipped success
+selector_script="$WORK_DIR/select-oci-scope.sh"
+ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" >"$selector_script" <<'RUBY'
+workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
+step = workflow.dig("jobs", "scope", "steps").find do |candidate|
+  candidate["id"] == "scope"
+end
+abort "oci-validate scope selector is missing" unless step
+puts step.fetch("run")
+RUBY
+cat >"$WORK_DIR/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "diff" && "$2" == "--no-renames" && "$3" == "--name-only" ]]
+printf '%s\n' "${OCI_SCOPE_PATHS:-}"
+SH
+chmod +x "$WORK_DIR/bin/git"
+assert_oci_scope() {
+  local expected="$1"
+  local paths="$2"
+  local output="$WORK_DIR/oci-scope-output"
+  : >"$output"
+  env \
+    PATH="$WORK_DIR/bin:$PATH" \
+    BASE_SHA="$CURRENT_SHA" \
+    HEAD_SHA="$DEPLOYED_SHA" \
+    GITHUB_OUTPUT="$output" \
+    OCI_SCOPE_PATHS="$paths" \
+    bash "$selector_script" >/dev/null
+  local actual
+  actual="$(sed -n 's/^mode=//p' "$output")"
+  [[ "$actual" == "$expected" ]] ||
+    fail "OCI scope expected $expected, got $actual for: $paths"
+}
+assert_oci_scope focused "infra/oci/agents/health-check-stan.sh"
+assert_oci_scope full "infra/oci/tests/test-contract.sh"
+assert_oci_scope none "docs/wiki/Quality-Gates.md"
+assert_oci_scope none ".github/workflows/production-build.yml"
+assert_oci_scope full $'infra/oci/scripts/deploy.sh\ninfra/oci/agents/health-check-stan.sh'
+for moved_contract in \
+  test-deploy-validation-loop-stan.sh \
+  test-live-data-maintenance-stan.sh \
+  test-live-betting-control-stan.sh \
+  test-revalidate-live-activation-stan.sh \
+  test-live-betting-data-rollout-stan.sh \
+  test-live-betting-readiness-stan.sh \
+  rollback-live-readiness-contract.sh; do
+  grep -Fq "\"\$TESTS_DIR/$moved_contract\"" \
+    "$ROOT_DIR/infra/oci/tests/run-contracts.sh" ||
+    fail "OCI full suite omits moved production-safety contract: $moved_contract"
+done
 for literal in \
   'transition_plan_state_sha256' \
   'TRANSITION_PHASE must be plan, rebind, or retire' \

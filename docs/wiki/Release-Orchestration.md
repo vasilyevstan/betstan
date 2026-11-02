@@ -16,10 +16,24 @@ image tag, a stale branch name, or an unverified workflow rerun.
 3. Pass the exact-head and merge-snapshot quality gates.
 4. Merge the focused change into `dev`.
 5. Promote an up-to-date `dev` to `master` through a separate pull request.
-6. Synchronize the resulting `master` ancestry back into `dev`.
+6. Do not open a standalone synchronization PR after a squash merge. Before a
+   later promotion, incorporate current `master` into that bounded candidate
+   and revalidate the exact resulting SHA.
 
 Direct pushes to `dev` or `master` are not part of the supported flow. Only
 `dev` may be promoted to `master`.
+
+### Protected-workflow bootstrap
+
+When a protected quality workflow must change, first promote the fail-closed
+publisher support while retaining the currently trusted workflow bytes. A
+short-lived selector may then bind the first eligible open PR with the exact
+repository, refs, trusted blob, and authorized blob instead of reserving a PR
+number before issuance. The PR transition and quality run must postdate
+issuance, and receipt publication revalidates live refs, the complete snapshot,
+and promotion ancestry. Source integration and `dev`-to-`master` promotion use
+separate one-use receipts. The workflow restoration removes the temporary
+declarations while preserving generic selector support.
 
 ### Concurrent feature delivery
 
@@ -63,7 +77,7 @@ flowchart LR
     Wiki --> Candidate
     Candidate --> DevPR["PR to dev"]
     DevPR --> Snapshot["Authorized orchestrator<br/>immutable candidate"]
-    Snapshot --> DevChecks["Applicable exact-head reviews,<br/>formal critic, tests, final validation + CI"]
+    Snapshot --> DevChecks["Applicable exact-head specialists,<br/>selected independent review + CI"]
     DevChecks --> Dev["dev"]
     Dev --> Promote["dev to master PR"]
     Promote --> MergeChecks["Exact head and<br/>merge-snapshot checks"]
@@ -76,7 +90,6 @@ flowchart LR
     Dark --> Activate["Bounded activation"]
     Activate --> Accept["Production acceptance"]
     Accept --> Commit["Permanent enablement"]
-    Master --> Sync["Synchronize ancestry<br/>back to dev"]
 ```
 
 Documentation-only changes use the same reviewed branch and promotion model.
@@ -102,7 +115,7 @@ Each PR also has public-safe GitHub labels for traceability:
 - `session:<slug>` identifies the bounded development session;
 - `feature:<slug>` groups the durable product or engineering feature.
 
-The same pair follows implementation, promotion, and ancestry-sync PRs. A
+The same pair follows implementation, promotion, and required reconciliation PRs. A
 shared promotion can carry several pairs when it aggregates work from multiple
 sessions. These labels are informational only: they do not satisfy or change
 checks, approvals, merge policy, release authority, deployment, activation, or
@@ -110,11 +123,9 @@ rollback. Internal session identifiers, local paths, user identities,
 credentials, private runtime references, and production identifiers are never
 used as public labels.
 
-Metadata is part of the reviewed evidence. It is completed before the release
-critical path rather than repeatedly edited while production work is active.
-Title/body edits can start validation. Avoid metadata changes while the
-publisher evaluates its snapshot, during a data-to-deploy handoff, or inside
-a production-exclusivity window.
+Metadata is part of the reviewed evidence. Title/body edits run lightweight
+branch policy only and reuse existing exact head/base source evidence; they do
+not start source, OCI, coverage, or deployment-safety validation.
 
 Context-label setup reads the PR's labels first. If both informational context
 labels are already present, it performs no GitHub mutation. Otherwise it
@@ -126,16 +137,24 @@ described in [[Quality Gates]].
 
 ## Quality chain
 
-The universal quality gates are:
+Use the smallest risk profile that covers the actual diff:
 
-1. architect;
-2. three-model simplifier synthesis;
-3. registered implementation owner;
-4. validation critic;
-5. test engineer;
-6. final validator.
+1. Low-risk, reversible work uses one registered implementation owner, one
+   independent critic or test pass, and exact required CI.
+2. Add only specialists triggered by changed UX, security, contract, quality,
+   deployment, data, or architecture boundaries.
+3. Use three-model simplifier synthesis only for disputed, materially complex,
+   or irreversible design.
+4. Use final validation only to reconcile multiple specialist decisions or an
+   irreversible release decision.
 
-The conductor spans the chain but is not a quality gate.
+The conductor is used only for parallel, asynchronous, external, or mutating
+operations that need checkpoints and recovery; it is not a quality gate.
+PerfettoStan and one simplifier process pass may stop new optional work, remove
+unsupported or duplicate steps, and return the shortest safe continuation.
+They cannot bypass protected branches, exact-SHA validation, selected
+independent evidence, production serialization, locks, fences, provenance,
+rollback, or active incident-safety work.
 `betstan-ux-ui-expert` is mandatory for every user-facing visual or
 interaction change. Other specialists join when their explicit trigger
 applies.
@@ -1722,10 +1741,9 @@ change instead records the inspected exact-diff paths and its justification.
 Product behavior, architecture, contracts, data lifecycle, security,
 infrastructure, quality gates, release behavior, UI/UX, and agent-role changes
 update their canonical `docs/wiki/` pages in the same pull request before
-formal critic review of the immutable candidate and final validation. The
-editor returns its owned pages and evidence to the implementation owner
-assembling the candidate; the authorized orchestrator creates its immutable
-snapshot.
+the independent review selected by the risk profile. The editor returns its
+owned pages and evidence to the implementation owner assembling the candidate;
+the authorized orchestrator creates its immutable snapshot.
 
 After the exact protected commit merges, the authorized orchestrator, not the
 public-wiki editor, publishes changed canonical pages to the GitHub wiki.

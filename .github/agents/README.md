@@ -5,20 +5,38 @@ fix, migration, and release-preparation tasks. They complement the existing
 specialist agents; they do not replace specialist authority or the approval
 mode defined in `CONTRIBUTING.md`.
 
-## Universal quality chain
+## Risk-conditional quality chain
 
-The fixed quality gates are:
+Classify work before registering agents and use the smallest profile whose
+triggers cover the actual diff and operation:
 
-1. `betstan-architect`
-2. `betstan-simplifier`
-3. **Developer gate**: `betstan-backend-developer` and/or
-   `betstan-frontend-developer` for application code, or the authorized
-   infrastructure/governance implementation owner for its owned paths
-4. `betstan-validation-critic`
-5. `betstan-test-engineer`
-6. `betstan-final-validator`
+| Profile | Required evidence |
+|---|---|
+| Low risk | One implementation owner, one independent critic or test pass, and exact required CI |
+| Triggered specialist | Low-risk evidence plus only the specialist whose boundary changed |
+| Complex or irreversible | Architect; three-model simplifier synthesis only for disputed, materially complex, or irreversible design; final validation only for multi-specialist reconciliation or an irreversible release decision |
 
-The conductor spans the workflow but is not a quality gate.
+Low-risk means bounded, reversible, backward-compatible work with no production
+mutation, data migration, security boundary, shared contract, or cross-service
+architecture decision. Documentation-only and narrow test corrections normally
+use this profile.
+
+The conductor is conditional coordination infrastructure, not a quality gate.
+Start it only for parallel, asynchronous, external, or mutating operations
+that require checkpoints, ownership recovery, or active protected-gate
+handling. A single synchronous implementation and validation trace stays with
+its owner.
+
+`PerfettoStan` continuously challenges process friction at task start, before
+adding a new agent/handoff/review/check/wait, after fifteen minutes without an
+acceptance milestone, and when the user reports excess complexity. It may stop
+new optional work. After `FLOW_STOP_OPTIMIZE`, invoke one model-neutral
+simplifier process pass; PerfettoStan consumes it, removes or combines
+unsupported steps, and returns the single shortest safe continuation. It
+cannot bypass exact-SHA validation, branch protection, selected independent
+evidence, production serialization, locks, fences, provenance, rollback, or
+active incident-safety work.
+
 Every change records a documentation-impact assessment. Register
 `betstan-public-wiki-editor` as a supporting unit only when public impact is
 plausible or ambiguous; otherwise the implementation handoff records the
@@ -41,8 +59,8 @@ as `chore`, `misc`, or `wip` are not accepted.
 
 ## Work-unit taxonomy
 
-- A **quality gate** is one stage in the universal chain and produces one
-  accepted downstream handoff.
+- A **quality gate** is evidence required by the selected risk profile and
+  produces one accepted downstream handoff.
 - The **developer gate** means the registered implementation owner with edit
   authority for the slice. It is not an exemption for non-application work:
   backend/frontend agents own application paths, deployment/runtime
@@ -52,8 +70,8 @@ as `chore`, `misc`, or `wip` are not accepted.
 - **Intra-gate work** stays under the same logical gate and `work_id`. The three
   simplifier passes, simplifier synthesis, and same-developer correction rounds
   are not additional quality-chain handoffs.
-- A **conditional specialist** supplies evidence to the owning quality gate;
-  it does not insert itself into the universal chain or issue a competing
+- A **conditional specialist** supplies evidence to the owning quality gate
+  only when its explicit trigger applies; it does not issue a competing
   approval.
 - A **registered supporting unit** is an agent, local process, GitHub run,
   protected approval, external wait, or post-merge publication task monitored
@@ -62,7 +80,7 @@ as `chore`, `misc`, or `wip` are not accepted.
   when impact is plausible or ambiguous. A clearly no-impact change records
   exact-diff evidence without creating another agent handoff.
 
-Only a completed logical quality gate hands work to the exact next gate.
+Only a completed required quality gate hands work to the exact next owner.
 Corrections return to the same agent conversation unless that owner has failed
 or become unavailable. A correction keeps its logical `work_id`, original
 `max_attempts`, and a monotonic attempt count; re-registration or a reissued
@@ -71,11 +89,12 @@ affected artifact rather than to a default application developer.
 
 ## Bounded substantive handoffs
 
-Before implementation of a new or materially changed design, send one
+When the design is disputed, materially complex, or irreversible, before
+implementation send one
 consolidated architecture, completed sealed-pass evidence, and synthesized
 contract to `betstan-validation-critic`. Register this bounded design review
 as supporting evidence for the design-to-developer handoff, not another
-universal quality gate. Its `DESIGN_REVIEW_PASSED` result accepts the design
+quality gate. Its `DESIGN_REVIEW_PASSED` result accepts the design
 only; it is not `APPROVE_SLICE` or release authority. Unaccepted design blocks
 its dependent implementation, not independently authorized operations.
 
@@ -88,11 +107,13 @@ and test evidence; it does not send its verdict back for critic approval.
 
 | Producing work | Direct next owner |
 |---|---|
-| Architect contract | Three independent simplifier passes, then one synthesis |
+| Low-risk accepted requirement | Registered implementation owner |
+| Disputed, materially complex, or irreversible design | Architect, then three independent simplifier passes and one synthesis |
 | Consolidated design bundle | Bounded design critic, then registered implementation owner |
 | Implementation and triggered specialist outputs | One implementation owner assembling the complete candidate |
 | Complete code and canonical documentation | Authorized orchestrator creating its immutable snapshot |
-| Immutable candidate and applicable exact-head specialist evidence | Formal critic, then test engineer, then final validator |
+| Immutable low-risk candidate | One independent critic or test pass, then exact required CI |
+| Immutable multi-specialist or irreversible candidate | Formal critic and tests, then final validator |
 | Final source acceptance | Deployment safety, then the authorized operation owner |
 | Terminal operation and publication evidence | Conductor/orchestrator completion |
 
@@ -131,6 +152,7 @@ operation whose required authority and safety evidence remain valid.
 | Repository entry point and irreversible rules | `.github/copilot-instructions.md` |
 | Quality chain, handoffs, and statuses | This README |
 | Watchdog and recovery behavior | `betstan-conductor.agent.md` |
+| Process stop, optimization, and safe continuation | `PerfettoStan.agent.md` |
 | Simplifier pass and synthesis decisions | `betstan-simplifier.agent.md` |
 | PR evidence structure | `.github/pull_request_template.md` |
 | Branch, approval, and contribution policy | `CONTRIBUTING.md` |
@@ -165,13 +187,15 @@ do not create another tracking system or repeat unchanged specialist passes.
 
 ## Conductor loop
 
-Start `betstan-conductor` before every unit whose result can block, approve,
-satisfy a gate, authorize mutation, or become dependency evidence, including
-short synchronous work. Register each unit with one owner, a bounded objective,
-dependencies, an exact private runtime reference, repository provenance when
-applicable, a progress signal, a checkpoint, a next-check trigger, and a stop
-condition. Keep those references in private session handoffs, not repository
-files or public reports.
+Start `betstan-conductor` only when work is parallel, asynchronous, external,
+or mutating and its result can block, approve, satisfy a gate, authorize
+mutation, or become dependency evidence. A single synchronous implementation
+and validation trace does not need a conductor ledger. For conductor-managed
+work, register each unit with one owner, a bounded objective, dependencies, an
+exact private runtime reference, repository provenance when applicable, a
+progress signal, a checkpoint, a next-check trigger, and a stop condition.
+Keep those references in private session handoffs, not repository files or
+public reports.
 
 The conductor monitors completion events and bounded checkpoints rather than
 tight-polling. A still-running `gh run watch` is notification transport, not
@@ -210,9 +234,9 @@ further long operation.
 An explicit user request to prioritize production establishes a critical-path
 scope freeze. Continue required safety work, but defer unrelated documentation,
 PR metadata, and advisory expansion until the production gate is terminal.
-Pull-request metadata edits are workflow-producing when validation subscribes
-to `pull_request.edited`; register those runs and never create them inside a
-data-to-deploy handoff or production-exclusivity window.
+Pull-request metadata edits run lightweight branch policy only. Do not register
+or wait for source, OCI, coverage, or deployment-safety runs unless the source
+snapshot changes.
 
 For manually disabled workflows, a workflow dispatch URL is acceptance, not
 materialization. Capture the exact run ID from the URL, keep the workflow
@@ -352,6 +376,8 @@ allowed only with disjoint ownership and a stable shared contract.
 
 ## Specialist routing
 
+- Process friction and unnecessary delivery steps: `PerfettoStan` together
+  with one `betstan-simplifier` process pass
 - Active-work coordination: `betstan-conductor`
 - Public documentation assessment, canonical wiki updates, and publication
   safety: `betstan-public-wiki-editor`
@@ -446,17 +472,17 @@ orchestration:
 
 Required invariants:
 
-- Every authority-bearing unit is registered regardless of synchronous or
-  background execution, with one owner, a checkpoint, a maximum checkpoint
-  interval, a recovery action, a stop condition, and required terminal
-  evidence.
+- Every conductor-managed authority-bearing unit is registered with one owner,
+  a checkpoint, a maximum checkpoint interval, a recovery action, a stop
+  condition, and required terminal evidence.
 - Every handoff preserves the original `root_task_authority_id`; it may narrow
   scope but cannot redefine repository, workspace, or required feature
   commits. A release head may advance only to protected current `master` after
   ancestry and complete-candidate revalidation.
 - Every quality gate has one logical `work_id`, one exact next owner, and a
   bounded correction count.
-- Three simplifier pass records use distinct model families and one synthesized
+- When the design is disputed, materially complex, or irreversible, three
+  simplifier pass records use distinct model families and one synthesized
   `SIMPLIFICATION_READY` artifact before development starts.
 - No replacement unit starts while the original can still produce side effects.
 - `out_of_ownership_touched` is empty.

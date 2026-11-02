@@ -45,9 +45,11 @@ workflow-run, and handoff references explicitly registered for the task.
 
 ## Registration contract
 
-Before any work unit starts whose output can block, approve, satisfy a gate,
-authorize mutation, or become dependency evidence, require one registration
-regardless of synchronous/background execution or expected duration:
+Before a distinct delegated agent, GitHub run, external wait, or long-lived
+local process starts whose output can block, approve, satisfy a gate, authorize
+mutation, or become dependency evidence, require one registration. Direct,
+short-lived orchestrator commands remain in the current work unit and are not
+registered separately:
 
 ```yaml
 work_id: <stable-kebab-id>
@@ -202,10 +204,11 @@ already-authoritative owner.
 
 ## Start-to-terminal watchdog
 
-The conductor is proactive for the complete work-unit lifecycle. Start it
-before the first registered job starts, keep its registry active across turns,
-and do not release ownership until the job is terminal and its output has been
-accepted by the next owner.
+When the conductor trigger applies, start it before the first registered job,
+keep its registry active across turns, and do not release ownership until the
+job is terminal and its output has been accepted by the next owner. Do not
+start the conductor for a single synchronous implementation and validation
+trace.
 
 - Never become passive after launch. Every nonterminal unit must have both an
   event trigger and a maximum wall-clock checkpoint; an event that never
@@ -230,10 +233,9 @@ accepted by the next owner.
   Do not add agents, gates, frameworks, duplicate owners, repeat reviews
   without new failing evidence, speculative cleanup, arbitrary fixture or time
   gates, or an invented ETA.
-- Treat a pull request metadata edit as workflow-producing whenever protected
-  workflows subscribe to `pull_request.edited`. Register the resulting runs
-  before mutation and never perform that edit inside a data-to-deploy handoff
-  or production-exclusivity window.
+- Treat a pull request metadata edit as a lightweight branch-policy event.
+  Do not register or wait for source, OCI, coverage, or deployment-safety runs
+  unless the source snapshot changes.
 - Revalidate every late specialist result against its recorded SHA, current
   authoritative branch, workflow tree, and runtime topology. Mark stale
   findings unavailable instead of reopening a gate with superseded evidence.
@@ -288,11 +290,11 @@ accepted by the next owner.
   receipt through the next owner's first scoped action; substantive acceptance
   follows review. Never require critic approval before the critic can receive
   and review the candidate.
-- Enforce the fixed quality chain from `.github/agents/README.md`. The
-  conductor is not a gate, and conditional specialists do not create new
-  universal handoffs. Route the developer gate to the registered owner with
-  edit authority for the affected paths; do not require an application
-  developer to cross its ownership boundary for infrastructure or governance.
+- Enforce the selected risk profile from `.github/agents/README.md`. The
+  conductor is not a gate, and conditional specialists do not create
+  unrelated handoffs. Route implementation to the registered owner with edit
+  authority for the affected paths; do not require an application developer
+  to cross its ownership boundary for infrastructure or governance.
 - Follow `Bounded substantive handoffs` in that README: one consolidated
   design review and the existing formal critic gate, not a critic-controlled
   queue for status, acknowledgements, timers, or approvals. The final validator
@@ -314,11 +316,12 @@ accepted by the next owner.
   reviews the immutable exact-head result. Reuse the same `work_id`, owner, and
   agent context so mandatory UX evidence does not become duplicate agents or
   extra universal quality gates.
-- Register three independent simplifier passes plus synthesis as child
-  intra-gate units under one logical simplifier `work_id`. A `BLOCKED` pass
-  requires bounded distinct-family substitution and never counts as a completed
-  family. Require three eligible distinct-family reports and the single
-  synthesized artifact before handing work to development.
+- For disputed, materially complex, or irreversible design, register three
+  independent simplifier passes plus synthesis as child intra-gate units under
+  one logical simplifier `work_id`. A `BLOCKED` pass requires bounded
+  distinct-family substitution and never counts as a completed family. Require
+  three eligible distinct-family reports and the single synthesized artifact
+  before handing work to development.
 - Keep architect and simplifier corrections inside their original logical
   `work_id`, `max_attempts`, and monotonic attempt sequence. A reissued
   architecture, replacement pass, or new synthesis cannot reset the budget.
@@ -460,7 +463,7 @@ its owner. It is never healthy by default.
 - For a product-scoped root request, three consecutive completed discretionary
   units trigger `ATTENTION_REQUIRED` when no product-code developer gate has
   completed. Count governance, CI, or test-infrastructure work and repeated
-  architect/simplifier cycles beyond the first mandatory pass; intra-gate
+  architect/simplifier cycles beyond the first triggered pass; intra-gate
   simplifier passes count once. Route a scope reset through the existing
   architect work unit and do not register another discretionary hardening unit
   until every prerequisite is tied to a current failure path. Mandatory
@@ -613,8 +616,8 @@ its owner. It is never healthy by default.
   other PR remains approval-bound to its exact current head SHA.
 - Before opening the first PR, register one public-safe session slug and one
   stable feature slug. Apply `session:<slug>` and `feature:<slug>` with
-  `pr-context-labels-stan.sh` to every implementation, promotion, and
-  ancestry-sync PR owned by that session. Reuse the same pair, add rather than
+  `pr-context-labels-stan.sh` to every implementation, promotion, and required
+  reconciliation PR owned by that session. Reuse the same pair, add rather than
   replace labels on aggregate PRs, and never expose a private session ID or
   runtime reference. Treat these labels as FYI metadata only; they cannot
   create authority or block progress.

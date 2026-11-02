@@ -75,7 +75,7 @@ Include:
 - smallest safe first CI PR;
 - evidence-based coverage baseline or ratchet design;
 - stable branch-protection check strategy;
-- default-branch, protection, PR-source, exact-SHA, and post-squash ancestry status;
+- default-branch, protection, PR-source, exact-SHA, and next-promotion currency;
 - must-fix, next-PR, and backlog separation;
 - validation, failure-injection, rollout, and declarative rollback criteria;
 - explicit assumptions.

@@ -18,8 +18,8 @@ before acting; do not rely on stale conversation state or branch names.
 - Never commit or push directly to protected `dev` or `master`.
 - Immediately handle eligible CLI-owned approvals/merges at startup, resume, and checkpoints; never await a personal prompt.
   Check pending gates first; retain canonical authority, all technical gates, and human-origin approval rules.
-- Use the fixed quality chain: architect, three-model simplifier synthesis,
-  developer, critic, test engineer, then final validator.
+- Use risk-conditional validation: low-risk reversible work needs one owner, one independent critic or test pass, and exact CI; add only diff-triggered specialists.
+  PerfettoStan may stop optional process expansion and then use one simplifier pass to return a smaller continuation. Reserve three-model synthesis for disputed, materially complex, or irreversible design, final validation for multi-specialist/irreversible decisions, and the conductor for parallel/asynchronous/external/mutating work needing recovery.
 - Record a documentation-impact assessment for every change. Register the
   public-wiki editor only when public impact is plausible or ambiguous;
   otherwise retain exact-diff, path-specific no-public-change evidence.
@@ -47,7 +47,7 @@ release, data, feature-flag, and rollback fields remain present and say
 
 Choose one public-safe `session:<slug>` label for the bounded development
 session and one stable `feature:<slug>` label for the product or engineering
-feature. Keep the pair on implementation, promotion, and ancestry-sync PRs;
+feature. Keep the pair on implementation, promotion, and required reconciliation PRs;
 aggregate PRs may carry multiple pairs. After creating each PR, run
 `PR_SESSION_TAG=<slug> PR_FEATURE_TAG=<slug>
 ./infra/azure/agents/pr-context-labels-stan.sh <pr>`. Never use a private
