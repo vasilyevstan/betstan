@@ -5145,78 +5145,10 @@ async function main() {
       receiptSha: "ccd0beaaeb306ef48b86fcb7566dfa8c1e7bd2b1",
     },
   ];
-  const activeLeanDeliveryWorkflowAuthorizations = [
-    {
-      id: "lean-delivery-production-build-source-selector-v1",
-      repository: "vasilyevstan/betstan",
-      headRepository: "vasilyevstan/betstan",
-      workflowPath: ".github/workflows/production-build.yml",
-      trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
-      authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-      pullNumber: null,
-      headRef: "fix/lean-delivery-workflow-restoration",
-      baseRef: "dev",
-      issuedAt: "2026-11-01T18:39:23.000Z",
-      expiresAt: "2026-11-02T18:39:23.000Z",
-      receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
-    },
-    {
-      id: "lean-delivery-production-build-promotion-selector-v1",
-      repository: "vasilyevstan/betstan",
-      headRepository: "vasilyevstan/betstan",
-      workflowPath: ".github/workflows/production-build.yml",
-      trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
-      authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-      pullNumber: null,
-      headRef: "dev",
-      baseRef: "master",
-      issuedAt: "2026-11-01T18:39:23.000Z",
-      expiresAt: "2026-11-02T18:39:23.000Z",
-      receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
-    },
-  ];
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    activeLeanDeliveryWorkflowAuthorizations,
+    [],
   );
-  for (const authorization of activeLeanDeliveryWorkflowAuthorizations) {
-    assert.deepEqual(
-      publishPrPolicy.findWorkflowAuthorization({
-        authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
-        repository: authorization.repository,
-        workflowPath: authorization.workflowPath,
-        trustedBlob: authorization.trustedBlob,
-        authorizedBlob: authorization.authorizedBlob,
-        pull: {
-          number: 999,
-          state: "open",
-          headRepository: authorization.headRepository,
-          headRef: authorization.headRef,
-          baseRef: authorization.baseRef,
-        },
-        now: "2026-11-01T19:00:00.000Z",
-      }),
-      authorization,
-    );
-    assert.equal(
-      publishPrPolicy.findWorkflowAuthorization({
-        authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
-        repository: authorization.repository,
-        workflowPath: authorization.workflowPath,
-        trustedBlob: authorization.trustedBlob,
-        authorizedBlob: authorization.authorizedBlob,
-        pull: {
-          number: 999,
-          state: "closed",
-          headRepository: authorization.headRepository,
-          headRef: authorization.headRef,
-          baseRef: authorization.baseRef,
-        },
-        now: "2026-11-01T19:00:00.000Z",
-      }),
-      null,
-    );
-  }
   for (const authorization of historicalNode24WorkflowAuthorizations) {
     const lookup = {
       authorizations: historicalNode24WorkflowAuthorizations,
@@ -5342,17 +5274,17 @@ async function main() {
     false,
   );
   assert(
-    publisherSource.includes(
+    !publisherSource.includes(
       'id: "lean-delivery-production-build-source-selector-v1"',
     ),
   );
   assert(
-    publisherSource.includes(
+    !publisherSource.includes(
       'id: "lean-delivery-production-build-promotion-selector-v1"',
     ),
   );
   assert(
-    !publisherSource.includes(
+    publisherSource.includes(
       "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
     ),
   );
