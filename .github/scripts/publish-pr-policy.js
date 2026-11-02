@@ -143,7 +143,7 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 // short-lived policy change and removed immediately after their intended PR.
 const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
   {
-    id: "lean-delivery-production-build-source-selector-v1",
+    id: "lean-delivery-production-build-source-selector-v2",
     repository: "vasilyevstan/betstan",
     headRepository: "vasilyevstan/betstan",
     workflowPath: ".github/workflows/production-build.yml",
@@ -152,12 +152,12 @@ const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
     pullNumber: null,
     headRef: "fix/lean-delivery-workflow-restoration",
     baseRef: "dev",
-    issuedAt: "2026-11-01T18:39:23.000Z",
-    expiresAt: "2026-11-02T18:39:23.000Z",
-    receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
+    issuedAt: "2026-11-02T18:15:00.000Z",
+    expiresAt: "2026-11-03T18:15:00.000Z",
+    receiptSha: "19cb0058a961c2da5ec9d851dcab12a71d7bdebd",
   },
   {
-    id: "lean-delivery-production-build-promotion-selector-v1",
+    id: "lean-delivery-production-build-promotion-selector-v2",
     repository: "vasilyevstan/betstan",
     headRepository: "vasilyevstan/betstan",
     workflowPath: ".github/workflows/production-build.yml",
@@ -166,9 +166,9 @@ const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
     pullNumber: null,
     headRef: "dev",
     baseRef: "master",
-    issuedAt: "2026-11-01T18:39:23.000Z",
-    expiresAt: "2026-11-02T18:39:23.000Z",
-    receiptSha: "8736fd8bd09940dd08783ea6210f598185802612",
+    issuedAt: "2026-11-02T18:15:00.000Z",
+    expiresAt: "2026-11-03T18:15:00.000Z",
+    receiptSha: "19cb0058a961c2da5ec9d851dcab12a71d7bdebd",
   },
 ]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
@@ -1490,6 +1490,7 @@ async function claimOneUseReceipt({
   assertCanWrite,
   receiptIO,
   receiptBudget = createReceiptBudget(receiptIO),
+  resumeCompleted = false,
 }) {
   const receipt = {
     anchorSha,
@@ -1500,8 +1501,44 @@ async function claimOneUseReceipt({
     ledger: null,
     budget: receiptBudget,
   };
+  let verifiedUnused = false;
+  if (resumeCompleted) {
+    const statuses = await listCommitStatuses(
+      github,
+      owner,
+      repo,
+      anchorSha,
+      { budget: receipt.budget },
+    );
+    if (statuses.some((status) => status.context === context)) {
+      let ledger;
+      try {
+        ledger = assertReceiptLedger(statuses, {
+          context,
+          description,
+          targetUrl,
+          states: ["pending", "success"],
+        });
+      } catch {
+        throw new Error("authorization receipt was already started");
+      }
+      receipt.acknowledged = ledger.map(({ status }) => status);
+      receipt.ledger = [...receipt.acknowledged];
+      if (revalidate) {
+        await revalidate(receipt);
+      }
+      receiptTimeRemaining(receipt.budget);
+      assertCanWrite?.();
+      return receipt;
+    }
+    receipt.ledger = [];
+    verifiedUnused = true;
+  }
   for (const state of ["pending", "success"]) {
-    await verifyReceiptLedger(github, owner, repo, receipt);
+    if (!verifiedUnused) {
+      await verifyReceiptLedger(github, owner, repo, receipt);
+    }
+    verifiedUnused = false;
     if (revalidate) {
       await revalidate(receipt);
     }
@@ -1565,6 +1602,7 @@ async function claimWorkflowAuthorization({
     assertCanWrite,
     receiptIO,
     receiptBudget,
+    resumeCompleted: true,
   });
 }
 
