@@ -281,8 +281,8 @@ A pull request title is release evidence, not an internal work bucket. Prefer
 short plain-language outcomes such as `Add second-half score betting` or
 `Fix live slip alignment`. Ambiguous prefixes such as `chore`, `misc`, or
 `wip` hide intent and should fail merge safety. Check the title and its
-72-character limit before PR creation or metadata edits that trigger workflows,
-without replacing the final canonical merge check.
+72-character limit before PR creation or metadata edits, without replacing the
+final canonical merge check.
 
 ### Capture rollback before mutation
 

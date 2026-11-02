@@ -5,16 +5,56 @@ on:
     branches:
       - dev
       - master
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
 jobs:
-  offline-contract:
-    name: oci-validate
+  scope:
+    name: oci-scope
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Select OCI contract scope
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mode=none
+          while IFS= read -r path; do
+            case "$path" in
+              infra/oci/agents/health-check-stan.sh|\
+              infra/oci/agents/test-health-contract-stan.sh|\
+              .github/workflows/oci-validate.yml|\
+              infra/oci/tests/test-ghcr-contract.sh)
+                [ "$mode" = full ] || mode=focused
+                ;;
+              infra/oci/*|\
+              .github/workflows/oci-*.yml|\
+              .github/workflows/ghcr-package-management.yml)
+                mode=full
+                ;;
+            esac
+          done < <(git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "oci_contract_scope=$mode"
+
+  syntax:
+    name: oci-workflow-syntax
+    needs: scope
+    if: needs.scope.outputs.mode != 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout pull request
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -32,5 +72,79 @@ jobs:
             .github/workflows/oci-*.yml \
             .github/workflows/ghcr-package-management.yml
 
-      - name: Run OCI offline contract
+  focused-contracts:
+    name: oci-focused-contracts
+    needs: scope
+    if: needs.scope.outputs.mode == 'focused'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Run focused OCI contracts
+        run: |
+          bash -n \
+            infra/oci/agents/health-check-stan.sh \
+            infra/oci/agents/test-health-contract-stan.sh
+          ./infra/oci/agents/test-health-contract-stan.sh
+          ./infra/oci/tests/test-ghcr-contract.sh
+
+  full-contracts:
+    name: oci-full-contracts (${{ matrix.shard }})
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, live, provenance, rollback]
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Run full OCI contract shard
+        env:
+          BETSTAN_CONTRACT_SHARD: ${{ matrix.shard }}
         run: ./infra/oci/tests/run-contracts.sh
+
+  offline-contract:
+    name: oci-validate
+    needs: [scope, syntax, focused-contracts, full-contracts]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate OCI validation
+        env:
+          MODE: ${{ needs.scope.outputs.mode }}
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          SYNTAX_RESULT: ${{ needs.syntax.result }}
+          FOCUSED_RESULT: ${{ needs.focused-contracts.result }}
+          FULL_RESULT: ${{ needs.full-contracts.result }}
+        run: |
+          set -euo pipefail
+          [ "$SCOPE_RESULT" = success ]
+          case "$MODE" in
+            none)
+              [ "$SYNTAX_RESULT" = skipped ]
+              [ "$FOCUSED_RESULT" = skipped ]
+              [ "$FULL_RESULT" = skipped ]
+              echo "OCI contracts unaffected by this pull request"
+              ;;
+            focused)
+              [ "$SYNTAX_RESULT" = success ]
+              [ "$FOCUSED_RESULT" = success ]
+              [ "$FULL_RESULT" = skipped ]
+              ;;
+            full)
+              [ "$SYNTAX_RESULT" = success ]
+              [ "$FOCUSED_RESULT" = skipped ]
+              [ "$FULL_RESULT" = success ]
+              ;;
+            *)
+              echo "invalid OCI contract scope: ${MODE:-missing}" >&2
+              exit 1
+              ;;
+          esac

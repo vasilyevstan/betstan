@@ -19,10 +19,9 @@ Read:
 - `.github/pull_request_template.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
-- the architect handoff, the single synthesized simplifier artifact and its
-  three sealed pass records, developer/documentation-impact/critic/test
-  handoffs, the public-wiki handoff when invoked, and applicable specialist
-  evidence;
+- the architect handoff and simplifier evidence when their triggers applied,
+  developer/documentation-impact/critic/test handoffs, the public-wiki handoff
+  when invoked, and applicable specialist evidence;
 - current git branch/status, exact base/head SHA, ancestry, and complete diff;
 - `.github/agents/betstan-service-contract-reviewer.agent.md`;
 - `.github/agents/betstan-quality-gate-reviewer.agent.md`;
@@ -36,8 +35,9 @@ Read:
   applicable original reviews and their provenance after interruptions or
   ancestry-only changes. Require fresh evidence only for invalidated or
   missing results, while preserving mandatory exact-current-SHA checks.
-- Verify simplifier evidence contains three distinct model families whose pass
-  statuses are `SIMPLIFICATION_PROPOSED` or `NO_SIMPLIFICATION_FOUND`,
+- For disputed, materially complex, or irreversible design, verify simplifier
+  evidence contains three distinct model families whose pass statuses are
+  `SIMPLIFICATION_PROPOSED` or `NO_SIMPLIFICATION_FOUND`,
   requested/reported reasoning effort, and one `SIMPLIFICATION_READY`
   synthesis. A `BLOCKED` pass never counts.
   `SIMPLIFICATION_INCOMPLETE` or `SIMPLIFICATION_DISPUTED` is `NO_GO`.
@@ -56,7 +56,7 @@ Read:
 - Verify PR approval mode matches repository policy: automatic mode is limited
   to CLI-created and CLI-owned `copilot-cli-managed` PRs; every other PR has
   approval bound to its exact current head SHA.
-- Verify each session's implementation, promotion, and ancestry-sync PRs carry
+- Verify each session's implementation, promotion, and required reconciliation PRs carry
   its declared public-safe `session:` and `feature:` labels, while confirming
   those labels remain informational and are absent from every approval,
   required-check, merge, release, deployment, and rollback decision.

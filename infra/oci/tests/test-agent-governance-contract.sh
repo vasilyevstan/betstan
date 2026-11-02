@@ -6,6 +6,7 @@ AGENT_DIR="$ROOT_DIR/.github/agents"
 INSTRUCTIONS="$ROOT_DIR/.github/copilot-instructions.md"
 README="$AGENT_DIR/README.md"
 SIMPLIFIER="$AGENT_DIR/betstan-simplifier.agent.md"
+PERFETTO="$AGENT_DIR/PerfettoStan.agent.md"
 CONDUCTOR="$AGENT_DIR/betstan-conductor.agent.md"
 PUBLIC_WIKI_EDITOR="$AGENT_DIR/betstan-public-wiki-editor.agent.md"
 FINAL_VALIDATOR="$AGENT_DIR/betstan-final-validator.agent.md"
@@ -24,6 +25,9 @@ LEARNINGS="$ROOT_DIR/LEARNINGS.md"
 MERGE_SAFETY="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
 POLICY_PUBLISHER="$ROOT_DIR/.github/scripts/publish-pr-policy.js"
 BRANCH_POLICY="$ROOT_DIR/.github/workflows/branch-policy.yml"
+QUALITY_GATES="$ROOT_DIR/docs/wiki/Quality-Gates.md"
+RELEASE_ORCHESTRATION="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
+PUBLIC_AGENTS="$ROOT_DIR/docs/wiki/Agents.md"
 
 fail() {
   echo "agent governance contract failed: $*" >&2
@@ -44,6 +48,14 @@ require_flat_literal() {
   flattened="$(tr '\n' ' ' <"$file" | tr -s '[:space:]' ' ')"
   grep -Fq "$literal" <<<"$flattened" ||
     fail "$(basename "$file") is missing: $literal"
+}
+
+reject_literal() {
+  local file="$1"
+  local literal="$2"
+  if grep -Fq "$literal" "$file"; then
+    fail "$(basename "$file") retains obsolete text: $literal"
+  fi
 }
 
 [[ -f "$INSTRUCTIONS" ]] || fail ".github/copilot-instructions.md is missing"
@@ -111,25 +123,54 @@ python3 - "$README" <<'PY' ||
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
-tokens = [
-    "1. `betstan-architect`",
-    "2. `betstan-simplifier`",
-    "3. **Developer gate**",
-    "4. `betstan-validation-critic`",
-    "5. `betstan-test-engineer`",
-    "6. `betstan-final-validator`",
+flat = " ".join(text.split())
+required = [
+    "## Risk-conditional quality chain",
+    "| Low risk | One implementation owner, one independent critic or test pass, and exact required CI |",
+    "three-model simplifier synthesis only for disputed, materially complex, or irreversible design",
+    "final validation only for multi-specialist reconciliation or an irreversible release decision",
+    "Start it only for parallel, asynchronous, external, or mutating operations",
+    "A single synchronous implementation and validation trace stays with its owner",
 ]
-positions = [text.find(token) for token in tokens]
-if any(position < 0 for position in positions) or positions != sorted(positions):
-    raise SystemExit("universal quality chain is missing or out of order")
+missing = [token for token in required if token not in flat]
+if missing:
+    raise SystemExit(f"risk-conditional quality policy is incomplete: {missing}")
+for forbidden in ("## Universal quality chain", "The fixed quality gates are:"):
+    if forbidden in text:
+        raise SystemExit(f"universal quality policy remains: {forbidden}")
 PY
-  fail "agent README does not define the fixed quality chain"
+  fail "agent README does not define risk-conditional validation"
+
+python3 - "$PUBLIC_AGENTS" <<'PY' ||
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+flat = " ".join(text.split())
+required = [
+    "## Risk-conditional workflow",
+    "BetStan does not require the former six-stage chain for every change",
+    "| Low risk | One implementation owner, one independent critic or test pass, and exact required CI |",
+    "Use the conductor only for parallel, asynchronous, external, or mutating work",
+    "PerfettoStan is a process challenger, not a universal quality gate",
+]
+missing = [token for token in required if token not in flat]
+if missing:
+    raise SystemExit(f"public agent policy is incomplete: {missing}")
+for forbidden in (
+    "The six universal gates remain",
+    "## Universal quality-chain agents",
+    "Keep the conductor active for blocking work",
+):
+    if forbidden in text:
+        raise SystemExit(f"public agent policy remains unconditional: {forbidden}")
+PY
+  fail "public Agents page does not define risk-conditional validation"
 
 for marker in \
   '## Work-unit taxonomy' \
   '## Canonical policy sources' \
   '## Three-model simplifier gate' \
-  'infrastructure/governance implementation owner for its owned paths' \
+  'Registered implementation owner' \
   'distinct model families' \
   'requested_reasoning: high' \
   'synthesis_model_id' \
@@ -142,9 +183,9 @@ for marker in \
   require_literal "$README" "$marker"
 done
 require_flat_literal "$README" \
-  'Start `betstan-conductor` before every unit whose result can block, approve, satisfy a gate, authorize mutation, or become dependency evidence'
+  'Start `betstan-conductor` only when work is parallel, asynchronous, external, or mutating'
 require_flat_literal "$README" \
-  'Every authority-bearing unit is registered regardless of synchronous or background execution'
+  'Every conductor-managed authority-bearing unit is registered with one owner'
 require_flat_literal "$README" \
   'Every handoff preserves the original `root_task_authority_id`'
 require_flat_literal "$README" \
@@ -156,6 +197,26 @@ require_literal "$README" \
 require_flat_literal "$README" \
   'original `max_attempts`, and a monotonic attempt count; re-registration or a reissued handoff never resets the budget'
 require_flat_literal "$README" \
+  '`PerfettoStan` continuously challenges process friction at task start'
+require_flat_literal "$PERFETTO" \
+  'Return `FLOW_STOP_OPTIMIZE` when optional process expansion lacks one of those proofs'
+require_flat_literal "$PERFETTO" \
+  'After `FLOW_STOP_OPTIMIZE`, invoke one sealed `betstan-simplifier` process pass'
+require_flat_literal "$PERFETTO" \
+  'PerfettoStan may stop optional workflow, but may not bypass or suspend'
+require_flat_literal "$PERFETTO" \
+  'You are read-only. Use inspection commands only. Never edit, commit, push, dispatch or cancel workflows, deploy, terminate a process, or mutate repository, GitHub, cloud, runtime, or production state.'
+require_flat_literal "$PERFETTO" \
+  'an executing mutation remains with that owner until its next safe boundary'
+for safeguard in \
+  'protected branches and exact-SHA validation' \
+  'required independent evidence selected by the risk profile' \
+  'production serialization, locks, fences, provenance, or rollback readiness' \
+  'active containment, rollback, or incident-recovery actions needed for safety' \
+  'human-origin approval rules'; do
+  require_flat_literal "$PERFETTO" "$safeguard"
+done
+require_flat_literal "$README" \
   'Register `betstan-public-wiki-editor` as a supporting unit only when public impact is plausible or ambiguous'
 require_flat_literal "$CONTRIBUTING" \
   'Register `betstan-public-wiki-editor` when public impact is plausible or ambiguous'
@@ -166,7 +227,7 @@ require_flat_literal "$ARCHITECT" \
 require_flat_literal "$CONDUCTOR" \
   'three consecutive completed discretionary units trigger `ATTENTION_REQUIRED` when no product-code developer gate has completed'
 require_flat_literal "$CONDUCTOR" \
-  'Count governance, CI, or test-infrastructure work and repeated architect/simplifier cycles beyond the first mandatory pass'
+  'Count governance, CI, or test-infrastructure work and repeated architect/simplifier cycles beyond the first triggered pass'
 require_flat_literal "$CONDUCTOR" \
   'intra-gate simplifier passes count once'
 require_flat_literal "$CONDUCTOR" \
@@ -265,13 +326,17 @@ for marker in \
   'handoff_ack_due_at:' \
   'Never create status-only, summary-only, or handoff-only agents' \
   'Use background agents only for genuinely independent parallel work' \
-  'three independent simplifier passes plus synthesis'; do
+  'For disputed, materially complex, or irreversible design, register'; do
   require_literal "$CONDUCTOR" "$marker"
 done
 require_flat_literal "$CONDUCTOR" \
   'Never accept repository evidence from an ambient or sibling worktree'
 require_flat_literal "$CONDUCTOR" \
-  'Before any work unit starts whose output can block, approve, satisfy a gate, authorize mutation, or become dependency evidence, require one registration regardless of synchronous/background execution or expected duration'
+  'Before a distinct delegated agent, GitHub run, external wait, or long-lived local process starts whose output can block, approve, satisfy a gate, authorize mutation, or become dependency evidence, require one registration'
+require_flat_literal "$CONDUCTOR" \
+  'Direct, short-lived orchestrator commands remain in the current work unit and are not registered separately'
+reject_literal "$CONDUCTOR" \
+  'regardless of synchronous/background execution or expected duration'
 require_literal "$CONDUCTOR" '`STALE_EVIDENCE`'
 require_flat_literal "$CONDUCTOR" \
   '`task_authority` is the immutable root user request that names the target workspace and refs'
@@ -410,7 +475,7 @@ require_flat_literal "$CONDUCTOR" \
 require_flat_literal "$FINAL_VALIDATOR" \
   'three distinct model families whose pass statuses are'
 require_flat_literal "$FINAL_VALIDATOR" \
-  'the single synthesized simplifier artifact and its three sealed pass records'
+  'the architect handoff and simplifier evidence when their triggers applied'
 require_flat_literal "$FINAL_VALIDATOR" \
   'one `SIMPLIFICATION_READY` synthesis'
 require_literal "$FINAL_VALIDATOR" '`SIMPLIFICATION_INCOMPLETE` or `SIMPLIFICATION_DISPUTED`'
@@ -505,7 +570,7 @@ for marker_authority_file in \
   require_flat_literal "$marker_authority_file" \
     'Version 1 and version 2 markers cannot newly bind, succeed, or consume an authorization receipt; a version 2 `x` remains a permanent tombstone.'
   require_flat_literal "$marker_authority_file" \
-    'Only a strictly later `edited`, `synchronize`, or `reopened` transition may recover, never a later or replayed `opened` event.'
+    'Only a strictly later `synchronize` or `reopened` transition may recover, never a metadata edit or a later or replayed `opened` event.'
   require_flat_literal "$marker_authority_file" \
     'Once any version 3 marker exists, operational rollback must retain version 3 parsing and ledger authority: recovered opening-label authority is not durable in marker v3, so every publisher able to bind or succeed such a lineage must revalidate the ledger; retaining version 3 parsing alone is insufficient, and rollback to a publisher lacking ledger authority is prohibited; use a reviewed forward correction.'
   require_flat_literal "$marker_authority_file" \
@@ -517,7 +582,7 @@ for marker_authority_file in \
   require_flat_literal "$marker_authority_file" \
     'The broad opening snapshot mismatch permits only fail-closed inspection and never grants reconciliation: an out-of-window replay without a marker stays pending, an existing mismatch writes the permanent tombstone, and any intervening `updated_at` change fails closed.'
   require_flat_literal "$marker_authority_file" \
-    'A same-cutoff tombstone cannot be replaced or revived; only a strictly later `edited`, `synchronize`, or `reopened` transition can recover the lineage.'
+    'A same-cutoff tombstone cannot be replaced or revived; only a strictly later `synchronize` or `reopened` transition can recover the lineage.'
 done
 
 require_flat_literal "$BRANCH_POLICY" \
@@ -579,9 +644,10 @@ expected = {
     "oci-health-reviewer", "azure-cost-analyst", "deployment-safety",
     "aks-operator", "oci-operator", "domain-ingress", "mongo-migration",
     "migration-recovery", "azure-retirement", "public-wiki-editor",
+    "PerfettoStan",
 }
 if set(roles) != expected:
-    raise SystemExit("the 23-role inventory changed")
+    raise SystemExit("the 24-role inventory changed")
 manual = set()
 for role, path in roles.items():
     frontmatter = path.read_text(encoding="utf-8").split("---", 2)[1]
@@ -600,7 +666,7 @@ PY
   fail "role or capability boundaries changed"
 
 require_flat_literal "$README" \
-  'Register this bounded design review as supporting evidence for the design-to-developer handoff, not another universal quality gate'
+  'Register this bounded design review as supporting evidence for the design-to-developer handoff, not another quality gate'
 require_flat_literal "$README" \
   'Unaccepted design blocks its dependent implementation, not independently authorized operations'
 require_flat_literal "$README" \
@@ -609,6 +675,37 @@ require_flat_literal "$README" \
   'Further critic work requires changed substantive evidence, an unresolved finding, or a concrete scope violation'
 require_flat_literal "$README" \
   "The recipient's first scoped action acknowledges receipt before substantive review; acknowledgement is not acceptance"
+
+python3 - \
+  "$README" \
+  "$INSTRUCTIONS" \
+  "$CONTRIBUTING" \
+  "$QUALITY_GATES" \
+  "$RELEASE_ORCHESTRATION" \
+  "$CONDUCTOR" \
+  "$FINAL_VALIDATOR" <<'PY' ||
+import pathlib
+import sys
+
+trigger = "disputed, materially complex, or irreversible design"
+for file_name in sys.argv[1:]:
+    text = " ".join(pathlib.Path(file_name).read_text(encoding="utf-8").split())
+    if trigger not in text:
+        raise SystemExit(f"{file_name} does not use the canonical three-model trigger")
+
+forbidden = (
+    "Independent critic, test, and final-validation evidence remains required",
+    "formal critic, tests, final validation + CI",
+    "before formal critic review of the immutable candidate and final validation",
+    "Start `betstan-conductor` before every unit",
+)
+for file_name in sys.argv[1:6]:
+    text = " ".join(pathlib.Path(file_name).read_text(encoding="utf-8").split())
+    for phrase in forbidden:
+        if phrase in text:
+            raise SystemExit(f"{file_name} retains unconditional process text: {phrase}")
+PY
+  fail "risk-conditional policy vocabulary or negative assertions failed"
 require_flat_literal "$README" \
   'An advisory delay cannot waive a technical gate or freeze an operation whose required authority and safety evidence remain valid'
 require_flat_literal "$README" \

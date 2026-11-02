@@ -763,9 +763,17 @@ finalizer="$OCI_DIR/scripts/finalize-k3s.sh"
 for access_field in \
   target_private_key target_known_hosts instance_private_ip os_user \
   local_ssh_port ssh_tunnel_pid; do
-  grep -Fq "printf '$access_field=%q" \
-    "$OCI_DIR/scripts/configure-k3s-access.sh" ||
-    fail "k3s access state does not write $access_field"
+  if [[ "$access_field" == "target_private_key" ]]; then
+    grep -Fq "printf '%s=%q" \
+      "$OCI_DIR/scripts/configure-k3s-access.sh" &&
+      grep -Fq "'target_private_key'" \
+        "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+      fail "k3s access state does not write $access_field"
+  else
+    grep -Fq "printf '$access_field=%q" \
+      "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+      fail "k3s access state does not write $access_field"
+  fi
   grep -Fq "\${${access_field}:-}" "$finalizer" ||
     fail "k3s finalizer does not require access-state field $access_field"
 done

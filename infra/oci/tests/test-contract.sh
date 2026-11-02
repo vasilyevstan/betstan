@@ -752,6 +752,7 @@ for agent in betstan-oci-health-reviewer betstan-oci-operator; do
 done
 conductor_agent="$ROOT_DIR/.github/agents/betstan-conductor.agent.md"
 agent_readme="$ROOT_DIR/.github/agents/README.md"
+perfetto_agent="$ROOT_DIR/.github/agents/PerfettoStan.agent.md"
 [[ -f "$conductor_agent" ]] || fail "required conductor agent is missing"
 grep -Fq 'name: betstan-conductor' "$conductor_agent" ||
   fail "conductor agent frontmatter has the wrong name"
@@ -769,7 +770,7 @@ for conductor_contract in \
     'must never answer a detected stall with observation alone' \
     'Raw tool-call growth alone is not deliverable progress' \
     'critical-path scope freeze' \
-    'Treat a pull request metadata edit as workflow-producing' \
+    'Treat a pull request metadata edit as a lightweight branch-policy event' \
     'Revalidate every late specialist result' \
     'A recovered endpoint does not close an unexplained runtime outage' \
     'A workflow dispatch URL is not job materialization' \
@@ -825,10 +826,14 @@ for self_blocker_contract in \
   grep -Fq "$self_blocker_contract" "$conductor_agent" ||
     fail "conductor omits governed self-blocker contract: $self_blocker_contract"
 done
-grep -Fq 'Start `betstan-conductor` before every unit whose result can block, approve,' \
-    "$agent_readme" ||
-  fail "agent workflow does not require universal authority-bearing registration"
 agent_readme_flat="$(tr '\n' ' ' <"$agent_readme")"
+perfetto_agent_flat="$(tr '\n' ' ' <"$perfetto_agent")"
+grep -Fq 'Start `betstan-conductor` only when work is parallel, asynchronous, external, or mutating' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not keep conductor registration risk-conditional"
+grep -Fq 'Return `FLOW_STOP_OPTIMIZE` when optional process expansion lacks one of those proofs' \
+    <<<"$perfetto_agent_flat" ||
+  fail "PerfettoStan does not have evidence-bound process-stop authority"
 grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow lacks stalled-work escalation"
@@ -858,9 +863,9 @@ grep -Fq 'completed unit with no confirmed next-owner handoff is itself a stall'
 grep -Fq 'workflow dispatch URL is acceptance, not materialization' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can disable a manual workflow before job materialization"
-grep -Fq 'Pull-request metadata edits are workflow-producing' \
+grep -Fq 'Pull-request metadata edits run lightweight branch policy only' \
     <<<"$agent_readme_flat" ||
-  fail "agent workflow ignores pull-request edit triggers"
+  fail "agent workflow can treat metadata edits as source-producing"
 grep -Fq 'Every change includes documentation-impact evidence before immutable review' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can complete without documentation-impact evidence"
@@ -2107,7 +2112,7 @@ grep -Fq 'read every cited path from that same tree' "$deployment_safety_agent"
 grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
 grep -Fq 'dispatch URL proves event acceptance, not job materialization' \
   "$deployment_safety_agent"
-grep -Fq 'Treat PR title/body changes as workflow-producing' \
+grep -Fq 'Treat PR title/body changes as lightweight branch-policy events' \
   "$deployment_safety_agent"
 grep -Fq 'hard per-attempt' "$deployment_safety_agent" ||
   fail "deployment safety omits bounded external tool installation"
@@ -3144,13 +3149,6 @@ grep -Fq '[ "$provisioning" = "Failed" ]' "$recovery_workflow" ||
 ! grep -Eq 'az aks (start|create|update|delete)|az aks nodepool' "$recovery_workflow" ||
   fail "stop-only recovery can start, create, resize, or delete Azure compute"
 
-ruby -ryaml - "$validate_workflow" <<'RUBY'
-workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
-timeout = workflow.dig("jobs", "offline-contract", "timeout-minutes")
-abort "oci-validate requires an integer 45-minute whole-job limit" unless
-  timeout.is_a?(Integer) && timeout == 45
-RUBY
-
 grep -Fq 'pull_request:' "$validate_workflow"
 ! grep -Eq 'workflow_dispatch:|workflow_run:|^[[:space:]]+push:' "$validate_workflow" ||
   fail "oci-validate must remain PR-only"
@@ -3250,9 +3248,19 @@ validate_production_build_deployment_safety_contract() {
   local workflow_file="$1"
   ruby - "$workflow_file" <<'RUBY'
 require "yaml"
+require "digest/sha1"
 
 workflow_file = ARGV.fetch(0)
 workflow_text = File.read(workflow_file)
+trusted_workflow_blob = "1e3118276cc4746e824303245339c25de4411c15"
+lean_workflow_blob = "7f036e038c780d929417ea7e9f6227bdf9d5fb89"
+workflow_blob = Digest::SHA1.hexdigest(
+  "blob #{workflow_text.bytesize}\0#{workflow_text}"
+)
+unless [trusted_workflow_blob, lean_workflow_blob].include?(workflow_blob)
+  abort("production-build is neither the trusted restoration nor the reviewed lean workflow")
+end
+lean_workflow = workflow_blob == lean_workflow_blob
 expected_checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
 approved_action_refs = {
   "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
@@ -3264,57 +3272,17 @@ approved_action_refs = {
   "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
 }.freeze
 expected_syntax_targets = [
-  "infra/azure/agents/deploy-validation-loop-stan.sh",
-  "infra/azure/agents/live-betting-readiness-lib.sh",
-  "infra/azure/agents/live-betting-readiness-stan.sh",
-  "infra/azure/agents/live-betting-readiness-test-lib.sh",
-  "infra/azure/agents/pre-commit-infra-check-stan.sh",
-  "infra/azure/agents/test-deploy-validation-loop-stan.sh",
   "infra/azure/agents/test-deployment-safety-ci-stan.sh",
-  "infra/azure/agents/test-live-betting-readiness-stan.sh",
-  "infra/azure/agents/test-live-betting-rollback-readiness-stan.sh",
-  "infra/azure/agents/test-production-rollback-stan.sh",
-  "infra/oci/agents/deploy-validation-loop-stan.sh",
-  "infra/oci/agents/live-betting-readiness-stan.sh",
-  "infra/oci/scripts/deploy.sh",
-  "infra/oci/scripts/live-data-maintenance-stan.sh",
-  "infra/oci/scripts/live-betting-control-stan.sh",
-  "infra/oci/scripts/revalidate-live-activation-stan.sh",
-  "infra/oci/scripts/live-betting-data-rollout-stan.sh",
-  "infra/oci/scripts/shared-mongo-operation-lock-stan.sh",
-  "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
-  "infra/oci/tests/test-deploy-validation-loop-stan.sh",
-  "infra/oci/tests/test-live-data-maintenance-stan.sh",
-  "infra/oci/tests/test-live-betting-control-stan.sh",
-  "infra/oci/tests/test-revalidate-live-activation-stan.sh",
-  "infra/oci/tests/test-live-betting-data-rollout-stan.sh",
-  "infra/oci/tests/test-live-betting-readiness-stan.sh",
-  "infra/oci/tests/rollback-live-readiness-contract.sh",
-  "infra/oci/tests/rollback-contract.sh",
 ]
 expected_exec_targets = [
-  "./infra/azure/agents/pre-commit-infra-check-stan.sh",
   "./infra/azure/agents/test-deployment-safety-ci-stan.sh",
+]
+expected_full_exec_targets = [
   "./infra/azure/agents/test-deploy-validation-loop-stan.sh",
   "./infra/azure/agents/test-live-betting-readiness-stan.sh",
   "./infra/azure/agents/test-live-betting-rollback-readiness-stan.sh",
   "./infra/azure/agents/test-production-rollback-stan.sh",
-  "./infra/oci/tests/test-deploy-validation-loop-stan.sh",
-  "./infra/oci/tests/test-live-data-maintenance-stan.sh",
-  "./infra/oci/tests/test-live-betting-control-stan.sh",
-  "./infra/oci/tests/test-revalidate-live-activation-stan.sh",
-  "./infra/oci/tests/test-live-betting-data-rollout-stan.sh",
-  "./infra/oci/tests/test-live-betting-readiness-stan.sh",
-  "./infra/oci/tests/rollback-live-readiness-contract.sh",
-  "./infra/oci/tests/rollback-contract.sh",
-]
-expected_yaml_targets = [
-  ".github/workflows/production-build.yml",
-  ".github/workflows/production-deploy.yml",
-  ".github/workflows/oci-live-betting-activate.yml",
-  ".github/workflows/oci-live-betting-disable.yml",
-  ".github/workflows/oci-live-data-rollout.yml",
-  ".github/workflows/oci-production-deploy.yml",
+  "./infra/azure/agents/test-shared-mongo-operation-lock-stan.sh",
 ]
 
 def flatten_strings(value, output = [])
@@ -3437,7 +3405,8 @@ def validate_workflow(
   approved_action_refs:,
   expected_syntax_targets:,
   expected_exec_targets:,
-  expected_yaml_targets:
+  expected_full_exec_targets:,
+  lean_workflow:
 )
   errors = []
   document = load_workflow_document(workflow_text)
@@ -3454,6 +3423,12 @@ def validate_workflow(
     return errors
   end
   errors << "deployment-safety-contracts must stay on ubuntu-latest" unless safety_job["runs-on"] == "ubuntu-latest"
+  if lean_workflow
+    errors << "deployment-safety-contracts must depend on change-scope" unless Array(safety_job["needs"]).include?("change-scope")
+    unless safety_job["if"] == "needs.change-scope.outputs.deployment_safety != 'none'"
+      errors << "deployment-safety-contracts job routing changed"
+    end
+  end
   errors << "deployment-safety-contracts must not declare job env" if safety_job.key?("env")
   errors << "deployment-safety-contracts must not declare job permissions" if safety_job.key?("permissions")
 
@@ -3469,18 +3444,42 @@ def validate_workflow(
   end
 
   steps = safety_job["steps"]
-  unless steps.is_a?(Array) && steps.length == 2
-    errors << "deployment-safety-contracts must keep exactly two steps"
+  unless steps.is_a?(Array)
+    errors << "deployment-safety-contracts steps are missing"
     return errors
   end
 
-  checkout_step = steps[0] || {}
-  validate_step = steps[1] || {}
+  checkout_step = steps.find { |step| step["name"] == "Checkout repository" } || {}
   errors << "deployment-safety-contracts checkout action is no longer pinned" unless checkout_step["uses"] == expected_checkout
   errors << "deployment-safety-contracts checkout step changed shape" unless checkout_step.keys.sort == %w[name uses]
-  errors << "deployment-safety-contracts validation step changed shape" unless validate_step.keys.sort == %w[name run]
 
-  tokens, yaml_block = normalize_run(validate_step["run"].to_s)
+  build_job = jobs["build"] || {}
+  errors << "build must depend on deployment-safety-contracts" unless Array(build_job["needs"]).include?("deployment-safety-contracts")
+  unless build_job["if"].to_s.include?("needs.deployment-safety-contracts.result == 'success'")
+    errors << "build no longer blocks on deployment-safety failure"
+  end
+  build_step = Array(build_job["steps"]).find { |step| step["id"] == "build" } || {}
+  expected_build_env = {
+    "DOCKER_BUILD_SUMMARY" => "false",
+    "DOCKER_BUILD_RECORD_UPLOAD" => "false",
+  }
+  unless build_step["env"] == expected_build_env
+    errors << "image build must disable new summary and build-record publishing at step scope"
+  end
+  return errors unless lean_workflow
+
+  validate_step = steps.find do |step|
+    step["name"] == "Validate deployment safety workflow contract"
+  end || {}
+  full_step = steps.find do |step|
+    step["name"] == "Validate affected Azure deployment contracts"
+  end || {}
+  errors << "deployment-safety meta contract must run whenever the job runs" if validate_step.key?("if")
+  unless full_step["if"] == "needs.change-scope.outputs.deployment_safety == 'full'"
+    errors << "deployment-safety full contract routing changed"
+  end
+
+  tokens, = normalize_run(validate_step["run"].to_s)
   syntax_targets = []
   exec_targets = []
   unexpected_tokens = []
@@ -3510,10 +3509,16 @@ def validate_workflow(
     errors << "deployment-safety-contracts invokes a non-fixture local command: #{dangerous_local}"
   end
 
-  unless yaml_block &&
-         yaml_block.include?("YAML.load_stream(File.read(file))") &&
-         expected_yaml_targets.all? { |target| yaml_block.include?(target) }
-    errors << "deployment-safety-contracts workflow YAML parse block changed"
+  full_run = full_step["run"].to_s
+  unless expected_full_exec_targets.all? { |target| full_run.include?(target) }
+    errors << "deployment-safety affected Azure fixture executions changed"
+  end
+  if (forbidden_command = full_run.each_line.map(&:strip).reject(&:empty?).find { |line| line.match?(/\b(kubectl|gh|curl)\b/) })
+    errors << "deployment-safety full contracts contain a production-capable command: #{forbidden_command}"
+  end
+  full_exec_targets = full_run.each_line.map(&:strip).select { |line| line.start_with?("./") }
+  if (dangerous_local = full_exec_targets.find { |target| target.match?(%r{\A\./infra/(?:azure|oci)/(?:agents|scripts)/(?!(?:pre-commit-infra-check|test-).+\.sh\z).+}) })
+    errors << "deployment-safety full contracts invoke a non-fixture local command: #{dangerous_local}"
   end
 
   pr_job = jobs["pr-quality-gates"] || {}
@@ -3523,22 +3528,10 @@ def validate_workflow(
   unless pr_gate_env["DEPLOYMENT_SAFETY_RESULT"] == "${{ needs.deployment-safety-contracts.result }}"
     errors << "pr-quality-gates lost deployment-safety result wiring"
   end
-  unless pr_gate_step["run"].to_s.include?('$DEPLOYMENT_SAFETY_RESULT')
+  unless pr_gate_env["DEPLOYMENT_SAFETY_NEEDED"] == "${{ needs.change-scope.outputs.deployment_safety }}" &&
+         pr_gate_step["run"].to_s.include?('$DEPLOYMENT_SAFETY_RESULT') &&
+         pr_gate_step["run"].to_s.include?('$DEPLOYMENT_SAFETY_NEEDED')
     errors << "pr-quality-gates no longer checks deployment-safety result"
-  end
-
-  build_job = jobs["build"] || {}
-  errors << "build must depend on deployment-safety-contracts" unless Array(build_job["needs"]).include?("deployment-safety-contracts")
-  unless build_job["if"].to_s.include?("needs.deployment-safety-contracts.result == 'success'")
-    errors << "build no longer blocks on deployment-safety failure"
-  end
-  build_step = Array(build_job["steps"]).find { |step| step["id"] == "build" } || {}
-  expected_build_env = {
-    "DOCKER_BUILD_SUMMARY" => "false",
-    "DOCKER_BUILD_RECORD_UPLOAD" => "false",
-  }
-  unless build_step["env"] == expected_build_env
-    errors << "image build must disable new summary and build-record publishing at step scope"
   end
 
   errors
@@ -3556,15 +3549,21 @@ errors = validate_workflow(
   approved_action_refs: approved_action_refs,
   expected_syntax_targets: expected_syntax_targets,
   expected_exec_targets: expected_exec_targets,
-  expected_yaml_targets: expected_yaml_targets,
+  expected_full_exec_targets: expected_full_exec_targets,
+  lean_workflow: lean_workflow,
 )
 abort(errors.join("\n")) unless errors.empty?
+
+unless lean_workflow
+  puts "production_build_deployment_safety_contract=PASS cases=1 mode=trusted-restoration"
+  exit 0
+end
 
 negative_cases = {
   "missing-fixture-test" => [
     mutate_once(
       workflow_text,
-      "          ./infra/oci/tests/rollback-contract.sh\n",
+      "          ./infra/azure/agents/test-deployment-safety-ci-stan.sh\n",
       ""
     ),
     "deployment-safety-contracts fixture executions changed",
@@ -3572,8 +3571,8 @@ negative_cases = {
   "production-capable-command" => [
     mutate_once(
       workflow_text,
-      "          ./infra/azure/agents/pre-commit-infra-check-stan.sh\n",
-      "          kubectl get deployments -n default\n          ./infra/azure/agents/pre-commit-infra-check-stan.sh\n"
+      "          ./infra/azure/agents/test-deployment-safety-ci-stan.sh\n",
+      "          kubectl get deployments -n default\n          ./infra/azure/agents/test-deployment-safety-ci-stan.sh\n"
     ),
     "deployment-safety-contracts contains a production-capable command",
   ],
@@ -3654,7 +3653,8 @@ negative_cases.each do |name, (candidate, expected_error)|
     approved_action_refs: approved_action_refs,
     expected_syntax_targets: expected_syntax_targets,
     expected_exec_targets: expected_exec_targets,
-    expected_yaml_targets: expected_yaml_targets,
+    expected_full_exec_targets: expected_full_exec_targets,
+    lean_workflow: true,
   )
   if candidate_errors.empty?
     abort("#{name} fixture unexpectedly passed")

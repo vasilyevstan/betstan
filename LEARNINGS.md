@@ -482,7 +482,7 @@ Retry tests must keep `submittedAt` fixed while changing `event.timestamp` and p
 cd resulting && npm ci && npm run test:ci
 ```
 
-`production-build.yml` runs coverage gates for every backend service and the client on pull requests into `dev` or `master`. Per-service `tests-*.yaml` workflows provide additional path-scoped feedback.
+`production-build.yml` runs coverage only for changed services, expands shared or unknown service-impacting paths to every service, and skips coverage for documentation, governance, and unrelated infrastructure changes. Per-service `tests-*.yaml` workflows provide additional path-scoped feedback.
 
 ---
 
@@ -507,7 +507,7 @@ cd resulting && npm ci && npm run test:ci
   `chore`, `misc`, and `wip`.
 - PR origin is recorded with one public-safe `session:<slug>` label and one
   stable `feature:<slug>` label. Reuse the pair across implementation,
-  promotion, and ancestry-sync PRs; aggregate promotions can retain several
+  promotion, and required reconciliation PRs; aggregate promotions can retain several
   pairs. These labels are FYI metadata, never authority, and valid context
   labels are excluded from trusted label fingerprints so adding them cannot
   perturb checks or release flow. Keep private session UUIDs and runtime
@@ -534,11 +534,10 @@ cd resulting && npm ci && npm run test:ci
   has a real job and expected protected gate, then disable it before approval.
   Capture the run ID from the URL, and inspect that run before retrying when a
   local assertion fails after dispatch.
-- Pull-request title and body edits trigger `pull_request.edited` validation.
-  Treat PR metadata changes as workflow-producing work and keep them outside
-  active data-to-deploy handoffs or other production-exclusivity windows.
-  Derive the exact head SHA from Git or GitHub when preparing evidence and
-  prefer one complete edit over repeated manual SHA corrections that start
+- Pull-request title and body edits trigger lightweight branch policy only.
+  Full source, OCI, service coverage, and deployment-safety validation is bound
+  to source transitions. Derive the exact head SHA from Git or GitHub when
+  preparing evidence and prefer one complete edit over repeated corrections.
   duplicate runs.
 - A late specialist report must be revalidated against its recorded SHA,
   current authoritative branch, and runtime topology. Tool-heavy work that
@@ -548,12 +547,9 @@ cd resulting && npm ci && npm run test:ci
   unrelated documentation and metadata changes until the safe terminal gate.
   Required safety checks still run; the scope freeze prevents self-created
   workflow conflicts rather than weakening release evidence.
-- A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
-- A zero-diff ancestry PR can still be `BEHIND` and unmergeable under strict
-  protection even when its merge-snapshot checks pass. Merge the latest `dev`
-  into the synchronization branch, preserve its tree, finalize metadata, and
-  require fresh exact-snapshot checks. Do not use an administrator bypass or
-  discard concurrent protected work.
+- Do not create a standalone post-squash synchronization PR solely to restore
+  ancestry. Before a later promotion, incorporate current `master` into that
+  bounded integration candidate and require fresh exact-snapshot checks.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
 - The trusted PR publisher compares the exact `production-build.yml` blob with the default branch. When adding a repository-wide static guard, prefer invoking it from an existing trusted entrypoint already called by that workflow; changing the trusted workflow and its verifier in the same PR intentionally fails closed.
@@ -599,7 +595,7 @@ cd resulting && npm ci && npm run test:ci
 - PR descriptions are durable evidence. Use
   `.github/pull_request_template.md` for the exact core and conditional fields.
   Check the plain-language title and its 72-character limit before creating
-  the PR or editing workflow-producing metadata, not only after CI finishes.
+  or editing the PR, not only after CI finishes.
 - Separate a successful deployment from its failed acceptance. Classify the
   actual failing assertion before reopening product design; a proven harness
   defect needs its bounded correction and affected evidence, not another
@@ -633,7 +629,7 @@ cd resulting && npm ci && npm run test:ci
   an out-of-window replay without a marker stays pending, an existing mismatch
   writes the permanent tombstone, and any intervening `updated_at` change fails
   closed. A same-cutoff tombstone cannot be replaced or revived; only a strictly
-  later `edited`, `synchronize`, or `reopened` transition can recover the
+  later `synchronize` or `reopened` transition can recover the
   lineage. Preserve the original event cutoff, run binding, and policy-run
   target. Label events remain non-producing; any other later label drift writes
   a permanent pending tombstone that label restoration, workflow completion,
@@ -673,9 +669,9 @@ cd resulting && npm ci && npm run test:ci
   action, content, policy-run target, or label progression fail closed, and a
   lower state cannot downgrade a higher state. Version 1 and version 2 markers
   cannot newly bind, succeed, or consume an authorization receipt; a version 2
-  `x` remains a permanent tombstone. Only a strictly later `edited`,
-  `synchronize`, or `reopened` transition may recover, never a later or
-  replayed `opened` event.
+  `x` remains a permanent tombstone. Only a strictly later `synchronize` or
+  `reopened` transition may recover, never a metadata edit or a later or replayed
+  `opened` event.
 - Once any version 3 marker exists, operational rollback must retain version 3
   parsing and ledger authority: recovered opening-label authority is not
   durable in marker v3, so every publisher able to bind or succeed such a

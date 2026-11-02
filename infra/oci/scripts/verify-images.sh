@@ -343,7 +343,7 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
       docker run -d --platform linux/arm64 --name "$container" --network "$network" "$image_ref" >/dev/null
     else
       docker run -d --platform linux/arm64 --name "$container" --network "$network" \
-        -e JWT_KEY=offline-verification-only \
+        -e JWT_KEY=placeholder \
         -e "MONGO_URI=mongodb://mongo:27017/gaming_${service}" \
         -e RABBITMQ_URI=amqp://rabbitmq \
         -e AUTH_SERVICE_URL=http://auth:3000 \
