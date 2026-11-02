@@ -424,6 +424,15 @@ Source and promotion selectors remain separate one-use authorities and receipt
 contexts; closed, stale, pre-issuance, ambiguous, or consumed matches grant no
 authority and fail closed.
 
+A workflow authorization receipt may be resumed only when its exact ledger is
+already the fully validated `pending` to `success` sequence for the same
+branch-policy run URL. Resumption reconstructs the acknowledged ledger and
+writes no additional receipt states. Before any success-capable publication,
+it repeats authority, exact PR snapshot, selector uniqueness, protected-ref,
+ancestry, freshness and expiry, and shared-budget checks. Partial, malformed,
+foreign, conflicting, or different-run receipts remain consumed and are
+rejected fail closed. Coverage receipts are unchanged and non-resumable.
+
 Workflow expiry is checked on a fresh clock immediately before every receipt
 POST and quality-success POST. Expiry between receipt success and quality
 publication leaves the receipt spent and prevents quality success. Coverage

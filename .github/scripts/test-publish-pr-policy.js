@@ -942,6 +942,7 @@ async function testReceiptReadback() {
       return {
         ledger,
         initialScans: 1,
+        resumable: true,
         anchor: HEAD_SHA,
         context: `trusted-workflow-authorization/${authorization.id}`,
         options: {
@@ -1141,7 +1142,14 @@ async function testReceiptReadback() {
       assert.equal(hidden.ledger.length, hiddenPhase);
       assert.equal(receiptWrites(result, hidden).length, hiddenPhase);
       const replay = await execute(hidden.options);
-      assertFailure(replay);
+      if (hidden.resumable && hiddenPhase === 2) {
+        assert(
+          qualityWrites(replay).every(({ state }) => state === "success"),
+          replay.messages.join("\n"),
+        );
+      } else {
+        assertFailure(replay);
+      }
       assert.equal(receiptWrites(replay, hidden).length, 0);
       assert.equal(hidden.ledger.length, hiddenPhase);
     }
@@ -1342,7 +1350,14 @@ async function testReceiptReadback() {
         assert.equal(ambiguous.ledger.length, writes);
         assert.equal(receiptWrites(result, ambiguous).length, writes);
         const replay = await execute(ambiguous.options);
-        assertFailure(replay);
+        if (ambiguous.resumable && phase === "success") {
+          assert(
+            qualityWrites(replay).every(({ state }) => state === "success"),
+            replay.messages.join("\n"),
+          );
+        } else {
+          assertFailure(replay);
+        }
         assert.equal(receiptWrites(replay, ambiguous).length, 0);
       }
     }
@@ -5145,10 +5160,78 @@ async function main() {
       receiptSha: "ccd0beaaeb306ef48b86fcb7566dfa8c1e7bd2b1",
     },
   ];
+  const activeLeanDeliveryWorkflowAuthorizations = [
+    {
+      id: "lean-delivery-production-build-source-selector-v2",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+      authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
+      pullNumber: null,
+      headRef: "fix/lean-delivery-workflow-restoration",
+      baseRef: "dev",
+      issuedAt: "2026-11-02T18:15:00.000Z",
+      expiresAt: "2026-11-03T18:15:00.000Z",
+      receiptSha: "19cb0058a961c2da5ec9d851dcab12a71d7bdebd",
+    },
+    {
+      id: "lean-delivery-production-build-promotion-selector-v2",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+      authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
+      pullNumber: null,
+      headRef: "dev",
+      baseRef: "master",
+      issuedAt: "2026-11-02T18:15:00.000Z",
+      expiresAt: "2026-11-03T18:15:00.000Z",
+      receiptSha: "19cb0058a961c2da5ec9d851dcab12a71d7bdebd",
+    },
+  ];
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    [],
+    activeLeanDeliveryWorkflowAuthorizations,
   );
+  for (const authorization of activeLeanDeliveryWorkflowAuthorizations) {
+    assert.deepEqual(
+      publishPrPolicy.findWorkflowAuthorization({
+        authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+        repository: authorization.repository,
+        workflowPath: authorization.workflowPath,
+        trustedBlob: authorization.trustedBlob,
+        authorizedBlob: authorization.authorizedBlob,
+        pull: {
+          number: 999,
+          state: "open",
+          headRepository: authorization.headRepository,
+          headRef: authorization.headRef,
+          baseRef: authorization.baseRef,
+        },
+        now: "2026-11-02T19:00:00.000Z",
+      }),
+      authorization,
+    );
+    assert.equal(
+      publishPrPolicy.findWorkflowAuthorization({
+        authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+        repository: authorization.repository,
+        workflowPath: authorization.workflowPath,
+        trustedBlob: authorization.trustedBlob,
+        authorizedBlob: authorization.authorizedBlob,
+        pull: {
+          number: 999,
+          state: "closed",
+          headRepository: authorization.headRepository,
+          headRef: authorization.headRef,
+          baseRef: authorization.baseRef,
+        },
+        now: "2026-11-02T19:00:00.000Z",
+      }),
+      null,
+    );
+  }
   for (const authorization of historicalNode24WorkflowAuthorizations) {
     const lookup = {
       authorizations: historicalNode24WorkflowAuthorizations,
@@ -5227,7 +5310,7 @@ async function main() {
           headRef: retired.headRef,
           baseRef: retired.baseRef,
         },
-        now: "2026-11-01T19:00:00.000Z",
+        now: "2026-11-02T19:00:00.000Z",
       }),
       null,
     );
@@ -5274,6 +5357,16 @@ async function main() {
     false,
   );
   assert(
+    publisherSource.includes(
+      'id: "lean-delivery-production-build-source-selector-v2"',
+    ),
+  );
+  assert(
+    publisherSource.includes(
+      'id: "lean-delivery-production-build-promotion-selector-v2"',
+    ),
+  );
+  assert(
     !publisherSource.includes(
       'id: "lean-delivery-production-build-source-selector-v1"',
     ),
@@ -5284,7 +5377,7 @@ async function main() {
     ),
   );
   assert(
-    publisherSource.includes(
+    !publisherSource.includes(
       "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
     ),
   );
@@ -6675,11 +6768,33 @@ async function main() {
         state === "success",
     ),
   );
+  const resumedConsumption = await execute({
+    eventName: "workflow_run",
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [workflowAuthorization()],
+    authorizationStatuses: durableStatuses,
+    contextRunId: 101,
+  });
+  assert.deepEqual(
+    resumedConsumption.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success", "success"],
+  );
+  assert.deepEqual(
+    durableStatuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-workflow-authorization/"),
+      )
+      .map(({ state }) => state),
+    ["success", "pending"],
+  );
   const secondConsumption = await execute({
     eventName: "workflow_run",
     headBlob: CHANGED_BLOB,
     workflowAuthorizations: [workflowAuthorization()],
     authorizationStatuses: durableStatuses,
+    contextRunId: 102,
   });
   assert.deepEqual(
     secondConsumption.statuses
