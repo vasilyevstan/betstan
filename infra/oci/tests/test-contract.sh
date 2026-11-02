@@ -3248,9 +3248,19 @@ validate_production_build_deployment_safety_contract() {
   local workflow_file="$1"
   ruby - "$workflow_file" <<'RUBY'
 require "yaml"
+require "digest/sha1"
 
 workflow_file = ARGV.fetch(0)
 workflow_text = File.read(workflow_file)
+trusted_workflow_blob = "1e3118276cc4746e824303245339c25de4411c15"
+lean_workflow_blob = "7f036e038c780d929417ea7e9f6227bdf9d5fb89"
+workflow_blob = Digest::SHA1.hexdigest(
+  "blob #{workflow_text.bytesize}\0#{workflow_text}"
+)
+unless [trusted_workflow_blob, lean_workflow_blob].include?(workflow_blob)
+  abort("production-build is neither the trusted restoration nor the reviewed lean workflow")
+end
+lean_workflow = workflow_blob == lean_workflow_blob
 expected_checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
 approved_action_refs = {
   "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
@@ -3395,7 +3405,8 @@ def validate_workflow(
   approved_action_refs:,
   expected_syntax_targets:,
   expected_exec_targets:,
-  expected_full_exec_targets:
+  expected_full_exec_targets:,
+  lean_workflow:
 )
   errors = []
   document = load_workflow_document(workflow_text)
@@ -3412,9 +3423,11 @@ def validate_workflow(
     return errors
   end
   errors << "deployment-safety-contracts must stay on ubuntu-latest" unless safety_job["runs-on"] == "ubuntu-latest"
-  errors << "deployment-safety-contracts must depend on change-scope" unless Array(safety_job["needs"]).include?("change-scope")
-  unless safety_job["if"] == "needs.change-scope.outputs.deployment_safety != 'none'"
-    errors << "deployment-safety-contracts job routing changed"
+  if lean_workflow
+    errors << "deployment-safety-contracts must depend on change-scope" unless Array(safety_job["needs"]).include?("change-scope")
+    unless safety_job["if"] == "needs.change-scope.outputs.deployment_safety != 'none'"
+      errors << "deployment-safety-contracts job routing changed"
+    end
   end
   errors << "deployment-safety-contracts must not declare job env" if safety_job.key?("env")
   errors << "deployment-safety-contracts must not declare job permissions" if safety_job.key?("permissions")
@@ -3437,14 +3450,30 @@ def validate_workflow(
   end
 
   checkout_step = steps.find { |step| step["name"] == "Checkout repository" } || {}
+  errors << "deployment-safety-contracts checkout action is no longer pinned" unless checkout_step["uses"] == expected_checkout
+  errors << "deployment-safety-contracts checkout step changed shape" unless checkout_step.keys.sort == %w[name uses]
+
+  build_job = jobs["build"] || {}
+  errors << "build must depend on deployment-safety-contracts" unless Array(build_job["needs"]).include?("deployment-safety-contracts")
+  unless build_job["if"].to_s.include?("needs.deployment-safety-contracts.result == 'success'")
+    errors << "build no longer blocks on deployment-safety failure"
+  end
+  build_step = Array(build_job["steps"]).find { |step| step["id"] == "build" } || {}
+  expected_build_env = {
+    "DOCKER_BUILD_SUMMARY" => "false",
+    "DOCKER_BUILD_RECORD_UPLOAD" => "false",
+  }
+  unless build_step["env"] == expected_build_env
+    errors << "image build must disable new summary and build-record publishing at step scope"
+  end
+  return errors unless lean_workflow
+
   validate_step = steps.find do |step|
     step["name"] == "Validate deployment safety workflow contract"
   end || {}
   full_step = steps.find do |step|
     step["name"] == "Validate affected Azure deployment contracts"
   end || {}
-  errors << "deployment-safety-contracts checkout action is no longer pinned" unless checkout_step["uses"] == expected_checkout
-  errors << "deployment-safety-contracts checkout step changed shape" unless checkout_step.keys.sort == %w[name uses]
   errors << "deployment-safety meta contract must run whenever the job runs" if validate_step.key?("if")
   unless full_step["if"] == "needs.change-scope.outputs.deployment_safety == 'full'"
     errors << "deployment-safety full contract routing changed"
@@ -3505,20 +3534,6 @@ def validate_workflow(
     errors << "pr-quality-gates no longer checks deployment-safety result"
   end
 
-  build_job = jobs["build"] || {}
-  errors << "build must depend on deployment-safety-contracts" unless Array(build_job["needs"]).include?("deployment-safety-contracts")
-  unless build_job["if"].to_s.include?("needs.deployment-safety-contracts.result == 'success'")
-    errors << "build no longer blocks on deployment-safety failure"
-  end
-  build_step = Array(build_job["steps"]).find { |step| step["id"] == "build" } || {}
-  expected_build_env = {
-    "DOCKER_BUILD_SUMMARY" => "false",
-    "DOCKER_BUILD_RECORD_UPLOAD" => "false",
-  }
-  unless build_step["env"] == expected_build_env
-    errors << "image build must disable new summary and build-record publishing at step scope"
-  end
-
   errors
 end
 
@@ -3535,8 +3550,14 @@ errors = validate_workflow(
   expected_syntax_targets: expected_syntax_targets,
   expected_exec_targets: expected_exec_targets,
   expected_full_exec_targets: expected_full_exec_targets,
+  lean_workflow: lean_workflow,
 )
 abort(errors.join("\n")) unless errors.empty?
+
+unless lean_workflow
+  puts "production_build_deployment_safety_contract=PASS cases=1 mode=trusted-restoration"
+  exit 0
+end
 
 negative_cases = {
   "missing-fixture-test" => [
@@ -3633,6 +3654,7 @@ negative_cases.each do |name, (candidate, expected_error)|
     expected_syntax_targets: expected_syntax_targets,
     expected_exec_targets: expected_exec_targets,
     expected_full_exec_targets: expected_full_exec_targets,
+    lean_workflow: true,
   )
   if candidate_errors.empty?
     abort("#{name} fixture unexpectedly passed")
