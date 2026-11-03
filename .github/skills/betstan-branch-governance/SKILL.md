@@ -5,140 +5,80 @@ description: Enforce BetStan's dev-to-master branch flow, exact-SHA CI checks, a
 
 # BetStan branch governance
 
-Use this skill whenever a task involves branches, commits, pushes, pull requests, CI gates, merges, or production workflow dispatches.
+Use for branches, commits, pushes, PRs, CI gates, merges and production
+dispatches. [CONTRIBUTING.md](../../../CONTRIBUTING.md) is the canonical policy;
+this skill is its procedure, not another approval hierarchy.
 
-## Required flow
+## Retained contract
 
-- Never commit or push directly to `master`.
-- `master` is the GitHub default and production branch; `dev` is the protected
-  integration branch.
-- Normal changes enter `dev` through a focused pull request; never push directly
-  to protected `dev`.
-- Only an up-to-date `dev` branch may open a pull request into `master`.
-- A production promotion requires green trusted `branch-policy/master` and `pr-quality-gates/master` statuses on both its current head and unique merge snapshot.
-- Before promotion, identify the exact head SHA and every production-capable workflow triggered by the diff. Require explicit approval covering that exact set.
-- Use `.github/pull_request_template.md` as the canonical PR evidence
-  structure. Core rationale, exact refs, scope/exclusions, compatibility,
-  validation, risks, and remaining work are required on every PR; conditional
-  operational fields stay present and say `not applicable` when appropriate.
-- Assign public-safe `session:<slug>` and `feature:<slug>` labels to every PR
-  with `pr-context-labels-stan.sh`. Reuse the session pair across
-  implementation, promotion, and required reconciliation PRs; aggregate promotions may
-  carry multiple pairs. The labels are informational only and never affect
-  checks, approval, merge, release, or rollback authority.
-- Only CLI-created and CLI-owned PRs may carry `copilot-cli-managed` and use
-  automatic mode. Every other PR requires `APPROVED_SHA` equal to its current
-  head; human `master` promotions also require the exact workflow inventory.
-- Treat PR title/body edits as lightweight branch-policy events. They must not
-  rerun source, OCI, coverage, or deployment-safety workflows.
-- Manual central production workflow dispatches are approval-gated through `production-emergency` and require an exact full master SHA. Legacy per-service deploy workflows are not manually dispatchable.
-- Common package publication is separately approval-gated through
-  `common-package-release`; only `common-package-publish.yml` may publish, and
-  only from an exact current `master` SHA.
-- Do not create a post-squash synchronization PR solely to restore ancestry.
-  Before a later promotion, incorporate the current `master` into that bounded
-  integration candidate and revalidate the exact resulting SHA.
+- Never commit or push directly to protected `dev` or `master`, or rewrite
+  their history. Normal work enters `dev` through a focused PR; only an
+  up-to-date `dev` PR may target production `master`.
+- Use ancestry-preserving merges. Prove required feature commits are included
+  in the exact protected aggregate and verify the exact tested snapshot.
+  Reconcile branches only when ancestry requires it; a promotion does not
+  automatically require a content-identical synchronization PR.
+- Require successful trusted, base-scoped branch-policy and quality statuses
+  on the current head and unique merge snapshot. Stale, skipped, pending,
+  neutral, unrelated or branch-name-only checks are not success.
+- Verified CLI-created, CLI-owned work progresses automatically through the
+  canonical helpers when technical gates pass, including follow-on Actions.
+  Never add `copilot-cli-managed` to human-origin work or treat that label alone
+  as proof of origin/ownership. Every other PR requires `APPROVED_SHA` equal to
+  its current head; human promotions also require `APPROVED_WORKFLOWS`.
+- Preserve comprehensive [PR evidence](../../pull_request_template.md):
+  rationale, exact refs, scope/exclusions, compatibility, validation, risks,
+  workflow inventory, data, flags, rollback and remaining work. Conditional
+  fields stay present as `not applicable` when appropriate.
+- Title/body presentation and public-safe session/feature labels are
+  informational. Actual missing evidence remains blocking. The candidate merge
+  helper no longer rejects title wording, but not-yet-replaced protected
+  revisions retain their executable checks. The trusted-master-identical
+  `production-build.yml` still runs full legacy validation on
+  `pull_request.edited`; lightweight metadata-only validation is staged, not
+  active for this compatibility path. Actual protected triggers govern until
+  tested cutover; no remote cutover is implied.
+- No agent verdict bypasses immutable deployed identity, physical
+  single-writer locks/fences, data integrity, compatible recovery or observed
+  health. Explicit pauses still apply to otherwise automatic progression.
 
-## Read-only baseline
+## Scoped read-only baseline
 
-Before recommending an action:
+Inspect only what the authorized action needs. A repository-only policy edit
+does not authorize remote configuration changes or a production baseline.
 
-1. Inspect the worktree and preserve unrelated changes.
-2. Fetch current remote refs.
-3. Confirm the repository default branch is `master`, then inspect protection
-   for both `master` and `dev`.
-4. Inspect PR base, head, exact head SHA, mergeability, and check conclusions.
-5. Use ancestry checks rather than comparing branch tips.
-6. Use `pr-validation-stan.sh` to bind the current head SHA, base SHA, merge snapshot, and trusted workflow IDs; use `pr-merge-safety-stan.sh` for the final recommendation.
-7. Verify the PR body satisfies `.github/pull_request_template.md`.
+1. Inspect the specified worktree and exact source; preserve unrelated work.
+2. For a live PR/merge decision, resolve current remote refs, default branch,
+   protection, PR head/base, mergeability and trusted check conclusions.
+3. Use ancestry, not branch-tip equality. Run `pr-validation-stan.sh` to bind
+   repository, current head/base, merge snapshot and trusted workflow IDs.
+4. Check actual PR evidence and origin/ownership. Run
+   `pr-merge-safety-stan.sh` in the correct automatic or exact human mode
+   immediately before a merge; a stale recommendation is not authorization.
+5. For a protected operation, use the canonical dispatcher and approver from
+   `CONTRIBUTING.md`, preserving operation-specific prerequisites, current
+   workflow identity/state, exact run attempt and one-use authority.
+6. Observe jobs and pending environment gates through terminal effects.
+   Progress eligible automatic gates promptly; respect an approved wait timer.
+   Unknown dispatch/approval outcomes require exact reconciliation, not replay.
 
-When changing a trusted required-check workflow, follow the exact bootstrap in
-`CONTRIBUTING.md`: first promote a separate, fail-closed one-use authorization
-mechanism without changing the protected workflow; then authorize only the
-intended workflow blob, promote it normally, remove the authorization, and
-verify fresh statuses before changing protection or disabling an old identity.
-If a future PR number cannot be reserved, `pullNumber: null` may select only
-the first eligible open PR matching the exact repository, refs, and workflow
-blobs. Its transition and quality run must postdate issuance; receipt
-publication revalidates live refs, the complete PR snapshot, and promotion
-ancestry. Keep source and promotion selectors and receipts separate, and
-remove both temporary declarations with the workflow restoration.
-The first completed exact quality run created after authorization consumes its
-durable receipt. Workflow-producing pull-request events publish pending until
-their own run completes. They first publish an unbound exact-snapshot barrier,
-then bind the exact newly registered run, which must strictly postdate the
-event. The marker also binds a bounded head/base source fingerprint, so
-evidence from another source snapshot cannot satisfy it. Accept
-markers only from the GitHub Actions bot with a validated repository
-`branch-policy` run target carrying the exact PR/head/base relation. Keep
-`branch-policy.yml` as the sole status-writing workflow and require every
-workflow job to declare effective token permissions. A completion that differs
-from the marker-bound run remains pending. An exact delayed completion or
-manual trusted refresh may bind an existing unbound marker, but refresh cannot
-create a marker or supply quality evidence. Version 3 quality markers use
-`v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.
-`u` records only an unconfirmed direct opening-label snapshot mismatch, `p`
-records a confirmed transition without a bound run, a positive run ID records
-the confirmed exact binding, and `x` permanently tombstones the cutoff. A `u`
-marker cannot bind a run, publish quality success, or consume an authorization
-receipt. The qualifying exact `labeled` event appends durable `p` before any
-optional run binding, and a label handler never consumes an authorization
-receipt. Opening-label reconciliation is authorized only when the server-owned
-label timestamp is at or after the original `opened` transition cutoff and no
-more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution
-cannot extend that window. GitHub may serialize distinct creation and label
-mutations to the same whole-second timestamp. Equality is accepted only with
-the complete direct or inverse proof; a timestamp even 1 ms before the cutoff
-is not reconciliation authority. Direct ordering also requires the label
-timestamp to strictly precede the earliest exact-lineage status creation, while
-inverse ordering requires identical event and live `updated_at` values and
-allows the marker on either side of the label. An exact replay of the same
-qualifying `labeled` event is inert after `p` or a run is durable; a later label
-mutation remains drift.
-Recovered opening-label authority is revalidated before every success-capable
-refresh, `workflow_run`, manual dispatch, or replayed `opened` event by a
-bounded server-owned issue-event ledger. The ledger must prove exactly one
-`copilot-cli-managed` `labeled` event within the original five-minute window
-and no matching `unlabeled` event. Any managed-label removal, second
-application, or application outside that window is proven drift and writes
-permanent `x`. Any fully validated managed `unlabeled` event, second managed
-`labeled` event, or out-of-window managed `labeled` event is individually
-sufficient, irreversible disproof: it writes permanent `x` immediately even
-on a full ledger page because unread appended events cannot restore the
-lineage; only positive authority requires scan completion. API, schema,
-duplicate-ID, missing, and incomplete ledger evidence remains inconclusive
-without `x` only when no disqualifying event has already been observed.
-`branch-policy.yml` grants only `issues: read` for this ledger; the publisher
-and permission must promote together.
-The broad opening snapshot mismatch permits only fail-closed inspection and
-never grants reconciliation: an out-of-window replay without a marker stays
-pending, an existing mismatch writes the permanent tombstone, and any
-intervening `updated_at` change fails closed. A same-cutoff tombstone cannot be
-replaced or revived; only a strictly later `synchronize` or `reopened`
-transition can recover the lineage. Preserve the original cutoff,
-run binding, and policy-run target. `labeled` and `unlabeled` are non-producing
-refreshes; any other label drift permanently tombstones that lineage, and
-restoring labels cannot revive it. At the greatest cutoff, `x` dominates every
-other state; absent `x`, any version 1 or version 2 marker makes that cutoff
-fail-closed legacy; otherwise one compatible version 3 lineage resolves
-positive run ID over `p` over `u`, independent of status order. Conflicting
-positive run IDs or incompatible action, content, policy-run target, or label
-progression fail closed, and a lower state cannot downgrade a higher state.
-Version 1 and version 2 markers cannot newly bind, succeed, or consume an
-authorization receipt; a version 2 `x` remains a permanent tombstone. Only a
-strictly later `synchronize` or `reopened` transition may recover, never a
-metadata edit or a later or replayed `opened` event. Once any version 3 marker exists,
-operational rollback must retain version 3 parsing and ledger authority:
-recovered opening-label authority is not durable in marker v3, so every
-publisher able to bind or succeed such a lineage must revalidate the ledger;
-retaining version 3 parsing alone is insufficient, and rollback to a publisher
-lacking ledger authority is prohibited; use a reviewed forward correction.
-Other non-producing metadata is excluded from marker identity.
-Recheck the current PR snapshot before and after publishing statuses and
-invalidate concurrent results with pending. Any subsequent edit,
-synchronization, base advance, or refresh needs the applicable short-lived
-authorization and receipt anchor.
+## Current trust and cutover
 
-Return `NO_GO` for a direct `master` push, a non-`dev` PR into `master`, a stale promotion, missing or stale checks, or incomplete production approval.
+Existing executable controls remain authoritative until replacements are
+proven and activated. This skill does not activate a new source-snapshot
+verifier or controller. Read the current
+[`publish-pr-policy.js`](../../scripts/publish-pr-policy.js) and
+[`branch-policy.yml`](../../workflows/branch-policy.yml) for publisher identity,
+transition/receipt compatibility and status-writing authority.
 
-Never expose secrets, cloud identifiers, kubeconfig data, private logs, or session paths.
+When a trusted workflow itself changes, follow `Trusted-check bootstrap` in
+`CONTRIBUTING.md` and its tested executable path. Do not invent an authorization
+variable, let candidate code authorize itself, reset consumed receipts, weaken
+protection or roll back to a reader incompatible with existing authority.
+Fresh required statuses and exact source relations must still be proven.
+
+Return `NO_GO` for unauthorized protected pushes, wrong promotion source,
+stale ancestry/checks, incomplete approval, unknown mutation outcomes or failed
+runtime prerequisites. Name the concrete blocker and smallest safe next action.
+Never expose credentials, private logs, infrastructure identifiers or session
+paths.

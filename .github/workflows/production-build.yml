@@ -8,7 +8,7 @@ on:
     branches:
       - dev
       - master
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 
 env:
   IMAGE_TAG: ${{ github.sha }}
@@ -17,133 +17,6 @@ permissions:
   contents: read
 
 jobs:
-  change-scope:
-    runs-on: ubuntu-latest
-    outputs:
-      auth_smoke: ${{ steps.scope.outputs.auth_smoke }}
-      coverage_needed: ${{ steps.scope.outputs.coverage_needed }}
-      coverage_matrix: ${{ steps.scope.outputs.coverage_matrix }}
-      deployment_safety: ${{ steps.scope.outputs.deployment_safety }}
-      runtime_validation: ${{ steps.scope.outputs.runtime_validation }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          fetch-depth: 0
-
-      - name: Select affected validation
-        id: scope
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
-
-          services = [
-              "auth", "bet", "backoffice", "event", "gamemaster",
-              "moderation", "resulting", "slip", "telemetry", "client",
-          ]
-          if os.environ.get("GITHUB_EVENT_NAME") == "push":
-              selected = services
-              auth_smoke = True
-              deployment_safety = "full"
-              runtime_validation = True
-          else:
-              paths = subprocess.check_output(
-                  [
-                      "git", "diff", "--no-renames", "--name-only",
-                      os.environ["BASE_SHA"], os.environ["HEAD_SHA"],
-                  ],
-                  text=True,
-              ).splitlines()
-              selected = set()
-              full = False
-              deployment_safety = "none"
-              runtime_validation = False
-              for path in paths:
-                  top = path.split("/", 1)[0]
-                  if top in services:
-                      selected.add(top)
-                  elif path.startswith("common/") or path.startswith("betstan-common-"):
-                      full = True
-                  elif path.startswith((
-                      "infra/",
-                      ".github/",
-                      "docs/",
-                  )) or path in {
-                      "CONTRIBUTING.md", "LEARNINGS.md", "README.md",
-                  }:
-                      pass
-                  else:
-                      full = True
-                  if path.startswith((
-                      "infra/azure/agents/",
-                      ".github/scripts/",
-                      ".github/workflows/",
-                  )):
-                      runtime_validation = True
-                  if path in {
-                      ".github/workflows/production-build.yml",
-                      "infra/azure/agents/test-deployment-safety-ci-stan.sh",
-                  } and deployment_safety != "full":
-                      deployment_safety = "meta"
-                  if (
-                      path in {
-                          ".github/workflows/production-deploy.yml",
-                          ".github/workflows/production-rollback.yml",
-                          "infra/azure/agents/baseline-capture-stan.sh",
-                          "infra/azure/agents/deploy-stan.sh",
-                          "infra/azure/agents/deploy-validation-loop-stan.sh",
-                          "infra/azure/agents/rollback-application-stan.sh",
-                          "infra/azure/agents/rollback-readiness-stan.sh",
-                          "infra/azure/agents/production-run-exclusivity-stan.sh",
-                          "infra/azure/agents/shared-mongo-operation-lock-stan.sh",
-                          "infra/azure/agents/test-deploy-validation-loop-stan.sh",
-                          "infra/azure/agents/test-production-rollback-stan.sh",
-                          "infra/azure/agents/test-production-run-exclusivity-stan.sh",
-                          "infra/azure/agents/test-shared-mongo-operation-lock-stan.sh",
-                      }
-                      or path.startswith(
-                          "infra/azure/agents/live-betting-readiness-"
-                      )
-                      or path.startswith(
-                          "infra/azure/agents/test-live-betting-"
-                      )
-                  ):
-                      deployment_safety = "full"
-              if full:
-                  selected = set(services)
-              selected = [service for service in services if service in selected]
-              auth_smoke = "auth" in selected
-          matrix = selected or ["none"]
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"auth_smoke={str(auth_smoke).lower()}\n")
-              output.write(
-                  f"coverage_needed={str(bool(selected)).lower()}\n"
-              )
-              output.write(
-                  "coverage_matrix=" +
-                  json.dumps({"service": matrix}, separators=(",", ":")) +
-                  "\n"
-              )
-              output.write(f"deployment_safety={deployment_safety}\n")
-              output.write(
-                  f"runtime_validation={str(runtime_validation).lower()}\n"
-              )
-          print(
-              "selected_validation=" +
-              json.dumps({
-                  "auth_smoke": auth_smoke,
-                  "coverage": matrix,
-                  "deployment_safety": deployment_safety,
-                  "runtime_validation": runtime_validation,
-              }, sort_keys=True)
-          )
-          PY
-
   manifest-static-validate:
     runs-on: ubuntu-latest
 
@@ -182,16 +55,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - name: Validate infrastructure secrets and ingress safety
+      - name: Validate prod ingress host/path safety
         run: |
-          chmod +x \
-            infra/azure/agents/ingress-routing-guard-stan.sh \
-            infra/azure/agents/pre-commit-infra-check-stan.sh
-          ./infra/azure/agents/pre-commit-infra-check-stan.sh
+          chmod +x infra/azure/agents/ingress-routing-guard-stan.sh
+          ./infra/azure/agents/ingress-routing-guard-stan.sh
 
   deploy-runtime-script-validate:
-    needs: change-scope
-    if: needs.change-scope.outputs.runtime_validation == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -238,46 +107,67 @@ jobs:
         run: ./infra/azure/agents/workflow-trigger-guard-stan.sh
 
   deployment-safety-contracts:
-    needs: change-scope
-    if: needs.change-scope.outputs.deployment_safety != 'none'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - name: Validate deployment safety workflow contract
+      - name: Validate deployment safety contracts
         run: |
+          bash -n infra/azure/agents/deploy-validation-loop-stan.sh
+          bash -n infra/azure/agents/live-betting-readiness-lib.sh
+          bash -n infra/azure/agents/live-betting-readiness-stan.sh
+          bash -n infra/azure/agents/live-betting-readiness-test-lib.sh
+          bash -n infra/azure/agents/pre-commit-infra-check-stan.sh
+          bash -n infra/azure/agents/test-deploy-validation-loop-stan.sh
           bash -n infra/azure/agents/test-deployment-safety-ci-stan.sh
+          bash -n infra/azure/agents/test-live-betting-readiness-stan.sh
+          bash -n infra/azure/agents/test-live-betting-rollback-readiness-stan.sh
+          bash -n infra/azure/agents/test-production-rollback-stan.sh
+          bash -n infra/oci/agents/deploy-validation-loop-stan.sh
+          bash -n infra/oci/agents/live-betting-readiness-stan.sh
+          bash -n infra/oci/scripts/deploy.sh
+          bash -n infra/oci/scripts/live-data-maintenance-stan.sh
+          bash -n infra/oci/scripts/live-betting-control-stan.sh
+          bash -n infra/oci/scripts/revalidate-live-activation-stan.sh
+          bash -n infra/oci/scripts/live-betting-data-rollout-stan.sh
+          bash -n infra/oci/scripts/shared-mongo-operation-lock-stan.sh
+          bash -n infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
+          bash -n infra/oci/tests/test-deploy-validation-loop-stan.sh
+          bash -n infra/oci/tests/test-live-data-maintenance-stan.sh
+          bash -n infra/oci/tests/test-live-betting-control-stan.sh
+          bash -n infra/oci/tests/test-revalidate-live-activation-stan.sh
+          bash -n infra/oci/tests/test-live-betting-data-rollout-stan.sh
+          bash -n infra/oci/tests/test-live-betting-readiness-stan.sh
+          bash -n infra/oci/tests/rollback-live-readiness-contract.sh
+          bash -n infra/oci/tests/rollback-contract.sh
+          ruby -ryaml -e '
+            %w[
+              .github/workflows/production-build.yml
+              .github/workflows/production-deploy.yml
+              .github/workflows/oci-live-data-rollout.yml
+              .github/workflows/oci-live-betting-activate.yml
+              .github/workflows/oci-live-betting-disable.yml
+              .github/workflows/oci-production-deploy.yml
+            ].each { |file| YAML.load_stream(File.read(file)) }
+          '
+          ./infra/azure/agents/pre-commit-infra-check-stan.sh
           ./infra/azure/agents/test-deployment-safety-ci-stan.sh
-
-      - name: Validate affected Azure deployment contracts
-        if: needs.change-scope.outputs.deployment_safety == 'full'
-        run: |
-          bash -n \
-            infra/azure/agents/deploy-validation-loop-stan.sh \
-            infra/azure/agents/baseline-capture-stan.sh \
-            infra/azure/agents/deploy-stan.sh \
-            infra/azure/agents/live-betting-readiness-lib.sh \
-            infra/azure/agents/live-betting-readiness-stan.sh \
-            infra/azure/agents/live-betting-readiness-test-lib.sh \
-            infra/azure/agents/rollback-application-stan.sh \
-            infra/azure/agents/shared-mongo-operation-lock-stan.sh \
-            infra/azure/agents/test-deploy-validation-loop-stan.sh \
-            infra/azure/agents/test-live-betting-readiness-stan.sh \
-            infra/azure/agents/test-live-betting-rollback-readiness-stan.sh \
-            infra/azure/agents/test-production-rollback-stan.sh \
-            infra/azure/agents/test-shared-mongo-operation-lock-stan.sh
           ./infra/azure/agents/test-deploy-validation-loop-stan.sh
           ./infra/azure/agents/test-live-betting-readiness-stan.sh
           ./infra/azure/agents/test-live-betting-rollback-readiness-stan.sh
           ./infra/azure/agents/test-production-rollback-stan.sh
-          ./infra/azure/agents/test-shared-mongo-operation-lock-stan.sh
+          ./infra/oci/tests/test-deploy-validation-loop-stan.sh
+          ./infra/oci/tests/test-live-data-maintenance-stan.sh
+          ./infra/oci/tests/test-live-betting-control-stan.sh
+          ./infra/oci/tests/test-revalidate-live-activation-stan.sh
+          ./infra/oci/tests/test-live-betting-data-rollout-stan.sh
+          ./infra/oci/tests/test-live-betting-readiness-stan.sh
+          ./infra/oci/tests/rollback-live-readiness-contract.sh
+          ./infra/oci/tests/rollback-contract.sh
 
   auth-container-smoke:
-    needs: change-scope
-    if: needs.change-scope.outputs.auth_smoke == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -339,14 +229,23 @@ jobs:
           grep -q '"currentUser":null' "$response_file"
 
   coverage-gate:
-    needs: change-scope
-    if: needs.change-scope.outputs.coverage_needed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       max-parallel: 3
-      matrix: ${{ fromJSON(needs.change-scope.outputs.coverage_matrix) }}
+      matrix:
+        include:
+          - service: auth
+          - service: bet
+          - service: backoffice
+          - service: event
+          - service: gamemaster
+          - service: moderation
+          - service: resulting
+          - service: slip
+          - service: telemetry
+          - service: client
 
     steps:
       - name: Checkout repository
@@ -407,58 +306,32 @@ jobs:
   pr-quality-gates:
     name: pr-quality-gates
     if: always() && github.event_name == 'pull_request'
-    needs: [change-scope, manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, deployment-safety-contracts, auth-container-smoke, coverage-gate]
+    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, deployment-safety-contracts, auth-container-smoke, coverage-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Require every validation gate
         env:
-          SCOPE_RESULT: ${{ needs.change-scope.result }}
           MANIFEST_RESULT: ${{ needs.manifest-static-validate.result }}
           INGRESS_RESULT: ${{ needs.ingress-routing-guard.result }}
-          RUNTIME_NEEDED: ${{ needs.change-scope.outputs.runtime_validation }}
           SCRIPT_RESULT: ${{ needs.deploy-runtime-script-validate.result }}
           WORKFLOW_RESULT: ${{ needs.workflow-trigger-guard.result }}
-          DEPLOYMENT_SAFETY_NEEDED: ${{ needs.change-scope.outputs.deployment_safety }}
           DEPLOYMENT_SAFETY_RESULT: ${{ needs.deployment-safety-contracts.result }}
-          AUTH_NEEDED: ${{ needs.change-scope.outputs.auth_smoke }}
           AUTH_CONTAINER_RESULT: ${{ needs.auth-container-smoke.result }}
-          COVERAGE_NEEDED: ${{ needs.change-scope.outputs.coverage_needed }}
           COVERAGE_RESULT: ${{ needs.coverage-gate.result }}
         run: |
-          for result in "$SCOPE_RESULT" "$MANIFEST_RESULT" "$INGRESS_RESULT" "$WORKFLOW_RESULT"; do
+          for result in "$MANIFEST_RESULT" "$INGRESS_RESULT" "$SCRIPT_RESULT" "$WORKFLOW_RESULT" "$DEPLOYMENT_SAFETY_RESULT" "$AUTH_CONTAINER_RESULT" "$COVERAGE_RESULT"; do
             if [ "$result" != "success" ]; then
               echo "required validation result=$result" >&2
               exit 1
             fi
           done
-          if [ "$RUNTIME_NEEDED" = "true" ]; then
-            [ "$SCRIPT_RESULT" = "success" ] || exit 1
-          else
-            [ "$SCRIPT_RESULT" = "skipped" ] || exit 1
-          fi
-          if [ "$AUTH_NEEDED" = "true" ]; then
-            [ "$AUTH_CONTAINER_RESULT" = "success" ] || exit 1
-          else
-            [ "$AUTH_CONTAINER_RESULT" = "skipped" ] || exit 1
-          fi
-          if [ "$DEPLOYMENT_SAFETY_NEEDED" = "none" ]; then
-            [ "$DEPLOYMENT_SAFETY_RESULT" = "skipped" ] || exit 1
-          else
-            [ "$DEPLOYMENT_SAFETY_RESULT" = "success" ] || exit 1
-          fi
-          if [ "$COVERAGE_NEEDED" = "true" ]; then
-            [ "$COVERAGE_RESULT" = "success" ] || exit 1
-          else
-            [ "$COVERAGE_RESULT" = "skipped" ] || exit 1
-          fi
 
   build:
-    needs: [change-scope, manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, deployment-safety-contracts, auth-container-smoke, coverage-gate]
+    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, deployment-safety-contracts, auth-container-smoke, coverage-gate]
     if: >
       always() &&
       github.event_name == 'push' &&
       github.run_attempt == 1 &&
-      needs.change-scope.result == 'success' &&
       needs.manifest-static-validate.result == 'success' &&
       needs.ingress-routing-guard.result == 'success' &&
       needs.deploy-runtime-script-validate.result == 'success' &&

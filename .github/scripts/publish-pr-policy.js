@@ -870,7 +870,7 @@ async function listCommitStatuses(
   const statuses = [];
   const seenIds = new Set();
   for (let page = 1; Number.isSafeInteger(page); page += 1) {
-    const response = await github.rest.repos.listCommitStatusesForRef({
+    const response = await measureReceiptIO(budget, () => github.rest.repos.listCommitStatusesForRef({
       owner,
       repo,
       ref,
@@ -886,10 +886,7 @@ async function listCommitStatuses(
           ),
         },
       }),
-    });
-    if (budget) {
-      receiptTimeRemaining(budget);
-    }
+    }));
     if (!Array.isArray(response.data) || response.data.length > 100) {
       throw new Error("authorization receipt response is malformed");
     }
@@ -1326,15 +1323,32 @@ function createReceiptBudget({
   wait = sleep,
   signal = (milliseconds) => AbortSignal.timeout(milliseconds),
 } = {}) {
-  return { now, wait, signal, deadline: now() + RECEIPT_READ_DEADLINE_MS };
+  return { now, wait, signal, remainingMs: RECEIPT_READ_DEADLINE_MS };
 }
 
 function receiptTimeRemaining(budget) {
-  const remaining = Math.floor(budget.deadline - budget.now());
+  const remaining = Math.floor(budget.remainingMs);
   if (remaining <= 0) {
     throw new Error("authorization receipt read-back deadline exhausted");
   }
   return remaining;
+}
+
+// Share the IO allowance across reads and retries, not unrelated validation.
+async function measureReceiptIO(budget, operation) {
+  if (!budget) return operation();
+  receiptTimeRemaining(budget);
+  const started = budget.now();
+  try {
+    return await operation();
+  } finally {
+    const elapsed = budget.now() - started;
+    if (!Number.isFinite(elapsed) || elapsed < 0) {
+      throw new Error("authorization receipt monotonic clock is invalid");
+    }
+    budget.remainingMs -= elapsed;
+    receiptTimeRemaining(budget);
+  }
 }
 
 function receiptReadRetryDelay(error) {
@@ -1411,7 +1425,7 @@ async function verifyReceiptLedger(github, owner, repo, receipt) {
     if (delay >= receiptTimeRemaining(receipt.budget)) {
       throw new Error("authorization receipt read-back deadline exhausted");
     }
-    await receipt.budget.wait(delay);
+    await measureReceiptIO(receipt.budget, () => receipt.budget.wait(delay));
   }
 }
 
@@ -2259,7 +2273,7 @@ async function listOpenPulls(
   const pulls = [];
   const seenNumbers = new Set();
   for (let page = 1; Number.isSafeInteger(page); page += 1) {
-    const response = await github.rest.pulls.list({
+    const response = await measureReceiptIO(budget, () => github.rest.pulls.list({
       owner,
       repo,
       state: "open",
@@ -2276,7 +2290,7 @@ async function listOpenPulls(
           ),
         },
       }),
-    });
+    }));
     const pagePulls = response.data;
     if (!Array.isArray(pagePulls) || pagePulls.length > 100) {
       throw new Error("open pull request inventory is malformed");

@@ -2,71 +2,67 @@
 
 ## Why BetStan uses agents
 
-BetStan's reusable agents separate design, implementation, review, testing,
-and production operations. The goal is independent evidence with clear
-ownership, not more participants.
+BetStan's reusable agents are bounded capabilities, not a required sequence
+or approval hierarchy. One accountable owner retains the accepted scope,
+implementation, verification evidence, and next action.
 
 An agent status is never permission to merge or deploy. GitHub branch
 protection, exact-SHA checks, protected environments, and the release workflow
 remain authoritative.
 
-## Risk-conditional workflow
+The [agent-team README](https://github.com/vasilyevstan/betstan/blob/master/.github/agents/README.md)
+owns capability routing and evidence reuse;
+[CONTRIBUTING.md](https://github.com/vasilyevstan/betstan/blob/master/CONTRIBUTING.md)
+owns branch and origin-bound approval policy. This page explains those
+responsibilities rather than adding gates. Editing repository instructions
+does not reload an already-running session or activate a new controller.
+
+## Proportionate verification
 
 ```mermaid
 flowchart LR
-    Request --> Risk["Risk classification"]
-    Risk --> Developer["Registered implementation owner"]
-    Risk -. architecture boundary .-> Architect["Architect"]
-    Architect --> Developer
-    Architect -. disputed, materially complex,<br/>or irreversible design .-> Simplifier["Simplifier<br/>3 sealed families + synthesis"]
-    Simplifier --> Developer
-    Developer --> Snapshot["Orchestrator snapshot<br/>code + canonical documentation"]
-    Snapshot --> Review["Selected independent<br/>critic or test pass"]
-    Review --> CI["Exact required CI"]
-    CI --> Release["Deployment safety"]
-
-    Simplifier -. consolidated design bundle .-> Design["Supporting design review<br/>same critic context"]
-    Design -. accepted before dependent code .-> Developer
-    Developer -. documentation impact .-> Wiki["Public-wiki editor"]
-    Wiki -. owned pages and evidence .-> Developer
-    Conductor["Conductor"] -. parallel or operational<br/>checkpoints .-> Risk
-    Conductor -.-> Release
-    Specialist["Conditional specialists"] -. owned evidence .-> Developer
-    Final["Final validator"] -. multi-specialist or<br/>irreversible reconciliation .-> Release
-    Perfetto["PerfettoStan + one simplifier pass"] -. challenges optional<br/>process expansion .-> Risk
+    Request["Accepted requirement"] --> Owner["Accountable implementation owner"]
+    Owner --> Candidate["Code and affected canonical documentation"]
+    Candidate --> Evidence["Proportionate verification"]
+    Evidence --> CI["Required exact-source CI"]
+    CI --> Operation["Authorized operation owner"]
+    Specialist["Expertise for an evidenced gap"] -. bounded evidence .-> Owner
+    Independent["Independent verifier"] -. changed trust or state boundary .-> Evidence
+    Observer["Coordination when needed"] -. observe actual effects .-> Operation
 ```
 
-BetStan does not require the former six-stage chain for every change. It
-selects the smallest profile whose triggers cover the actual diff and
-operation:
-
-| Profile | Required evidence |
+| Change | Verification |
 |---|---|
-| Low risk | One implementation owner, one independent critic or test pass, and exact required CI |
-| Triggered specialist | Low-risk evidence plus only the specialist whose boundary changed |
-| Complex or irreversible | Architect; three-model simplifier synthesis only for disputed, materially complex, or irreversible design; final validation only for multi-specialist reconciliation or an irreversible release decision |
+| Ordinary bounded, reversible work | Relevant existing tests, inspection, or build checks |
+| Documentation-only work | Applicable documentation link and contract checks |
+| Trust or state boundary | Independent verification of the changed authorization, CI trust, release authority, writer ownership, data integrity, migration, or recovery boundary |
 
-Snapshot creation and bounded design review are supporting work, not additional
-gates. Applicable exact-head specialist reviews consume the snapshot before a
-formal critic when the selected profile requires one.
+Required current-SHA CI and applicable runtime checks remain in force. The
+author cannot supply their own independent verification. Implementation,
+verification, and privileged execution are responsibilities, not a requirement
+for a separate agent at each step.
 
-## Quality-chain agent roles
+There is no compulsory architect/simplifier/developer/critic/test-engineer/
+final-validator conveyor, model quorum, unanimity veto, review-of-review, or
+duplicate test handoff. Select expertise for a concrete acceptance gap, not
+because a role exists. Missing required evidence blocks its dependent action;
+absence of an optional role's status does not.
+
+## Engineering capabilities
 
 | Agent | Role | Mode |
 |---|---|---|
-| `betstan-architect` | Defines boundaries, compatibility, risks, and acceptance criteria when architecture or complex-release triggers apply | Read-only |
-| `betstan-simplifier` | Supplies three independent model-family passes and synthesis for disputed, materially complex, or irreversible design; supplies one model-neutral process pass after a PerfettoStan stop | Read-only |
+| `betstan-architect` | Resolves an evidenced design question, boundaries, compatibility, and acceptance criteria | Read-only |
+| `betstan-simplifier` | Challenges unnecessary scope or abstraction; returns a bounded recommendation | Read-only |
 | `betstan-backend-developer` | Implements bounded TypeScript service, shared-contract, RabbitMQ, MongoDB, migration, and backend-test changes | Repository editor |
 | `betstan-frontend-developer` | Implements bounded React, SSE, responsive, accessible, and client-test changes | Repository editor |
-| `betstan-validation-critic` | Provides the selected independent low-risk review or, for complex work, reviews the consolidated design and immutable candidate | Read-only |
-| `betstan-test-engineer` | Provides the selected independent test pass or the formal test evidence required by a complex profile | Read-only |
-| `betstan-final-validator` | Reconciles multiple specialist decisions or an irreversible release decision | Read-only |
+| `betstan-validation-critic` | Independently verifies concrete correctness, concurrency, or trust-boundary risks | Read-only |
+| `betstan-test-engineer` | Supplies focused executable verification and identifies evidence gaps | Read-only |
+| `betstan-final-validator` | Reconciles aggregate evidence when unresolved cross-domain risk needs it | Read-only |
 
-Backend and frontend developers share the developer gate for application
-paths. Infrastructure/runtime specialists or the authorized human/orchestrator
-own that gate for their infrastructure or governance paths. The public-wiki
-editor owns canonical documentation and returns supporting output to the
-registered implementation owner.
+Each editor stays within assigned paths. Infrastructure and governance work
+remain with their authorized owners. The public-wiki editor returns owned
+canonical pages and evidence directly to the accountable implementation owner.
 
 File-editing developers are not Git actors. They do not merge, push, approve,
 or deploy; the authorized orchestrator creates the complete immutable
@@ -76,8 +72,8 @@ candidate.
 
 | Agent | Role | Mode |
 |---|---|---|
-| `betstan-conductor` | Registers work, dependencies, checkpoints, progress signals, protected gates, and handoffs; detects stalls and coordinates bounded recovery | Read-only by default; narrowly governed edits only for a proven self-imposed policy defect |
-| `PerfettoStan` | Challenges unsupported agents, handoffs, reviews, checks, waits, and correction cycles; returns the shortest safe continuation with one simplifier process pass when it stops optional expansion | Read-only |
+| `betstan-conductor` | Observes parallel, asynchronous, external, or mutating work; tracks dependencies, real progress, and bounded recovery | Read-only by default; narrowly governed edits only for a proven self-imposed policy defect |
+| `PerfettoStan` | When requested for process friction, returns a smaller safe continuation directly to the owner | Read-only |
 
 Use the conductor only for parallel, asynchronous, external, or mutating work
 that needs checkpoints and recovery. A single synchronous implementation and
@@ -86,16 +82,14 @@ distinguishes activity from progress. A running process, growing log, or
 watcher is not a deliverable. It checks the underlying job, approval, agent
 result, or handoff and assigns one owner for the next action.
 
-PerfettoStan is a process challenger, not a universal quality gate or release
-authority. At task start and each proposed process expansion, it asks which
-unmet criterion or mandatory safeguard requires the step and whether accepted
-evidence already satisfies it. It may stop new optional work and use one
-model-neutral simplifier process pass to remove or combine unsupported steps.
-It cannot bypass branch protection, exact-SHA validation, selected independent
+PerfettoStan is optional, not a prerequisite to starting or resuming work.
+The accountable owner may remove unsupported duplication directly; no
+PerfettoStan-to-simplifier continuation is required. Process simplification
+cannot bypass branch protection, exact-SHA validation, required independent
 evidence, locks, fences, provenance, rollback, or active incident-safety work.
 
 Routine scope, routing, receipt acknowledgements, and timers belong to the
-conductor, not a critic queue. It returns obvious scope violations to their
+owner or assigned conductor, not a critic queue. It returns obvious scope violations to their
 native owner and consults the retained critic only for substantive ambiguity.
 Missing advisory work blocks only its affected dependants: independently
 authorized observation, eligible approval, safe completion, and incident
@@ -118,8 +112,8 @@ observed blocker. See [[Release Orchestration]] for owned operational waits.
 
 After a successful deployment but failed acceptance, the conductor records the
 exact assertion and distinguishes application, harness, and provider causes
-before routing only the affected correction. Once the existing final-evidence
-checklist passes, it closes the unit rather than adding reviews, status-only
+before routing only the affected correction. Once scoped completion criteria
+pass, it closes the unit rather than adding reviews, status-only
 handoffs, or another release. See [[Engineering Learnings]] for these lessons.
 
 It also treats concurrent feature delivery as normal. A session records the
@@ -132,27 +126,29 @@ production mutations serialized.
 
 | Agent | Trigger | Role |
 |---|---|---|
-| `betstan-public-wiki-editor` | Public documentation impact is plausible or ambiguous | Returns the smallest relevant canonical page update and evidence; requires authorized post-merge publication but does not publish |
-| `betstan-ux-ui-expert` | Any user-visible or interactive change | Defines the product-wide consistency baseline, accessibility and responsive criteria, then audits the immutable result |
+| `betstan-public-wiki-editor` | Documentation expertise is needed for public impact | Returns the smallest relevant canonical page update and evidence; requires authorized post-merge publication but does not publish |
+| `betstan-ux-ui-expert` | Evidenced design, accessibility, responsive, or interaction risk | Supplies a consistency specification, result review, or both, as assigned |
 | `betstan-service-contract-reviewer` | HTTP, JWT, message, persistence, or shared-package boundary change | Traces producer, consumer, data, compatibility, and affected-test impact |
 | `betstan-quality-gate-reviewer` | CI, coverage, branch protection, or false-green risk | Verifies gates are reproducible, complete, and attached to the intended change |
 | `betstan-branch-governance-reviewer` | Branch, PR, ancestry, or exact-SHA question | Verifies allowed source/target flow and trusted status provenance |
 | `betstan-auth-security-reviewer` | Authentication, session, identity, or authorization change | Reports high-confidence exploitable auth/security defects without editing |
 
-The UX/UI expert is mandatory for every user-facing change. Other specialists
-join only when their trigger applies; they do not become extra profile steps.
+This catalog is not an invocation checklist. Every change records documentation
+impact, which the owner may assess directly. User-facing changes retain
+source-bound consistency evidence and appropriate rendered checks without a
+compulsory two-phase UX handoff. See [[UI UX Consistency]].
 
 ## Deployment, runtime, and migration specialists
 
 | Agent | Trigger | Role |
 |---|---|---|
 | `betstan-deployment-safety` | PR, CI/CD, exact-SHA deployment, rollback, or post-merge work | Owns release safety, provenance, rollback readiness, and deployed-state conclusions |
-| `betstan-oci-operator` | OCI-owned repository work or explicitly approved runtime operation | Edits only owned source for repository work; diagnoses runtime work first and performs only the authorized bounded operation |
+| `betstan-oci-operator` | OCI-owned repository work or exactly authorized runtime operation | Edits only owned source for repository work; diagnoses runtime work first and performs only the authorized bounded operation |
 | `betstan-oci-health-reviewer` | OCI deployment or health assessment | Independently checks exact provenance, routing, workloads, data, broker, and cost constraints |
 | `betstan-domain-ingress` | DNS, TLS, redirect, ingress, or load-balancer change | Protects canonical routing and diagnostic separation |
 | `betstan-mongo-migration` | Shared-Mongo migration, cleanup, rollback, or recovery | Preserves journal, lock, topology, and data safety |
 | `betstan-migration-recovery` | Interrupted cross-cloud replacement | Recovers the existing migration state rather than starting a competing operation |
-| `betstan-aks-operator` | Explicitly approved Azure runtime diagnostics or recovery | Owns bounded AKS operations and restoration evidence |
+| `betstan-aks-operator` | Exactly authorized Azure runtime diagnostics or recovery | Owns bounded AKS operations and restoration evidence |
 | `betstan-azure-cost-analyst` | Azure cost or regional optimization question | Produces read-only, evidence-based cost comparisons under runtime constraints |
 | `betstan-azure-retirement` | Verified post-migration Azure deletion | Deletes only the exact approved inventory and proves retirement completion |
 
@@ -160,11 +156,13 @@ Mutation-capable runtime agents begin with diagnosis and require exact scope,
 authority, rollback, and stop conditions. They do not treat a broad request as
 permission for unrelated production changes.
 
-Deployment safety brings title, configuration, and publication-metadata checks
-forward, preserves the bounded same-authority approval rules, and verifies final
-artifact bytes, committed/no-lease state, and post-upload cleanup. The lessons in
+Deployment safety brings applicable configuration and publication-prerequisite
+checks forward, preserves the bounded same-authority approval rules, and
+verifies final artifact bytes, committed/no-lease state, and post-upload cleanup. The lessons in
 [[Engineering Learnings]] refine execution of [[Release Orchestration]]; they do
-not add gates or expand production authority.
+not add gates or expand production authority. Exact runtime authorization
+follows the CLI-owned automatic versus human-origin approval boundary in
+[[Release Orchestration]].
 
 Seven specialists retain manual-only invocation: AKS operator, Azure
 retirement, domain/ingress, migration recovery, Mongo migration, OCI health
@@ -179,86 +177,25 @@ identity validation does not require an OKE configuration. In-runtime Mongo
 consolidation and cross-cloud migration retain their own identity, backup,
 compatibility, lock/fence, and rollback evidence.
 
-## Handoffs
+## Evidence and actual transfers
 
-Each work unit records:
+Keep one existing task record with the accepted request, exact source/diff,
+scope, acceptance criteria, ownership, commands/results, limitations, and next
+action. Active external work also needs an exact run/process reference,
+checkpoint, stop condition, and recovery action. Do not create a second ledger
+or acknowledgement-only work unit.
 
-- the immutable root request, with a distinct stable work ID for each logical
-  gate and one owner;
-- the bounded objective, acceptance criteria, allowed actions, and exclusions;
-- the exact baseline and, for formal review, immutable candidate SHA;
-- dependencies and specialist evidence;
-- files or runtime surfaces owned;
-- validation performed and not performed;
-- unresolved risks;
-- the original correction budget, monotonic attempt count, checkpoint,
-  recovery action, and stop condition;
-- one exact next owner.
+When a transfer is actually needed, return the result directly to the next
+owner. Findings name the concrete mismatch, consequence, and smallest
+correction. Keep corrections with the original owner where available and
+reopen only evidence invalidated by changed source, dependencies, criteria, or
+an unresolved finding. Never replace an operation until its effects are known
+and overlapping writers are excluded.
 
-| Completed output | Direct next owner |
-|---|---|
-| Low-risk accepted requirement | Registered implementation owner |
-| Disputed, materially complex, or irreversible design | Architect, then three independent simplifier passes and one synthesis |
-| Consolidated design bundle | Supporting design critic, then registered implementation owner |
-| Implementation and triggered specialist outputs, including wiki pages | One implementation owner assembling the complete candidate |
-| Complete code and canonical documentation | Authorized orchestrator creating the immutable snapshot |
-| Immutable low-risk candidate | One independent critic or test pass, then exact required CI |
-| Immutable multi-specialist or irreversible candidate | Formal critic and tests, then final validator |
-| Final source acceptance | Deployment safety, then the authorized operation owner |
-| Terminal operation and applicable publication evidence | Conductor/orchestrator completion |
-
-Route completed work immediately. The recipient's first scoped action
-acknowledges receipt before substantive review; receipt is not acceptance.
-A missing receipt becomes a stall at its registered acknowledgement deadline,
-not instantly, and does not need an acknowledgement-only agent.
-
-Corrections stay in the same logical agent conversation whenever possible.
-They preserve that gate's work ID and original budget under the same root
-request; a new branch, model, or registration does not reset attempts.
-Starting a replacement agent while the original can still produce side
-effects creates contradictory ownership and is prohibited.
-
-### Design review and formal code review
-
-For disputed, materially complex, or irreversible design, the critic reviews
-one consolidated bundle of architecture, all three completed sealed passes,
-and synthesis before dependent implementation. `DESIGN_REVIEW_PASSED` accepts
-only the design bound to its baseline and artifact; it is not `APPROVE_SLICE`,
-test success, or release authority. The critic does not review individual
-sealed passes, reveal their reasoning to one another, or redo synthesis.
-
-When that complex profile applies, reuse the same critic context for the
-formal immutable code-and-documentation review. Low-risk work instead uses its
-single selected independent critic or test pass. The implementation owner
-assembles the candidate; the authorized orchestrator creates its snapshot.
-Exact-head UX and other applicable source reviews consume that snapshot before
-formal critic review when required. Source corrections require a new snapshot
-and revalidation of affected evidence. Native specialist statuses remain
-scoped evidence, not a complete developer-gate handoff.
-
-Further critic work requires changed substantive evidence, an unresolved
-finding, or a concrete scope risk. Routine reports, status, acknowledgements,
-timers, approvals, and unchanged artifacts do not trigger another round.
-Findings name a concrete mismatch, consequence, and smallest correction, not
-an optional redesign. When registered, the conductor checks critic scope and
-timeliness. A final validator used by the selected profile independently
-checks critic and test evidence and does not return its verdict for critic
-approval. There is no recursive reviewer chain.
-
-### Supporting test evidence
-
-An implementation or test owner may supply narrowly scoped, source-bound
-rendered measurements to UX before the selected independent review. A test
-engineer's `SUPPORTING_EVIDENCE_READY` result belongs only to that supporting
-task: it does not require its own future UX or critic verdict, cannot emit
-`TESTS_GREEN`, and cannot satisfy the selected independent test pass or any
-formal test evidence required by a complex profile. The requesting specialist
-consumes the measurements and returns its own evidence to the implementation
-owner.
-
-Reuse verified immutable facts only with current scope and complete coverage
-as required by [[Quality Gates]]. Keep private handoff references out of the
-public handbook; see [[Security]].
+Supporting measurements prove only their stated claims. They need no prior
+UX/critic verdict or duplicate test round and do not establish independent
+verification, whole-candidate acceptance, or runtime health by themselves.
+Keep private evidence references out of this handbook; see [[Security]].
 
 For scoped-fixture or additional-page harness corrections, the test engineer
 follows [[Engineering Learnings]] on actual helpers, fixture isolation,
@@ -268,15 +205,15 @@ production acceptance.
 
 ### Resuming accepted reviews
 
-The canonical reuse policy is **Reusing accepted evidence** in
+The canonical reuse policy is **Evidence and reuse** in
 [the agent-team README](https://github.com/vasilyevstan/betstan/blob/master/.github/agents/README.md).
 A crash, pause, compaction, new PR, promotion, or ancestry synchronization
 alone does not invalidate a completed source review. Recover its original
-SHA, base, scope, criteria, report, verdict, and required model metadata;
+SHA, base, scope, criteria, report, verdict, and limitations;
 missing evidence must not be invented or relabelled as a new-head review.
 
 Reuse requires proof that the relevant inputs, dependencies, criteria, and
-current policy remain unchanged. Reopen only invalidated gates and their
+current policy remain applicable. Reopen only invalidated evidence and its
 dependants, keeping the same owner context when available. Required
 exact-current-SHA CI, merge-snapshot checks, runtime acceptance, provenance,
 and approval controls remain current. Record the justification in the
@@ -284,39 +221,22 @@ existing handoff, not a new ledger.
 
 ## Model diversity
 
-For disputed, materially complex, or irreversible design, the simplifier uses
-three independent model families with the same input, then one synthesis. The
-individual passes challenge scope; they do not vote on requirements. A
-PerfettoStan stop instead uses one model-neutral simplifier process pass and
-does not create the three-model design gate. If any recommendation would
-remove accepted behavior, safety, compatibility, observability, or rollback,
-it is rejected.
-
-Other reviews use model diversity when it adds independent reasoning, but the
-repository still assigns one path owner and one final authority for each
-decision.
+Multi-model deliberation is optional unless explicitly requested. Reuse
+accepted synthesis rather than repeating a completed design discussion.
+Disagreements are decided by the accountable owner against requirements and
+evidence, not unanimity. Model agreement is not implementation proof and cannot
+remove safety, compatibility, data integrity, or rollback obligations.
 
 ## Agent selection guide
 
-1. Classify the actual diff as low risk, triggered-specialist, or complex and
-   irreversible.
-2. Select the registered implementation owner by affected paths and edit
-   authority, including infrastructure and governance work.
-3. Use an architect and three-model simplifier synthesis only for disputed,
-   materially complex, or irreversible design.
-4. Record documentation impact; invoke the public-wiki editor only when impact
-   is plausible or ambiguous.
-5. Add only specialists whose documented trigger applies.
-6. Use the conductor only for parallel, asynchronous, external, or mutating
-   work that needs checkpoints and recovery.
-7. Let PerfettoStan challenge each optional process expansion; after a stop,
-   use one simplifier process pass to return the shortest safe continuation.
-8. Assemble code and documentation, obtain the orchestrator's immutable
-   snapshot, then run the independent review and exact CI selected by the
-   profile. Use final validation only for multi-specialist reconciliation or
-   an irreversible release decision.
-9. Hand release decisions to deployment safety and the matching runtime
-   operator.
+1. Assign one accountable owner with the required path and action authority.
+2. Inspect the exact diff and reuse applicable accepted evidence.
+3. Choose proportionate verification; independently verify changed trust/state
+   boundaries.
+4. Record documentation impact and affected UI consistency evidence.
+5. Add expertise or coordination only for a concrete gap.
+6. Keep current exact-source checks and origin-bound operation controls.
+7. Report actual results and the exact next owner without status-only handoffs.
 
 ## Related pages
 

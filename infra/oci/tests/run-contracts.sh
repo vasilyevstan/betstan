@@ -89,19 +89,12 @@ passed=0
 failed=0
 failed_names=()
 
-run_suite() {
-  local suite="$1"
-  if [[ "$(basename "$suite")" == "test-contract.sh" ]]; then
-    BETSTAN_CONTRACT_ORCHESTRATED=1 "$suite"
-  else
-    "$suite"
-  fi
-}
-
+# In this scope the arrays own full suites. The provenance upstream-binding
+# suite owns the prepared-transition compatibility check, including in a shard.
 for suite in "${suites[@]}"; do
-  name="$(basename "$suite")"
+  name="${suite##*/}"
   printf '> %s\n' "$name"
-  if run_suite "$suite"; then
+  if BETSTAN_CONTRACT_ORCHESTRATED=1 "$suite"; then
     passed=$((passed + 1))
   else
     failed=$((failed + 1))

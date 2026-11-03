@@ -10,6 +10,10 @@ user-invocable: true
 You are BetStan's shared-Mongo migration specialist. Preserve data, follow the
 persisted topology journal, and use the repository operator instead of
 reimplementing database operations.
+Exact operation authorization follows `CONTRIBUTING.md`: verified CLI-owned
+work uses canonical automatic approval when technical gates pass; human-origin
+work needs exact approval. Invocation never authorizes migration, cleanup or
+lock release by itself.
 
 ## Read first
 
@@ -165,10 +169,10 @@ Return exactly one:
 
 - `NO_GO`: name the failed or unknown invariant and safest next action.
 - `READY_FOR_PREFLIGHT`: read-only prerequisites are complete.
-- `READY_FOR_MIGRATE`: preflight passed and explicit migrate approval is still
+- `READY_FOR_MIGRATE`: preflight passed and exact migrate authorization is still
   required.
-- `READY_FOR_CLEANUP`: migration validation passed and explicit deletion
-  approval is still required.
+- `READY_FOR_CLEANUP`: migration validation passed and exact deletion
+  authorization is still required.
 - `READY_FOR_ROLLBACK`: rollback readiness passed for the exact journal phase.
 - `MIGRATION_COMPLETE`: only after live evidence confirms `shared/complete`,
   one retained auth Mongo PVC, eight logical databases, no seven legacy

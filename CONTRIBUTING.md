@@ -10,10 +10,12 @@ Use this flow:
 2. Validate the complete `dev` branch.
 3. Promote production only with an up-to-date pull request from `dev` to `master`.
 4. Require the trusted, base-scoped `branch-policy/master` and `pr-quality-gates/master` statuses on both the promotion head and current merge snapshot to pass.
-5. Before merging a promotion, bind approval to the exact head SHA and every production-capable workflow the diff will trigger.
-6. Do not open a synchronization PR solely because a promotion was squash
-   merged. Before a later promotion, incorporate the current `master` into that
-   bounded integration candidate and revalidate its exact SHA.
+5. Before merging a promotion, verify origin/ownership and the applicable
+   exact-head approval mode, including every production-capable workflow.
+6. Use ancestry-preserving merges for integration and promotion. Verify the
+   intended protected ancestry and exact tested snapshot before merging.
+   Reconcile `master` into `dev` only when ancestry requires it, not through an
+   automatic content-identical synchronization PR.
 
 Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
 
@@ -80,27 +82,29 @@ or malformed label retain their existing policy meaning. The helper adds
 labels without removing current labels and warns rather than blocking the PR
 flow when GitHub label mutation is temporarily unavailable.
 
-Every pull request that changes what a user sees or how a user interacts must
-also include an exact-head `betstan-ux-ui-expert` result. Use one registered
-two-phase specialist work unit: establish the named reference pattern before
-implementation, then review the immutable result. Record the affected routes,
-components, states, UI variants, themes, and viewport classes; the stable
-reference screens/components/tokens; every intentional exception and its
-product rationale; the final UX status and head SHA; and any evidence gap.
+For user-facing changes, record the affected routes, components, states,
+themes and viewports, relevant reference patterns, intentional exceptions and
+their rationale, verification source and any evidence gap. Use the UX
+specialist when design or interaction risk needs that expertise; a separate
+two-phase specialist invocation is not compulsory for every visual edit.
 Non-user-facing changes write `not applicable`.
 
-Pull request titles must be short, plain-language outcomes that a reviewer can
+Prefer short, plain-language PR titles that a reviewer can
 understand without opening the diff, such as `Add second-half score betting` or
-`Fix live slip alignment`. Do not use ambiguous category labels such as
-`chore`, `misc`, or `wip`. Merge safety rejects those prefixes, single-word
-titles, and titles longer than 72 characters.
+`Fix live slip alignment`. Title wording, body presentation and session/feature
+labels are informational, not safety authority. Actual missing rationale,
+source, approval, compatibility or validation evidence remains blocking.
+This candidate's `pr-merge-safety-stan.sh` no longer rejects title wording;
+its approval, current-source, ancestry and exclusivity checks remain.
+Executable checks in not-yet-replaced protected revisions still govern their
+runs until proven cutover; no remote cutover is implied.
 
 ## Public documentation impact
 
 Every change records a documentation-impact assessment after implementation
-and before immutable review. Register `betstan-public-wiki-editor` when public
-impact is plausible or ambiguous. When the exact diff clearly has no public
-documentation impact, the implementation handoff instead names the inspected
+and before source acceptance. The accountable owner may perform it directly;
+use `betstan-public-wiki-editor` when its expertise is needed. When the exact
+diff clearly has no public documentation impact, the task record names the inspected
 paths and explains why no canonical page changes are needed.
 
 Changes to product behavior, architecture, contracts, data lifecycle,
@@ -110,27 +114,29 @@ pull request.
 
 ## Risk-conditional validation
 
-Use the smallest validation profile that covers the exact diff. Bounded,
-reversible, backward-compatible changes default to one implementation owner,
-one independent critic or test pass, and exact required CI. Add only
-specialists triggered by changed UX, security, contracts, quality gates,
-deployment, data, or architecture boundaries.
+Use one accountable owner and the smallest verification that covers the exact
+diff: relevant existing tests, inspection or build checks for ordinary changes.
+Trust or state-boundary changes require independent verification of the
+changed authorization, CI trust, release authority, physical writer ownership,
+data integrity, migration or recovery behavior. The author cannot supply their
+own independent verification. This is not a blanket no-review or no-test policy.
 
-Three-model simplifier synthesis is reserved for disputed, materially complex,
-or irreversible design. Final validation is reserved for reconciling multiple
-specialist decisions or an irreversible release decision. Start the conductor
-only for parallel, asynchronous, external, or mutating operations that need
-active checkpoints or recovery; a single synchronous work unit does not need
-one.
+Implementation, verification and privileged execution are responsibilities,
+not a compulsory sequence of agents. `.github/agents/README.md` owns capability
+routing and evidence reuse. There is no mandatory architect/simplifier/
+developer/critic/test-engineer/final-validator conveyor, model quorum,
+unanimity veto, review-of-review or repeated test/status-only handoff. Reuse
+accepted design and unaffected evidence; independently verify the actual
+changed trust/state boundaries, not the existence of prior review tokens.
 
-PerfettoStan continuously challenges unnecessary agents, handoffs, reviews,
-checks, waits, and repeated evidence. It may stop new optional work when a step
-has no unmet acceptance criterion, mandatory safeguard, or evidenced blocker.
-After `FLOW_STOP_OPTIMIZE`, one model-neutral simplifier process pass supplies
-the reduction evidence and PerfettoStan returns the smaller continuation before
-work resumes. This authority never bypasses protected branches, exact-SHA
-checks, selected independent evidence, production serialization, locks,
-fences, provenance, rollback, or active incident-safety work.
+Before adding process, name its unmet acceptance criterion or evidenced
+blocker. The owner may remove optional duplication directly without a
+PerfettoStan/simplifier continuation round. Keep required current-SHA CI,
+protected ancestry, origin/ownership approval, immutable deployed identity,
+physical single-writer locks/fences, data integrity, compatible recovery and
+observed health. Existing executable controls remain authoritative until
+their replacements are proven and activated. No new source-snapshot verifier
+or controller is made active by these documentation changes.
 
 The repository files are the reviewed source of truth. After the exact commit
 is merged, publish `docs/wiki/*.md` byte-for-byte to the GitHub wiki and verify
@@ -147,11 +153,13 @@ smallest appropriate rendered evidence. See
 `docs/wiki/UI-UX-Consistency.md`.
 
 Keep this detail on implementation, promotion, synchronization, and closed
-attempt PRs. Title/body edits run lightweight branch policy only; they do not
-rerun source, OCI, service coverage, or deployment-safety suites. Derive the
-exact head SHA from Git or GitHub immediately before preparing the final description, and
-prefer one complete metadata edit over repeated corrections that start
-duplicate validation runs.
+attempt PRs. Lightweight metadata-only validation describes the staged lean
+path, not this compatibility candidate. Its `production-build.yml` is
+byte-identical to the trusted master workflow and retains `pull_request.edited`
+plus full legacy validation. Current protected workflow triggers remain
+authoritative until tested cutover. Derive the exact head SHA from Git or
+GitHub immediately before preparing the final description, and prefer one
+complete metadata edit over repeated corrections that start duplicate runs.
 
 Copilot CLI-created pull requests carry the `copilot-cli-managed` label. Only
 Copilot CLI may apply it, and only to a PR that the active CLI workflow created
@@ -159,14 +167,19 @@ and owns; never relabel an existing human PR. Because the CLI and a human using
 `gh` share the same GitHub identity, this label is an operational convention,
 not cryptographic attestation.
 
-CLI-managed PRs may use `COPILOT_CLI_AUTO_APPROVE=true` without a separate
-personal prompt only after the merge-safety script verifies the label, exact
+Verified CLI-created and CLI-owned PRs use `COPILOT_CLI_AUTO_APPROVE=true`
+without a separate personal prompt only after the merge-safety script verifies the label, exact
 refs, trusted required checks, resolved review threads, production workflow
 inventory, and absence of actionable competing production activity. Every
 other PR requires `APPROVED_SHA` equal to its exact current head, including
 PRs targeting `dev`. Human `master` promotions also require the exact
 `APPROVED_WORKFLOWS` inventory. Automatic mode never skips required checks,
 immutable-SHA gates, or production safety.
+
+Promptly progress eligible CLI-owned merges and follow-on protected Actions
+through the canonical approval path, including later gates in the same chain.
+Respect approved environment wait timers. Never adopt human-origin work or
+another owner's operation; the managed label alone is not proof of ownership.
 
 Do not merge a PR until `pr-merge-safety-stan.sh` passes in the correct
 automatic or human mode for its exact current head.

@@ -9,31 +9,66 @@ and artifact identity.
 Production is never updated directly from a developer worktree, a mutable
 image tag, a stale branch name, or an unverified workflow rerun.
 
+## Delivery redesign: compatibility stage
+
+The delivery redesign is implemented only in part. Consolidated repository
+policy uses accountable ownership, proportionate verification, conditional
+specialists, and reuse of applicable evidence. Current executable checks,
+trusted workflow identities, protected `dev`-to-`master` ancestry, and
+origin-bound approval remain authoritative until their replacements are
+proven and activated. Editing policy does not reload a running session.
+
+The local publisher correction changes receipt IO accounting, not receipt
+identity, expiry, or consumed authority. The inactive coverage-review path is
+being retired with temporary legacy readers retained. A candidate-only
+three-job shadow workflow now stages trusted source capture, unprivileged
+exact-merge source-policy checks, and an isolated native-signed aggregate.
+It is not an active producer or authoritative publisher integration; governed
+protected execution and real BetStan attestation remain pending.
+[[Quality Gates]] owns these implementation details and remaining proof
+requirements.
+
+The compatibility landing is prepared locally: `production-build.yml` is
+byte-identical to the trusted-master workflow. The lean workflow remains in
+existing `dev` and repository history. The full trusted workflow remains the
+temporary authority while the shadow replacement is proven. This preparation is not a
+landed change, an executed bootstrap, or activation of the replacement.
+Existing head/merge-snapshot statuses and first-attempt rules remain required.
+No proposed snapshot proof may replace them before protected enforcement is
+accepted. Rollback must retain readers for all emitted evidence and preserve
+spent receipts; use a reviewed forward correction when an older controller
+cannot interpret that state. Never enable competing writers or release a
+physical hold on the strength of a timeout.
+
+This implementation stage does not establish service or live-betting health,
+resume paused recovery, or claim code promotion, production dispatch, or
+cutover. Runtime claims require separate observed evidence. Public wiki
+publication also waits for accepted merged source.
+
 ## Branch flow
 
 1. Create a focused feature, fix, operations, or documentation branch.
 2. Open a pull request to `dev`.
 3. Pass the exact-head and merge-snapshot quality gates.
-4. Merge the focused change into `dev`.
+4. Merge the focused change into `dev`, preserving ancestry.
 5. Promote an up-to-date `dev` to `master` through a separate pull request.
-6. Do not open a standalone synchronization PR after a squash merge. Before a
-   later promotion, incorporate current `master` into that bounded candidate
-   and revalidate the exact resulting SHA.
+6. Preserve ancestry during promotion as well. Reconcile protected branches
+   only when ancestry requires it; do not create content-identical
+   synchronization PRs as a ritual. Validate the exact resulting snapshot.
 
 Direct pushes to `dev` or `master` are not part of the supported flow. Only
 `dev` may be promoted to `master`.
 
 ### Protected-workflow bootstrap
 
-When a protected quality workflow must change, first promote the fail-closed
-publisher support while retaining the currently trusted workflow bytes. A
-short-lived selector may then bind the first eligible open PR with the exact
-repository, refs, trusted blob, and authorized blob instead of reserving a PR
-number before issuance. The PR transition and quality run must postdate
-issuance, and receipt publication revalidates live refs, the complete snapshot,
-and promotion ancestry. Source integration and `dev`-to-`master` promotion use
-separate one-use receipts. The workflow restoration removes the temporary
-declarations while preserving generic selector support.
+Protected quality-workflow changes must remain consumable by the currently
+trusted publisher. Compatible control can land while preserving trusted
+workflow bytes; changing that protected identity still needs its existing
+exact authorization and normal protected promotion. Source integration and
+promotion retain separate one-use receipt contexts. A consumed receipt remains
+consumed, and source edits cannot reset its identity or expiry. See
+[[Quality Gates]] for the compatibility boundary, not a bootstrap execution
+procedure.
 
 ### Concurrent feature delivery
 
@@ -77,7 +112,7 @@ flowchart LR
     Wiki --> Candidate
     Candidate --> DevPR["PR to dev"]
     DevPR --> Snapshot["Authorized orchestrator<br/>immutable candidate"]
-    Snapshot --> DevChecks["Applicable exact-head specialists,<br/>selected independent review + CI"]
+    Snapshot --> DevChecks["Proportionate verification<br/>and required exact-source CI"]
     DevChecks --> Dev["dev"]
     Dev --> Promote["dev to master PR"]
     Promote --> MergeChecks["Exact head and<br/>merge-snapshot checks"]
@@ -123,9 +158,18 @@ rollback. Internal session identifiers, local paths, user identities,
 credentials, private runtime references, and production identifiers are never
 used as public labels.
 
-Metadata is part of the reviewed evidence. Title/body edits run lightweight
-branch policy only and reuse existing exact head/base source evidence; they do
-not start source, OCI, coverage, or deployment-safety validation.
+Plain-language wording and description presentation help contributors, but
+are not source-quality or approval authority. Missing actual rationale,
+source, compatibility, approval, or validation evidence still blocks its
+dependent action. Legacy merge helpers continue to enforce their existing
+presentation checks until a tested replacement is activated.
+
+With the temporary full `production-build` workflow, PR title/body edits can
+trigger that workflow's full validation through `edited`. Avoiding that source
+rerun is behavior of the lean variant retained in `dev` and repository history,
+not the compatible baseline. The trusted publisher's metadata refresh may
+reuse existing exact head/base evidence but still cannot create or recover a
+source-quality transition.
 
 Context-label setup reads the PR's labels first. If both informational context
 labels are already present, it performs no GitHub mutation. Otherwise it
@@ -135,41 +179,24 @@ strict-failure behavior. This prevents avoidable metadata churn; it does not
 change managed-label authority or replace the fresh-transition recovery
 described in [[Quality Gates]].
 
-## Quality chain
+## Verification responsibilities
 
-Use the smallest risk profile that covers the actual diff:
+[[Quality Gates]] defines proportionate verification and independent
+verification of changed trust/state boundaries. [[Agents]] explains optional
+capabilities, evidence reuse, and direct transfers to the accountable owner.
+These responsibilities do not require a conveyor, model quorum, recursive
+review, mandatory UX handoff, or process-simplification round.
 
-1. Low-risk, reversible work uses one registered implementation owner, one
-   independent critic or test pass, and exact required CI.
-2. Add only specialists triggered by changed UX, security, contract, quality,
-   deployment, data, or architecture boundaries.
-3. Use three-model simplifier synthesis only for disputed, materially complex,
-   or irreversible design.
-4. Use final validation only to reconcile multiple specialist decisions or an
-   irreversible release decision.
+Every change records documentation impact; relevant canonical pages join the
+complete candidate before source acceptance. User-facing changes retain
+consistency evidence. The owner may request specialist or coordination help
+for a concrete gap rather than a missing role token.
 
-The conductor is used only for parallel, asynchronous, external, or mutating
-operations that need checkpoints and recovery; it is not a quality gate.
-PerfettoStan and one simplifier process pass may stop new optional work, remove
-unsupported or duplicate steps, and return the shortest safe continuation.
-They cannot bypass protected branches, exact-SHA validation, selected
-independent evidence, production serialization, locks, fences, provenance,
-rollback, or active incident-safety work.
-`betstan-ux-ui-expert` is mandatory for every user-facing visual or
-interaction change. Other specialists join when their explicit trigger
-applies.
-
-Every change records documentation impact. The public-wiki editor is a
-supporting unit when public impact is plausible or ambiguous, not a universal
-quality gate.
-
-The consolidated design review, single candidate assembly owner, supporting
-test evidence, and direct handoffs follow [[Agents]]. They do not add another
-release or documentation gate. Source acceptance remains separate from
-runtime authorization and the selected procedure's operational checks.
-
-No agent may approve its own implementation, and no agent verdict replaces
-GitHub branch protection or protected-environment approval.
+Source acceptance remains separate from runtime authorization and the selected
+procedure's operational checks. The author cannot supply their own independent
+verification, and no verdict replaces branch protection, exact-SHA validation,
+origin/ownership checks, protected approval, physical single-writer locks and
+fences, data integrity, compatible rollback/recovery, or observed health.
 
 ## Approval model
 
@@ -177,10 +204,10 @@ Approval is classified by origin:
 
 - Copilot CLI-created and CLI-owned pull requests and protected operations,
   including downstream workflows whose ownership is proven by the canonical
-  policy, may use the bounded no-personal-prompt path after every technical,
+  policy, progress through the bounded no-personal-prompt path after every technical,
   lineage, review, and exclusivity check passes;
 - a human-originated pull request or protected operation remains personally
-  approved;
+  approved for the exact current source and applicable effects;
 - neither path can skip required tests, exact-SHA provenance, environment
   controls, genuine wait timers, first-attempt provenance, serialization,
   locks/fences, rollback readiness, or post-deployment validation.
@@ -1729,19 +1756,19 @@ Routine routing, acknowledgements, timers, and obvious scope corrections stay
 with the conductor. Advisory drift or delay blocks only affected dependants;
 it cannot freeze independently authorized eligible approval, safe completion,
 or incident recovery. Required technical proof still gates its operation.
-Use the bounded checkpoints and original correction budgets in [[Agents]],
+Use the bounded checkpoints and scoped correction ownership in [[Agents]],
 not a new review round for every status change. Preserve compatibility and
 spent authority evidence through any reviewed correction or rollback.
 
 ## Documentation impact and public-wiki support
 
-Every change records a documentation-impact assessment. Register the
-public-wiki editor when impact is plausible or ambiguous. A clearly no-impact
-change instead records the inspected exact-diff paths and its justification.
+Every change records a documentation-impact assessment. The accountable owner
+may assess it directly and request public-wiki expertise when needed. A
+clearly no-impact change records the inspected exact-diff paths and its justification.
 Product behavior, architecture, contracts, data lifecycle, security,
 infrastructure, quality gates, release behavior, UI/UX, and agent-role changes
 update their canonical `docs/wiki/` pages in the same pull request before
-the independent review selected by the risk profile. The editor returns its
+source acceptance and applicable independent verification. The editor returns its
 owned pages and evidence to the implementation owner assembling the candidate;
 the authorized orchestrator creates its immutable snapshot.
 
