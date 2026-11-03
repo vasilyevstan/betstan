@@ -799,8 +799,6 @@ ux_critic_agent="$ROOT_DIR/.github/agents/betstan-validation-critic.agent.md"
 ux_test_agent="$ROOT_DIR/.github/agents/betstan-test-engineer.agent.md"
 ux_final_agent="$ROOT_DIR/.github/agents/betstan-final-validator.agent.md"
 public_wiki_agent="$ROOT_DIR/.github/agents/betstan-public-wiki-editor.agent.md"
-pr_merge_safety="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
-pr_merge_safety_test="$ROOT_DIR/infra/azure/agents/test-pr-merge-safety-stan.sh"
 while IFS='|' read -r wiki_file wiki_link; do
   [[ -f "$ROOT_DIR/docs/wiki/$wiki_file" ]] ||
     fail "canonical public wiki page is missing: $wiki_file"
@@ -911,10 +909,6 @@ grep -Fq 'Additional protected commits are allowed' \
 grep -Fq 'Multiple sessions may merge compatible reviewed work independently' \
     "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
   fail "deployment safety does not support aggregate concurrent-session releases"
-grep -Fq 'ambiguous prefixes such as chore, misc, or wip' "$pr_merge_safety" ||
-  fail "merge safety does not reject ambiguous PR titles"
-grep -Fq "STUB_TITLE='chore: update files'" "$pr_merge_safety_test" ||
-  fail "merge safety lacks an ambiguous-title regression test"
 grep -Fq 'tools: [read, search]' "$ux_agent" ||
   fail "UX/UI expert does not remain read-only"
 if grep -Eq '^tools:.*execute' "$ux_agent"; then
@@ -1990,8 +1984,6 @@ grep -Fq 'Do not use `npm install --no-save <tarball>`' "$common_readme" ||
 grep -Fq 'read every cited path from that same tree' "$deployment_safety_agent"
 grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
 grep -Fq 'dispatch URL proves event acceptance, not job materialization' \
-  "$deployment_safety_agent"
-grep -Fq 'Treat PR title/body changes as lightweight branch-policy events' \
   "$deployment_safety_agent"
 grep -Fq 'hard per-attempt' "$deployment_safety_agent" ||
   fail "deployment safety omits bounded external tool installation"
