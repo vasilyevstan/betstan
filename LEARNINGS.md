@@ -1,6 +1,13 @@
 # Betstan — Session Learnings
 
-## Standing approval rule
+These are historical engineering lessons, not a second delivery policy.
+`CONTRIBUTING.md` owns the current branch/approval contract and
+`.github/agents/README.md` owns conditional routing and evidence reuse.
+Historical runs and imperative wording below explain failure prevention, not
+new agent gates or proof of current deployment. Existing executable controls
+remain authoritative until their replacements are proven and activated.
+
+## Origin-bound approval lesson
 
 CLI-created, CLI-owned work does not need another personal approval prompt.
 Once the required checks and exact ownership evidence pass, the orchestrator
@@ -9,6 +16,8 @@ the user to click GitHub's approval button. Inspect pending gates before other
 work on startup, resume, and each monitoring checkpoint. An eligible approval
 wait is an action to execute, not a status to keep reporting. Preserve every
 technical gate and the separate approval rules for human-originated work.
+The maintained procedure is in `CONTRIBUTING.md`; a managed label alone is not
+proof of CLI ownership.
 
 ## Repository overview
 
@@ -181,10 +190,9 @@ technical gate and the separate approval rules for human-originated work.
 
 ### Product-wide UI/UX consistency
 
-- Every user-facing visual or interaction change uses one two-phase
-  `betstan-ux-ui-expert` work unit: establish a named consistency baseline
-  before implementation, then review the immutable exact-head result in the
-  same context.
+- User-facing changes need source-bound consistency evidence, not compulsory
+  two-phase agent routing. Reuse named references and request UX expertise for
+  evidenced design or interaction risk; keep any follow-up in the same context.
 - Build the baseline from accepted product semantics and stable shared shells,
   components, variables, tokens, and repeated patterns across routes. A single
   screenshot or the newest page is evidence, not a design system.
@@ -488,7 +496,7 @@ cd resulting && npm ci && npm run test:ci
 
 ## Branch and delivery governance
 
-- Never commit or push directly to `master`.
+- Never commit or push directly to protected `dev` or `master`.
 - Normal work enters `dev`; production promotion is an up-to-date `dev`-to-`master` pull request.
 - Parallel sessions may merge compatible reviewed work independently. Record
   each session's required feature/fix commits, prove they are ancestors of the
@@ -496,16 +504,17 @@ cd resulting && npm ci && npm run test:ci
   Additional protected commits are not blockers; if `master` advances,
   supersede the stale release chain instead of resetting shared history or
   deploying an older SHA. Keep production mutations serialized.
-- Every change records documentation impact; `betstan-public-wiki-editor` is
-  registered when public impact is plausible or ambiguous. Relevant canonical
+- Every change records documentation impact; the accountable owner can assess
+  it directly and use documentation expertise when needed. Relevant canonical
   `docs/wiki/` pages change in the same PR, and changed pages are published
   byte-identically after merge. Public content describes behavior and safety
   invariants without private authority, infrastructure, user, or recovery
   details.
-- PR titles are short plain-language outcomes, not ambiguous work buckets.
-  Merge safety rejects single-word or overlong titles and prefixes such as
-  `chore`, `misc`, and `wip`.
-- PR origin is recorded with one public-safe `session:<slug>` label and one
+- Plain-language PR titles help readers, but wording is not source quality or
+  approval evidence. The candidate merge helper no longer rejects title wording;
+  actual rationale, verification and approval remain required. Not-yet-replaced
+  protected revisions retain their executable checks until proven cutover.
+- Development context is recorded with one public-safe `session:<slug>` label and one
   stable `feature:<slug>` label. Reuse the pair across implementation,
   promotion, and required reconciliation PRs; aggregate promotions can retain several
   pairs. These labels are FYI metadata, never authority, and valid context
@@ -514,10 +523,9 @@ cd resulting && npm ci && npm run test:ci
   references out of public labels.
 - Promotion requires base-scoped statuses whose head and unique merge-snapshot copies point to the same trusted runs and current PR head/base/repository. Head-only, merge-only, or branch-name evidence can be stale or unrelated.
 - Skipped, stale, pending, neutral, or unrelated runs are not green gates.
-- The conductor owns every registered unit from before launch through terminal
-  evidence and accepted handoff. Pair event notifications with a maximum
-  wall-clock checkpoint, reconstruct lost observation from exact references,
-  and treat an unstarted downstream handoff as a stall.
+- One owner observes active work through terminal effects. A conductor is
+  optional coordination help, not another required handoff. Pair notifications
+  with bounded checkpoints and recover observation from exact references.
 - A stalled watcher is not a stalled job, and a running watcher is not job
   progress. Recover read-side observation directly; route mutations to one
   exact owner with a deadline and keep the same unit open until evidence moves.
@@ -534,11 +542,12 @@ cd resulting && npm ci && npm run test:ci
   has a real job and expected protected gate, then disable it before approval.
   Capture the run ID from the URL, and inspect that run before retrying when a
   local assertion fails after dispatch.
-- Pull-request title and body edits trigger lightweight branch policy only.
-  Full source, OCI, service coverage, and deployment-safety validation is bound
-  to source transitions. Derive the exact head SHA from Git or GitHub when
-  preparing evidence and prefer one complete edit over repeated corrections.
-  duplicate runs.
+- Metadata-only lightweight validation was staged lean behavior. The
+  compatibility candidate restores the trusted-master-identical
+  `production-build.yml`, including `pull_request.edited` and full legacy
+  validation. Its actual protected triggers govern until tested cutover.
+  Derive the exact head SHA when preparing evidence and prefer one complete
+  edit over repeated corrections.
 - A late specialist report must be revalidated against its recorded SHA,
   current authoritative branch, and runtime topology. Tool-heavy work that
   returns after the release state changed cannot reopen a gate with stale
@@ -547,9 +556,9 @@ cd resulting && npm ci && npm run test:ci
   unrelated documentation and metadata changes until the safe terminal gate.
   Required safety checks still run; the scope freeze prevents self-created
   workflow conflicts rather than weakening release evidence.
-- Do not create a standalone post-squash synchronization PR solely to restore
-  ancestry. Before a later promotion, incorporate current `master` into that
-  bounded integration candidate and require fresh exact-snapshot checks.
+- Squash promotions lost ancestry and caused avoidable validation cycles.
+  Use ancestry-preserving integration and promotion; reconcile protected
+  branches only when ancestry actually requires it.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
 - The trusted PR publisher compares the exact `production-build.yml` blob with the default branch. When adding a repository-wide static guard, prefer invoking it from an existing trusted entrypoint already called by that workflow; changing the trusted workflow and its verifier in the same PR intentionally fails closed.
@@ -568,8 +577,11 @@ cd resulting && npm ci && npm run test:ci
 
 ### Agent orchestration and review governance
 
-- The conductor spans the quality chain but never substitutes for a gate.
-  `.github/agents/README.md` owns the exact chain and handoff taxonomy.
+- Compulsory agent chains and review-of-review added delay without proving
+  changed behavior. `.github/agents/README.md` now owns conditional capability
+  routing: one accountable owner, proportionate verification, independent
+  verification for changed trust/state boundaries, and authorized privileged
+  execution without a distinct agent for every responsibility.
 - A process can be running and still be stalled. Tool activity, logs, and
   watchers do not replace a bounded first response, objective progress,
   checkpoint, or accepted downstream handoff.
@@ -588,14 +600,14 @@ cd resulting && npm ci && npm run test:ci
 - An explicit pause remains in force across completion notifications and
   restarts. Resume only when authorized, then reconcile current facts and
   continue the remaining transition with one owner and one observer.
-- Three independent simplifier passes need distinct model families, identical
-  sealed input, high reasoning, and one conservative synthesis. Fewer than
-  three completed passes blocks; safety and compatibility cannot be removed by
-  majority vote.
+- Multi-model deliberation can inform a difficult design when requested, but
+  a model quorum or unanimous removal vote is not a correctness oracle.
+  Reuse accepted synthesis, decide conflicts against concrete requirements and
+  verify the implementation rather than repeatedly reviewing the reviews.
 - PR descriptions are durable evidence. Use
   `.github/pull_request_template.md` for the exact core and conditional fields.
-  Check the plain-language title and its 72-character limit before creating
-  or editing the PR, not only after CI finishes.
+  Presentation and session/feature labels are informational; actual source,
+  compatibility, approval and validation evidence is not.
 - Separate a successful deployment from its failed acceptance. Classify the
   actual failing assertion before reopening product design; a proven harness
   defect needs its bounded correction and affected evidence, not another
@@ -1350,7 +1362,7 @@ time, so from the inside it felt like progress; from the outside it was
 indistinguishable from a hang. That is a stall, and the fact that the work
 eventually succeeded does not retire the defect.
 
-Durable rules:
+Lessons (current coordination procedure: `.github/agents/README.md`):
 
 - Executing is not reporting. Active tool calls, provider reasoning time, and
   growing call counts are activity, never deliverable progress, and they never
@@ -1368,8 +1380,9 @@ Durable rules:
   a protected approval wait or a local failure. Report `BLOCKED` with that
   classification instead of polling indefinitely, and cancel or supersede only
   when it is safe for production.
-- A command active for thirty minutes without a measurable milestone is stopped
-  or handed off safely, and the checkpoint precedes any further long operation.
+- A long-running command needs a bounded checkpoint and an exact underlying
+  state check. Time alone never proves it is safe to terminate a writer or
+  release a lock; continue authorized observation.
 - Long polling loops are the usual disguise. Waiting in large sleep blocks
   without surfacing intermediate state converts a legitimate provider wait into
   an invisible one.
@@ -1473,8 +1486,8 @@ slice.
 
 Durable rules:
 
-- Challenge intent and scope in the existing architect; do not add another
-  intent-review agent.
+- Challenge intent and scope with the accountable owner; do not add an
+  intent-review agent or mandatory architect round.
 - Start with the smallest compatible end-to-end behavior. Optimize after it
   works unless a current incompatibility, failing test, or mandatory safety
   gate proves a prerequisite is necessary.
@@ -1482,7 +1495,7 @@ Durable rules:
   add a service, agent, workflow, gate, or release phase without a concrete
   failure path that the existing owner cannot resolve.
 - For a localized production bug, follow the actual cause through a surgical
-  patch, targeted existing tests, one existing quality chain, and the normal
+  patch, proportionate verification, and the normal
   protected release. Do not add agents, gates, frameworks, duplicate owners,
   repeat reviews without new failing evidence, speculative cleanup, arbitrary
   fixture or time gates, or an invented ETA.
@@ -1499,16 +1512,12 @@ Durable rules:
   because effort has already been spent on it.
 - Preserve security, compatibility, data, branch, test, and production safety.
   Simplicity changes sequencing and ownership, not the required quality bar.
-- Keep architect and simplifier corrections in the same logical work unit and
-  correction budget. Reissuing a plan or synthesis never resets the loop.
-- For product work, three consecutive discretionary governance, CI,
-  test-infrastructure, architect, or simplifier completions without a
-  product-code developer completion trigger a scope reset before another
-  hardening unit is registered. Established mandatory gates and
-  governance-only tasks are excluded.
-- Every change records documentation impact, but the public-wiki editor is a
-  supporting unit only when impact is plausible or ambiguous. Ordinary product
-  work does not require an artificial agent-definition or wiki edit.
+- Keep corrections with the original owner and reuse accepted decisions.
+  Do not reset an investigation by renaming work or relaunching agents.
+- Before adding process work, name the unmet criterion or evidenced blocker.
+  A count of completed governance tasks is not an acceptance criterion.
+- Every change records documentation impact; use documentation expertise when
+  needed. Ordinary work needs no artificial agent-definition or wiki edit.
 - After implementation, review the result, capture applicable learning in
   existing agents and documentation, and optimize only where evidence shows
   concrete value.

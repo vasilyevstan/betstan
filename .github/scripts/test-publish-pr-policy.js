@@ -1428,10 +1428,9 @@ async function testReceiptReadback() {
       return data;
     },
   });
-  assertFailure(sharedResult);
+  assertSuccess(sharedResult, sharedDeadline);
   assert.equal(sharedDeadline.ledger.length, 2);
-  assert.deepEqual(sharedReads, [1, 5, 4]);
-  assert(sharedResult.messages.some((message) => message.includes("deadline exhausted")));
+  assert.deepEqual(sharedReads, [1, 5, 5]);
 
   const cancelled = scenarios[0]();
   elapsed = 0;
@@ -1442,12 +1441,13 @@ async function testReceiptReadback() {
     cancelledResult = await execute({
       ...cancelled.options,
       receiptIO: { now: () => elapsed },
-      statusWriteResponse: (row) => {
-        if (row.context === cancelled.context) elapsed = 29_980;
-        return row;
-      },
       statusRead: async ({ ref, request, data }) => {
-        if (ref !== cancelled.anchor || !request || cancelled.ledger.length !== 1) return data;
+        if (ref !== cancelled.anchor || !request) return data;
+        if (cancelled.ledger.length === 0) {
+          elapsed = 29_980;
+          return data;
+        }
+        if (cancelled.ledger.length !== 1) return data;
         await new Promise((resolve, reject) => {
           const abort = () => {
             aborted = request.signal.aborted;
@@ -1661,6 +1661,8 @@ async function testReceiptReadback() {
 }
 
 async function main() {
+  require("./test-pr-source-snapshot.js");
+  await require("./test-source-quality.js")();
   await testReceiptReadback();
   function assertNoQualitySuccess(result) {
     assert.equal(

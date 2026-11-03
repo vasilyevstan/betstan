@@ -6,6 +6,11 @@ This page distills reusable lessons from BetStan's implementation and release
 history. It intentionally shares principles, failure modes, and validation
 patterns rather than private operational records or recovery recipes.
 
+These are lessons, not a second delivery policy or evidence of current runtime
+health. Contributor policy owns branch and approval rules; [[Agents]] owns
+the public explanation of conditional capabilities and evidence reuse, and
+[[Quality Gates]] distinguishes active controls from candidate-only work.
+
 ## Architecture and service boundaries
 
 ### Persist intent before publishing
@@ -131,6 +136,30 @@ authorization-denial screen.
 
 ## Testing
 
+### Reduce repeated work without losing the assertion
+
+Assign each behavioral assertion an execution owner within its validation
+scope. Share immutable fixture inputs but isolate mutable repositories,
+locks, ports, and remote state. Retain representative real process,
+cancellation, and concurrency tests rather than replacing physical boundaries
+with mocks.
+
+The compatibility-stage CI work reduced repeated repository construction and
+removed obsolete inactive-feature fixtures while retaining the 35 OCI suites.
+An intermediate seven-fixture macOS timing sample is not comparable GitHub
+performance acceptance. Further retirement and matched measurements remain;
+neither the half-baseline target nor complete redesign acceptance is proven.
+
+### Charge a timeout to the work it bounds
+
+Receipt visibility IO and full quality revalidation have different costs.
+Charging unrelated revalidation against a receipt-read allowance can reject
+valid work after a successful immutable receipt. The local publisher
+correction charges receipt/selector IO and retry waits without increasing the
+allowance. Cancellation, cumulative exhaustion, exact same-owner semantics,
+expiry, and fresh authority checks remain. A timeout never renews consumed
+authority. See [[Quality Gates]] for the compatibility-stage contract.
+
 ### Test the invariant, not one convenient fixture
 
 Examples:
@@ -249,7 +278,7 @@ governance work that never reaches product implementation triggers a scope
 reset rather than another hardening layer.
 
 For a localized production bug, follow the actual cause through a surgical
-patch, targeted existing tests, one existing required quality chain, and the normal
+patch, proportionate verification, and the normal
 protected release. Defer unrelated redesign to one evidence-rich issue
 covering reproduction and evidence, user or operational impact, root cause,
 direction and acceptance, exclusions and dependencies, compatibility or
@@ -267,9 +296,9 @@ branch, test, and production safeguards remain unchanged.
 ### Make public documentation part of the change
 
 Documentation should not be a best-effort cleanup after release. Every change
-records documentation impact. When public impact is plausible or ambiguous,
-the relevant canonical pages change in the same pull request and merged pages
-are published byte-identically. A clearly internal change may retain
+records documentation impact; use specialist help when needed. Publicly
+affected canonical pages change in the same pull request and accepted merged
+pages are published byte-identically, never ahead of source acceptance. A clearly internal change may retain
 path-specific no-public-change evidence without creating another handoff.
 Public documentation explains behavior and safety invariants without exposing
 credentials, private approval state, live records, or actionable bypass
@@ -277,12 +306,28 @@ procedures.
 
 ### Name pull requests by their outcome
 
-A pull request title is release evidence, not an internal work bucket. Prefer
+A pull request title helps readers understand intent. Prefer
 short plain-language outcomes such as `Add second-half score betting` or
-`Fix live slip alignment`. Ambiguous prefixes such as `chore`, `misc`, or
-`wip` hide intent and should fail merge safety. Check the title and its
-72-character limit before PR creation or metadata edits, without replacing the
-final canonical merge check.
+`Fix live slip alignment`. Wording and presentation are not source quality or
+approval authority; actual missing rationale and safety evidence still matter.
+Current merge helpers retain legacy presentation checks until their tested
+replacement is activated. Policy edits do not bypass executable controls.
+
+### Replace choreography with accountable evidence
+
+Compulsory agent sequences, model quorums, unanimity, recursive review, and
+status-only transfers do not prove correctness. Use one accountable owner,
+proportionate checks, and independent verification of changed trust/state
+boundaries. Request design, UX, testing, or process expertise for an evidenced
+gap; reuse accepted decisions and unaffected results. No additional
+PerfettoStan/simplifier round is needed to remove optional duplication.
+Repository instruction edits do not reload the running session.
+
+Preserve ancestry during protected integration and promotion. Reconciliation
+is needed when ancestry requires it, not automatically after every release.
+Evidence reuse never substitutes for current exact-source checks, origin-bound
+approval, immutable deployed identity, physical writer exclusion, compatible
+rollback, or observed health.
 
 ### Capture rollback before mutation
 

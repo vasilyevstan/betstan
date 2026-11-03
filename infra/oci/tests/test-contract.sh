@@ -111,7 +111,11 @@ if [[ "$#" != 0 ]]; then
   check_prepared_transition_contract
   exit 0
 fi
-check_prepared_transition_contract
+# Standalone callers retain this active compatibility contract. In the full
+# OCI validation scope, upstream-binding runs --prepared-transition-only.
+if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
+  check_prepared_transition_contract
+fi
 
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/provenance"
@@ -758,138 +762,32 @@ grep -Fq 'name: betstan-conductor' "$conductor_agent" ||
   fail "conductor agent frontmatter has the wrong name"
 grep -Fq 'tools: [read, search, execute, edit, web]' "$conductor_agent" ||
   fail "conductor agent lacks governed self-blocker correction authority"
+# Routing and independent-verification policy belong to the existing
+# test-agent-governance-contract.sh suite. These are retained operational
+# guidance contracts, not proof that a runtime operation is safe.
+conductor_agent_flat="$(tr '\n' ' ' <"$conductor_agent" | tr -s '[:space:]' ' ')"
 for conductor_contract in \
-    'Do not tight-poll' \
-    'blocking watcher such as `gh run watch` as notification transport' \
-    'Its continued execution is not a progress signal' \
-    'A user request for status or a suspicion that work is stuck is an immediate' \
-    'Never become passive after launch' \
-    'maximum wall-clock checkpoint' \
-    'Reconstruct observation from the registry after interruption' \
-    'A terminal unit without a confirmed downstream handoff is a stall' \
-    'must never answer a detected stall with observation alone' \
-    'Raw tool-call growth alone is not deliverable progress' \
-    'critical-path scope freeze' \
-    'Treat a pull request metadata edit as a lightweight branch-policy event' \
-    'Revalidate every late specialist result' \
-    'A recovered endpoint does not close an unexplained runtime outage' \
-    'A workflow dispatch URL is not job materialization' \
-    'A jobless queued dispatch with zero jobs and zero pending approvals' \
-    'zero completed turns after its first-response deadline' \
-    'stop further investigation and return the bounded verdict' \
-    'Continue dependency-safe work immediately' \
-    'Do not extend a checkpoint without new underlying progress evidence' \
-    'At the second missed checkpoint, escalate the same registered unit' \
-    '`ORCHESTRATION_HEALTHY` is forbidden while a checkpoint is overdue' \
-    '`ORCHESTRATION_COMPLETE` requires terminal evidence and accepted handoff' \
-    'completed deploy job' \
-    'waiting public-validation job is an approval-bound gate' \
-    "defer that handoff behind the watcher's timeout" \
-    'A running agent with recent tool activity is observable' \
-    'Enforce its first-response deadline' \
-    'A GitHub environment approval wait is active external work' \
-    'inspect both jobs and `pending_deployments` immediately' \
-    'have documented preauthorization, immediately return' \
-    'After two missed checkpoints, return' \
-    'a duplicate reviewer merely because the first is slow' \
-    'terminal or explicitly cancelled and prove that concurrent side effects' \
-    'Treat a completed first-attempt-only run failure as terminal, not stalled' \
-    'If downstream provenance requires' \
-    'never recommend rerunning that run' \
-    'report `BLOCKED` rather than manufacture an empty' \
-    'Never bypass a trusted publisher that rejects changes to its own' \
-    'leaves a production maintenance fence, operation' \
-    'health recovery precedes candidate replacement' \
-    'public-wiki supporting unit only for plausible or ambiguous impact' \
-    'publication unit only when canonical pages changed' \
-    'one two-phase specialist work unit for' \
-    'duration for the same workflow and job on a comparable runner' \
-    'Never use name-based process discovery or termination' \
-    'Conductor status is coordination evidence only'; do
-  grep -Fq "$conductor_contract" "$conductor_agent" ||
-    fail "conductor agent omits orchestration contract: $conductor_contract"
-done
-for self_blocker_contract in \
-    '## Governed self-imposed-blocker recovery' \
-    'external wait, passively wait, or repeatedly hand it off' \
-    'governed correction under the original registered work ID' \
-    'another agent or a duplicate policy page' \
-    'focused safe fixture or dry-run' \
-    'unresolved production risk: active or competing work' \
-    'normal focused branch -> `dev` -> `master` path' \
-    '`mutation_capable: true` only' \
-    'challenge through the existing deployment-safety specialist, not a new' \
-    'Preserve rollback evidence and revalidate the' \
-    'resume the original registered' \
-    'Never bypass or edit live authority state ad hoc' \
-    'Never weaken a gate merely to make progress'; do
-  grep -Fq "$self_blocker_contract" "$conductor_agent" ||
-    fail "conductor omits governed self-blocker contract: $self_blocker_contract"
+    'inspect the exact underlying jobs and `pending_deployments`' \
+    'canonical helpers to the authorized owner' \
+    'Human-origin work retains its exact approval requirement' \
+    'An explicit pause blocks new mutations' \
+    'Use event notifications with bounded checkpoints, not tight polling' \
+    'Use exact known PIDs or shell IDs' \
+    'Do not replace work until the original side effects are known and concurrent mutations are excluded' \
+    'A first-attempt-only failed run cannot become valid by rerunning' \
+    'Missing evidence never restarts the clock' \
+    'Treat this as an active incident, not a completed release' \
+    'Preserve lock-before-fence release ordering and data integrity' \
+    'Verify both the false rejection and the genuine unsafe case' \
+    'Completion requires the scoped terminal evidence and known effects'; do
+  grep -Fq "$conductor_contract" <<<"$conductor_agent_flat" ||
+    fail "conductor omits retained operational guidance: $conductor_contract"
 done
 agent_readme_flat="$(tr '\n' ' ' <"$agent_readme")"
 perfetto_agent_flat="$(tr '\n' ' ' <"$perfetto_agent")"
-grep -Fq 'Start `betstan-conductor` only when work is parallel, asynchronous, external, or mutating' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow does not keep conductor registration risk-conditional"
 grep -Fq 'Return `FLOW_STOP_OPTIMIZE` when optional process expansion lacks one of those proofs' \
     <<<"$perfetto_agent_flat" ||
   fail "PerfettoStan does not have evidence-bound process-stop authority"
-grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow lacks stalled-work escalation"
-grep -Fq 'the conductor checks jobs plus `pending_deployments`' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can leave protected environment gates unattended"
-grep -Fq 'A still-running `gh run watch` is notification transport, not evidence of progress' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can mistake a blocking watcher for progress"
-grep -Fq 'A user asking for status or whether work is stuck triggers that checkpoint immediately' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow does not force an immediate checkpoint on status requests"
-grep -Fq 'A GitHub `waiting` state is an action trigger, not a polling state.' \
-    "$conductor_agent" ||
-  fail "conductor can leave an actionable protected gate in passive polling"
-grep -Fq 'copilot-cli-run-approval-stan.sh --approve' "$conductor_agent" ||
-  fail "conductor does not route eligible CLI-owned waiting gates to automatic approval"
-grep -Fq 'remains proactive from before a registered job starts through its terminal evidence and accepted downstream handoff' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow does not retain start-to-terminal conductor ownership"
-grep -Fq 'Every event trigger is paired with a maximum wall-clock checkpoint' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow permits an event-only indefinite wait"
-grep -Fq 'completed unit with no confirmed next-owner handoff is itself a stall' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can stall between completion and handoff"
-grep -Fq 'workflow dispatch URL is acceptance, not materialization' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can disable a manual workflow before job materialization"
-grep -Fq 'Pull-request metadata edits run lightweight branch policy only' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can treat metadata edits as source-producing"
-grep -Fq 'Every change includes documentation-impact evidence before immutable review' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can complete without documentation-impact evidence"
-grep -Fq 'byte-identically and verifies the public pages' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow omits post-merge wiki publication"
-grep -Fq 'At the second missed checkpoint it escalates the same unit' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can replace or indefinitely defer stalled work"
-grep -Fq 'orchestration completes only when every registered unit has terminal evidence and an accepted handoff' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow permits premature orchestration completion"
-grep -Fq 'terminal job followed by a downstream `waiting` job with no executing step' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can miss a downstream protected-environment gate"
-grep -Fq 'A failed release run whose consumers require `run_attempt == 1` is terminal' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can rerun terminal first-attempt release evidence"
-grep -Fq 'It never invents an empty commit or bypasses a trusted publisher' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can bypass trusted publication to replace a failed run"
-grep -Fq 'treats that state as an active production incident' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow can leave a failed release maintenance hold unattended"
 ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
 ux_wiki="$ROOT_DIR/docs/wiki/UI-UX-Consistency.md"
 ux_home="$ROOT_DIR/docs/wiki/Home.md"
@@ -1039,10 +937,7 @@ for ux_contract in \
     'When overflow or clipping is in scope or remains unresolved' \
     'For event-grid changes' \
     'For market-control changes' \
-    'UX_REVIEW_PASSED' \
-    'Hand implementation to the registered developer-gate owner for the affected paths' \
-    '`betstan-backend-developer` for user-visible producer, formatter, ordering, or contract work' \
-    'return the UX status to the registered developer-gate implementation owner'; do
+    'UX_REVIEW_PASSED'; do
   grep -Fq "$ux_contract" <<<"$ux_agent_flat" ||
     fail "UX/UI expert omits usability contract: $ux_contract"
 done
@@ -1053,30 +948,18 @@ for unconditional_rendered_gate in \
     fail "UX/UI expert makes rendered evidence unconditional: $unconditional_rendered_gate"
   fi
 done
-grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or interaction change' \
+grep -Fq 'UI changes need evidence of the affected behavior and consistency' \
     <<<"$agent_readme_flat" ||
-  fail "agent workflow does not require UX review for every user-facing change"
-grep -Fq 'Register one two-phase specialist work unit' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow duplicates or omits the two-phase UX specialist handoff"
-grep -Fq 'Every user-facing change has one exact-head `UX_REVIEW_PASSED` result' \
-    <<<"$agent_readme_flat" ||
-  fail "agent workflow does not require exact-head UX consistency evidence"
-grep -Fq 'Every change that alters what a user sees or how a user interacts requires' \
-    "$ux_wiki" ||
-  fail "UI/UX consistency wiki omits the mandatory trigger"
+  fail "agent workflow omits affected UI behavior and consistency evidence"
 grep -Fq 'A user-facing change does not automatically require a new screenshot baseline' \
     "$ux_wiki" ||
   fail "UI/UX consistency wiki turns visual tests into a blanket gate"
 grep -Fq '[[UI UX Consistency]]' "$ux_home" ||
   fail "wiki Home does not link the UI/UX consistency contract"
-grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or' \
-    "$ux_release_wiki" ||
-  fail "release orchestration omits the mandatory UX handoff"
 backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result in the handoff to the next gate' \
+grep -Fq 'Return evidence directly to the accountable owner' \
     <<<"$backend_agent_flat" ||
-  fail "backend developer does not carry applicable UX evidence into the next handoff"
+  fail "backend developer omits returning implementation evidence"
 grep -Eq 'persist a retry marker[[:space:]]+in the same atomic write' \
     <<<"$backend_agent_flat" ||
   fail "backend developer omits durable mutation publication"
@@ -1084,16 +967,12 @@ grep -Fq 'A quote identity owns exactly one validity window' \
     "$ux_backend_agent" ||
   fail "backend developer permits quote expiry mutation under one identity"
 frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result in the handoff to the next gate' \
+grep -Fq 'Return evidence directly to the accountable owner' \
     <<<"$frontend_agent_flat" ||
-  fail "frontend developer does not carry UX evidence into the next handoff"
-grep -Fq 'Missing or stale UX evidence is an acceptance' \
-    "$ux_critic_agent" ||
-  fail "validation critic does not identify missing UX evidence"
-grep -Fq 'gap. Do not replace the UX specialist with subjective style review' \
-    "$ux_critic_agent" ||
-  fail "validation critic does not fail missing UX evidence"
+  fail "frontend developer omits returning implementation evidence"
 critic_agent_flat="$(tr '\n' ' ' <"$ux_critic_agent")"
+grep -Fq 'verify source-bound consistency evidence' <<<"$critic_agent_flat" ||
+  fail "validation critic omits source-bound UI consistency evidence"
 grep -Eq 'obsolete authorization expectation performs a real[[:space:]]+mutation' \
     <<<"$critic_agent_flat" ||
   fail "validation critic can miss side-effecting stale authorization probes"
@@ -1109,11 +988,11 @@ grep -Fq 'stable-odds material transition whose' "$ux_test_agent" ||
   fail "test engineer omits unchanged-price quote-boundary coverage"
 grep -Fq 'changed `quoteValidUntil` under an unchanged' "$ux_critic_agent" ||
   fail "validation critic omits quote-authority collision detection"
-grep -Fq 'Every bounded fresh reselection returning exact `STALE_QUOTE`' \
-    "$conductor_agent" ||
+grep -Fq 'Repeated `STALE_QUOTE` failures require a bounded authority diagnosis' \
+    <<<"$conductor_agent_flat" ||
   fail "conductor can misclassify repeated stale quotes as transient retries"
-grep -Fq '`betstan-ux-ui-expert: UX_REVIEW_PASSED` result' "$ux_final_agent" ||
-  fail "final validator does not require exact-head UX evidence"
+grep -Fq 'verify relevant source-bound consistency evidence' "$ux_final_agent" ||
+  fail "final validator omits source-bound UI consistency evidence"
 grep -Fq '### Product-wide UI/UX consistency' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the product-wide UI/UX consistency contract"
 for ux_reinforced_check in \
@@ -2120,9 +1999,8 @@ grep -Fq 'Do not invent a workflow-wide' "$deployment_safety_agent" &&
   grep -Fq '`ghcr-package-validate` must use the checked-in automatic approver' \
     "$deployment_safety_agent" ||
   fail "deployment safety can invent a human-only exception for CLI package validation"
-grep -Fq 'verify that claim against' "$conductor_agent" &&
-  grep -Fq 'never spend a monitoring window waiting for a person' \
-    "$conductor_agent" ||
+grep -Fq 'Never wait for a personal prompt when verified CLI ownership and technical gates allow automatic progression' \
+    <<<"$conductor_agent_flat" ||
   fail "conductor can poll an eligible CLI-owned approval as human-only"
 grep -Fq 'Approval eligibility comes from the machine-readable protected-operation' \
   "$ROOT_DIR/docs/wiki/Release-Orchestration.md" ||
@@ -2139,9 +2017,9 @@ grep -Fq 'different authority root to disguise the same request' \
 grep -Fq 'through the checked-in bounded supersession or unmaterialized classifier' \
   "$deployment_safety_agent" ||
   fail "deployment safety omits bounded provider-ghost classification"
-grep -Fq 'immediately run the checked-in supersession classifier' \
-  "$conductor_agent" ||
-  fail "conductor does not recover superseded provider-ghost stalls"
+grep -Fq 'retirement, rejecting-state cancellation and supersession must pass the checked-in exact proofs' \
+  <<<"$conductor_agent_flat" ||
+  fail "conductor omits exact proofs for provider-ghost recovery"
 for recovery_contract in \
     'reason=unmaterialized' \
     'same repository regardless of control SHA' \
@@ -2172,28 +2050,11 @@ for compare_contract in \
     fail "deployment safety omits compact Compare recovery contract: $compare_contract"
 done
 for recovery_contract in \
-    'reason=unmaterialized' \
-    'regardless of control SHA' \
-    'runs must never receive human or CLI environment approval' \
-    'rebuild the exact-SHA chain'; do
-  grep -Fq "$recovery_contract" "$conductor_agent" ||
-    fail "conductor omits unmaterialized recovery contract: $recovery_contract"
-done
-for prospective_contract in \
-    'For the narrow current-master unmaterialized promotion deadlock' \
-    'may pass only the exact PR number to the checked-in' \
-    'A raw prospective SHA is never authority' \
-    'approval, authority-fence, and every other active-run decision remain bound' \
-    '`EXCLUDE_RUN_ID` and generic disabled handling are never'; do
-  grep -Fq "$prospective_contract" "$conductor_agent" ||
-    fail "conductor omits prospective-master bootstrap contract: $prospective_contract"
-done
-for inventory_contract in \
-    'A recovered original blocker is not completion' \
-    'nonterminal production-run inventory' \
-    'zero unexplained blockers'; do
-  grep -Fq "$inventory_contract" "$conductor_agent" ||
-    fail "conductor omits recovered-blocker inventory contract: $inventory_contract"
+    'A jobless queue, run age, exit or timeout alone cannot authorize retirement or replacement' \
+    'A prospective SHA or `EXCLUDE_RUN_ID` is not new authority' \
+    'A merged correction is not proof the operation recovered; observe its terminal effects'; do
+  grep -Fq "$recovery_contract" <<<"$conductor_agent_flat" ||
+    fail "conductor omits retained recovery guidance: $recovery_contract"
 done
 for recovery_contract in \
     'Promotion cannot silently clear the fence' \
@@ -2207,7 +2068,6 @@ done
 for self_blocker_learning in \
     'not automatically an external safety wait' \
     'branch -> `dev` -> `master`' \
-    'independent deployment-safety challenge' \
     'post-promotion exact-SHA revalidation before automatic resumption' \
     'Never weaken a gate to make progress or edit live authority state ad hoc'; do
   grep -Fq "$self_blocker_learning" "$ROOT_DIR/LEARNINGS.md" ||
@@ -2281,12 +2141,12 @@ for heading in \
   grep -Fq "$heading" "$pr_template" ||
     fail "pull request template omits required evidence heading: $heading"
 done
-grep -Fq 'UX specialist baseline status and final exact-head status/SHA' \
+grep -Fq 'Consistency verification and exact source; specialist result when needed' \
   "$pr_template" ||
-  fail "pull request template omits exact-head UX evidence"
-grep -Fq 'Every pull request that changes what a user sees or how a user interacts must' \
+  fail "pull request template omits source-bound consistency evidence"
+grep -Fq 'verification source and any evidence gap' \
   "$ROOT_DIR/CONTRIBUTING.md" ||
-  fail "contributor policy omits mandatory UX review"
+  fail "contributor policy omits verification source and unresolved evidence gaps"
 grep -Fq './infra/azure/agents/shared-mongo-topology-guard-stan.sh' \
   "$azure_deploy_workflow"
 grep -Fq 'export REQUIRED_MONGO_TOPOLOGY_MODE=shared' "$oci_live_readiness"

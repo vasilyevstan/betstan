@@ -134,10 +134,13 @@ uploaded recovery evidence.
 
 ## Secure engineering controls
 
-- Authentication changes require the auth/security specialist.
-- Shared contract changes require a service-boundary compatibility review.
-- User-facing changes require the UX/UI specialist and rendered evidence when
-  geometry or interaction is material.
+- Changed authentication, authorization, and other trust/state boundaries
+  require independent verification by someone other than the author. Select
+  specialist expertise for an evidenced gap, not a compulsory handoff.
+- Shared contract changes retain service-boundary compatibility verification.
+- User-facing changes require source-bound consistency evidence and rendered
+  evidence when geometry or interaction is material; use UX expertise for
+  evidenced design or interaction risk.
 - Infrastructure changes run syntax, manifest, secret-pattern, routing,
   provenance, and rollback contract tests.
 - Production acceptance checks public behavior, APIs, live updates,

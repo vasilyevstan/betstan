@@ -1,0 +1,109 @@
+name: source-quality-shadow
+
+on:
+  pull_request_target:
+    branches: [dev, master]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request for a non-authoritative checkout proof
+        required: true
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: source-quality-shadow-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      record: ${{ steps.source.outputs.record }}
+      checkout_sha: ${{ steps.source.outputs.checkout_sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Capture source without executing candidate code
+        id: source
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const { captureSource } = require("./.github/scripts/source-quality.js");
+            const source = await captureSource({
+              github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            });
+            core.setOutput("record", JSON.stringify(source));
+            core.setOutput("checkout_sha", source.checkout.commitSha);
+
+  checks:
+    name: quality (source-policy)
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.source.outputs.checkout_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "20.19.5"
+      - name: Run candidate source-policy regressions
+        env:
+          CHECKOUT_SHA: ${{ needs.source.outputs.checkout_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CHECKOUT_SHA"
+          node .github/scripts/test-publish-pr-policy.js
+
+  attest:
+    needs: [source, checks]
+    if: always() && needs.source.result == 'success' && needs.checks.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Construct manifest from trusted outputs and native jobs
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          SOURCE_RECORD: ${{ needs.source.outputs.record }}
+        with:
+          script: |
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { collectManifest } = require("./.github/scripts/source-quality.js");
+            const manifest = await collectManifest({
+              github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            }, JSON.parse(process.env.SOURCE_RECORD));
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "quality-manifest.json"),
+              JSON.stringify(manifest) + "\n", { flag: "wx", mode: 0o600 });
+      - name: Attest only the locally constructed manifest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/quality-manifest.json
+      - name: Upload the signed shadow manifest
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: quality-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quality-manifest.json
+          if-no-files-found: error
+          retention-days: 14

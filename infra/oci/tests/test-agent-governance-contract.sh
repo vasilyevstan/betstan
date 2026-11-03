@@ -2,639 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-AGENT_DIR="$ROOT_DIR/.github/agents"
-INSTRUCTIONS="$ROOT_DIR/.github/copilot-instructions.md"
-README="$AGENT_DIR/README.md"
-SIMPLIFIER="$AGENT_DIR/betstan-simplifier.agent.md"
-PERFETTO="$AGENT_DIR/PerfettoStan.agent.md"
-CONDUCTOR="$AGENT_DIR/betstan-conductor.agent.md"
-PUBLIC_WIKI_EDITOR="$AGENT_DIR/betstan-public-wiki-editor.agent.md"
-FINAL_VALIDATOR="$AGENT_DIR/betstan-final-validator.agent.md"
-BRANCH_REVIEWER="$AGENT_DIR/betstan-branch-governance-reviewer.agent.md"
-ARCHITECT="$AGENT_DIR/betstan-architect.agent.md"
-BACKEND_DEVELOPER="$AGENT_DIR/betstan-backend-developer.agent.md"
-FRONTEND_DEVELOPER="$AGENT_DIR/betstan-frontend-developer.agent.md"
-SERVICE_CONTRACT_REVIEWER="$AGENT_DIR/betstan-service-contract-reviewer.agent.md"
-QUALITY_GATE_REVIEWER="$AGENT_DIR/betstan-quality-gate-reviewer.agent.md"
-TEST_ENGINEER="$AGENT_DIR/betstan-test-engineer.agent.md"
-PR_TEMPLATE="$ROOT_DIR/.github/pull_request_template.md"
-CONTRIBUTING="$ROOT_DIR/CONTRIBUTING.md"
-BRANCH_SKILL="$ROOT_DIR/.github/skills/betstan-branch-governance/SKILL.md"
-DEPLOYMENT_SAFETY="$AGENT_DIR/betstan-deployment-safety.agent.md"
-LEARNINGS="$ROOT_DIR/LEARNINGS.md"
-MERGE_SAFETY="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
-POLICY_PUBLISHER="$ROOT_DIR/.github/scripts/publish-pr-policy.js"
-BRANCH_POLICY="$ROOT_DIR/.github/workflows/branch-policy.yml"
-QUALITY_GATES="$ROOT_DIR/docs/wiki/Quality-Gates.md"
-RELEASE_ORCHESTRATION="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
-PUBLIC_AGENTS="$ROOT_DIR/docs/wiki/Agents.md"
 
-fail() {
-  echo "agent governance contract failed: $*" >&2
-  exit 1
-}
-
-require_literal() {
-  local file="$1"
-  local literal="$2"
-  grep -Fq "$literal" "$file" ||
-    fail "$(basename "$file") is missing: $literal"
-}
-
-require_flat_literal() {
-  local file="$1"
-  local literal="$2"
-  local flattened
-  flattened="$(tr '\n' ' ' <"$file" | tr -s '[:space:]' ' ')"
-  grep -Fq "$literal" <<<"$flattened" ||
-    fail "$(basename "$file") is missing: $literal"
-}
-
-reject_literal() {
-  local file="$1"
-  local literal="$2"
-  if grep -Fq "$literal" "$file"; then
-    fail "$(basename "$file") retains obsolete text: $literal"
-  fi
-}
-
-[[ -f "$INSTRUCTIONS" ]] || fail ".github/copilot-instructions.md is missing"
-instruction_lines="$(wc -l <"$INSTRUCTIONS" | tr -d ' ')"
-(( instruction_lines <= 60 )) ||
-  fail "copilot instructions exceed 60 lines: $instruction_lines"
-
-python3 - "$INSTRUCTIONS" "$ROOT_DIR" <<'PY' ||
-import os
-import re
-import sys
-
-source = os.path.realpath(sys.argv[1])
-root = os.path.realpath(sys.argv[2])
-text = open(source, encoding="utf-8").read()
-failures = []
-for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
-    if target.startswith(("http://", "https://", "mailto:", "#")):
-        continue
-    target = target.split("#", 1)[0].split("?", 1)[0]
-    resolved = os.path.realpath(os.path.join(os.path.dirname(source), target))
-    if os.path.commonpath([root, resolved]) != root:
-        failures.append(f"link escapes repository: {target}")
-    elif not os.path.exists(resolved):
-        failures.append(f"missing link target: {target}")
-if failures:
-    raise SystemExit("; ".join(failures))
-PY
-  fail "copilot instructions contain an invalid repository link"
-
-while IFS= read -r -d '' agent_file; do
-  expected="$(basename "$agent_file" .agent.md)"
-  actual="$(
-    awk '
-      NR == 1 && $0 == "---" { frontmatter = 1; next }
-      frontmatter && $0 == "---" { exit }
-      frontmatter && /^name:[[:space:]]*/ {
-        sub(/^name:[[:space:]]*/, "")
-        print
-        exit
-      }
-    ' "$agent_file"
-  )"
-  [[ "$actual" == "$expected" ]] ||
-    fail "agent filename/name mismatch: $expected != ${actual:-missing}"
-done < <(find "$AGENT_DIR" -maxdepth 1 -type f -name '*.agent.md' -print0)
-
-simplifier_count="$(
-  find "$AGENT_DIR" -maxdepth 1 -type f -name '*simplifier*.agent.md' |
-    wc -l |
-    tr -d ' '
-)"
-[[ "$simplifier_count" == "1" ]] ||
-  fail "expected one simplifier agent, found $simplifier_count"
-
-if awk '
-  NR == 1 && $0 == "---" { frontmatter = 1; next }
-  frontmatter && $0 == "---" { exit }
-  frontmatter { print }
-' "$SIMPLIFIER" | grep -Eq '^model:[[:space:]]*'; then
-  fail "simplifier must remain model-neutral"
-fi
-
-python3 - "$README" <<'PY' ||
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-flat = " ".join(text.split())
-required = [
-    "## Risk-conditional quality chain",
-    "| Low risk | One implementation owner, one independent critic or test pass, and exact required CI |",
-    "three-model simplifier synthesis only for disputed, materially complex, or irreversible design",
-    "final validation only for multi-specialist reconciliation or an irreversible release decision",
-    "Start it only for parallel, asynchronous, external, or mutating operations",
-    "A single synchronous implementation and validation trace stays with its owner",
-]
-missing = [token for token in required if token not in flat]
-if missing:
-    raise SystemExit(f"risk-conditional quality policy is incomplete: {missing}")
-for forbidden in ("## Universal quality chain", "The fixed quality gates are:"):
-    if forbidden in text:
-        raise SystemExit(f"universal quality policy remains: {forbidden}")
-PY
-  fail "agent README does not define risk-conditional validation"
-
-python3 - "$PUBLIC_AGENTS" <<'PY' ||
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-flat = " ".join(text.split())
-required = [
-    "## Risk-conditional workflow",
-    "BetStan does not require the former six-stage chain for every change",
-    "| Low risk | One implementation owner, one independent critic or test pass, and exact required CI |",
-    "Use the conductor only for parallel, asynchronous, external, or mutating work",
-    "PerfettoStan is a process challenger, not a universal quality gate",
-]
-missing = [token for token in required if token not in flat]
-if missing:
-    raise SystemExit(f"public agent policy is incomplete: {missing}")
-for forbidden in (
-    "The six universal gates remain",
-    "## Universal quality-chain agents",
-    "Keep the conductor active for blocking work",
-):
-    if forbidden in text:
-        raise SystemExit(f"public agent policy remains unconditional: {forbidden}")
-PY
-  fail "public Agents page does not define risk-conditional validation"
-
-for marker in \
-  '## Work-unit taxonomy' \
-  '## Canonical policy sources' \
-  '## Three-model simplifier gate' \
-  'Registered implementation owner' \
-  'distinct model families' \
-  'requested_reasoning: high' \
-  'synthesis_model_id' \
-  'A `BLOCKED` pass is attempt evidence, not a completed family' \
-  'SIMPLIFICATION_INCOMPLETE' \
-  'SIMPLIFICATION_DISPUTED' \
-  'Only `SIMPLIFICATION_READY` produces the single artifact' \
-  'same agent conversation' \
-  'bounded correction budget'; do
-  require_literal "$README" "$marker"
-done
-require_flat_literal "$README" \
-  'Start `betstan-conductor` only when work is parallel, asynchronous, external, or mutating'
-require_flat_literal "$README" \
-  'Every conductor-managed authority-bearing unit is registered with one owner'
-require_flat_literal "$README" \
-  'Every handoff preserves the original `root_task_authority_id`'
-require_flat_literal "$README" \
-  'Every change has exact-diff documentation-impact evidence'
-require_flat_literal "$README" \
-  'to_agent: betstan-validation-critic'
-require_literal "$README" \
-  'public_impact: <plausible|ambiguous|none>'
-require_flat_literal "$README" \
-  'original `max_attempts`, and a monotonic attempt count; re-registration or a reissued handoff never resets the budget'
-require_flat_literal "$README" \
-  '`PerfettoStan` continuously challenges process friction at task start'
-require_flat_literal "$PERFETTO" \
-  'Return `FLOW_STOP_OPTIMIZE` when optional process expansion lacks one of those proofs'
-require_flat_literal "$PERFETTO" \
-  'After `FLOW_STOP_OPTIMIZE`, invoke one sealed `betstan-simplifier` process pass'
-require_flat_literal "$PERFETTO" \
-  'PerfettoStan may stop optional workflow, but may not bypass or suspend'
-require_flat_literal "$PERFETTO" \
-  'You are read-only. Use inspection commands only. Never edit, commit, push, dispatch or cancel workflows, deploy, terminate a process, or mutate repository, GitHub, cloud, runtime, or production state.'
-require_flat_literal "$PERFETTO" \
-  'an executing mutation remains with that owner until its next safe boundary'
-for safeguard in \
-  'protected branches and exact-SHA validation' \
-  'required independent evidence selected by the risk profile' \
-  'production serialization, locks, fences, provenance, or rollback readiness' \
-  'active containment, rollback, or incident-recovery actions needed for safety' \
-  'human-origin approval rules'; do
-  require_flat_literal "$PERFETTO" "$safeguard"
-done
-require_flat_literal "$README" \
-  'Register `betstan-public-wiki-editor` as a supporting unit only when public impact is plausible or ambiguous'
-require_flat_literal "$CONTRIBUTING" \
-  'Register `betstan-public-wiki-editor` when public impact is plausible or ambiguous'
-require_literal "$README" \
-  '| Repository-root `README.md`, `docs/wiki/**`'
-require_flat_literal "$ARCHITECT" \
-  'Start with the smallest compatible end-to-end behavior that advances the accepted user outcome'
-require_flat_literal "$CONDUCTOR" \
-  'three consecutive completed discretionary units trigger `ATTENTION_REQUIRED` when no product-code developer gate has completed'
-require_flat_literal "$CONDUCTOR" \
-  'Count governance, CI, or test-infrastructure work and repeated architect/simplifier cycles beyond the first triggered pass'
-require_flat_literal "$CONDUCTOR" \
-  'intra-gate simplifier passes count once'
-require_flat_literal "$CONDUCTOR" \
-  'Route a scope reset through the existing architect work unit'
-require_flat_literal "$CONDUCTOR" \
-  'Mandatory triggered specialists and safety gates are always registered'
-require_flat_literal "$CONDUCTOR" \
-  'governance-only root tasks do not count'
-[[ -f "$PUBLIC_WIKI_EDITOR" ]] || fail "public wiki editor agent is missing"
-for marker in \
-  'name: betstan-public-wiki-editor' \
-  'Every repository change receives a documentation-impact assessment' \
-  'WIKI_UPDATE_READY' \
-  'WIKI_NO_PUBLIC_CHANGE' \
-  'byte-identical publication' \
-  'Never publish credentials'; do
-  require_flat_literal "$PUBLIC_WIKI_EDITOR" "$marker"
-done
-require_flat_literal "$PUBLIC_WIKI_EDITOR" \
-  '`WIKI_NO_PUBLIC_CHANGE` is valid only when this agent was invoked and the exact diff changes no public'
-require_flat_literal "$ARCHITECT" \
-  'Source present in `common/` does not make an unpublished contract available to service images'
-require_flat_literal "$BACKEND_DEVELOPER" \
-  'source for the next package candidate while each service compiles against its exact published `@betstan/common` pin'
-require_flat_literal "$BACKEND_DEVELOPER" \
-  '`gamemaster`, `moderation`, `resulting`, `slip`, and `telemetry`'
-require_flat_literal "$BACKEND_DEVELOPER" \
-  'documentation-impact classification, inspected exact-diff paths'
-require_flat_literal "$FRONTEND_DEVELOPER" \
-  'documentation-impact classification, inspected exact-diff paths'
-require_flat_literal "$QUALITY_GATE_REVIEWER" \
-  'Require exact-diff documentation-impact evidence'
-require_flat_literal "$SERVICE_CONTRACT_REVIEWER" \
-  'state both versions and never substitute one for the other'
-require_flat_literal "$TEST_ENGINEER" \
-  'Never use `npm install --no-save <tarball>` as evidence'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'exact candidate Auth and Client images plus a valid candidate-prefix/baseline-suffix split over the canonical seven-writer forward order: Bet, Event, Moderation, Resulting, Slip, Backoffice, then Gamemaster'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'Maintenance must quiesce Backoffice first, and non-final restoration or fenced recovery must restore Backoffice last'
-require_flat_literal "$TEST_ENGINEER" \
-  'exact candidate Auth and Client plus each candidate-prefix/baseline-suffix split over the canonical seven-writer forward order: Bet, Event, Moderation, Resulting, Slip, Backoffice, then Gamemaster'
-require_flat_literal "$TEST_ENGINEER" \
-  'Prove Backoffice quiesces first and restores last'
-require_flat_literal "$LEARNINGS" \
-  'Cleanup recovery accepts only exact candidate Auth and Client images over a valid candidate prefix of the canonical seven-writer rollout'
-for stale_topology in \
-  'Auth, Backoffice, and Client' \
-  'canonical six-writer forward order' \
-  'all six data writers' \
-  'six quiesced legacy writer'; do
-  if grep -Fq "$stale_topology" "$DEPLOYMENT_SAFETY" ||
-    grep -Fq "$stale_topology" "$TEST_ENGINEER"; then
-    fail "agent definitions retain obsolete recovery topology: $stale_topology"
-  fi
-done
-require_flat_literal "$LEARNINGS" \
-  'Every change records documentation impact; `betstan-public-wiki-editor` is registered when public impact is plausible or ambiguous'
-
-simplifier_flat="$(tr '\n' ' ' <"$SIMPLIFIER" | tr -s '[:space:]' ' ')"
-for marker in \
-  'three eligible reports from distinct model families' \
-  'requested reasoning effort `high`' \
-  'Request `xhigh` reasoning when supported' \
-  'Never synthesize two reports as a degraded 2-of-3 result' \
-  'a `BLOCKED` pass requires substitution and never counts toward the three' \
-  '`REMOVE` requires unanimous support' \
-  'Do not invent a simplification that no independent pass proposed' \
-  'SIMPLIFICATION_READY' \
-  'SIMPLIFICATION_DISPUTED' \
-  'SIMPLIFICATION_INCOMPLETE'; do
-  grep -Fq "$marker" <<<"$simplifier_flat" ||
-    fail "simplifier contract is missing: $marker"
-done
-
-for marker in \
-  'unit_class: quality-gate|intra-gate|specialist|supporting' \
-  'logical_gate:' \
-  'task_authority: <immutable-root-user-request-or-canonical-pr-reference>' \
-  'root_task_authority_id: <stable-root-authority-id>' \
-  'repository_id: <canonical-owner-repository-or-not-applicable>' \
-  'workspace_root: <absolute-registered-worktree-or-not-applicable>' \
-  'repository_root: <resolved-git-root-or-not-applicable>' \
-  'expected_base_ref: <authoritative-git-ref-or-not-applicable>' \
-  'expected_base_sha: <full-sha-or-not-applicable>' \
-  'expected_head_ref: <authoritative-remote-or-pr-ref-or-not-applicable>' \
-  'expected_head_sha: <full-sha-or-not-applicable>' \
-  'required_commit_shas: [<full-sha>]' \
-  'expected_merge_base_sha: <full-sha-or-not-applicable>' \
-  'expected_tree_sha: <full-git-tree-sha-or-not-applicable>' \
-  'changed_paths_sha256: <canonical-compare-manifest-sha256-or-not-applicable>' \
-  'evidence_scope: <all-changed-paths-or-explicit-paths-or-not-applicable>' \
-  'policy_source_path: <repo-relative-path-or-not-applicable>' \
-  'policy_source_sha: <full-sha-or-not-applicable>' \
-  'max_attempts:' \
-  'handoff_ack_due_at:' \
-  'Never create status-only, summary-only, or handoff-only agents' \
-  'Use background agents only for genuinely independent parallel work' \
-  'For disputed, materially complex, or irreversible design, register'; do
-  require_literal "$CONDUCTOR" "$marker"
-done
-require_flat_literal "$CONDUCTOR" \
-  'Never accept repository evidence from an ambient or sibling worktree'
-require_flat_literal "$CONDUCTOR" \
-  'Before a distinct delegated agent, GitHub run, external wait, or long-lived local process starts whose output can block, approve, satisfy a gate, authorize mutation, or become dependency evidence, require one registration'
-require_flat_literal "$CONDUCTOR" \
-  'Direct, short-lived orchestrator commands remain in the current work unit and are not registered separately'
-reject_literal "$CONDUCTOR" \
-  'regardless of synchronous/background execution or expected duration'
-require_literal "$CONDUCTOR" '`STALE_EVIDENCE`'
-require_flat_literal "$CONDUCTOR" \
-  '`task_authority` is the immutable root user request that names the target workspace and refs'
-require_flat_literal "$CONDUCTOR" \
-  'It never changes during the workflow'
-require_flat_literal "$CONDUCTOR" \
-  'Every downstream handoff carries the same `root_task_authority_id`'
-require_flat_literal "$CONDUCTOR" \
-  'it cannot redefine the repository, workspace, or required feature commits'
-require_flat_literal "$CONDUCTOR" \
-  'A release work unit may advance its expected head to a newer protected `master`'
-require_flat_literal "$CONDUCTOR" \
-  'Do not reserve a release SHA for one development session'
-require_flat_literal "$CONDUCTOR" \
-  'Before registration, the conductor derives repository identity, workspace, source refs, and required commits from the root authority'
-require_flat_literal "$CONDUCTOR" \
-  'caller-supplied registration values are comparisons, never the source of truth'
-require_flat_literal "$CONDUCTOR" \
-  'Any handoff or registration that breaks root-authority continuity or drops a required commit is `STALE_EVIDENCE`'
-require_flat_literal "$CONDUCTOR" \
-  '`repository_id` is the canonical GitHub `owner/repository`'
-require_flat_literal "$CONDUCTOR" \
-  '`expected_base_ref` identifies the authoritative comparison source for a diff-based unit'
-require_flat_literal "$CONDUCTOR" \
-  '`expected_base_sha` is its immutable resolved value'
-require_flat_literal "$CONDUCTOR" \
-  '`expected_head_ref` identifies the authoritative remote branch or PR head'
-require_flat_literal "$CONDUCTOR" \
-  '`expected_merge_base_sha` is the canonical merge base for diff review'
-require_flat_literal "$CONDUCTOR" \
-  '`expected_tree_sha` is the immutable Git tree for `expected_head_sha`'
-require_flat_literal "$CONDUCTOR" \
-  '`changed_paths_sha256` hashes the NUL-delimited name/status manifest returned by `git diff --name-status -z <merge-base> <head>`'
-require_flat_literal "$CONDUCTOR" \
-  '`evidence_scope` is either every changed path or an explicit subset that cannot approve outside that subset'
-require_flat_literal "$CONDUCTOR" \
-  '`policy_source_path` names the repository-relative canonical policy file'
-require_flat_literal "$CONDUCTOR" \
-  '`policy_source_sha` is that file'
-require_flat_literal "$CONDUCTOR" \
-  'Any repository-derived result that can block, approve, or authorize mutation must be produced from a clean committed snapshot'
-require_flat_literal "$CONDUCTOR" \
-  'The conductor itself runs `git -C <workspace_root>` probes for the Git top level, `HEAD`, `HEAD^{tree}`, porcelain status, hidden index flags, submodule state, and ancestry at registration and immediately before acceptance'
-require_flat_literal "$CONDUCTOR" \
-  'independently queries the exact `repository_id` through the GitHub API at those same two checkpoints'
-require_flat_literal "$CONDUCTOR" \
-  'exact `repository_id` through the GitHub API at those same two checkpoints to resolve the base/head refs, commit tree, merge base, and policy blob'
-require_flat_literal "$CONDUCTOR" \
-  'isolated bare object store with no alternates, grafts, or replacement refs'
-require_flat_literal "$CONDUCTOR" \
-  'Independently verified objects and manifests from that repository may be reused'
-require_flat_literal "$CONDUCTOR" \
-  'Reuse never replaces fresh mutable-ref, current-master, local-state, or authority checks'
-require_flat_literal "$CONDUCTOR" \
-  'Every tree, ancestry, diff, and blob command runs with `GIT_NO_REPLACE_OBJECTS=1`'
-require_flat_literal "$CONDUCTOR" \
-  'derives the complete changed-path manifest there from the registered merge base and head'
-require_flat_literal "$CONDUCTOR" \
-  'a capped, partial, or otherwise unprovably complete provider file list is unverifiable'
-require_flat_literal "$CONDUCTOR" \
-  'never treats a local remote alias or tracking ref as authority'
-require_flat_literal "$CONDUCTOR" \
-  'verifies every evidence-scope file against its canonical blob'
-require_flat_literal "$CONDUCTOR" \
-  'An all-changed-files gate must consume the complete unfiltered canonical compare manifest'
-require_flat_literal "$CONDUCTOR" \
-  'Uncommitted advisory review may propose changes, but it cannot satisfy a quality, merge, deployment, or approval gate until rerun on a clean commit'
-require_flat_literal "$CONDUCTOR" \
-  'For units that interpret neither repository code nor policy, every Git provenance field is `not-applicable`'
-require_flat_literal "$CONDUCTOR" \
-  'Immediately before accepting or consuming the result, the conductor also audits the registered agent runtime'
-require_flat_literal "$CONDUCTOR" \
-  'Every repository file access must resolve under `workspace_root`'
-require_flat_literal "$CONDUCTOR" \
-  'every repository command must record that root as its working directory or use an explicit `git -C <workspace_root>`'
-require_flat_literal "$CONDUCTOR" \
-  'Diff-based reads and commands must use the registered `expected_merge_base_sha..expected_head_sha` endpoints'
-require_flat_literal "$CONDUCTOR" \
-  'equivalent to Git'
-require_flat_literal "$CONDUCTOR" \
-  'If tool-path, comparison-range, or changed-path coverage evidence is unavailable, the result is unverifiable'
-require_flat_literal "$CONDUCTOR" \
-  'Local test output is advisory only and cannot satisfy the test gate'
-require_flat_literal "$CONDUCTOR" \
-  'require trusted CI bound to the canonical exact commit'
-require_flat_literal "$CONDUCTOR" \
-  'Merge or deployment authority always requires those trusted exact-SHA checks'
-require_flat_literal "$CONDUCTOR" \
-  'Authority-bearing code and policy conclusions must read immutable Git objects'
-require_flat_literal "$CONDUCTOR" \
-  'using an exact-SHA GitHub API request, `git show <sha>:<path>`, or the registered merge-base/head object diff'
-require_flat_literal "$CONDUCTOR" \
-  'A mutable working-file read is advisory only'
-require_flat_literal "$CONDUCTOR" \
-  'any authoritative citation must be reproducible from the registered canonical objects'
-require_flat_literal "$CONDUCTOR" \
-  'A missing required provenance value, failed probe, or mismatch is `STALE_EVIDENCE`'
-require_flat_literal "$CONDUCTOR" \
-  'it cannot block, approve, authorize mutation, satisfy a gate, or become dependency evidence anywhere'
-require_flat_literal "$CONDUCTOR" \
-  'Return one bounded correction to the same agent context naming the exact worktree and SHAs'
-require_flat_literal "$CONDUCTOR" \
-  'if it repeats the mismatch, close that advisory result as unavailable'
-require_flat_literal "$CONDUCTOR" \
-  'Every other PR remains approval-bound to its exact current head SHA'
-require_literal "$CONDUCTOR" 'tools: [read, search, execute, edit, web]'
-require_flat_literal "$CONDUCTOR" \
-  'When a critical path is blocked by a checked-in rule, policy, or guard that this repository introduced, the conductor must not classify that as an external wait, passively wait, or repeatedly hand it off'
-require_flat_literal "$CONDUCTOR" \
-  'It owns one bounded governed correction under the original registered work ID; do not create another agent or a duplicate policy page'
-require_flat_literal "$CONDUCTOR" \
-  'A self-imposed correction is ineligible when the evidence shows a real unresolved production risk'
-require_flat_literal "$CONDUCTOR" \
-  'normal focused branch -> `dev` -> `master` path'
-require_flat_literal "$CONDUCTOR" \
-  'independent safety challenge through the existing deployment-safety specialist, not a new agent or universal quality gate'
-require_flat_literal "$CONDUCTOR" \
-  'Preserve rollback evidence and revalidate the exact promoted SHA'
-require_flat_literal "$CONDUCTOR" \
-  'resume the original registered job automatically from its exact persisted state'
-require_flat_literal "$CONDUCTOR" \
-  'Never bypass or edit live authority state ad hoc'
-require_flat_literal "$CONDUCTOR" \
-  'Never weaken a gate merely to make progress'
-require_flat_literal "$CONDUCTOR" \
-  'For the narrow current-master unmaterialized promotion deadlock'
-require_flat_literal "$CONDUCTOR" \
-  'The guard independently proves the OPEN CLI-managed same-repository `dev` -> `master` PR'
-require_flat_literal "$CONDUCTOR" \
-  'A raw prospective SHA is never authority'
-require_flat_literal "$CONDUCTOR" \
-  'A recovered original blocker is not completion'
-require_flat_literal "$CONDUCTOR" \
-  'do not report the promotion or release healthy until zero unexplained blockers remain'
-
-require_flat_literal "$FINAL_VALIDATOR" \
-  'three distinct model families whose pass statuses are'
-require_flat_literal "$FINAL_VALIDATOR" \
-  'the architect handoff and simplifier evidence when their triggers applied'
-require_flat_literal "$FINAL_VALIDATOR" \
-  'one `SIMPLIFICATION_READY` synthesis'
-require_literal "$FINAL_VALIDATOR" '`SIMPLIFICATION_INCOMPLETE` or `SIMPLIFICATION_DISPUTED`'
-require_literal "$BRANCH_REVIEWER" '`master` is the GitHub default and production branch'
-require_flat_literal "$BRANCH_REVIEWER" \
-  'while `dev` is the protected integration branch'
-
-for heading in \
-  '## Why this change exists' \
-  '## Exact source and ancestry' \
-  '## Scope and compatibility' \
-  '## Validation' \
-  '## Release and rollback' \
-  '## Exceptions and remaining work'; do
-  require_literal "$PR_TEMPLATE" "$heading"
-done
-
-contributing_flat="$(tr '\n' ' ' <"$CONTRIBUTING" | tr -s '[:space:]' ' ')"
-grep -Fq 'Every other PR requires `APPROVED_SHA` equal to its exact current head' \
-  <<<"$contributing_flat" ||
-  fail "CONTRIBUTING.md does not require exact-head human approval"
-grep -Fq 'operational convention' <<<"$contributing_flat" ||
-  fail "CONTRIBUTING.md does not disclose the label-only limitation"
-
-require_flat_literal "$CONTRIBUTING" \
-  'manual refresh cannot create a missing marker or act as quality evidence'
-require_flat_literal "$CONTRIBUTING" \
-  '`labeled` and `unlabeled` are non-producing refreshes'
-require_flat_literal "$CONTRIBUTING" \
-  'permanent pending tombstone'
-require_flat_literal "$CONTRIBUTING" \
-  'strictly postdate both the event timestamp'
-
-require_flat_literal "$BRANCH_SKILL" \
-  'refresh cannot create a marker or supply quality evidence'
-require_flat_literal "$BRANCH_SKILL" \
-  '`labeled` and `unlabeled` are non-producing refreshes'
-require_flat_literal "$BRANCH_SKILL" \
-  'permanently tombstones that lineage'
-require_flat_literal "$BRANCH_SKILL" \
-  'must strictly postdate the event'
-
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'Manual refresh may bind an existing marker but cannot create one or supply quality evidence'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  '`labeled` and `unlabeled` remain non-producing refreshes'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'permanently tombstones that lineage'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'created strictly after the original cutoff'
-
-require_flat_literal "$LEARNINGS" \
-  'Manual refresh may bind an existing marker but never creates one or supplies quality evidence'
-require_flat_literal "$LEARNINGS" \
-  'Label events remain non-producing'
-require_flat_literal "$LEARNINGS" \
-  'permanent pending tombstone'
-require_flat_literal "$LEARNINGS" \
-  'created strictly after the original cutoff'
-
-require_literal "$POLICY_PUBLISHER" \
-  'const OPENING_RACE_WINDOW_MS = 300_000;'
-for marker_authority_file in \
-  "$CONTRIBUTING" \
-  "$BRANCH_SKILL" \
-  "$DEPLOYMENT_SAFETY" \
-  "$LEARNINGS"; do
-  require_flat_literal "$marker_authority_file" \
-    'Version 3 quality markers use `v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.'
-  require_flat_literal "$marker_authority_file" \
-    'A `u` marker cannot bind a run, publish quality success, or consume an authorization receipt.'
-  require_flat_literal "$marker_authority_file" \
-    'The qualifying exact `labeled` event appends durable `p` before any optional run binding, and a label handler never consumes an authorization receipt.'
-  require_flat_literal "$marker_authority_file" \
-    'An exact replay of the same qualifying `labeled` event is inert after `p` or a run is durable; a later label mutation remains drift.'
-  require_flat_literal "$marker_authority_file" \
-    'Recovered opening-label authority is revalidated before every success-capable refresh, `workflow_run`, manual dispatch, or replayed `opened` event by a bounded server-owned issue-event ledger.'
-  require_flat_literal "$marker_authority_file" \
-    'The ledger must prove exactly one `copilot-cli-managed` `labeled` event within the original five-minute window and no matching `unlabeled` event.'
-  require_flat_literal "$marker_authority_file" \
-    'Any managed-label removal, second application, or application outside that window is proven drift and writes permanent `x`.'
-  require_flat_literal "$marker_authority_file" \
-    'Any fully validated managed `unlabeled` event, second managed `labeled` event, or out-of-window managed `labeled` event is individually sufficient, irreversible disproof: it writes permanent `x` immediately even on a full ledger page because unread appended events cannot restore the lineage; only positive authority requires scan completion.'
-  require_flat_literal "$marker_authority_file" \
-    'API, schema, duplicate-ID, missing, and incomplete ledger evidence remains inconclusive without `x` only when no disqualifying event has already been observed.'
-  require_flat_literal "$marker_authority_file" \
-    '`branch-policy.yml` grants only `issues: read` for this ledger; the publisher and permission must promote together.'
-  require_flat_literal "$marker_authority_file" \
-    'At the greatest cutoff, `x` dominates every other state; absent `x`, any version 1 or version 2 marker makes that cutoff fail-closed legacy; otherwise one compatible version 3 lineage resolves positive run ID over `p` over `u`, independent of status order.'
-  require_flat_literal "$marker_authority_file" \
-    'Conflicting positive run IDs or incompatible action, content, policy-run target, or label progression fail closed, and a lower state cannot downgrade a higher state.'
-  require_flat_literal "$marker_authority_file" \
-    'Version 1 and version 2 markers cannot newly bind, succeed, or consume an authorization receipt; a version 2 `x` remains a permanent tombstone.'
-  require_flat_literal "$marker_authority_file" \
-    'Only a strictly later `synchronize` or `reopened` transition may recover, never a metadata edit or a later or replayed `opened` event.'
-  require_flat_literal "$marker_authority_file" \
-    'Once any version 3 marker exists, operational rollback must retain version 3 parsing and ledger authority: recovered opening-label authority is not durable in marker v3, so every publisher able to bind or succeed such a lineage must revalidate the ledger; retaining version 3 parsing alone is insufficient, and rollback to a publisher lacking ledger authority is prohibited; use a reviewed forward correction.'
-  require_flat_literal "$marker_authority_file" \
-    'Opening-label reconciliation is authorized only when the server-owned label timestamp is at or after the original `opened` transition cutoff and no more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution cannot extend that window.'
-  require_flat_literal "$marker_authority_file" \
-    'GitHub may serialize distinct creation and label mutations to the same whole-second timestamp. Equality is accepted only with the complete direct or inverse proof; a timestamp even 1 ms before the cutoff is not reconciliation authority.'
-  require_flat_literal "$marker_authority_file" \
-    'Direct ordering also requires the label timestamp to strictly precede the earliest exact-lineage status creation, while inverse ordering requires identical event and live `updated_at` values and allows the marker on either side of the label.'
-  require_flat_literal "$marker_authority_file" \
-    'The broad opening snapshot mismatch permits only fail-closed inspection and never grants reconciliation: an out-of-window replay without a marker stays pending, an existing mismatch writes the permanent tombstone, and any intervening `updated_at` change fails closed.'
-  require_flat_literal "$marker_authority_file" \
-    'A same-cutoff tombstone cannot be replaced or revived; only a strictly later `synchronize` or `reopened` transition can recover the lineage.'
-done
-
-require_flat_literal "$BRANCH_POLICY" \
-  'permissions: actions: read contents: read issues: read pull-requests: read statuses: write'
-
-require_literal "$MERGE_SAFETY" 'human approval requires APPROVED_SHA='
-
-# Anti-stall reporting invariant. Executing tool calls are not a report, so the
-# conductor, the deployment-safety owner, the shared agent contract, and the
-# durable ledger must all require milestone timestamps, bounded silence,
-# one-shot classification of a stalled wait, and explicit escalation.
-require_flat_literal "$CONDUCTOR" \
-  'An owner that is still executing is not thereby reporting. A long turn without an externally visible checkpoint is a communication stall even when tools remain active'
-require_flat_literal "$CONDUCTOR" \
-  'Every checkpoint carries the current branch and SHA, the artifacts created so far, the current step, the last objectively completed milestone with its timestamp, the active command or run, any blocker, and the exact next bounded action.'
-require_flat_literal "$CONDUCTOR" \
-  'Record a milestone timestamp for each completed phase. An elapsed interval with no recorded milestone is silence, and silence is bounded, never open-ended.'
-require_flat_literal "$CONDUCTOR" \
-  'no objective state change for fifteen minutes, inspect it exactly once'
-require_flat_literal "$CONDUCTOR" \
-  'Report `BLOCKED` with that classification instead of polling indefinitely.'
-require_flat_literal "$CONDUCTOR" \
-  'When a command stays active for thirty minutes without producing a measurable milestone, stop it or hand it off safely, then checkpoint.'
-
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'Executing tool calls are not a report, and a long silent turn is a stall even while work continues.'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'Give every completed phase a milestone timestamp'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'no objective state change for fifteen minutes, inspect it once'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'When a command runs thirty minutes without a measurable milestone, stop it or hand it off safely and checkpoint before starting further work.'
-
-require_flat_literal "$README" \
-  'A long turn without an externally visible checkpoint is a communication stall even while tools remain active'
-require_flat_literal "$README" \
-  'Silence between milestones is bounded, never open-ended.'
-
-require_flat_literal "$LEARNINGS" \
-  'Executing is not reporting. Active tool calls, provider reasoning time, and growing call counts are activity, never deliverable progress'
-require_flat_literal "$LEARNINGS" \
-  'Checkpoint at each safe boundary rather than only at terminal success.'
-
-python3 - "$AGENT_DIR" <<'PY' ||
+python3 - "$ROOT_DIR" <<'PY'
 import pathlib
 import re
 import sys
 
-root = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[1]).resolve()
+agents = root / ".github/agents"
 roles = {
     path.name.removeprefix("betstan-").removesuffix(".agent.md"): path
-    for path in root.glob("*.agent.md")
+    for path in agents.glob("*.agent.md")
 }
 expected = {
     "architect", "simplifier", "backend-developer", "frontend-developer",
@@ -646,100 +24,143 @@ expected = {
     "migration-recovery", "azure-retirement", "public-wiki-editor",
     "PerfettoStan",
 }
+manual_expected = {
+    "aks-operator", "oci-operator", "oci-health-reviewer", "domain-ingress",
+    "mongo-migration", "migration-recovery", "azure-retirement",
+}
 if set(roles) != expected:
-    raise SystemExit("the 24-role inventory changed")
+    raise SystemExit("supported agent inventory changed")
+
 manual = set()
 for role, path in roles.items():
-    frontmatter = path.read_text(encoding="utf-8").split("---", 2)[1]
+    text = path.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    if len(parts) != 3 or parts[0]:
+        raise SystemExit(f"{path.name}: missing frontmatter")
+    frontmatter = parts[1]
+    name = re.search(r"^name:\s*(\S+)\s*$", frontmatter, re.M)
+    if not name or name[1] != path.name.removesuffix(".agent.md"):
+        raise SystemExit(f"{path.name}: filename/name mismatch")
     if re.search(r"^disable-model-invocation:\s*true\s*$", frontmatter, re.M):
         manual.add(role)
     if role == "ux-ui-expert" and not re.search(
         r"^tools:\s*\[read,\s*search\]\s*$", frontmatter, re.M
     ):
         raise SystemExit("UX gained execution or editing authority")
-if manual != {
-    "aks-operator", "oci-operator", "oci-health-reviewer", "domain-ingress",
-    "mongo-migration", "migration-recovery", "azure-retirement",
-}:
+    if role == "simplifier" and re.search(r"^model:", frontmatter, re.M):
+        raise SystemExit("simplifier must remain model-neutral")
+if manual != manual_expected:
     raise SystemExit("manual-invocation restrictions changed")
-PY
-  fail "role or capability boundaries changed"
 
-require_flat_literal "$README" \
-  'Register this bounded design review as supporting evidence for the design-to-developer handoff, not another quality gate'
-require_flat_literal "$README" \
-  'Unaccepted design blocks its dependent implementation, not independently authorized operations'
-require_flat_literal "$README" \
-  'Reuse that critic context for the existing formal implemented-code review'
-require_flat_literal "$README" \
-  'Further critic work requires changed substantive evidence, an unresolved finding, or a concrete scope violation'
-require_flat_literal "$README" \
-  "The recipient's first scoped action acknowledges receipt before substantive review; acknowledgement is not acceptance"
+sources = [
+    root / ".github/copilot-instructions.md",
+    agents / "README.md",
+    root / ".github/skills/betstan-branch-governance/SKILL.md",
+]
+for source in sources:
+    text = source.read_text(encoding="utf-8")
+    for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        target = target.split("#", 1)[0].split("?", 1)[0]
+        resolved = (source.parent / target).resolve()
+        if not resolved.is_relative_to(root) or not resolved.exists():
+            raise SystemExit(f"{source.name}: invalid repository link {target}")
 
-python3 - \
-  "$README" \
-  "$INSTRUCTIONS" \
-  "$CONTRIBUTING" \
-  "$QUALITY_GATES" \
-  "$RELEASE_ORCHESTRATION" \
-  "$CONDUCTOR" \
-  "$FINAL_VALIDATOR" <<'PY' ||
-import pathlib
-import sys
+readme = (agents / "README.md").read_text(encoding="utf-8")
+for path in roles.values():
+    if path.name.removesuffix(".agent.md") not in readme:
+        raise SystemExit(f"{path.name}: capability missing from routing")
 
-trigger = "disputed, materially complex, or irreversible design"
-for file_name in sys.argv[1:]:
-    text = " ".join(pathlib.Path(file_name).read_text(encoding="utf-8").split())
-    if trigger not in text:
-        raise SystemExit(f"{file_name} does not use the canonical three-model trigger")
+def require(path, *outcomes):
+    text = " ".join(path.read_text(encoding="utf-8").split())
+    for outcome in outcomes:
+        if outcome not in text:
+            raise SystemExit(f"{path.relative_to(root)}: missing {outcome}")
 
-forbidden = (
-    "Independent critic, test, and final-validation evidence remains required",
-    "formal critic, tests, final validation + CI",
-    "before formal critic review of the immutable candidate and final validation",
-    "Start `betstan-conductor` before every unit",
+# Policy assertions cover retained responsibilities, not a prescribed sequence.
+require(
+    agents / "README.md",
+    "one accountable owner",
+    "Changes to trust or state boundaries require independent verification",
+    "The verifier must not be the author",
+    "Current executable controls remain authoritative until a proven cutover",
+    "Do not rerun unchanged tests",
 )
-for file_name in sys.argv[1:6]:
-    text = " ".join(pathlib.Path(file_name).read_text(encoding="utf-8").split())
-    for phrase in forbidden:
-        if phrase in text:
-            raise SystemExit(f"{file_name} retains unconditional process text: {phrase}")
+require(
+    root / "CONTRIBUTING.md",
+    "Never push directly to `dev`",
+    "Never commit or push directly to it",
+    "Use ancestry-preserving merges",
+    "Every other PR requires `APPROVED_SHA` equal to its exact current head",
+    "CLI-created and CLI-owned",
+    "without a separate personal prompt",
+    "immutable deployed identity",
+    "physical single-writer locks/fences",
+    "data integrity",
+    "compatible recovery",
+    "observed health",
+)
+require(
+    agents / "betstan-conductor.agent.md",
+    "The conductor does not submit the approval",
+    "Timeout, runner exit or lease expiry is not proof that a writer stopped",
+    "Never edit live authority",
+)
+require(
+    root / "docs/copilot-security-guardrails.md",
+    "Never commit sensitive information",
+    "human-origin work requires exact approval",
+    "policy edits grant no production permissions",
+)
+require(
+    agents / "betstan-public-wiki-editor.agent.md",
+    "Never publish credentials",
+    "byte-identical publication",
+    "This editor does not perform Git or publication actions",
+)
+require(
+    root / ".github/pull_request_template.md",
+    "## Why this change exists",
+    "## Exact source and ancestry",
+    "## Scope and compatibility",
+    "## Validation",
+    "## Release and rollback",
+    "## Exceptions and remaining work",
+    "Independent verification for changed trust/state boundaries",
+    "Reused evidence",
+)
+
+# Domain safeguards survive routing consolidation; their executable tests
+# remain with the package, authorization, migration and release implementations.
+require(
+    agents / "betstan-service-contract-reviewer.agent.md",
+    "state both versions and never substitute one for the other",
+    "a shared contract requires every genuine consumer",
+)
+require(
+    agents / "betstan-test-engineer.agent.md",
+    "Never use `npm install --no-save <tarball>` as evidence",
+    "Prove Backoffice quiesces first and restores last",
+)
+require(
+    agents / "betstan-deployment-safety.agent.md",
+    "exact candidate Auth and Client images plus a valid candidate-prefix/baseline-suffix split",
+    "do not apply an AKS journal requirement to an OCI release",
+)
+require(
+    agents / "betstan-oci-operator.agent.md",
+    "Repository-only implementation uses its exact source/diff contract and performs no live baseline or provider operation",
+)
+require(
+    agents / "betstan-oci-health-reviewer.agent.md",
+    "For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID",
+    "For k3s, verify the recorded instance/runtime identity",
+)
+require(
+    agents / "betstan-mongo-migration.agent.md",
+    "Require exact in-AKS source/target server-version and FCV compatibility",
+)
 PY
-  fail "risk-conditional policy vocabulary or negative assertions failed"
-require_flat_literal "$README" \
-  'An advisory delay cannot waive a technical gate or freeze an operation whose required authority and safety evidence remain valid'
-require_flat_literal "$README" \
-  'The authorized orchestrator, not a file-editing developer, creates the immutable candidate'
-require_flat_literal "$AGENT_DIR/betstan-validation-critic.agent.md" \
-  'A design result is not implemented-code or release approval'
-require_flat_literal "$AGENT_DIR/betstan-validation-critic.agent.md" \
-  'never emit `APPROVE_SLICE` or invent implementation/test evidence'
-require_flat_literal "$TEST_ENGINEER" \
-  'this task neither requires its own future UX/critic verdict nor emits `TESTS_GREEN`'
-require_literal "$TEST_ENGINEER" 'betstan-test-engineer: SUPPORTING_EVIDENCE_READY'
-require_flat_literal "$AGENT_DIR/betstan-ux-ui-expert.agent.md" \
-  'It may precede the formal test gate and does not depend on this UX verdict or a completed critic review'
-require_flat_literal "$PUBLIC_WIKI_EDITOR" \
-  'Return the owned documentation and evidence to the registered implementation owner'
-require_flat_literal "$PUBLIC_WIKI_EDITOR" \
-  'This editor does not perform Git or publication actions'
-require_flat_literal "$CONDUCTOR" \
-  'The conductor does not submit the approval'
-require_flat_literal "$CONDUCTOR" \
-  'A terminal unit without a confirmed downstream handoff is a stall once its registered acknowledgement deadline is missed'
-require_flat_literal "$AGENT_DIR/betstan-oci-operator.agent.md" \
-  'Repository-only implementation uses its exact source/diff contract and performs no live baseline or provider operation'
-require_flat_literal "$AGENT_DIR/betstan-oci-health-reviewer.agent.md" \
-  'For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID'
-require_flat_literal "$AGENT_DIR/betstan-oci-health-reviewer.agent.md" \
-  'For k3s, verify the recorded instance/runtime identity and the checked-in Bastion/loopback access contract'
-require_flat_literal "$AGENT_DIR/betstan-mongo-migration.agent.md" \
-  'Require exact in-AKS source/target server-version and FCV compatibility'
-require_flat_literal "$DEPLOYMENT_SAFETY" \
-  'do not apply an AKS journal requirement to an OCI release'
-require_flat_literal "$QUALITY_GATE_REVIEWER" \
-  'shared CI or contract changes expand to every affected consumer'
-require_flat_literal "$SERVICE_CONTRACT_REVIEWER" \
-  'a shared contract requires every genuine consumer, including services added after older reviews'
 
 echo "agent_governance_contract=PASS"

@@ -9,6 +9,10 @@ user-invocable: true
 
 You retire the Azure source only after OCI has become the verified canonical
 production system.
+Follow `CONTRIBUTING.md` for origin-bound authorization; eligible verified
+CLI-owned work uses the canonical automatic path without another personal
+prompt. Destructive confirmations, exact inventory and all technical gates
+below still apply. Invocation alone never authorizes deletion.
 
 ## Read first
 

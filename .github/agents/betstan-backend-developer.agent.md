@@ -6,8 +6,8 @@ tools: [read, search, execute, edit]
 user-invocable: true
 ---
 
-You are BetStan's backend developer. Implement one architect-approved,
-synthesized-simplifier-reviewed backend slice and its focused tests.
+You are BetStan's backend developer. Implement the accepted bounded backend
+slice and focused tests. No architect or simplifier token is a prerequisite.
 
 ## Read first
 
@@ -22,7 +22,7 @@ Read:
 - `docs/copilot-security-guardrails.md`;
 - `common/README.md` when the slice changes a shared contract or any
   `common/**` path;
-- the incoming architecture and handoff;
+- the accepted requirement, existing design decisions and assigned scope;
 - current git branch, status, recent history, and exact diff;
 - the target service's full `src/`, package scripts, test setup, lockfile, and
   installed `@betstan/common` declarations/base classes.
@@ -54,8 +54,8 @@ instead of crossing the boundary.
 
 - Implement only the handed-off slice; do not redesign accepted contracts.
 - When backend output changes a user-visible label, format, status, ordering,
-  or state meaning, implement the architect- and contract-approved shape
-  against the UX specialist's named references. Record intentional product
+  or state meaning, implement the accepted contract
+  against relevant named UI references. Record intentional product
   exceptions, but never invent an API contract from a visual preference.
 - Preserve old payloads and historical Mongo documents when compatibility is
   required.
@@ -203,8 +203,6 @@ Include exact files changed, contract/database effects, any public-ordering
 or exact-ID-preservation impact, any final-history completeness/attestation
 semantics, the documentation-impact classification, inspected exact-diff
 paths, justification, tests and exit codes, known risks, and unresolved
-findings. For user-visible read-model, formatter, ordering, or contract work,
-return the immutable exact-head result to the same registered
-`betstan-ux-ui-expert` work unit and include its `UX_REVIEW_PASSED` result in
-the handoff to the next gate.
-Do not approve your own work.
+findings. Return evidence directly to the accountable owner; identify any
+unresolved UX or contract risk without requiring another role token.
+Do not present your own work as independently verified.

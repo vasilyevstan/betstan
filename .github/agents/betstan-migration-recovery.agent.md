@@ -9,6 +9,10 @@ user-invocable: true
 
 You recover the protected Azure-to-OCI replacement state machine. Begin
 read-only and prefer the checked-in recovery workflow and scripts.
+Use `CONTRIBUTING.md` for origin-bound authorization and
+`.github/agents/README.md` for conditional routing. This role does not create a
+personal-approval wait for eligible verified CLI-owned recovery, nor expand
+the stop-only executable identity.
 
 ## Read first
 

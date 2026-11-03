@@ -8,10 +8,11 @@ patterns elsewhere in the product.
 For the implemented application shell, density layouts, themes, route
 structure, and component behavior, see [[User Interface]].
 
-## When the specialist is required
+## When to use UX expertise
 
-Every change that alters what a user sees or how a user interacts requires
-`betstan-ux-ui-expert`, including:
+Every user-facing change needs evidence of affected behavior and consistency.
+Use `betstan-ux-ui-expert` when an evidenced design, accessibility, responsive,
+or interaction risk needs that expertise. Relevant changes include:
 
 - layout, typography, copy, color, icon, card, control, or navigation changes;
 - loading, empty, error, disabled, stale, suspended, live, terminal, and
@@ -20,25 +21,25 @@ Every change that alters what a user sees or how a user interacts requires
 - focus, keyboard, touch, form, live-update, and state-transition behavior;
 - user-visible data formatting, terminology, ordering, or plausibility.
 
-The agent is a mandatory conditional specialist: it applies to every
-user-facing slice but does not become a universal quality gate for backend,
-infrastructure, or documentation-only work.
+The accountable owner selects the smallest appropriate evidence. The
+specialist is not a mandatory handoff for every visual edit. Conditional
+capability routing and independent verification of changed trust/state
+boundaries are described in [[Agents]] and [[Quality Gates]].
 
-## One two-phase work unit
+## Bounded specification or review
 
-Register one specialist `work_id`, owner, and agent context for the complete
-slice.
+An assignment may cover a specification, a result review, or both:
 
-1. **Baseline specification:** before implementation by the registered path
-   owner, name the stable reference grammar, required information hierarchy,
+1. **Specification:** name the stable reference grammar, required information hierarchy,
    states, responsive behavior, accessibility constraints, intentional
    semantic differences, and acceptance evidence.
-2. **Immutable-result audit:** after implementation, review the exact committed
+2. **Result review:** when requested, review the exact committed
    head against the same baseline and issue `UX_REVIEW_PASSED`,
    `UX_CHANGES_REQUIRED`, or `UX_CLARIFICATION_NEEDED`.
 
-Do not create a second UX agent, handoff-only reviewer, or extra universal
-quality gate for the post-implementation phase.
+Reuse accepted references and evidence. Keep corrections and any requested
+follow-up with the same owner/context; no separate baseline token, second UX
+agent, or acknowledgement-only reviewer is required.
 
 ## Establishing the reference baseline
 
@@ -148,7 +149,7 @@ and responsive states on the routed surface.
 | Classification | Meaning | Required outcome |
 |---|---|---|
 | Blocking usability defect | betting information is hidden/misleading, accessibility fails, interaction is unstable, or content collides/clips/overflows | fix before acceptance |
-| Required consistency fix | the slice diverges from a stable product pattern without a semantic reason | fix before `UX_REVIEW_PASSED` |
+| Required consistency fix | the slice diverges from a stable product pattern without a semantic reason | fix before acceptance |
 | Intentional product exception | product meaning requires a different treatment and the rationale is documented | accept and retain the rationale |
 | Optional polish | improvement is useful but not required for coherent, accessible behavior | record separately; do not block the smallest complete change |
 
@@ -185,9 +186,10 @@ composition is coherent.
 
 Rendered evidence is required for precise claims about pixel geometry,
 collision, clipping, overflow, touch-target size, focus order, layout shift, or
-dynamic interaction. Ask `betstan-test-engineer` for the smallest existing
-browser, accessibility, interaction, or computed-layout check that resolves
-the claim.
+dynamic interaction. Ask the implementation or test owner for the smallest
+existing browser, accessibility, interaction, or computed-layout check that
+resolves the claim. Supporting measurements need no prior specialist verdict
+or later duplicate test round.
 
 A user-facing change does not automatically require a new screenshot baseline,
 image-diff dependency, or full responsive Playwright matrix. Reuse existing
@@ -268,9 +270,10 @@ The pull request records:
 - affected routes, components, states, layouts, themes, and viewport classes;
 - named reference screens, components, and tokens;
 - intentional exceptions and rationale;
-- baseline and final UX status, bound to the exact head SHA;
+- consistency verification bound to the exact source, including any requested
+  specialist result;
 - evidence used, unverified ambiguity, and remaining optional polish.
 
-UX evidence informs critic, test, and final validation. It is not architecture,
+UX evidence informs scoped verification and source acceptance. It is not architecture,
 quality, merge, deployment, activation, or rollback authority. See
 [[Release Orchestration]].
