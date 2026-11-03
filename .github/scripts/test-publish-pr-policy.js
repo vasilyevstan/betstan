@@ -1663,6 +1663,7 @@ async function testReceiptReadback() {
 async function main() {
   require("./test-pr-source-snapshot.js");
   await require("./test-source-quality.js")();
+  await require("./test-consume-source-quality.js")();
   await testReceiptReadback();
   function assertNoQualitySuccess(result) {
     assert.equal(

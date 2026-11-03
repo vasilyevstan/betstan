@@ -53,9 +53,10 @@ quality results. Its base-scoped `branch-policy/<base>` and
 `pr-quality-gates/<base>` statuses still bind both the PR head and current
 merge snapshot. The separate required `oci-validate` aggregate is unchanged.
 
-The implementation remains **candidate-only shadow work**, not an active
-producer or release authority. `.github/workflows/source-quality.yml`
-(`source-quality-shadow`) and `.github/scripts/source-quality.js` stage three
+The implementation remains **non-authoritative shadow work**, not release
+authority. The producer has landed through protected integration and promotion.
+`.github/workflows/source-quality.yml` (`source-quality-shadow`) and
+`.github/scripts/source-quality.js` define three
 isolated jobs:
 
 | Job | Staged responsibility |
@@ -91,9 +92,20 @@ the exact manifest bytes and checks GitHub OIDC certificate repository,
 workflow, control commit/ref, event, run, and attempt identity.
 Candidate-supplied claims are not certificate authority.
 
-Governed landing and execution on protected source, a real BetStan native
-attestation, authoritative publisher integration, and protected cutover remain
-pending. A public reference signature established the CLI JSON contract and
+`.github/scripts/consume-source-quality.js` composes that verifier with the
+current source evaluator without publishing any status. Its caller supplies
+an independently trusted signer checkout and the downloaded manifest bytes,
+not an expected signer copied from the manifest. Native artifact identity,
+repository, run, attempt-specific name and expiry must match. The consumer
+reconstructs selected jobs from all native attempts, rejects a newer failed
+execution, and preserves older test attempts only when source capture is not
+newer. A final source/execution read rejects concurrent changes. This helper
+is not yet wired into the authoritative publisher or automatic artifact
+retrieval; its successful result explicitly remains non-authoritative.
+
+Execution on protected source, a real BetStan native attestation,
+authoritative publisher integration, and protected cutover remain pending.
+A public reference signature established the CLI JSON contract and
 wrong-source rejection, not BetStan checkout proof. Candidate tests establish
 neither protected execution nor delegation, cutover, or production readiness.
 
@@ -131,14 +143,17 @@ shard has a 25-minute limit; timeout, shard failure, or partial completion is
 not passing evidence. The complete local runner remains available in
 deterministic serial order.
 
-The locally prepared compatibility `production-build` uses the full
+The protected compatibility `production-build` uses the full
 trusted-master workflow, not lean path selection. It runs coverage for all ten
 application packages, the Client production build, Auth container smoke,
 runtime-script validation, and full deployment-safety contracts without
 changed-path selection. Its PR triggers include `edited`, so title/body edits
 can start full `production-build` validation. Usable quality evidence still
 follows the existing publisher marker and receipt rules; metadata edits cannot
-create or recover a trusted source-quality transition.
+create or recover a trusted source-quality transition. An edit-triggered
+replacement run therefore cannot replace the original bound run. Verify
+trigger and publisher behavior together before cancelling validation, and
+verify a supported new transition's binding before waiting for expensive CI.
 
 The lean variant retained in `dev` and repository history selects coverage,
 Auth smoke, and runtime/deployment checks by changed paths and avoids source

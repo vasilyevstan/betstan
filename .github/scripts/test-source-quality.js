@@ -150,3 +150,4 @@ if (require.main === module) {
   });
 }
 module.exports = testSourceQuality;
+module.exports.fixture = fixture;
