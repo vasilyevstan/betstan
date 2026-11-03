@@ -5018,13 +5018,15 @@ async function publishPrPolicy(arguments_) {
     if (protocol === "full-v2") {
       await publishFullSourceQuality({ ...arguments_, selectedPullNumber: number, expectedPublication });
     } else {
-      const legacyContext = context.eventName === "workflow_run" ? {
-        ...context,
-        payload: {
-          ...context.payload,
-          workflow_run: { ...wakeup, pull_requests: wakeup.pull_requests.filter((pull) => pull.number === number) },
+      // Keep the Context prototype: actions/github-script exposes repo as a getter.
+      const legacyContext = context.eventName === "workflow_run" ? Object.assign(
+        Object.create(Object.getPrototypeOf(context)), context, {
+          payload: {
+            ...context.payload,
+            workflow_run: { ...wakeup, pull_requests: wakeup.pull_requests.filter((pull) => pull.number === number) },
+          },
         },
-      } : context;
+      ) : context;
       await publishLegacyPrPolicy({ ...arguments_, context: legacyContext, expectedPublication });
     }
     try {

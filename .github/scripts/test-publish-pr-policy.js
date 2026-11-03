@@ -906,7 +906,13 @@ async function execute({
     info: (message) => messages.push(message),
     setFailed: (message) => messages.push(`FAILED: ${message}`),
   };
-  const context = {
+  // Mirror actions/github-script: repo is a prototype getter, not an own property.
+  class ActionsContext {
+    get repo() {
+      return { owner: "example", repo: "repo" };
+    }
+  }
+  const context = Object.assign(new ActionsContext(), {
     eventName,
     payload:
       eventName === "workflow_run"
@@ -921,10 +927,9 @@ async function execute({
                 label: { name: eventLabelName ?? CLI_MANAGED_LABEL },
               }),
             },
-    repo: { owner: "example", repo: "repo" },
     runId: contextRunId,
     serverUrl: "https://example.invalid",
-  };
+  });
 
   const policyArguments = {
     github,
@@ -1701,6 +1706,12 @@ async function main() {
       },
     });
     assert.match(output, /published_status_compatibility=PASS/);
+    const completion = await execute({
+      currentProtocol: true, currentPull, eventName: "workflow_run",
+      transitionStatuses: [qualityTransitionStatus({ context: `trusted-quality-transition/${base}` })],
+    });
+    assert.equal(completion.statuses.filter((row) => row.context === `pr-quality-gates/${base}`).at(-1)?.state,
+      "success", completion.messages.join("\n"));
   }
   for (const readFails of [false, true]) {
     const statuses = [];
