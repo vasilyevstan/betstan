@@ -1,7 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { captureSource, collectManifest } = require("./source-quality.js");
+const {
+  captureSource, captureCurrentSelection, captureExecutionProfiles, collectManifest,
+} = require("./source-quality.js");
 
 function fixture() {
   const pull = {
@@ -66,13 +68,28 @@ function fixture() {
     }
     assert.deepEqual(args.slice(0, 4), ["ls-tree", "-z", "HEAD", "--"]);
     return args.slice(4).map((file, index) =>
-      `100644 blob ${String(index + 5).repeat(40)}\t${file}\0`,
+      `100644 blob ${(index + 5).toString(16).padStart(40, "0")}\t${file}\0`,
     ).join("");
   };
   return { options: { github, context, attempt: 2 }, pull, merge, native, jobs, git };
 }
 
 async function testSourceQuality() {
+  const runner = {
+    imageVersion: "20261103.1.0", imageOS: "ubuntu24", platform: "linux",
+    architecture: "x64", kernel: "6.11.0-1018-azure", nodeVersion: "v20.19.5",
+    nodeSha256: "a".repeat(64),
+  };
+  const resolved = captureExecutionProfiles(runner);
+  assert.equal(resolved["node-policy"].immutable, true);
+  assert.equal(resolved.contracts.immutable, false);
+  for (const field of ["imageVersion", "kernel", "nodeSha256"]) {
+    const changed = { ...runner, [field]: field === "nodeSha256" ? "b".repeat(64)
+      : field === "kernel" ? "6.11.0-1019-azure" : "20261104.1.0" };
+    assert.notEqual(captureExecutionProfiles(changed)["node-policy"].identity, resolved["node-policy"].identity);
+  }
+  assert.equal(captureExecutionProfiles({ ...runner, imageVersion: undefined })["node-policy"].immutable, false);
+  assert.throws(() => captureExecutionProfiles({ ...runner, nodeVersion: "v24.0.0" }), /approved Node/);
   const initial = fixture();
   const source = await captureSource(initial.options, initial.git);
   assert.equal(source.run.headSha, initial.pull.head.sha);
@@ -139,6 +156,56 @@ async function testSourceQuality() {
   resumed.jobs[0].conclusion = "success";
   previous.validator.workflowBlobSha = "0".repeat(40);
   await assert.rejects(collectManifest(resumed.options, previous, resumed.git), /control changed/);
+
+  const selected = fixture();
+  const originalCommit = selected.options.github.rest.git.getCommit;
+  const baseTree = "e".repeat(40);
+  const baseEntries = [
+    { path: "client/package.json", mode: "100644", type: "blob", sha: "a".repeat(40) },
+    { path: "client/package-lock.json", mode: "100644", type: "blob", sha: "b".repeat(40) },
+    { path: "client/src/deleted.ts", mode: "100644", type: "blob", sha: "c".repeat(40) },
+    { path: ".github/scripts/source-quality.js", mode: "100644", type: "blob", sha: "d".repeat(40) },
+  ];
+  const currentEntries = structuredClone(baseEntries);
+  currentEntries[2].path = "client/src/renamed.ts";
+  const profiles = Object.fromEntries(["node-policy", "package", "contracts"].map((name) =>
+    [name, { identity: "a".repeat(64), immutable: false }],
+  ));
+  selected.options.github.rest.git.getCommit = async (args) => args.commit_sha === selected.pull.base.sha
+    ? { data: { sha: selected.pull.base.sha, tree: { sha: baseTree } } }
+    : originalCommit(args);
+  let truncated = false;
+  selected.options.github.rest.git.getTree = async ({ tree_sha, recursive }) => {
+    assert.equal(recursive, "1");
+    assert.ok([baseTree, selected.merge.tree.sha].includes(tree_sha));
+    return { data: {
+      sha: tree_sha, truncated,
+      tree: structuredClone(tree_sha === baseTree ? baseEntries : currentEntries),
+    } };
+  };
+  const full = await captureCurrentSelection(selected.options, profiles, selected.git);
+  assert.equal(full.purpose, "full-source-quality");
+  assert.ok(full.suites.some((suite) => suite.suiteId === "package-client"));
+  assert.notEqual(full.validator.executableClosureSha256, source.validator.executableClosureSha256);
+  const unchanged = structuredClone(currentEntries);
+  currentEntries.splice(0, currentEntries.length, ...structuredClone(baseEntries));
+  assert.equal((await captureCurrentSelection(selected.options, profiles, selected.git)).noWork, true);
+  currentEntries.splice(0, currentEntries.length, ...unchanged);
+  truncated = true;
+  await assert.rejects(captureCurrentSelection(selected.options, profiles, selected.git), /Complete immutable Git tree/);
+  truncated = false;
+  currentEntries[2].mode = "120000";
+  await assert.rejects(captureCurrentSelection(selected.options, profiles, selected.git), /Unsupported candidate Git tree/);
+  currentEntries[2].mode = "100644";
+  let reads = 0;
+  selected.options.github.rest.pulls.get = async () => {
+    if (++reads === 2) {
+      selected.pull.head.sha = "f".repeat(40);
+      selected.merge.parents[1].sha = selected.pull.head.sha;
+    }
+    return { data: structuredClone(selected.pull) };
+  };
+  await assert.rejects(captureCurrentSelection(selected.options, profiles, selected.git), /changed during input capture/);
 
   console.log("source_quality_tests=PASS");
 }

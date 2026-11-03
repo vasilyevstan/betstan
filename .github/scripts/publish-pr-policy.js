@@ -4904,12 +4904,17 @@ async function invalidatePublishedSnapshot({
   repo,
   pull,
   targetUrl,
+  protocolChanged = false,
 }) {
   const contexts = [
     `${BRANCH_CONTEXT_PREFIX}/${pull.baseRef}`,
     `${QUALITY_CONTEXT_PREFIX}/${pull.baseRef}`,
+    ...(protocolChanged ? [`${FULL_QUALITY_CONTEXT}/${pull.baseRef}`] : []),
   ];
-  for (const target of statusTargets(pull)) {
+  const targets = protocolChanged
+    ? [...new Set([pull.headSha, pull.mergeSha].filter((sha) => /^[0-9a-f]{40}$/.test(sha ?? "")))]
+    : statusTargets(pull);
+  for (const target of targets) {
     for (const statusContext of contexts) {
       await publishStatus(
         github,
@@ -4917,8 +4922,10 @@ async function invalidatePublishedSnapshot({
         repo,
         target,
         statusContext,
-        "pending",
-        `PR #${pull.number} changed during trusted policy publication`,
+        protocolChanged ? "failure" : "pending",
+        protocolChanged
+          ? `PR #${pull.number} protection changed during policy publication`
+          : `PR #${pull.number} changed during trusted policy publication`,
         targetUrl,
       );
     }
@@ -4929,7 +4936,334 @@ function eventPullIdentity(eventPull) {
   return pullIdentity(eventPull);
 }
 
-module.exports = async function publishPrPolicy({
+const FULL_QUALITY_WORKFLOW = "source-quality.yml";
+const FULL_QUALITY_CONTEXT = "source-quality-v2";
+
+function publicationSnapshot(pull) {
+  return {
+    number: pull.number, headRef: pull.head?.ref, headSha: pull.head?.sha,
+    headRepository: pull.head?.repo?.full_name || "",
+    baseRef: pull.base?.ref, baseSha: pull.base?.sha, mergeSha: pull.merge_commit_sha || "",
+  };
+}
+
+function assertPublicationSnapshot(actual, expected) {
+  if (!expected) return;
+  assertExpectedPull(actual, expected);
+  if (actual.mergeSha !== expected.mergeSha) {
+    throw new Error("Pull request merge snapshot changed before publication");
+  }
+}
+
+function qualityProtocol(branch, baseRef) {
+  const checks = branch.protection?.required_status_checks;
+  if (
+    branch.name !== baseRef || !["dev", "master"].includes(baseRef) ||
+    branch.protected !== true || branch.protection?.enabled !== true ||
+    !Array.isArray(checks?.contexts) || checks.contexts.some((name) => typeof name !== "string") ||
+    !Array.isArray(checks.checks) || checks.checks.some((check) => typeof check?.context !== "string")
+  ) {
+    throw new Error("Native required-check protection is unavailable or invalid");
+  }
+  const required = new Set([...checks.contexts, ...checks.checks.map((check) => check.context)]);
+  const branchContext = `${BRANCH_CONTEXT_PREFIX}/${baseRef}`;
+  if (required.has(`${FULL_QUALITY_CONTEXT}/${baseRef}`)) {
+    if (!required.has(branchContext)) throw new Error("Full-quality branch policy is not enforced");
+    return "full-v2";
+  }
+  if (
+    (required.has(branchContext) && required.has(`${QUALITY_CONTEXT_PREFIX}/${baseRef}`)) ||
+    (baseRef === "dev" && required.has("publish-current-pr-snapshot") && required.has("pr-quality-gates"))
+  ) {
+    return "legacy";
+  }
+  throw new Error("No supported protected quality protocol is enforced");
+}
+
+async function publishPrPolicy(arguments_) {
+  const { github, context, core } = arguments_;
+  const wakeup = context.payload.workflow_run;
+  const fullWakeup = context.eventName === "workflow_run" &&
+    wakeup?.path === `.github/workflows/${FULL_QUALITY_WORKFLOW}`;
+  let numbers;
+  if (context.eventName === "pull_request_target") {
+    numbers = [context.payload.pull_request?.number];
+  } else if (context.eventName === "workflow_dispatch") {
+    numbers = [Number(context.payload.inputs?.pr_number)];
+  } else if (context.eventName === "workflow_run") {
+    if (!fullWakeup && wakeup?.path !== QUALITY_WORKFLOW_PATH) {
+      throw new Error("Unsupported quality publication wakeup");
+    }
+    numbers = fullWakeup ? fullRunPullNumbers(wakeup)
+      : (wakeup.pull_requests ?? []).map((pull) => pull.number);
+  } else {
+    throw new Error("Unsupported quality publication event");
+  }
+  for (const number of [...new Set(numbers)]) {
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error("Invalid publication PR number");
+    const { data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: number });
+    if (pull.state === "closed") {
+      core.info(`PR #${number} is closed; no current quality authority is published`);
+      continue;
+    }
+    const readProtocol = async () => qualityProtocol((await github.rest.repos.getBranch({
+      ...context.repo, branch: pull.base?.ref,
+    })).data, pull.base?.ref);
+    const protocol = await readProtocol();
+    const expectedPublication = publicationSnapshot(pull);
+    if (context.eventName === "workflow_run" && fullWakeup !== (protocol === "full-v2")) {
+      core.info(`PR #${number} retains ${protocol} publication; other producer completion is inert`);
+      continue;
+    }
+    if (protocol === "full-v2") {
+      await publishFullSourceQuality({ ...arguments_, selectedPullNumber: number, expectedPublication });
+    } else {
+      const legacyContext = context.eventName === "workflow_run" ? {
+        ...context,
+        payload: {
+          ...context.payload,
+          workflow_run: { ...wakeup, pull_requests: wakeup.pull_requests.filter((pull) => pull.number === number) },
+        },
+      } : context;
+      await publishLegacyPrPolicy({ ...arguments_, context: legacyContext, expectedPublication });
+    }
+    try {
+      if (await readProtocol() !== protocol) {
+        throw new Error("Protected quality protocol changed during publication");
+      }
+    } catch (error) {
+      await invalidatePublishedSnapshot({
+        github, ...context.repo, protocolChanged: true,
+        pull: expectedPublication,
+        targetUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+      });
+      throw error;
+    }
+  }
+}
+
+function fullRunPullNumbers(run) {
+  const numbers = (Array.isArray(run.pull_requests) ? run.pull_requests : [])
+    .map((pull) => pull.number).filter((number) => Number.isSafeInteger(number) && number > 0);
+  const title = /^source-quality PR ([1-9][0-9]*)$/.exec(run.display_title ?? "");
+  if (title && Number.isSafeInteger(Number(title[1]))) numbers.push(Number(title[1]));
+  return [...new Set(numbers)];
+}
+
+async function latestFullQualityRun({ github, owner, repo, workflowId, number }) {
+  const select = (response) => {
+    if (!Array.isArray(response.workflow_runs) || response.workflow_runs.length > 100) {
+      throw new Error("Native source-quality inventory is invalid");
+    }
+    const runs = response.workflow_runs.filter((run) =>
+      ["pull_request_target", "workflow_dispatch"].includes(run.event) &&
+      fullRunPullNumbers(run).includes(number));
+    for (const run of runs) {
+      if (
+        !Number.isSafeInteger(run.id) || run.id < 1 ||
+        !Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1 ||
+        run.workflow_id !== workflowId || run.path !== `.github/workflows/${FULL_QUALITY_WORKFLOW}` ||
+        !Number.isFinite(Date.parse(run.created_at))
+      ) {
+        throw new Error("Native source-quality execution identity is invalid");
+      }
+    }
+    return runs.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
+  };
+  const parameters = { owner, repo, workflow_id: workflowId, per_page: 100, page: 1 };
+  const { data: recent } = await github.rest.actions.listWorkflowRuns(parameters);
+  const candidate = select(recent)[0];
+  if (!candidate) return null;
+  const { data: newer } = await github.rest.actions.listWorkflowRuns({
+    ...parameters, created: `>=${candidate.created_at}`,
+  });
+  if (
+    !Number.isSafeInteger(newer.total_count) || !Array.isArray(newer.workflow_runs) ||
+    newer.total_count !== newer.workflow_runs.length
+  ) {
+    throw new Error("Newer source-quality executions cannot be completely established");
+  }
+  const latest = select(newer)[0];
+  if (!latest) throw new Error("Source-quality execution inventory changed during discovery");
+  return latest;
+}
+
+async function verifyFullQualityRun({ github, repo, controlSha, run, number }, dependencies = {}) {
+  const { consumeFullSourceQuality } = require("./consume-source-quality.js");
+  const { readQualityArtifact } = require("./quality-attestation.js");
+  const readArtifact = dependencies.readArtifact ?? ((reference) =>
+    readQualityArtifact({ repository: `${repo.owner}/${repo.repo}`, artifactId: reference.artifactId }));
+  const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
+    ...repo, run_id: run.id, per_page: 100, page: 1,
+  });
+  if (
+    !Array.isArray(artifacts.artifacts) || !Number.isSafeInteger(artifacts.total_count) ||
+    artifacts.total_count !== artifacts.artifacts.length || artifacts.total_count > 100
+  ) {
+    throw new Error("Current full-quality artifact inventory is incomplete");
+  }
+  const matches = artifacts.artifacts.filter((artifact) =>
+    artifact.name === `quality-manifest-${run.id}-${run.run_attempt}` && artifact.expired === false);
+  if (matches.length > 1) throw new Error("Current full-quality artifact is ambiguous");
+  if (matches.length === 0) return null;
+  const artifactId = matches[0].id;
+  const content = await readArtifact({ artifactId, runId: run.id, attempt: run.run_attempt });
+  const options = {
+    github, attempt: run.run_attempt,
+    context: {
+      repo, runId: run.id, sha: controlSha, ref: "refs/heads/master", eventName: run.event,
+      payload: run.event === "workflow_dispatch"
+        ? { inputs: { pr_number: String(number) } } : { pull_request: { number } },
+    },
+  };
+  return consumeFullSourceQuality({ options, artifactId, content }, { ...dependencies, readArtifact });
+}
+
+async function publishFullSourceQuality({
+  github, context, core, fullQuality = {}, selectedPullNumber, expectedPublication,
+}) {
+  const { execFileSync } = require("node:child_process");
+  const { isDeepStrictEqual } = require("node:util");
+  const { sourceSnapshot } = require("./pr-source-snapshot.js");
+  const { owner, repo } = context.repo;
+  const repository = `${owner}/${repo}`;
+  const git = fullQuality.git ?? ((args) => execFileSync("git", args, {
+    encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024,
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+  }));
+  const controlSha = git(["rev-parse", "HEAD"]).trim();
+  if (
+    context.serverUrl !== "https://github.com" || !/^[0-9a-f]{40}$/.test(controlSha) ||
+    !Number.isSafeInteger(context.runId) || context.runId < 1 ||
+    await getBranchSha(github, owner, repo, "master") !== controlSha
+  ) {
+    throw new Error("Full-quality publisher must execute the current protected master policy");
+  }
+  let numbers;
+  if (context.eventName === "pull_request_target") {
+    if (!SUPPORTED_PULL_REQUEST_TARGET_ACTIONS.has(context.payload.action)) {
+      throw new Error("Unsupported source-quality publication action");
+    }
+    numbers = [context.payload.pull_request?.number];
+  } else if (context.eventName === "workflow_dispatch") {
+    const raw = context.payload.inputs?.pr_number;
+    numbers = /^[1-9][0-9]*$/.test(String(raw)) ? [Number(raw)] : [];
+  } else if (context.eventName === "workflow_run") {
+    const { data: wakeup } = await github.rest.actions.getWorkflowRun({
+      owner, repo, run_id: context.payload.workflow_run?.id,
+    });
+    if (
+      wakeup.path !== `.github/workflows/${FULL_QUALITY_WORKFLOW}` ||
+      wakeup.repository?.full_name !== repository
+    ) {
+      throw new Error("Publication wakeup is not a repository quality workflow");
+    }
+    numbers = fullRunPullNumbers(wakeup);
+  } else {
+    throw new Error("Unsupported source-quality publication event");
+  }
+  if (numbers.length === 0 && context.eventName === "workflow_run") return;
+  if (numbers.length === 0 || numbers.some((number) => !Number.isSafeInteger(number) || number < 1)) {
+    throw new Error("Source-quality publication requires an exact pull request number");
+  }
+  const { data: workflow } = await github.rest.actions.getWorkflow({
+    owner, repo, workflow_id: FULL_QUALITY_WORKFLOW,
+  });
+  if (
+    !Number.isSafeInteger(workflow.id) || workflow.id < 1 ||
+    workflow.path !== `.github/workflows/${FULL_QUALITY_WORKFLOW}` || workflow.state !== "active"
+  ) {
+    throw new Error("The protected full-quality producer is not registered and active");
+  }
+  const policyUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`;
+  for (const number of [...new Set(numbers)].filter((number) =>
+    selectedPullNumber === undefined || number === selectedPullNumber)) {
+    const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+    assertPublicationSnapshot(publicationSnapshot(pull), expectedPublication);
+    if (pull.state === "closed") {
+      core.info(`PR #${number} is closed; no current quality authority is published`);
+      continue;
+    }
+    if (!["dev", "master"].includes(pull.base?.ref)) {
+      throw new Error("Source-quality publication is outside protected branch flow");
+    }
+    const qualityContexts = [
+      `${FULL_QUALITY_CONTEXT}/${pull.base.ref}`,
+      `${QUALITY_CONTEXT_PREFIX}/${pull.base.ref}`,
+    ];
+    const targets = [...new Set([pull.head?.sha, pull.merge_commit_sha].filter((sha) =>
+      typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha)))];
+    if (targets.length === 0) throw new Error("Current pull request has no valid status target");
+    const writeQuality = async (state, description, target = policyUrl) => {
+      for (const sha of targets) {
+        for (const name of qualityContexts) {
+          await publishStatus(github, owner, repo, sha, name, state, description, target);
+        }
+      }
+    };
+    if (pull.mergeable !== true) {
+      await writeQuality(pull.mergeable === false ? "failure" : "pending",
+        `PR #${number} awaits an eligible current merge snapshot`);
+      continue;
+    }
+    const snapshot = sourceSnapshot(pull);
+    const branch = branchDecision(snapshot, repository);
+    const latest = () => latestFullQualityRun({ github, owner, repo, workflowId: workflow.id, number });
+    let run;
+    try {
+      let state = "pending";
+      let description = `PR #${number} awaits its current full-quality proof`;
+      let target = policyUrl;
+      if (!branch.allowed) {
+        state = "failure";
+        description = `PR #${number} violates the protected branch flow`;
+      } else {
+        run = await latest();
+        if (run?.status === "completed" && run.conclusion !== "success") {
+          state = "failure";
+          description = `PR #${number} latest source-quality execution did not succeed`;
+        } else if (run?.status === "completed" && run.conclusion === "success") {
+          const proof = await verifyFullQualityRun({
+            github, repo: context.repo, controlSha, run, number,
+          }, { ...fullQuality, git });
+          if (proof) {
+            state = "success";
+            description = `PR #${number} current full-quality proof verified`;
+            target = `${context.serverUrl}/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}`;
+          }
+        }
+      }
+      const assertFresh = async () => {
+        const { data: current } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+        const newer = branch.allowed ? await latest() : null;
+        if (
+          !isDeepStrictEqual(sourceSnapshot(current), snapshot) ||
+          await getBranchSha(github, owner, repo, "master") !== controlSha ||
+          await getBranchSha(github, owner, repo, snapshot.baseRef) !== snapshot.baseSha ||
+          (branch.allowed && (
+            newer?.id !== run?.id || newer?.run_attempt !== run?.run_attempt ||
+            newer?.status !== run?.status || newer?.conclusion !== run?.conclusion))
+        ) {
+          throw new Error("Source, policy or latest quality execution changed during publication");
+        }
+      };
+      await assertFresh();
+      for (const sha of targets) {
+        await publishStatus(github, owner, repo, sha, `${BRANCH_CONTEXT_PREFIX}/${snapshot.baseRef}`,
+          branch.allowed ? "success" : "failure", `PR #${number}: ${branch.description}`, policyUrl);
+      }
+      await writeQuality(state, description, target);
+      await assertFresh();
+      core.info(`pr=${number} merge_sha=${snapshot.mergeSha} full_quality=${state}`);
+      if (state === "failure") core.setFailed("Current source did not satisfy full-quality policy");
+    } catch (error) {
+      await writeQuality("failure", `PR #${number} full-quality verification failed`);
+      throw error;
+    }
+  }
+}
+
+async function publishLegacyPrPolicy({
   github,
   context,
   core,
@@ -4937,6 +5271,7 @@ module.exports = async function publishPrPolicy({
   coverageAuthorizations = TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS,
   authorizationNow,
   receiptIO,
+  expectedPublication,
 }) {
   const getAuthorizationNow = () =>
     typeof authorizationNow === "function"
@@ -5049,6 +5384,7 @@ module.exports = async function publishPrPolicy({
           item.allowOpeningLabelSnapshotMismatch,
       },
     );
+    assertPublicationSnapshot(pull, expectedPublication);
     const branch = branchDecision(pull, repository);
     const branchContext = `${BRANCH_CONTEXT_PREFIX}/${pull.baseRef}`;
     const qualityContext = `${QUALITY_CONTEXT_PREFIX}/${pull.baseRef}`;
@@ -5464,6 +5800,11 @@ module.exports = async function publishPrPolicy({
   }
 };
 
+module.exports = publishPrPolicy;
+module.exports.publishLegacy = publishLegacyPrPolicy;
+module.exports.qualityProtocol = qualityProtocol;
+module.exports.latestFullQualityRun = latestFullQualityRun;
+module.exports.verifyFullQualityRun = verifyFullQualityRun;
 module.exports.branchDecision = branchDecision;
 module.exports.claimCoverageAssetAuthorization =
   claimCoverageAssetAuthorization;

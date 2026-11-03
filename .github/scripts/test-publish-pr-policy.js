@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const publishPrPolicy = require("./publish-pr-policy.js");
 
 const HEAD_SHA = "1111111111111111111111111111111111111111";
@@ -510,6 +511,8 @@ function issueEvent(overrides = {}) {
 }
 
 async function execute({
+  currentProtocol = false,
+  protocolContexts,
   currentPull = pull(),
   currentPulls,
   eventPull = pull(),
@@ -650,6 +653,15 @@ async function execute({
         },
       },
       repos: {
+        getBranch: async ({ branch }) => ({ data: {
+          name: branch, protected: true, protection: {
+            enabled: true, required_status_checks: {
+              contexts: protocolContexts ? protocolContexts(branch)
+                : branch === "dev" ? ["publish-current-pr-snapshot", "pr-quality-gates"]
+                  : ["branch-policy/master", "pr-quality-gates/master"], checks: [],
+            },
+          },
+        } }),
         get: async () => ({ data: { default_branch: "master" } }),
         getCommit: async ({ ref }) => ({
           data: { sha: branchShas[ref] },
@@ -930,7 +942,7 @@ async function execute({
   if (coverageAuthorizations !== undefined) {
     policyArguments.coverageAuthorizations = coverageAuthorizations;
   }
-  await publishPrPolicy(policyArguments);
+  await (currentProtocol ? publishPrPolicy : publishPrPolicy.publishLegacy)(policyArguments);
   return { statuses, messages };
 }
 
@@ -1661,9 +1673,68 @@ async function testReceiptReadback() {
 }
 
 async function main() {
+  require("./test-source-input-selection.js")();
+  await require("./test-quality-attestation.js")();
   require("./test-pr-source-snapshot.js");
   await require("./test-source-quality.js")();
   await require("./test-consume-source-quality.js")();
+  await require("./test-publish-full-quality.js")();
+  for (const base of ["dev", "master"]) {
+    const currentPull = pull();
+    currentPull.base.ref = base;
+    currentPull.head.ref = base === "dev" ? "feature" : "dev";
+    const published = await execute({
+      currentProtocol: true, currentPull,
+      transitionStatuses: [qualityTransitionStatus({ context: `trusted-quality-transition/${base}` })],
+    });
+    assert.equal(published.statuses.filter((row) => row.context === `pr-quality-gates/${base}`).at(-1)?.state,
+      "success", published.messages.join("\n"));
+    const output = execFileSync("bash", [
+      path.resolve(__dirname, "../../infra/azure/agents/test-pr-validation-stan.sh"),
+    ], {
+      encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024,
+      env: {
+        ...process.env, STUB_PROTOCOL: base === "dev" ? "legacy-dev" : "legacy",
+        STUB_BASE_REF: base, STUB_HEAD_REF: currentPull.head.ref,
+        STUB_BRANCH_EVENT: "workflow_dispatch", STUB_BRANCH_UPSTREAM_ID: "63",
+        STUB_PUBLISHED_STATUSES: JSON.stringify(published.statuses),
+      },
+    });
+    assert.match(output, /published_status_compatibility=PASS/);
+  }
+  for (const readFails of [false, true]) {
+    const statuses = [];
+    let published = false;
+    await assert.rejects(execute({
+      currentProtocol: true, statusSink: statuses,
+      beforeStatusWrite: () => { published = true; },
+      protocolContexts: () => {
+        if (published && readFails) throw new Error("Protection read failed");
+        return ["branch-policy/master", published ? "source-quality-v2/master" : "pr-quality-gates/master"];
+      },
+    }), /protocol changed|Protection read failed/);
+    for (const sha of [HEAD_SHA, MERGE_SHA]) {
+      for (const name of ["branch-policy/master", "pr-quality-gates/master", "source-quality-v2/master"]) {
+        assert.equal(statuses.filter((row) => row.sha === sha && row.context === name).at(-1)?.state, "failure");
+      }
+    }
+  }
+  for (const readFails of [false, true]) {
+    const current = pull();
+    const earlier = structuredClone(current);
+    earlier.head.sha = "a".repeat(40);
+    earlier.merge_commit_sha = "b".repeat(40);
+    const statuses = [];
+    let protocolReads = 0;
+    await assert.rejects(execute({
+      currentProtocol: true, statusSink: statuses, currentPulls: [earlier, current],
+      protocolContexts: () => {
+        if (++protocolReads > 1 && readFails) throw new Error("Protection read failed");
+        return ["branch-policy/master", protocolReads > 1 ? "source-quality-v2/master" : "pr-quality-gates/master"];
+      },
+    }), /changed during policy evaluation/);
+    assert.equal(statuses.length, 0, "legacy publication must stay bound to the router snapshot");
+  }
   await testReceiptReadback();
   function assertNoQualitySuccess(result) {
     assert.equal(
@@ -7968,7 +8039,7 @@ async function main() {
   );
   assert.match(
     branchPolicy,
-    /concurrency:\s*\n\s*group: trusted-branch-policy-publisher-\$\{\{ github\.event\.pull_request\.number \|\| github\.event\.workflow_run\.pull_requests\[0\]\.number \|\| inputs\.pr_number \}\}\s*\n\s*cancel-in-progress: false/,
+    /concurrency:\s*\n\s*group: trusted-branch-policy-publisher-\$\{\{ github\.event\.workflow_run\.pull_requests\[0\]\.number && format\('source-quality PR \{0\}', github\.event\.workflow_run\.pull_requests\[0\]\.number\) \|\| github\.event\.workflow_run\.display_title \|\| format\('source-quality PR \{0\}', github\.event\.pull_request\.number \|\| inputs\.pr_number\) \}\}\s*\n\s*cancel-in-progress: false/,
   );
   assert.match(
     branchPolicy,
@@ -7976,13 +8047,9 @@ async function main() {
   );
   assert.match(
     branchPolicy,
-    /permissions:\s*\n\s*actions: read\s*\n\s*contents: read\s*\n\s*issues: read\s*\n\s*pull-requests: read\s*\n\s*statuses: write/,
+    /permissions:\s*\n\s*actions: read\s*\n\s*attestations: read\s*\n\s*contents: read\s*\n\s*issues: read\s*\n\s*pull-requests: read\s*\n\s*statuses: write/,
   );
   assert.doesNotMatch(branchPolicy, /issues: write/);
-  assert.match(
-    branchPolicy,
-    /description: Open pull request number to reconcile an existing trusted transition/,
-  );
   const qualityTriggerActions = publisherSource.match(
     /const QUALITY_TRIGGER_ACTIONS = new Set\(\[([\s\S]*?)\]\);/,
   );

@@ -232,7 +232,7 @@ require_literal "$oci_rollback_workflow" '[ "$BASELINE_SOURCE_RUN_ID" = "$FENCED
 require_literal "$oci_rollback_workflow" '[ "$pre_recovery_source_sha" = "$DEPLOYED_SOURCE_SHA" ]' "fenced rollback deployed generation binding"
 
 require_literal "$branch_workflow" "pull_request_target:" "trusted PR metadata event"
-require_literal "$branch_workflow" 'workflows: ["production-build"]' "trusted quality completion event"
+require_literal "$branch_workflow" 'workflows: ["production-build", "source-quality"]' "trusted quality completion event"
 require_literal "$branch_workflow" "pr_number:" "trusted bootstrap refresh input"
 require_literal "$branch_workflow" "statuses: write" "status publication permission"
 require_literal "$branch_workflow" "publish-pr-policy.js" "trusted policy publisher"

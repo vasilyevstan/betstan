@@ -18,24 +18,35 @@ trusted workflow identities, protected `dev`-to-`master` ancestry, and
 origin-bound approval remain authoritative until their replacements are
 proven and activated. Editing policy does not reload a running session.
 
-The local publisher correction changes receipt IO accounting, not receipt
+The compatible publisher correction changes receipt IO accounting, not receipt
 identity, expiry, or consumed authority. The inactive coverage-review path is
-being retired with temporary legacy readers retained. A candidate-only
-three-job shadow workflow now stages trusted source capture, unprivileged
+being retired with temporary legacy readers retained. The protected
+three-job shadow workflow established trusted source capture, unprivileged
 exact-merge source-policy checks, and an isolated native-signed aggregate.
-It is not an active producer or authoritative publisher integration; governed
-protected execution and real BetStan attestation remain pending.
+Real BetStan signature verification passed against independently accepted
+default-master control. This is source-policy evidence, not full quality.
+The next cohesive candidate integrates complete selection, authenticated
+direct-original reuse, isolated full signing, metadata-independent publication
+and native merge verification. Its local regressions are not protected
+execution or activation evidence.
 [[Quality Gates]] owns these implementation details and remaining proof
 requirements.
 
-The compatibility landing is prepared locally: `production-build.yml` is
+The compatibility landing preserved `production-build.yml`
 byte-identical to the trusted-master workflow. The lean workflow remains in
-existing `dev` and repository history. The full trusted workflow remains the
-temporary authority while the shadow replacement is proven. This preparation is not a
-landed change, an executed bootstrap, or activation of the replacement.
+repository history. The full trusted workflow remains the temporary authority
+while the full replacement is proven.
 Existing head/merge-snapshot statuses and first-attempt rules remain required.
 No proposed snapshot proof may replace them before protected enforcement is
-accepted. Rollback must retain readers for all emitted evidence and preserve
+accepted. The staged publisher and merge helper select their protocol from
+native required checks: legacy settings retain legacy publication and
+production-build completion handling together. Enforcing the new full-quality
+context prevents legacy-proof fallback.
+Replacement enforcement must precede removal of old producers/checks; default
+master remains the privileged verifier source. CLI-origin automatic progression
+and human-origin exact approval are unchanged.
+
+Rollback must retain readers for all emitted evidence and preserve
 spent receipts; use a reviewed forward correction when an older controller
 cannot interpret that state. Never enable competing writers or release a
 physical hold on the strength of a timeout.

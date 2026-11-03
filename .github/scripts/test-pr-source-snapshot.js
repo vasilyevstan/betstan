@@ -5,6 +5,8 @@ const crypto = require("node:crypto");
 const {
   sourceSnapshot,
   createQualityManifest,
+  createFullQualityManifest,
+  evaluateCurrentSelection,
   evaluateQualityCandidate,
 } = require("./pr-source-snapshot.js");
 
@@ -417,6 +419,131 @@ refreshedEvidence.input.selectedResults = [{
   suiteId: refreshedEvidence.suite.suiteId,
 }];
 assert.equal(evaluateQualityCandidate(refreshedEvidence.input).candidateMatch, true);
+
+function fullProducerFixture() {
+  const value = producerFixture();
+  value.source.purpose = "full-source-quality";
+  value.source.selectionDigest = "b".repeat(64);
+  value.source.noWork = false;
+  value.source.executionProfiles = { "node-policy": { identity: "a".repeat(64), immutable: true } };
+  value.source.suites[0].reuseAllowed = true;
+  return value;
+}
+
+const fullProducer = fullProducerFixture();
+const fullManifest = createFullQualityManifest(fullProducer);
+assert.equal(fullManifest.schemaVersion, 2);
+assert.equal(fullManifest.purpose, "full-source-quality");
+assert.equal(fullManifest.results[0].evidence.kind, "EXECUTED");
+assert.equal(fullManifest.results[0].evidence.jobId, 501);
+assert.equal(fullManifest.suites, undefined);
+const fullProof = {
+  manifest: fullManifest, contentSha256: "a".repeat(64),
+  run: { ...fullProducer.run, status: "completed", conclusion: "success" },
+  jobs: [...fullProducer.jobs, { ...fullProducer.jobs[0], id: 502, name: "source" }],
+};
+assert.equal(evaluateCurrentSelection({ source: fullProducer.source, proof: fullProof }).candidateMatch, true);
+for (const mutate of [
+  (value) => { value.source.selectionDigest = "0".repeat(64); },
+  (value) => { value.source.inputClosureSha256 = "0".repeat(64); },
+  (value) => { value.source.sourceSnapshot.headSha = "0".repeat(40); },
+  (value) => { value.source.validator.executableClosureSha256 = "0".repeat(64); },
+  (value) => { value.proof.manifest.purpose = "shadow-source-policy"; },
+  (value) => { value.proof.manifest.results = []; },
+  (value) => { value.proof.jobs[0].conclusion = "skipped"; },
+  (value) => { value.proof.jobs.pop(); },
+  (value) => { value.proof.run.attempt += 1; },
+]) {
+  const invalid = structuredClone({ source: fullProducer.source, proof: fullProof });
+  mutate(invalid);
+  assert.throws(() => evaluateCurrentSelection(invalid));
+}
+
+function reuseFixture() {
+  const value = fullProducerFixture();
+  const old = fullProducerFixture();
+  old.source.run.attempt = 1;
+  old.jobs[0].run_attempt = 1;
+  const original = {
+    artifactId: 71,
+    contentSha256: "c".repeat(64),
+    manifest: createFullQualityManifest(old),
+    run: { ...old.run, status: "completed", conclusion: "success" },
+    jobs: [...old.jobs, { ...old.jobs[0], id: 502, name: "source" }],
+  };
+  value.run.runId = 103;
+  value.source.run.runId = 103;
+  value.jobs = [];
+  value.reusedResults = [{ suiteId: "source-policy", original }];
+  return value;
+}
+const reusedProducer = reuseFixture();
+const reusedBefore = structuredClone(reusedProducer);
+const reusedManifest = createFullQualityManifest(reusedProducer);
+assert.deepEqual(reusedProducer, reusedBefore);
+assert.equal(reusedManifest.noWork, false);
+assert.deepEqual(reusedManifest.results[0].evidence, {
+  kind: "REUSED", repository: "example/repo", runId: 102, attempt: 2,
+  artifactId: 71, contentSha256: "c".repeat(64), originalSuiteId: "source-policy",
+  originalJobId: 501, originalExecutionAttempt: 1,
+});
+const reusedProof = {
+  manifest: reusedManifest, contentSha256: "e".repeat(64),
+  run: { ...reusedProducer.run, status: "completed", conclusion: "success" },
+  jobs: [{ ...producerFixture().jobs[0], id: 900, name: "source", run_id: 103 }],
+};
+assert.equal(evaluateCurrentSelection({
+  source: reusedProducer.source, proof: reusedProof, reusedResults: reusedProducer.reusedResults,
+}).candidateMatch, true);
+assert.throws(() => evaluateCurrentSelection({
+  source: reusedProducer.source, proof: reusedProof,
+}), /selected job/);
+const mixedProducer = reuseFixture();
+mixedProducer.source.suites.push({
+  suiteId: "package-client", jobName: "quality (package-client)",
+  inputClosureSha256: "d".repeat(64), reuseAllowed: false,
+});
+mixedProducer.jobs.push({
+  ...producerFixture().jobs[0], id: 600, name: "quality (package-client)", run_id: 103,
+});
+assert.deepEqual(createFullQualityManifest(mixedProducer).results.map((result) => result.evidence.kind),
+  ["REUSED", "EXECUTED"]);
+mixedProducer.jobs[0].conclusion = "skipped";
+assert.throws(() => createFullQualityManifest(mixedProducer), /selected job/);
+
+for (const mutate of [
+  (value) => { value.source.purpose = "shadow-source-policy"; },
+  (value) => { value.source.noWork = true; },
+  (value) => { value.source.suites[0].reuseAllowed = false; },
+  (value) => { value.reusedResults.push(value.reusedResults[0]); },
+  (value) => { value.reusedResults[0].suiteId = "unselected"; },
+  (value) => { value.reusedResults[0].original.manifest.purpose = "shadow-source-policy"; },
+  (value) => { value.reusedResults[0].original.manifest.schemaVersion = 1; },
+  (value) => { value.reusedResults[0].original.manifest.results[0].evidence.kind = "REUSED"; },
+  (value) => { value.reusedResults[0].original.manifest.results[0].inputClosureSha256 = "e".repeat(64); },
+  (value) => { value.reusedResults[0].original.manifest.results[0].evidence.executionAttempt = 2; },
+  (value) => { value.reusedResults[0].original.run.repository = "other/repo"; },
+  (value) => { value.reusedResults[0].original.run.conclusion = "failure"; },
+  (value) => { value.reusedResults[0].original.manifest.validator.workflowBlobSha = "f".repeat(40); },
+  (value) => { value.reusedResults[0].original.jobs[0].conclusion = "cancelled"; },
+  (value) => { value.reusedResults[0].original.jobs[1].run_attempt = 2; },
+  (value) => {
+    const jobs = value.reusedResults[0].original.jobs;
+    jobs.push({ ...jobs[0], id: 503, run_attempt: 2, conclusion: "failure" });
+  },
+  (value) => {
+    value.jobs.push({ ...producerFixture().jobs[0], run_id: 103, conclusion: "failure" });
+  },
+]) {
+  const invalid = reuseFixture();
+  mutate(invalid);
+  assert.throws(() => createFullQualityManifest(invalid));
+}
+const fullNoWork = fullProducerFixture();
+fullNoWork.source.suites = [];
+fullNoWork.source.noWork = true;
+fullNoWork.jobs = [];
+assert.deepEqual(createFullQualityManifest(fullNoWork).results, []);
 
 require("./test-quality-attestation.js");
 console.log("pr_source_snapshot_tests=PASS");
