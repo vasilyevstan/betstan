@@ -84,8 +84,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
-    env:
-      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -128,6 +126,7 @@ jobs:
       - name: Run the selected candidate suite with protected routing
         working-directory: candidate
         env:
+          TMPDIR: ${{ runner.temp }}
           CHECKOUT_SHA: ${{ needs.source.outputs.checkout_sha }}
           SUITE_ID: ${{ matrix.runnerId }}
         run: |

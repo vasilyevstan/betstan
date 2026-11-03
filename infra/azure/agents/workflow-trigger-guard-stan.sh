@@ -240,6 +240,7 @@ permission_inventory="$(
   ruby - "$WORKFLOW_PERMISSION_DIR" <<'RUBY'
 require "yaml"
 
+expression_literal = /\x27(?:[^\x27]|\x27\x27)*\x27/
 directory = ARGV.fetch(0)
 writers = []
 implicit = []
@@ -254,6 +255,19 @@ Dir[File.join(directory, "*.{yml,yaml}")].sort.each do |path|
     jobs.each do |name, job|
       next unless job.is_a?(Hash)
 
+      if job["env"].is_a?(Hash)
+        job["env"].each do |variable, value|
+          next unless value.is_a?(String)
+
+          uses_runner = value.scan(/\$\{\{((?:#{expression_literal}|[^\x27])*?)\}\}/m).any? do |expression|
+            expression.first.gsub(expression_literal, "").gsub(/\s*\.\s*/, ".")
+              .match?(/(?<![\w.])runner\b/i)
+          end
+          if uses_runner
+            abort "#{File.basename(path)}:#{name}.env.#{variable} uses unsupported runner context; move it to step env"
+          end
+        end
+      end
       if workflow_permissions.nil? && !job.key?("permissions")
         implicit << "#{File.basename(path)}:#{name}"
       end

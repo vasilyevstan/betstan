@@ -639,6 +639,49 @@ cp "$ROOT_DIR"/.github/workflows/*.yml "$permission_fixture_dir/"
 WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
   "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1
 
+cat >"$permission_fixture_dir/runner-context.yml" <<'YAML'
+name: runner-context
+on: workflow_dispatch
+permissions: {}
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      LITERAL: ${{ 'runner.temp' }}
+    steps:
+      - run: echo safe
+        env:
+          TMPDIR: ${{ runner.temp }}
+YAML
+WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
+  "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1
+while IFS= read -r expression; do
+  cat >"$permission_fixture_dir/runner-context.yml" <<YAML
+name: runner-context
+on: workflow_dispatch
+permissions: {}
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      TMPDIR: >-
+        $expression
+    steps:
+      - run: echo unsafe
+YAML
+  if WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
+      "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1; then
+    echo "ERROR: job environment runner context unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "runner-context.yml:checks.env.TMPDIR uses unsupported runner context" \
+    "$test_output"
+done <<'EXPRESSIONS'
+${{ runner.temp }}
+${{ format('}} {0}', runner['temp']) }}
+EXPRESSIONS
+rm -f "$permission_fixture_dir/runner-context.yml"
+
 cat >"$permission_fixture_dir/rogue-status-writer.yml" <<'YAML'
 name: rogue-status-writer
 on: workflow_dispatch

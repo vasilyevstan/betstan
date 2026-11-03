@@ -41,6 +41,13 @@ affected consumer, not only a historical service list. Repository-only
 evidence and runtime acceptance are distinct phases; each retains its
 applicable checks.
 
+After each push, inspect all native runs and check suites for the exact head,
+including zero-job workflow-definition failures, before waiting for known PR
+jobs. Successful local lint or existing protected jobs does not establish that
+GitHub accepts every candidate workflow. The workflow guard rejects `runner`
+expressions in job-level environment values; runner-dependent values belong
+in step environments.
+
 ## Compatibility-stage delivery redesign
 
 Repository policy consolidation does not replace executable controls or

@@ -51,6 +51,16 @@ immutable merge and native execution evidence; it accepts absent associations
 but rejects contradictory ones. Current open-PR source validation remains
 separate from historical-original authentication.
 
+## Native workflow-definition failures
+
+Local workflow lint and successful PR jobs do not prove that GitHub accepts
+every candidate workflow. GitHub rejected a job-level `runner.temp` expression
+before scheduling any job, while the existing protected PR workflows passed.
+Keep runner-dependent environment values at step scope. Inspect all native
+runs/check suites for the pushed SHA, including zero-job definition failures,
+before waiting for the expected PR jobs; a fixed list of expected run IDs can
+miss this early failure.
+
 ## Repository overview
 
 `betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities live in the normal tracked `common/` package and are published as `@betstan/common`; never recreate `common/` as a gitlink or submodule.
