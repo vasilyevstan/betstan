@@ -6,9 +6,11 @@ BetStan's primary production runtime is an OCI-hosted, cost-constrained
 single-node k3s cluster. Public application images are stored in GitHub
 Container Registry and deployed by immutable digest.
 
-Azure deployment assets remain in the repository for explicitly approved
-recreation, migration history, and recovery work. They are not an automatic
-failover path and cannot replace OCI implicitly.
+Azure is no longer used. Azure-only provisioning, stage, diagnostic and
+retirement tooling is archived, unexecuted, under `archive/azure/`, and the
+Azure deploy, rollback and migration workflows are disabled. Generic
+delivery-safety helpers that still live under `infra/azure/agents/` remain
+active for the OCI flow.
 
 ## Deployment topology
 
@@ -389,7 +391,7 @@ The repository contains:
 - production-oriented Kubernetes manifests and overlays;
 - OCI provisioning, validation, deployment, migration, activation, rollback,
   and recovery scripts;
-- retained Azure automation for explicitly approved recovery or recreation.
+- archived Azure-only automation under `archive/azure/`, which nothing runs.
 
 Runtime selection is explicit and fail-closed. Automation does not silently
 switch cloud provider, cluster type, region, paid capacity, or data source.

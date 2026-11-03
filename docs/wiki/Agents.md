@@ -148,9 +148,9 @@ compulsory two-phase UX handoff. See [[UI UX Consistency]].
 | `betstan-domain-ingress` | DNS, TLS, redirect, ingress, or load-balancer change | Protects canonical routing and diagnostic separation |
 | `betstan-mongo-migration` | Shared-Mongo migration, cleanup, rollback, or recovery | Preserves journal, lock, topology, and data safety |
 | `betstan-migration-recovery` | Interrupted cross-cloud replacement | Recovers the existing migration state rather than starting a competing operation |
-| `betstan-aks-operator` | Exactly authorized Azure runtime diagnostics or recovery | Owns bounded AKS operations and restoration evidence |
-| `betstan-azure-cost-analyst` | Azure cost or regional optimization question | Produces read-only, evidence-based cost comparisons under runtime constraints |
-| `betstan-azure-retirement` | Verified post-migration Azure deletion | Deletes only the exact approved inventory and proves retirement completion |
+
+The former Azure agents (AKS operator, Azure cost analyst and Azure
+retirement) are archived because BetStan no longer runs on Azure.
 
 Mutation-capable runtime agents begin with diagnosis and require exact scope,
 authority, rollback, and stop conditions. They do not treat a broad request as
@@ -164,9 +164,9 @@ not add gates or expand production authority. Exact runtime authorization
 follows the CLI-owned automatic versus human-origin approval boundary in
 [[Release Orchestration]].
 
-Seven specialists retain manual-only invocation: AKS operator, Azure
-retirement, domain/ingress, migration recovery, Mongo migration, OCI health
-reviewer, and OCI operator. Model routing must not invoke them automatically;
+Five specialists retain manual-only invocation: domain/ingress, migration
+recovery, Mongo migration, OCI health reviewer, and OCI operator. Model
+routing must not invoke them automatically;
 manual invocation itself is not runtime authorization.
 
 Repository-only work reports its source changes and local validation, not a
