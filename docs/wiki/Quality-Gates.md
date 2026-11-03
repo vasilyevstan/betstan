@@ -41,6 +41,13 @@ affected consumer, not only a historical service list. Repository-only
 evidence and runtime acceptance are distinct phases; each retains its
 applicable checks.
 
+After each push, inspect all native runs and check suites for the exact head,
+including zero-job workflow-definition failures, before waiting for known PR
+jobs. Successful local lint or existing protected jobs does not establish that
+GitHub accepts every candidate workflow. The workflow guard rejects `runner`
+expressions in job-level environment values; runner-dependent values belong
+in step environments.
+
 ## Compatibility-stage delivery redesign
 
 Repository policy consolidation does not replace executable controls or
@@ -48,13 +55,13 @@ reload a running agent session. The current trusted publisher, required
 checks, workflow identities, event-transition rules, and first-attempt
 contracts remain authoritative until a proven protected cutover.
 
-The current publisher remains `branch-policy`, consuming `production-build`
+The pre-cutover protected publisher remains `branch-policy`, consuming `production-build`
 quality results. Its base-scoped `branch-policy/<base>` and
 `pr-quality-gates/<base>` statuses still bind both the PR head and current
 merge snapshot. The separate required `oci-validate` aggregate is unchanged.
 
-The implementation remains **non-authoritative shadow work**, not release
-authority. The producer has landed through protected integration and promotion.
+The protected proof established so far is **non-authoritative shadow evidence**,
+not full release authority. That producer landed through protected integration and promotion.
 `.github/workflows/source-quality.yml` (`source-quality-shadow`) and
 `.github/scripts/source-quality.js` define three
 isolated jobs:
@@ -99,15 +106,91 @@ not an expected signer copied from the manifest. Native artifact identity,
 repository, run, attempt-specific name and expiry must match. The consumer
 reconstructs selected jobs from all native attempts, rejects a newer failed
 execution, and preserves older test attempts only when source capture is not
-newer. A final source/execution read rejects concurrent changes. This helper
-is not yet wired into the authoritative publisher or automatic artifact
-retrieval; its successful result explicitly remains non-authoritative.
+newer. A final source/execution read rejects concurrent changes. This helper's successful result explicitly remains non-authoritative.
+The separate full-quality candidate described below composes it with bounded
+artifact discovery and a trusted publisher; that candidate is not activated.
 
-Execution on protected source, a real BetStan native attestation,
-authoritative publisher integration, and protected cutover remain pending.
-A public reference signature established the CLI JSON contract and
-wrong-source rejection, not BetStan checkout proof. Candidate tests establish
-neither protected execution nor delegation, cutover, or production readiness.
+The local compatible implementation adds a shared selector, complete base and
+merge Git-tree capture, and version-2 full-quality manifests. Each selected
+suite has either its actual native execution or a direct reference to an
+authenticated original execution; reused results never become current-run
+jobs and cannot form provenance chains. Historical authentication does not
+re-read a closed PR's current tips. The native certificate's controller must
+be an eligible protected ancestor with the same independently approved
+producer closure, not merely a signer named by the artifact.
+Native PR association lists may disappear after merge. Missing or empty lists
+do not invalidate an authenticated historical proof; contradictory nonempty
+lists are rejected. Signed source, immutable merge, controller and native
+execution bindings remain mandatory.
+
+Reuse discovery is bounded. Missing, expired, incompatible or invalid evidence
+is an explicit reuse miss and leaves fresh execution selected; implementation
+errors are not swallowed as cache misses. Aggregation authenticates original
+references again, reconstructs complete coverage and rechecks current source.
+Whole-tree contract fingerprints remain conservative and non-reusable.
+Selection dependencies are bounded independently of those fingerprints.
+The candidate now separates ordinary package edits from unrelated deployment
+contracts. Actual cross-boundary readers still select their owners: listener
+inventories, specified UI assertions, Auth startup ordering, infrastructure
+and control inputs. Unknown paths select the conservative full scope; unsupported
+Git modes and incomplete trees fail closed.
+These local contracts do not establish protected cutover or measured speed
+acceptance.
+
+### Staged full-quality integration
+
+The candidate retains `branch-policy` as the sole status writer. Native
+protected required checks select its protocol. While legacy checks remain
+enforced, it preserves legacy publication and production-build completion
+handling; source-quality completion is inert. The new protocol activates only
+when its scoped full-quality and branch-policy contexts are enforced, with no
+legacy-proof fallback.
+
+In full-quality mode, the default-master checkout reconciles an open PR after
+source-quality completion, metadata refresh, or explicit read-only dispatch. All three paths
+share a per-PR writer group, including manually dispatched source runs without
+native PR associations. Candidate code never executes with the publisher's
+status-writing token.
+
+The `source-quality` candidate separates trusted selection, unprivileged
+selected suites, and isolated signing. The publisher requires version-2 full
+coverage; a successful version-1 source-policy shadow cannot substitute.
+Native run/attempt identity and artifact inventory are bounded and checked
+independently. The newest failed execution cannot fall back to older success.
+Source, master policy, and execution identity are rechecked around publication;
+drift invalidates the statuses instead of preserving success.
+
+Candidate statuses are `source-quality-v2/<base>` on both head and merge,
+alongside temporary `pr-quality-gates/<base>` compatibility aliases.
+Successful quality URLs bind both the native run and attempt. Metadata-only
+edits do not change test identity; they never grant approval.
+
+The publisher and merge helper select their verification protocol from native protected-branch
+required checks, not an artifact's claimed purpose or a caller flag. Once the
+new context is enforced, it requires a clean current-master verifier checkout
+and independently authenticates the full proof using the same consumer as the
+publisher. Missing proof, protection-read failure, stale attempt, source drift,
+or invalid publisher provenance cannot fall back to legacy validation.
+Legacy publication and its reader remain paired for branches still enforcing
+the old protocol, including the current generic dev check names. Compatibility
+does not reinterpret a source-quality run as production-build evidence.
+
+Activation requires proving this complete stack on protected source and adding
+the new enforced context before retiring old checks or producers. Local
+publisher and merge-verifier regressions establish neither activation nor
+production health. Existing CLI-origin ownership/automatic approval and
+human-origin exact approval remain separate and unchanged.
+
+Protected BetStan execution and native signature verification have now been
+exercised end-to-end for source-policy proofs. The consumer checked actual
+GitHub artifact/job records, exact protected Git inputs and the current merge
+snapshot. The observed signer used the accepted default-master commit/ref,
+not the PR's dev base; an independently expected dev signer was rejected.
+This establishes the non-authoritative proof contract only. Full-suite
+selection/reuse and publisher integration have local implementations, but
+independent new-boundary review, protected execution, cutover and performance
+acceptance remain unfinished; source-policy proof is not full quality or
+production readiness.
 
 Test-content changes reduce repeated fixture setup and duplicate assertion
 execution while retaining all 35 OCI suites. Local fixture timings are

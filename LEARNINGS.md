@@ -31,6 +31,35 @@ new binding immediately after a supported source/reopen transition, not only
 after expensive CI completes. This compatibility limitation is not permission
 to accept an unbound run or bypass exact-source checks; source-quality
 identity independent of presentation remains the intended replacement.
+During protocol migration, route the publisher and reader from the same
+protected required-check policy. A new producer URL under an old status name
+is not backward compatibility. The publisher regression now passes real
+default-publisher output through the legacy shell reader for both existing
+branch configurations; enforced full-quality proof never falls back.
+
+## Native quality signer identity
+
+The first protected source-quality executions for a PR into dev used the
+accepted default-master workflow/control commit, while native REST run/job
+`head_sha` identified the event PR head. Neither the PR base nor that event
+head is an expected signer digest. Preserve these separate identities and
+verify against independently approved protected control; never fix a
+signature mismatch by trusting a manifest's self-declared signer.
+GitHub can remove native PR associations after merge. Historical proof
+authentication therefore uses signed source, approved controller closure,
+immutable merge and native execution evidence; it accepts absent associations
+but rejects contradictory ones. Current open-PR source validation remains
+separate from historical-original authentication.
+
+## Native workflow-definition failures
+
+Local workflow lint and successful PR jobs do not prove that GitHub accepts
+every candidate workflow. GitHub rejected a job-level `runner.temp` expression
+before scheduling any job, while the existing protected PR workflows passed.
+Keep runner-dependent environment values at step scope. Inspect all native
+runs/check suites for the pushed SHA, including zero-job definition failures,
+before waiting for the expected PR jobs; a fixed list of expected run IDs can
+miss this early failure.
 
 ## Repository overview
 

@@ -4,7 +4,10 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { verifyQualityManifest } = require("./quality-attestation.js");
+const os = require("node:os");
+const { execFileSync } = require("node:child_process");
+const { verifyQualityManifest, verifyHistoricalQualityManifest, readQualityArtifact } = require("./quality-attestation.js");
+const { QualityEvidenceError } = require("./pr-source-snapshot.js");
 
 function fixture() {
   const content = '{"schemaVersion":1,"suites":[]}';
@@ -146,3 +149,110 @@ for (const filename of paths) {
 }
 
 console.log("quality_attestation_tests=PASS");
+
+async function testHistoricalQualityAttestation() {
+  const original = fixture();
+  original.input.expected.validator = { workflowPath: ".github/workflows/source-quality.yml" };
+  let approvals = 0;
+  const historical = await verifyHistoricalQualityManifest({
+    ...original.input,
+    approveController: async (certificate) => {
+      approvals += 1;
+      assert.equal(certificate.controlSha, "1".repeat(40));
+      assert.equal(certificate.sourceRef, "refs/heads/dev");
+      assert.equal(certificate.runId, 102);
+      return true;
+    },
+  }, (_command, args) => {
+    assert.ok(!args.includes("--signer-digest"));
+    assert.ok(!args.includes("--source-digest"));
+    assert.ok(args.includes("--signer-workflow"));
+    return JSON.stringify([original.result]);
+  });
+  assert.equal(approvals, 1);
+  assert.equal(historical.contentSha256, verified.contentSha256);
+
+  for (const approval of [false, undefined, { approved: true }]) {
+    await assert.rejects(verifyHistoricalQualityManifest({
+      ...original.input, approveController: async () => approval,
+    }, () => JSON.stringify([original.result])), /not independently approved/);
+  }
+  await assert.rejects(verifyHistoricalQualityManifest({
+    ...original.input, approveController: async () => { throw new Error("closure mismatch"); },
+  }, () => JSON.stringify([original.result])), /closure mismatch/);
+  await assert.rejects(verifyHistoricalQualityManifest(original.input, () => {
+    assert.fail("missing approval contract must fail before invoking native verification");
+  }), /independent controller approval/);
+
+  for (const field of Object.keys(original.certificate)) {
+    const invalid = structuredClone(original);
+    invalid.certificate[field] = "untrusted";
+    invalid.result.verificationResult.signature.certificate = invalid.certificate;
+    await assert.rejects(verifyHistoricalQualityManifest({
+      ...invalid.input,
+      approveController: async () => assert.fail("invalid native identity must not reach closure approval"),
+    }, () => JSON.stringify([invalid.result])), /does not bind/);
+  }
+  const other = structuredClone(original.result);
+  for (const field of ["buildSignerDigest", "sourceRepositoryDigest", "buildConfigDigest"]) {
+    other.verificationResult.signature.certificate[field] = "2".repeat(40);
+  }
+  await assert.rejects(verifyHistoricalQualityManifest({
+    ...original.input, approveController: async () => true,
+  }, () => JSON.stringify([original.result, other])), /disagree/);
+  testArtifactDownload();
+  console.log("historical_quality_attestation_tests=PASS");
+}
+
+function testArtifactDownload() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "quality-download-test-"));
+  const document = path.join(directory, "quality-manifest.json");
+  const archive = path.join(directory, "fixture.zip");
+  const downloaded = [];
+  try {
+    fs.writeFileSync(document, '{"schemaVersion":2}\n');
+    execFileSync("zip", ["-q", "-j", archive, document]);
+    const bytes = fs.readFileSync(archive);
+    const execute = (command, args, options) => {
+      if (command === "gh") {
+        assert.deepEqual(args, ["api", "repos/example/repo/actions/artifacts/71/zip"]);
+        assert.equal(options.maxBuffer, 2 * 1024 * 1024);
+        return bytes;
+      }
+      assert.equal(command, "unzip");
+      assert.equal(args[0], "-p");
+      assert.equal(args[2], "quality-manifest.json");
+      assert.equal(options.maxBuffer, 1024 * 1024);
+      downloaded.push(args[1]);
+      return execFileSync(command, args, options);
+    };
+    assert.equal(readQualityArtifact({ repository: "example/repo", artifactId: 71 }, execute),
+      '{"schemaVersion":2}\n');
+    assert.throws(() => readQualityArtifact({ repository: "../outside", artifactId: 71 }, execute),
+      QualityEvidenceError);
+    assert.throws(() => readQualityArtifact({ repository: "example/repo", artifactId: 71 }, (command, args, options) => {
+      if (command === "gh") return Buffer.from("invalid archive");
+      downloaded.push(args[1]);
+      return execFileSync(command, args, options);
+    }), QualityEvidenceError);
+    assert.throws(() => readQualityArtifact({ repository: "example/repo", artifactId: 71 }, () => {
+      throw new TypeError("adapter bug");
+    }), TypeError);
+  } finally {
+    fs.rmSync(document, { force: true });
+    fs.rmSync(archive, { force: true });
+    fs.rmdirSync(directory);
+  }
+  for (const filename of downloaded) {
+    assert.equal(fs.existsSync(filename), false);
+    assert.equal(fs.existsSync(path.dirname(filename)), false);
+  }
+}
+
+if (require.main === module) {
+  testHistoricalQualityAttestation().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+module.exports = testHistoricalQualityAttestation;
