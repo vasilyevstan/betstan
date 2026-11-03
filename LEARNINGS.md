@@ -61,6 +61,15 @@ runs/check suites for the pushed SHA, including zero-job definition failures,
 before waiting for the expected PR jobs; a fixed list of expected run IDs can
 miss this early failure.
 
+## Actions script context shape
+
+`actions/github-script` exposes `context.repo` and `context.issue` as `Context`
+prototype getters. Object spread copies only own properties, so a rebuilt
+`{ ...context }` silently loses `repo`. The legacy `workflow_run` completion
+publisher failed this way on every PR after promotion, while plain-object test
+fixtures passed. Derive modified contexts from the original prototype, and keep
+publisher fixtures shaped like the real `Context`.
+
 ## Repository overview
 
 `betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities live in the normal tracked `common/` package and are published as `@betstan/common`; never recreate `common/` as a gitlink or submodule.
