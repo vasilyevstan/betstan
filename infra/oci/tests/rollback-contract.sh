@@ -451,8 +451,13 @@ write_text_atomic() {
 
 reset_live_state() {
   local state_root="${1:-$STATE_DIR/current}"
+  local template="$FIXTURE_DIR/live-state-current"
   rm -rf "$state_root"
   mkdir -p "$state_root"
+  if [[ -d "$template" ]]; then
+    cp -R "$template/." "$state_root"
+    return
+  fi
   for service in "${SERVICES[@]}"; do
     write_text_atomic "$state_root/${service}.env" <<EOF2
 image=$(current_image_ref "$service")
@@ -466,18 +471,26 @@ EOF2
   : >"$state_root/telemetry-service"
   printf '1\n' >"$state_root/telemetry-route-canonical"
   printf '1\n' >"$state_root/telemetry-route-diagnostic"
+  # Only deterministic initial state is shared; every case gets independent files.
+  cp -R "$state_root" "$template"
 }
 
 set_target_state() {
   local state_root="${1:-$STATE_DIR/current}"
+  local template="$FIXTURE_DIR/live-state-target"
   rm -rf "$state_root"
   mkdir -p "$state_root"
+  if [[ -d "$template" ]]; then
+    cp -R "$template/." "$state_root"
+    return
+  fi
   for service in "${SERVICES[@]}"; do
     write_text_atomic "$state_root/${service}.env" <<EOF2
 image=$(target_image_ref "$service")
 revision=8
 EOF2
   done
+  cp -R "$state_root" "$template"
 }
 
 create_recovery_baseline_fixture() {

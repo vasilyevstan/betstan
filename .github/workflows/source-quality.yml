@@ -1,4 +1,5 @@
-name: source-quality-shadow
+name: source-quality
+run-name: source-quality PR ${{ github.event.pull_request.number || inputs.pr_number }}
 
 on:
   pull_request_target:
@@ -7,14 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: Open pull request for a non-authoritative checkout proof
+        description: Open pull request for an isolated full-quality proof
         required: true
         type: number
 
 permissions: {}
 
 concurrency:
-  group: source-quality-shadow-${{ github.event.pull_request.number || inputs.pr_number }}
+  group: source-quality-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -25,56 +26,125 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
+      attestations: read
     outputs:
       record: ${{ steps.source.outputs.record }}
       checkout_sha: ${{ steps.source.outputs.checkout_sha }}
+      matrix: ${{ steps.source.outputs.matrix }}
+      has_checks: ${{ steps.source.outputs.has_checks }}
+      node_profile: ${{ steps.source.outputs.node_profile }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "20.19.5"
+          package-manager-cache: false
       - name: Capture source without executing candidate code
         id: source
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           script: |
-            const { captureSource } = require("./.github/scripts/source-quality.js");
-            const source = await captureSource({
+            const { execFileSync } = require("node:child_process");
+            const { planFullQuality } = require("./.github/scripts/source-quality.js");
+            const profiles = JSON.parse(execFileSync("node", ["-e",
+              'console.log(JSON.stringify(require("./.github/scripts/source-quality.js").captureExecutionProfiles()))',
+            ], { encoding: "utf8", timeout: 10000, maxBuffer: 16384 }));
+            const source = await planFullQuality({
               github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
-            });
+            }, profiles, { onReuseMiss: message => core.warning(message) });
             core.setOutput("record", JSON.stringify(source));
             core.setOutput("checkout_sha", source.checkout.commitSha);
+            core.setOutput("matrix", JSON.stringify(source.matrix));
+            core.setOutput("has_checks", source.matrix.include.length > 0);
+            core.setOutput("node_profile", JSON.stringify(profiles["node-policy"]));
 
   checks:
-    name: quality (source-policy)
+    name: quality (${{ matrix.suiteId }})
     needs: source
+    if: needs.source.outputs.has_checks == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 40
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.source.outputs.matrix) }}
+    services:
+      mongodb:
+        image: ${{ matrix.runnerId == 'auth-image' && 'mongo:7' || '' }}
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ needs.source.outputs.checkout_sha }}
+          ref: ${{ github.sha }}
+          path: control
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "20.19.5"
-      - name: Run candidate source-policy regressions
+          package-manager-cache: false
+      - name: Check the resolved profile before candidate code is available
+        if: matrix.executionProfile == 'node-policy'
         env:
+          EXPECTED_PROFILE: ${{ needs.source.outputs.node_profile }}
+        run: |
+          node <<'JS'
+          const { captureExecutionProfiles } = require("./control/.github/scripts/source-quality.js");
+          const expected = JSON.parse(process.env.EXPECTED_PROFILE);
+          const actual = captureExecutionProfiles()["node-policy"];
+          if (expected.immutable && (!actual.immutable || actual.identity !== expected.identity)) {
+            throw new Error("Resolved runner profile changed; a fresh source plan is required");
+          }
+          JS
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.source.outputs.checkout_sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Install the pinned workflow parser
+        if: matrix.runnerId == 'workflow'
+        run: |
+          archive="$RUNNER_TEMP/source-quality-actionlint.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $archive" |
+            sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          rm -- "$archive"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Run the selected candidate suite with protected routing
+        working-directory: candidate
+        env:
+          TMPDIR: ${{ runner.temp }}
           CHECKOUT_SHA: ${{ needs.source.outputs.checkout_sha }}
+          SUITE_ID: ${{ matrix.runnerId }}
         run: |
           test "$(git rev-parse HEAD)" = "$CHECKOUT_SHA"
-          node .github/scripts/test-publish-pr-policy.js
+          bash "$GITHUB_WORKSPACE/control/.github/scripts/source-quality-suite.sh" "$SUITE_ID"
 
   attest:
     needs: [source, checks]
-    if: always() && needs.source.result == 'success' && needs.checks.result == 'success'
+    if: >-
+      always() && needs.source.result == 'success' &&
+      (needs.checks.result == 'success' ||
+       (needs.checks.result == 'skipped' && needs.source.outputs.has_checks == 'false'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
+      pull-requests: read
       attestations: write
       id-token: write
     steps:
@@ -86,12 +156,13 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
           SOURCE_RECORD: ${{ needs.source.outputs.record }}
+          GH_TOKEN: ${{ github.token }}
         with:
           script: |
             const fs = require("node:fs");
             const path = require("node:path");
-            const { collectManifest } = require("./.github/scripts/source-quality.js");
-            const manifest = await collectManifest({
+            const { collectFullManifest } = require("./.github/scripts/source-quality.js");
+            const manifest = await collectFullManifest({
               github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
             }, JSON.parse(process.env.SOURCE_RECORD));
             fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "quality-manifest.json"),
@@ -100,7 +171,7 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/quality-manifest.json
-      - name: Upload the signed shadow manifest
+      - name: Upload the signed full-quality manifest
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: quality-manifest-${{ github.run_id }}-${{ github.run_attempt }}

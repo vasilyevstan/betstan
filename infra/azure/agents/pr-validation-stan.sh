@@ -11,6 +11,7 @@ PR_NUMBER="${1:-${PR:-}}"
 EXPECTED_HEAD_SHA="${EXPECTED_HEAD_SHA:-}"
 EXPECTED_BASE_SHA="${EXPECTED_BASE_SHA:-}"
 TRUSTED_STATUS_APP_ID="${TRUSTED_STATUS_APP_ID:-15368}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../../.." && pwd)"
 
 if [[ -z "$PR_NUMBER" ]]; then
   echo "usage: $0 <pr-number>" >&2
@@ -87,6 +88,45 @@ PY
   echo "PR base changed: expected=$EXPECTED_BASE_SHA actual=$base_sha" >&2
   exit 1
 }
+
+[[ "$base_ref" == "dev" || "$base_ref" == "master" ]] || {
+  echo "PR does not target a protected integration or production branch" >&2
+  exit 1
+}
+section "protected quality protocol"
+gh api "repos/$REPO/branches/$base_ref/protection/required_status_checks" > "$tmp_required"
+quality_protocol="$(python3 - "$tmp_required" "$base_ref" <<'PY'
+import json
+import sys
+
+policy = json.load(open(sys.argv[1], encoding="utf-8"))
+base = sys.argv[2]
+if not isinstance(policy, dict):
+    raise SystemExit("Required-status protection is unavailable")
+contexts = policy.get("contexts", [])
+checks = policy.get("checks", [])
+if not isinstance(contexts, list) or not isinstance(checks, list):
+    raise SystemExit("Invalid required-status protection")
+required = set(contexts)
+required.update(check["context"] for check in checks)
+if f"source-quality-v2/{base}" in required:
+    if f"branch-policy/{base}" not in required:
+        raise SystemExit("Full-quality branch policy is not enforced")
+    print("full-v2")
+elif {f"branch-policy/{base}", f"pr-quality-gates/{base}"} <= required:
+    print("legacy")
+elif base == "dev" and {"publish-current-pr-snapshot", "pr-quality-gates"} <= required:
+    print("legacy")
+else:
+    raise SystemExit("No supported protected quality protocol is enforced")
+PY
+)"
+if [[ "$quality_protocol" == "full-v2" ]]; then
+  cd "$ROOT_DIR"
+  REPO="$REPO" EXPECTED_HEAD_SHA="$head_sha" EXPECTED_BASE_SHA="$base_sha" \
+    node .github/scripts/validate-full-source-quality.js "$PR_NUMBER"
+  exit 0
+fi
 
 section "required merge-snapshot statuses"
 gh api "repos/$REPO/commits/$merge_sha/status" > "$tmp_statuses"

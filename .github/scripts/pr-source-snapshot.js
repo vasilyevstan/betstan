@@ -1,11 +1,18 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { isDeepStrictEqual } = require("node:util");
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const QUALITY_EVENTS = Object.freeze(["pull_request_target", "workflow_dispatch"]);
+class QualityEvidenceError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = "QualityEvidenceError";
+  }
+}
 const SNAPSHOT_FIELDS = [
   "repository", "number", "headRepository", "headRef",
   "headSha", "baseRef", "baseSha", "mergeSha",
@@ -174,7 +181,7 @@ function createQualityManifest({ source, run, jobs }) {
     ) ||
     new Set(jobs.map((job) => job.id)).size !== jobs.length
   ) {
-    throw new Error("Invalid trusted quality source or execution");
+    throw new QualityEvidenceError("Invalid trusted quality source or execution");
   }
   const suites = source.suites.map((suite) => {
     const matches = jobs.filter((job) => job.name === suite.jobName);
@@ -185,7 +192,7 @@ function createQualityManifest({ source, run, jobs }) {
       !job || job.run_attempt < source.run.attempt ||
       job.status !== "completed" || job.conclusion !== "success"
     ) {
-      throw new Error(`Missing, ambiguous or unsuccessful selected job: ${suite.suiteId}`);
+      throw new QualityEvidenceError(`Missing, ambiguous or unsuccessful selected job: ${suite.suiteId}`);
     }
     return {
       suiteId: suite.suiteId,
@@ -210,6 +217,213 @@ function createQualityManifest({ source, run, jobs }) {
     noWork: source.noWork === true,
     suites,
   };
+}
+
+function assertFullQualityManifest(document) {
+  const positive = (value) => Number.isSafeInteger(value) && value > 0;
+  const hash = (value) => typeof value === "string" && DIGEST_PATTERN.test(value);
+  if (
+    !isRecord(document) || document.schemaVersion !== 2 || document.purpose !== "full-source-quality" ||
+    !validSnapshot(document.sourceSnapshot) || !validValidator(document.validator) ||
+    !checkoutMatchesSnapshot(document.checkout, document.sourceSnapshot) ||
+    !isRecord(document.run) || document.run.repository !== document.sourceSnapshot.repository ||
+    !positive(document.run.runId) || !positive(document.run.attempt) ||
+    !QUALITY_EVENTS.includes(document.run.event) ||
+    typeof document.run.headSha !== "string" || !COMMIT_PATTERN.test(document.run.headSha) ||
+    !hash(document.selectionDigest) || !hash(document.inputClosureSha256) ||
+    !isRecord(document.executionProfiles) || Object.keys(document.executionProfiles).length === 0 ||
+    Object.entries(document.executionProfiles).some(([name, profile]) =>
+      !["node-policy", "package", "docker", "contracts"].includes(name) ||
+      !isRecord(profile) || !hash(profile.identity) || typeof profile.immutable !== "boolean") ||
+    !Array.isArray(document.expectedSuiteIds) || !Array.isArray(document.results) ||
+    document.expectedSuiteIds.some((id) => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_./-]*$/.test(id)) ||
+    new Set(document.expectedSuiteIds).size !== document.expectedSuiteIds.length ||
+    document.results.length !== document.expectedSuiteIds.length ||
+    new Set(document.results.map((result) => result?.suiteId)).size !== document.results.length ||
+    document.noWork !== (document.results.length === 0) ||
+    document.results.some((result) => {
+      if (!isRecord(result) || !document.expectedSuiteIds.includes(result.suiteId) ||
+        !hash(result.inputClosureSha256) || !isRecord(result.evidence)) return true;
+      const evidence = result.evidence;
+      if (evidence.kind === "EXECUTED") {
+        return !positive(evidence.jobId) || typeof evidence.jobName !== "string" || !evidence.jobName ||
+          !positive(evidence.executionAttempt) || evidence.executionAttempt > document.run.attempt;
+      }
+      if (evidence.kind === "REUSED") {
+        return evidence.repository !== document.run.repository ||
+          !positive(evidence.runId) || !positive(evidence.attempt) ||
+          !positive(evidence.artifactId) || !hash(evidence.contentSha256) ||
+          evidence.originalSuiteId !== result.suiteId || !positive(evidence.originalJobId) ||
+          !positive(evidence.originalExecutionAttempt) || evidence.originalExecutionAttempt > evidence.attempt;
+      }
+      return true;
+    })
+  ) {
+    throw new QualityEvidenceError("Invalid full-quality manifest");
+  }
+}
+
+function sourceCaptureAttempt(jobs) {
+  if (!Array.isArray(jobs)) throw new QualityEvidenceError("Native source jobs are unavailable");
+  const captures = jobs.filter((job) => job?.name === "source");
+  if (captures.some((job) => !Number.isSafeInteger(job.run_attempt) || job.run_attempt < 1)) {
+    throw new QualityEvidenceError("Native source capture has an invalid attempt");
+  }
+  const latestAttempt = captures.reduce((latest, job) => Math.max(latest, job.run_attempt), 0);
+  const latest = captures.filter((job) => job.run_attempt === latestAttempt);
+  if (latest.length !== 1 || latest[0].status !== "completed" || latest[0].conclusion !== "success") {
+    throw new QualityEvidenceError("Native source capture is missing, ambiguous or unsuccessful");
+  }
+  return latestAttempt;
+}
+
+function originalExecution(original, expected, validator) {
+  const document = original?.manifest;
+  assertFullQualityManifest(document);
+  if (
+    !isRecord(original) || !Number.isSafeInteger(original.artifactId) || original.artifactId < 1 ||
+    typeof original.contentSha256 !== "string" || !DIGEST_PATTERN.test(original.contentSha256) ||
+    !sameFields(document.validator, validator, VALIDATOR_INPUT_FIELDS) ||
+    !completedRun(original.run, document.sourceSnapshot.repository, document.validator) ||
+    !sameRun(document.run, original.run) ||
+    !Array.isArray(original.jobs)
+  ) {
+    throw new QualityEvidenceError("Invalid authenticated original quality result");
+  }
+  const result = document.results.find((item) => item.suiteId === expected.suiteId);
+  const evidence = result?.evidence;
+  if (
+    !isRecord(result) || result.inputClosureSha256 !== expected.inputClosureSha256 ||
+    !isRecord(evidence) || evidence.kind !== "EXECUTED"
+  ) {
+    throw new QualityEvidenceError("Reuse requires a directly executed original result with identical inputs");
+  }
+  const captureAttempt = sourceCaptureAttempt(original.jobs);
+  const reconstructed = createQualityManifest({
+    source: {
+      sourceSnapshot: document.sourceSnapshot,
+      checkout: document.checkout,
+      validator: document.validator,
+      inputClosureSha256: document.inputClosureSha256,
+      suites: [expected],
+      run: { ...original.run, attempt: captureAttempt },
+    },
+    run: original.run,
+    jobs: original.jobs,
+  }).suites[0];
+  if (
+    evidence.jobId !== reconstructed.jobId || evidence.jobName !== reconstructed.jobName ||
+    evidence.executionAttempt !== reconstructed.executionAttempt
+  ) {
+    throw new QualityEvidenceError("Original result does not match its latest native execution");
+  }
+  return {
+    kind: "REUSED",
+    repository: original.run.repository,
+    runId: original.run.runId,
+    attempt: original.run.attempt,
+    artifactId: original.artifactId,
+    contentSha256: original.contentSha256,
+    originalSuiteId: result.suiteId,
+    originalJobId: evidence.jobId,
+    originalExecutionAttempt: evidence.executionAttempt,
+  };
+}
+
+function createReuseReference({ original, suite, validator }) {
+  if (suite?.reuseAllowed !== true) {
+    throw new QualityEvidenceError("Current suite is not eligible for original-result reuse");
+  }
+  return originalExecution(original, suite, validator);
+}
+
+function evaluateCurrentSelection({ source, proof, reusedResults = [] }) {
+  assertFullQualityManifest(proof?.manifest);
+  const document = proof.manifest;
+  if (
+    invalidPolicy(source) ||
+    !sameFields(document.sourceSnapshot, source.sourceSnapshot, SNAPSHOT_FIELDS) ||
+    !isDeepStrictEqual(document.checkout, source.checkout) ||
+    !sameFields(document.validator, source.validator, VALIDATOR_INPUT_FIELDS) ||
+    !sameRun(proof.run, source.run) ||
+    !completedRun(proof.run, source.sourceSnapshot.repository, document.validator) ||
+    typeof proof.contentSha256 !== "string" || !DIGEST_PATTERN.test(proof.contentSha256) ||
+    !Array.isArray(proof.jobs)
+  ) {
+    throw new Error("Full-quality proof does not bind the current source and approved policy");
+  }
+  const latestAttempt = sourceCaptureAttempt(proof.jobs);
+  const reconstructed = createFullQualityManifest({
+    source: {
+      ...source, validator: document.validator,
+      run: { ...proof.run, attempt: latestAttempt },
+    },
+    run: proof.run, jobs: proof.jobs, reusedResults,
+  });
+  if (!isDeepStrictEqual(reconstructed, document)) {
+    throw new Error("Full-quality selection or evidence differs from current reconstruction");
+  }
+  return Object.freeze({
+    candidateMatch: true,
+    snapshotKey: digest(JSON.stringify(SNAPSHOT_FIELDS.map((field) => source.sourceSnapshot[field]))),
+    proofDigestOrNull: proof.contentSha256,
+    reasonCodes: [],
+  });
+}
+
+function createFullQualityManifest({ source, run, jobs, reusedResults = [] }) {
+  if (
+    invalidPolicy(source) || source.purpose !== "full-source-quality" ||
+    typeof source.selectionDigest !== "string" || !DIGEST_PATTERN.test(source.selectionDigest) ||
+    source.noWork !== (source.suites.length === 0) ||
+    !Array.isArray(reusedResults) ||
+    new Set(reusedResults.map((result) => result?.suiteId)).size !== reusedResults.length ||
+    reusedResults.some((result) => !isRecord(result) ||
+      !source.suites.some((suite) => suite.suiteId === result.suiteId && suite.reuseAllowed === true))
+  ) {
+    throw new Error("Invalid full-quality selection or reuse plan");
+  }
+  const freshSuites = source.suites.filter((suite) =>
+    !reusedResults.some((result) => result.suiteId === suite.suiteId),
+  );
+  const fresh = createQualityManifest({
+    source: { ...source, suites: freshSuites, noWork: freshSuites.length === 0 },
+    run, jobs,
+  });
+  const results = source.suites.map((suite) => {
+    const reused = reusedResults.find((result) => result.suiteId === suite.suiteId);
+    let evidence;
+    if (reused) {
+      if (reused.original?.run?.repository !== run.repository) {
+        throw new Error("Original quality execution belongs to another repository");
+      }
+      if (jobs.some((job) => job.name === suite.jobName &&
+        job.run_attempt >= source.run.attempt && job.conclusion !== "skipped")) {
+        throw new Error("A reused suite must be excluded from current execution");
+      }
+      evidence = originalExecution(reused.original, suite, source.validator);
+    } else {
+      const executed = fresh.suites.find((result) => result.suiteId === suite.suiteId);
+      evidence = {
+        kind: "EXECUTED", jobId: executed.jobId, jobName: executed.jobName,
+        executionAttempt: executed.executionAttempt,
+      };
+    }
+    return { suiteId: suite.suiteId, inputClosureSha256: suite.inputClosureSha256, evidence };
+  });
+  const { suites: _suites, ...header } = fresh;
+  const manifest = {
+    ...header,
+    schemaVersion: 2,
+    purpose: "full-source-quality",
+    selectionDigest: source.selectionDigest,
+    executionProfiles: structuredClone(source.executionProfiles),
+    expectedSuiteIds: source.suites.map((suite) => suite.suiteId),
+    noWork: source.noWork === true,
+    results,
+  };
+  assertFullQualityManifest(manifest);
+  return manifest;
 }
 
 // The caller authenticates whole manifests and native jobs. Suite references
@@ -351,4 +565,8 @@ function evaluateQualityCandidate({
   };
 }
 
-module.exports = { QUALITY_EVENTS, sourceSnapshot, createQualityManifest, evaluateQualityCandidate };
+module.exports = {
+  QUALITY_EVENTS, sourceSnapshot, createQualityManifest, createFullQualityManifest,
+  QualityEvidenceError, createReuseReference, assertFullQualityManifest,
+  sourceCaptureAttempt, evaluateCurrentSelection, evaluateQualityCandidate,
+};
