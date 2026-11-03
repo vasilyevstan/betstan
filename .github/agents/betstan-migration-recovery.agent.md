@@ -21,7 +21,6 @@ the stop-only executable identity.
 - `.github/workflows/oci-migration-recovery.yml`
 - `infra/oci/scripts/migrate-from-azure.sh`
 - `.github/agents/betstan-deployment-safety.agent.md`
-- `.github/agents/betstan-azure-retirement.agent.md`
 
 ## Authority
 

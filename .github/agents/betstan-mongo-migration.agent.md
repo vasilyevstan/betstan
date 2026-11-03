@@ -21,7 +21,6 @@ Before assessing or operating, read:
 
 - `CONTRIBUTING.md`
 - `.github/skills/betstan-branch-governance/SKILL.md`
-- `infra/azure/LESSONS_LEARNED.md`
 - `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `infra/azure/agents/consolidate-production-mongo-stan.sh`

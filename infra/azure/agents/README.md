@@ -1,14 +1,14 @@
-# Azure operation agents (`*-stan`)
+# Delivery-safety helpers (`*-stan`)
+
+BetStan no longer uses Azure. Azure-only provisioning, stage, diagnostic and
+retirement tooling is archived in [`archive/azure/`](../../../archive/azure/README.md).
+The helpers below are generic PR, CLI-authority, lock and guard tooling used by
+the OCI flow; they keep this historical path. The Azure deploy, rollback and
+migration workflows they still mention are disabled.
 
 - `pre-commit-infra-check-stan.sh` — scans infra changes for secrets patterns, validates ingress routing, warns on public IPs and staged artifacts. Run before every `git push` on infra/workflow changes.
-- `provisioning-stan.sh` — runs full AKS provisioning flow.
 - `deploy-stan.sh` — applies Kubernetes manifests only after the shared-Mongo topology guard passes.
-- `troubleshoot-stan.sh` — prints cluster/workload/ingress diagnostics.
-- `cost-ops-stan.sh` — stop/start/scale controls for cost management.
-- `qa-e2e-stan.sh` — runs Playwright browser smoke tests.
-- `dns-check-stan.sh` — compares public DNS answer with ingress external IP.
-- `health-check-stan.sh` — reusable per-service AKS health checks with node/log/SSH diagnostics.
-- `mismatch-diagnostic-stan.sh` — traces event-service vs gamemaster event-stream mismatches for a specific event.
+- `reconcile-nodepool-profile-stan.sh` — unused legacy AKS node-pool helper. It stays here only because the protected quality workflow still syntax-checks this path; archive it with the next quality-workflow change.
 - `branch-policy-guard-stan.sh` — enforces feature/hotfix-to-dev and only-dev-to-master PR pairs.
 - `test-branch-policy-guard-stan.sh` — tests accepted and rejected branch pairs.
 - `test-workflow-run-provenance-stan.sh` — rejects wrong-SHA artifacts and untrusted build/deploy workflow runs.
@@ -32,121 +32,8 @@
 - `shared-mongo-operation-lock-stan.sh` — serializes migration, rollback, cleanup, and deployment through a resource-versioned ConfigMap lock with a bounded lease/expiry handoff; its incident-only `replace-expired-active` mode performs one complete-preimage active-to-active replacement and never falls back to generic acquisition.
 - `consolidate-production-mongo-stan.sh` — exact-SHA preflight, migrate, cleanup, and rollback operator for the seven-database move into auth Mongo.
 - `test-shared-mongo-consolidation-stan.sh` — validates manifests/mappings and runs a synthetic eight-database dump/restore parity test.
-- `provision-stage-stan.sh` — creates isolated `betstan-rg-stage` AKS and configures autoscaler 1→3 with a larger baseline node size for 1-node stage operation.
-- `park-stage-stan.sh` — stops stage AKS compute while keeping the stage resource group.
-- `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
-- `decommission-stage-rg-stan.sh` — deletes the entire stage resource group to remove stage costs.
-- `reconcile-nodepool-profile-stan.sh` — creates or validates the `Standard_B4as_v2` + Managed 64 GiB OS disk profile and reconciles autoscaler `1..3`; it refuses workload cutover and legacy pool deletion.
-- `retire-production-stan.sh` — exact-inventory, resumable deletion of the retired BetStan Azure resource groups after OCI cutover.
-- `retire-migration-identities-stan.sh` — separate exact-metadata retirement of temporary migration/recovery identities and environment secrets while retaining Azure recreation configuration.
-- `audit-oci-primary-retirement-stan.sh` — read-only terminal audit for OCI health/free-tier state, Azure and identity absence, workflows, journal fences, and delayed billing.
-- `record-azure-retirement-billing-stan.sh` — locked append-only recorder for mature clean ActualCost and AmortizedCost observations.
 
 Scripts assume the CLIs and authentication required by their operations are already available. The node-pool profile reconciler requires only `az` and does not change the user's Kubernetes context.
-
-## Temporary migration identity retirement
-
-Keep the 28-field metadata file and state directory outside the repository with
-mode `0600` and `0700`, respectively. Review `plan` before the destructive
-mode, then retain the terminal state for independent verification:
-
-```bash
-export IDENTITY_RETIREMENT_METADATA=/absolute/private/identity-metadata.env
-export IDENTITY_RETIREMENT_STATE_DIR=/absolute/private/identity-state
-
-./infra/azure/agents/retire-migration-identities-stan.sh plan
-./infra/azure/agents/retire-migration-identities-stan.sh execute
-./infra/azure/agents/retire-migration-identities-stan.sh verify
-```
-
-After reviewed metadata cleanup, `verify` can load the exact 23-field
-`betstan.identity-retirement-terminal.v1` state without the metadata file.
-The operator disables only `oci-migration-recovery.yml`; `oci-migrate.yml`
-remains available for future reconfiguration but is fenced twice and loses
-its temporary Azure environment secret before any identity deletion. Both
-workflows must have no nonterminal runs at the post-secret fence.
-
-Role-assignment IDs may use only subscription, resource-group, or the exact
-AKS managed-cluster scope, and each ID parent must equal its declared metadata
-scope. Deleted service principals are probed with a successful `--all`
-listing and exact client-side object-ID count because Azure CLI's server-side
-ID filter exits nonzero for an absent object.
-
-## Terminal retirement audit and billing evidence
-
-Keep all evidence paths private and absolute. The terminal audit is read-only
-and recomputes the live OCI inventory, resource bindings, Azure absence,
-temporary-identity state, workflow state, migration contract, and both cost
-types:
-
-```bash
-field() { sed -n "s/^$1=//p" "$2"; }
-
-export OCI_INFRASTRUCTURE_PROVENANCE_FILE=/absolute/private/provenance.env
-export AZURE_RETIREMENT_STATE_FILE=/absolute/private/retirement-state.env
-export IDENTITY_STATE_FILE=/absolute/private/identity-terminal.env
-export IDENTITY_ATTESTATION_FILE=/absolute/private/identity-attestation.env
-export OCI_DIAGNOSTIC_URL=https://92.5.96.113.nip.io
-export OCI_COMPARTMENT_OCID="$(field compartment_ocid "$OCI_INFRASTRUCTURE_PROVENANCE_FILE")"
-export EXPECTED_OCI_PROVENANCE_DIGEST=6aacf7029e8ea5a5b3e905a4c07e6318885f69786332b079d30f2b3790fed8b2
-export EXPECTED_OCI_INVENTORY_DIGEST=56c3fac911b71a31214129b5a027c669a362c62fb6b9b6e4559d439c834d8377
-export AZURE_SUBSCRIPTION_FINGERPRINT="$(field subscription_id_sha256 "$AZURE_RETIREMENT_STATE_FILE")"
-export AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="$(field cluster_resource_id_sha256 "$AZURE_RETIREMENT_STATE_FILE")"
-export MIGRATION_RUN_ID="$(field github_run_id "$AZURE_RETIREMENT_STATE_FILE")"
-export MIGRATION_RUN_ATTEMPT="$(field github_run_attempt "$AZURE_RETIREMENT_STATE_FILE")"
-export MIGRATION_ID="$(field migration_id "$AZURE_RETIREMENT_STATE_FILE")"
-export MIGRATION_SHA="$(field source_sha "$AZURE_RETIREMENT_STATE_FILE")"
-
-./infra/azure/agents/audit-oci-primary-retirement-stan.sh
-```
-
-The expected pre-maturity result is
-`resource_phase=RESOURCE_RETIREMENT_COMPLETE` with
-`terminal_phase=BILLING_INGESTION_PENDING` and exit code `3`. Exit `0` is
-reserved for `AZURE_RETIRED`; `1` means `NO_GO`, and `2` means
-`AUDIT_INCOMPLETE`. Do not convert delayed billing ingestion into a
-resource-retirement failure. The audit checks a live JSON API route and all
-eight production-capable workflow records, not only the OCI deploy workflows.
-
-Azure's daily `UsageDate` cannot attribute the partial retirement day. The
-reviewed billing boundary is therefore `2026-08-20T00:00:00Z`, the first full
-UTC day after the exact resource cutoff. Resource absence covers the intervening
-hours. Only after that billing boundary plus 96 hours, record a window into a
-mode-0700 private directory.
-
-The recorder recomputes the case-preserving subscription fingerprint,
-validates the active Azure account, queries both cost types with the exact
-BetStan resource-group filter, repeats the original POST body for every
-subscription-bound continuation, and validates item-level usage details so a
-charge cannot net against a refund. It retries provider failures at most four
-times with bounded backoff. Its hard-link lock records exact ownership,
-recovers only a verified dead owner, and validates the complete prior chain
-before an atomic append. A terminating signal exits before releasing the lock:
-
-```bash
-export OBSERVATION_FILE=/absolute/private/billing-observations.env
-export AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-export AZURE_SUBSCRIPTION_FINGERPRINT="$(field subscription_id_sha256 "$AZURE_RETIREMENT_STATE_FILE")"
-
-./infra/azure/agents/record-azure-retirement-billing-stan.sh
-```
-
-Pass that file to later audits with
-`BILLING_OBSERVATION_FILE="$OBSERVATION_FILE"`. The
-`betstan.billing-observation.v4` contract binds both Cost Management Query and
-item-level Usage Details API versions, stores exact combined response-digest
-pairs, and chains every append. Positive cost on or after the full-day billing
-boundary is `NO_GO`;
-negative adjustments, an incomplete 96-hour grace, fewer than three windows,
-less than 24 hours between appends, or less than a 96-hour observation span
-remain pending. Provider/schema/pagination, currency, chain, or binding errors
-are `AUDIT_INCOMPLETE`. A known positive result remains `NO_GO` even if the
-peer cost type is malformed, and `NO_ROWS` never resets an established
-currency. The current subscription emits `legacy` Usage Details records;
-another record kind fails closed as incomplete rather than being generalized
-across billing-account types. Legacy records may reuse an ARM `id` for
-different charge lines; the audit validates and classifies every item instead
-of assuming that resource-shaped identifier is a unique charge key.
 
 ## Required validation sequence for production changes
 
@@ -164,7 +51,7 @@ post-merge-verification-stan.sh  ← run immediately after every production merg
 rollback-readiness-stan.sh       ← run before taking any rollback action
 ```
 
-See `infra/azure/LESSONS_LEARNED.md` for the full set of operational rules.
+See `infra/oci/LESSONS_LEARNED.md` for the current operational rules.
 
 ## Pre-commit infra check
 
@@ -180,46 +67,6 @@ The check:
 - warns if `artifacts/` is staged for commit;
 - warns about hard-coded public IPs in k8s manifests.
 
-Suggested execution order for an already validated production topology:
-1. `provisioning-stan.sh`
-2. `deploy-stan.sh`
-3. `dns-check-stan.sh`
-4. `qa-e2e-stan.sh`
-5. `smoke-liveness-stan.sh`
-6. `deploy-validation-loop-stan.sh`
-7. `validation-loop-stan.sh`
-
-## Reusable service health checks
-
-Use `health-check-stan.sh` when you need a single entrypoint that can check one service or the full backend set:
-
-```bash
-SERVICE=gamemaster ./infra/azure/agents/health-check-stan.sh
-SERVICES=auth,bet,backoffice,event,gamemaster,moderation,resulting,slip ./infra/azure/agents/health-check-stan.sh
-SERVICE=gamemaster SSH_ENABLED=1 SSH_USER=azureuser ./infra/azure/agents/health-check-stan.sh
-```
-
-The script:
-- checks the AKS cluster and node state,
-- validates the service deployment, Service, Endpoints, pods, and restarts,
-- maps pods to nodes and prints node diagnostics,
-- collects recent pod error logs,
-- optionally SSHes into the node for deeper OS-level inspection when credentials are supplied.
-
-## Diagnosing event/gamemaster stream mismatches
-
-Use `mismatch-diagnostic-stan.sh` when an event exists in the event service but never appears in gamemaster:
-
-```bash
-EVENT_NAME='North Nikkoside - Hermanview' ./infra/azure/agents/mismatch-diagnostic-stan.sh
-EVENT_ID=6172b204-e662-4d8e-b0a1-93df1782b844 ./infra/azure/agents/mismatch-diagnostic-stan.sh
-```
-
-The script:
-- compares the event record in `gaming_event` and `gaming_gamemaster`,
-- prints relevant event/gamemaster logs for the target event,
-- shows gamemaster pending events and pod runtime state,
-- summarizes the likely cause when the record exists only in `gaming_event`.
 
 ## PR validation and merge safety
 
@@ -885,22 +732,6 @@ The script outputs:
 - `rollback_readiness=GO` when safety preconditions are met;
 - `rollback_readiness=NO_GO` with concrete reasons when rollback would be risky.
 
-## GoDaddy `A www` error fix (`Invalid data provided for record data`)
-
-Use this sequence in GoDaddy DNS management:
-1. Delete any existing `CNAME` record with host `www`.
-2. Add a new `A` record:
-   - **Type**: `A`
-   - **Host**: `www`
-   - **Points to**: the ingress external IPv4 from AKS (plain IP only, no URL)
-3. Keep TTL default and save.
-
-Validation:
-- `DOMAIN=www.betstan.xyz ./infra/azure/agents/dns-check-stan.sh`
-- `dig +short www.betstan.xyz A`
-
-If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress.
-
 ## CI/CD and data-safety posture
 
 - `production-build` runs on `master` and tags each image with the exact approved SHA.
@@ -1087,59 +918,3 @@ CONFIRM_UNLOCK=remove-stale-migration-lock \
   job on a comparable runner. A much faster local command is not a CI duration
   baseline. Historical duration does not excuse a pending approval, failed
   step, or missing progress transition.
-
-## Stage lifecycle and cost controls
-
-Use these operations to park and restore stage safely:
-
-```bash
-# Stop stage compute but keep RG/resources
-./infra/azure/agents/park-stage-stan.sh
-
-# Resume stage compute
-./infra/azure/agents/resume-stage-stan.sh
-
-# Fully remove stage costs (delete RG)
-./infra/azure/agents/decommission-stage-rg-stan.sh
-
-# Recreate stage from scripts later
-JWT_KEY='<stage-jwt-secret>' ./infra/azure/agents/provision-stage-stan.sh
-```
-
-Profile reconciliation helper (Azure profile only):
-
-```bash
-# Defaults to Standard_B4as_v2, Managed 64 GiB, autoscaler 1..3
-./infra/azure/agents/reconcile-nodepool-profile-stan.sh
-```
-
-The reconciler creates a missing target pool, validates an existing pool's immutable profile, reconciles its autoscaler settings, and prints the Azure node-pool profile JSON. It does not obtain Kubernetes credentials or move workloads. Setting `EXECUTE_CUTOVER=true` or `DELETE_LEGACY_POOL=true` fails nonzero intentionally; workload migration and pool deletion require the manual gate below.
-
-Exact production reconciliation (profile check/update only; no workload cutover):
-
-```bash
-RESOURCE_GROUP=betstan-rg \
-CLUSTER_NAME=betstan-aks \
-TARGET_POOL_NAME=nodepool4 \
-TARGET_VM_SIZE=Standard_B4as_v2 \
-TARGET_OS_DISK_TYPE=Managed \
-TARGET_OS_DISK_SIZE_GB=64 \
-TARGET_MIN_COUNT=1 \
-TARGET_MAX_COUNT=3 \
-./infra/azure/agents/reconcile-nodepool-profile-stan.sh
-```
-
-An existing target pool must already match the requested VM size, OS disk type, and OS disk size; immutable-profile mismatches fail instead of being reported as aligned.
-
-### Manual node-pool migration gate
-
-Before deleting a legacy node pool:
-
-1. Take and verify consistent snapshots of every currently attached Mongo PVC.
-2. Roll out stateless workloads sequentially, waiting for readiness before each next rollout.
-3. Move Mongo StatefulSets one at a time so each RWO volume detaches, reattaches, and becomes healthy before the next move.
-4. Explicitly reconnect backend services after any RabbitMQ replacement, using the sequential recovery procedure above, and verify queue consumers.
-5. Repeat application health, RabbitMQ queue/consumer, and node filesystem/free-space checks (including `DiskPressure`) after every migration step.
-6. Delete the legacy pool manually only after all repeated checks remain healthy.
-
-Do not use `Standard_B4ms` with a 30 GiB Ephemeral OS disk for this workload. Concurrent image pulls exhausted that trial pool's OS filesystem, caused `DiskPressure`, and evicted two pods.
