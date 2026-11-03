@@ -8,71 +8,32 @@ that production is healthy.
 
 ```mermaid
 flowchart LR
-    Request["Accepted requirement"] --> Risk["Risk classification"]
-    Risk --> Developer["Implementation owner"]
-    Risk -. architecture boundary .-> Architect["Architecture gate"]
-    Architect --> Developer
-    Architect -. disputed, materially complex, or irreversible design .-> Simplifier["Three-model simplifier"]
-    Simplifier --> Developer
-    Developer --> Snapshot["Immutable candidate<br/>code + canonical documentation"]
-    Snapshot --> Review["One independent critic or test pass"]
-    Review --> PR["PR and branch checks"]
+    Request["Accepted requirement"] --> Owner["Accountable owner"]
+    Owner --> Candidate["Code and canonical documentation"]
+    Candidate --> Evidence["Proportionate verification"]
+    Evidence --> PR["Required exact-source PR checks"]
     PR --> Build["Exact-SHA build"]
     Build --> Deploy["Protected deployment"]
     Deploy --> Accept["Production acceptance"]
-
-    Developer -. documentation impact .-> Wiki["Public-wiki editor"]
-    Wiki -. owned documentation .-> Developer
-    UX["UX/UI specialist"] -. user-facing evidence .-> Developer
-    Contract["Contract specialist"] -. boundary evidence .-> Developer
-    Security["Auth/security specialist"] -. security evidence .-> Developer
-    Final["Final validator"] -. multi-specialist or irreversible reconciliation .-> PR
-    Perfetto["PerfettoStan + simplifier<br/>process challenge"] -. stop and optimize optional flow .-> Risk
-    Conductor["Conductor"] -. parallel or operational checkpoints .-> Risk
-    Conductor -.-> Accept
+    Independent["Independent verification"] -. changed trust or state boundary .-> Evidence
+    Specialist["Expertise for a concrete gap"] -. scoped evidence .-> Owner
 ```
 
-The conductor is used only for parallel, asynchronous, external, or mutating
-work that needs checkpoints and recovery. It does not replace a quality gate
-or grant release authority.
+## Proportionate verification
 
-PerfettoStan challenges process friction at each proposed expansion and may
-stop new optional work until it and one simplifier process pass return the
-shortest safe continuation. It cannot remove or bypass mandatory technical
-safeguards or active incident-safety work.
+Ordinary bounded, reversible changes use relevant existing tests, inspection,
+or build checks. Documentation-only work normally needs applicable
+documentation checks, not application or infrastructure suites. Changes to
+authorization, CI trust, release authority, physical writer ownership, data
+integrity, migration, or recovery require independent verification of that
+changed boundary; the author cannot supply that independent evidence.
 
-The bounded consolidated design review described in [[Agents]] supports the
-design-to-implementation handoff when the complex profile requires it.
-Neither that review nor PerfettoStan is a universal gate. Design acceptance
-and supporting test measurements cannot replace the independent candidate
-review or test evidence selected by the profile. Snapshot creation is an
-authorized orchestrator action, not permission for a file-editing developer
-to commit.
-
-## Risk-conditional review profiles
-
-| Profile | Purpose | Required outcome |
-|---|---|---|
-| Low risk | Keep bounded, reversible, backward-compatible work fast | One implementation owner, one independent critic or test pass, and exact required CI |
-| Triggered specialist | Protect a changed UX, security, contract, quality, deployment, data, or architecture boundary | Low-risk evidence plus only the applicable specialist result |
-| Complex or irreversible | Resolve disputed design, multiple specialist decisions, or irreversible release risk | Architect; three-model synthesis only for disputed, materially complex, or irreversible design; final validator only for reconciliation or irreversible release review |
-
-## Conditional specialist gates
-
-- Public documentation impact is assessed for every change. Invoke
-  `betstan-public-wiki-editor` when impact is plausible or ambiguous; otherwise
-  retain exact-diff, path-specific no-public-change evidence.
-- `betstan-ux-ui-expert` is mandatory for every user-facing visual or
-  interaction change.
-- Shared HTTP, message, package, or persistence boundaries require the service
-  contract reviewer.
-- Authentication, session, identity, and authorization changes require the
-  auth/security reviewer.
-- CI or coverage changes require the quality-gate reviewer.
-- Branch, PR, ancestry, or exact-SHA questions require the branch-governance
-  reviewer.
-- Infrastructure, deployment, rollback, migration, ingress, and runtime work
-  require their matching operator or safety specialist.
+Specialists are capabilities selected for an evidenced gap, not a compulsory
+conveyor. There is no mandatory model quorum, unanimous synthesis,
+review-of-review, two-phase UX handoff, or PerfettoStan continuation. Every
+change still records documentation impact, and user-facing changes retain
+consistency and appropriate rendered evidence. [[Agents]] explains ownership,
+conditional routing, and reuse of accepted evidence.
 
 Select review scope from the actual diff and current workflow, package, and
 manifest inventories. Shared CI or contract changes include every genuine
@@ -80,8 +41,67 @@ affected consumer, not only a historical service list. Repository-only
 evidence and runtime acceptance are distinct phases; each retains its
 applicable checks.
 
-See [[Agents]] for the complete catalog, direct handoffs, and supporting
-evidence boundaries.
+## Compatibility-stage delivery redesign
+
+Repository policy consolidation does not replace executable controls or
+reload a running agent session. The current trusted publisher, required
+checks, workflow identities, event-transition rules, and first-attempt
+contracts remain authoritative until a proven protected cutover.
+
+The current publisher remains `branch-policy`, consuming `production-build`
+quality results. Its base-scoped `branch-policy/<base>` and
+`pr-quality-gates/<base>` statuses still bind both the PR head and current
+merge snapshot. The separate required `oci-validate` aggregate is unchanged.
+
+The implementation remains **candidate-only shadow work**, not an active
+producer or release authority. `.github/workflows/source-quality.yml`
+(`source-quality-shadow`) and `.github/scripts/source-quality.js` stage three
+isolated jobs:
+
+| Job | Staged responsibility |
+|---|---|
+| Source capture | Protected control code captures the current PR head/base, exact merge object and validator inputs without executing candidate code |
+| Source-policy checks | An unprivileged exact-merge checkout runs source-policy regressions only, not the full CI scope |
+| Signed aggregate | Isolated control code constructs one manifest from trusted capture outputs and native job/attempt records, then natively signs and uploads those exact bytes |
+
+Only the aggregate receives attestation-signing permissions; candidate code
+does not execute in that context. The workflow has no status-writing or
+deployment permissions and no production environments. It cannot satisfy the
+existing required checks. Its `workflow_dispatch` is a read-only source-proof
+refresh, not production recovery.
+
+For `pull_request_target`, native REST `run.head_sha` and `job.head_sha`
+identify the event PR head, not the protected control commit or tested merge.
+The proof model keeps native event identity, certificate/control identity, and
+the actual tested merge separate. Valid protected control can capture a fresh
+current merge after the PR base advances; its control commit need not equal
+the current PR base. The captured merge still binds its exact head/base
+parents and tree.
+
+`.github/scripts/pr-source-snapshot.js` evaluates source identity independently
+of title, body, labels, and edit history. Its candidate evaluator rejects
+missing or mismatched selected evidence and can validate explicit no-work
+proof or input-equivalent reuse with original authenticated provenance. The
+shadow producer selects source-policy regressions only; it does not yet
+implement the complete dependency-aware selector, full CI scope, or automatic
+evidence reuse.
+
+`.github/scripts/quality-attestation.js` uses native GitHub CLI verification of
+the exact manifest bytes and checks GitHub OIDC certificate repository,
+workflow, control commit/ref, event, run, and attempt identity.
+Candidate-supplied claims are not certificate authority.
+
+Governed landing and execution on protected source, a real BetStan native
+attestation, authoritative publisher integration, and protected cutover remain
+pending. A public reference signature established the CLI JSON contract and
+wrong-source rejection, not BetStan checkout proof. Candidate tests establish
+neither protected execution nor delegation, cutover, or production readiness.
+
+Test-content changes reduce repeated fixture setup and duplicate assertion
+execution while retaining all 35 OCI suites. Local fixture timings are
+development evidence, not matched GitHub performance acceptance. Further
+retirement and integrated validation remain; the redesign's half-baseline
+wall-time and runner-consumption target has not been demonstrated.
 
 ## Pull-request CI
 
@@ -96,7 +116,7 @@ required aggregate gate includes:
 | Workflow trigger guard | Production-capable workflows keep their intended triggers and trust boundaries |
 | Deployment safety contracts | Readiness, activation, rollback, migration, and recovery invariants remain intact |
 | Auth container smoke | A production-built Auth container typechecks, starts, and serves the expected API shape |
-| Service coverage | Changed services meet at least 80% line coverage and 80% branch coverage where branches exist; shared or unknown service-impacting paths run every service |
+| Service coverage | All ten application packages run their configured coverage checks; each requires at least 80% line coverage and 80% branch coverage where branches exist |
 | Client production build | The React application builds successfully in CI |
 
 The PR-only, read-only `oci-validate` workflow selects scope first. Changes
@@ -111,20 +131,21 @@ shard has a 25-minute limit; timeout, shard failure, or partial completion is
 not passing evidence. The complete local runner remains available in
 deterministic serial order.
 
-`production-build` similarly routes service coverage to changed services,
-falls back to every service for shared or unknown service-impacting paths, and
-skips the coverage job for documentation, governance, and unrelated
-infrastructure changes. Auth container smoke runs only when Auth is selected
-directly or through the shared/unknown fallback, and the
-Client production build follows the same Client/shared/unknown selection.
-Runtime validation is selected for Azure agent, GitHub script, or workflow
-changes. Deployment-safety validation uses a meta contract for its own workflow
-or harness and the full contract set only for affected deployment, readiness,
-rollback, or lock paths; its 45-minute ceiling applies only when that job is
-selected. Pull-request title/body edits run lightweight branch
-policy only and do not rerun source, OCI, coverage, or deployment-safety jobs.
-This changes engineering delivery latency only; it does not change public
-product behavior or user-facing documentation.
+The locally prepared compatibility `production-build` uses the full
+trusted-master workflow, not lean path selection. It runs coverage for all ten
+application packages, the Client production build, Auth container smoke,
+runtime-script validation, and full deployment-safety contracts without
+changed-path selection. Its PR triggers include `edited`, so title/body edits
+can start full `production-build` validation. Usable quality evidence still
+follows the existing publisher marker and receipt rules; metadata edits cannot
+create or recover a trusted source-quality transition.
+
+The lean variant retained in `dev` and repository history selects coverage,
+Auth smoke, and runtime/deployment checks by changed paths and avoids source
+validation on title/body edits. That reduced-scope behavior and its selected
+deployment-safety 45-minute ceiling are staged/historical, not the compatible
+full workflow. Existing publisher markers remain authoritative until protected
+cutover; neither workflow source nor local preparation proves runtime health.
 
 ### Actions runtime and compatible pins
 
@@ -181,108 +202,22 @@ authority; preserving the encoding alone is insufficient. Use a reviewed
 forward correction when that compatibility floor cannot be retained.
 Metadata sequencing remains governed by [[Release Orchestration]].
 
-### Reserved telemetry identity and inert coverage foundation
+### Retired inactive coverage-review path
 
-The repository reserves the single workflow identity `tests-telemetry` for a
-future, separately authorized coverage-telemetry workflow. Until that
-activation the production workflow inventory rejects a workflow file with a
-`.yml` or `.yaml` extension when its filename stem case-normalizes to
-`tests-telemetry`, and rejects a workflow name that normalizes to that identity,
-so it cannot become ambiguous or duplicated. The workflow trigger guard invokes
-the inventory to verify the exact production workflow set, but does not
-independently parse workflow filenames or names to implement this reservation;
-the inventory owns that rejection. The guard protects the inert foundation by
-requiring its descriptor, package, lockfile, engine, and engine-test files to
-exist as non-symlink files, and by checking that the engine retains pinned
-integrity literals, including the reserved identity. It also pins both
-inventory reservation-rule literals, the inventory test's reservation
-completion sentinel, and the deployment-safety harness's Node-non-invocation
-sentinel. Focused negative tests fail closed when inert files are missing or
-symlinked, or when those pins are removed.
+The compatibility-stage candidate removes the unused coverage-review wrapper,
+`.github/coverage/` descriptor/package files, and their obsolete guard and
+activation fixtures. No production workflow invokes that review feature, and
+the coverage-authorization inventory is empty. The actual per-service 80%
+line/branch checks are untouched; this is not coverage-gate retirement.
 
-Alongside the reservation the repository carries an inert coverage descriptor
-and its supporting tooling. The descriptor records eleven packages - Auth,
-Backoffice, Bet, Client, Common, Event, Gamemaster, Moderation, Resulting, and
-Slip, plus Telemetry - a pinned Node runtime, and the same 80% line and 80% branch thresholds
-the current gate applies. The coverage-asset authorization inventory is empty,
-so the foundation remains inert: the coverage engine is not an active required
-check, and coverage continues to be enforced by the existing per-package
-coverage gate. The unchanged production validation workflow remains the
-execution boundary; in the ordinary default-equal state, where the engine and
-its harness match the trusted default branch, policy evaluation returns before
-reading the coverage review wrapper or its invocation contract, listing pull
-request files, selecting an authorization, or executing Node or Docker.
-
-The review wrapper
-`infra/azure/agents/coverage-engine-review-stan.sh` and its invocation contract
-are checked-in, trust-pinned assets only. `production-build.yml` does not yet
-invoke the wrapper as an active coverage-review job. The deployment-safety
-aggregate exercises its offline contract fixtures, but that test coverage must
-not be represented as activated candidate review.
-
-Any future engine and harness revision must be reviewed as one exact pair and
-receive a separate authorization bound to its immutable source and evidence.
-When that pair is activated, the review wrapper and invocation contract must
-each match the trusted default at the pull base, pull head, and merge snapshot.
-They therefore cannot be corrected or introduced in the activation pull
-request. Any required wrapper or invocation correction is first promoted as a
-normal default-equal pull request. Only after that promotion may a separate
-authorized pull request activate the engine-and-harness pair; before its later
-promotion, that bounded candidate incorporates current `master` and receives
-fresh exact-SHA validation.
-
-That authority has two distinct, one-use proof legs: source integration into
-`dev`, followed by canonical `dev`-to-`master` promotion. A successful source
-integration receipt does not authorize promotion by itself. Promotion must
-separately prove the exact authorized source merge, current branch lineage,
-trusted workflow run and aggregate job, and unchanged engine-and-harness
-content before candidate execution is allowed.
-
-Publication of workflow and coverage receipts uses invocation-local
-acknowledgment proof. A claim invocation can POST each of `pending` and
-`success` at most once. Advancement requires an HTTP 201 acknowledgment of
-the exact row identity, request fields and timestamp from the trusted Actions
-publisher. Ambiguous
-writes are not retried or recovered by later GETs. Entry performs one complete
-ledger scan without retries; an existing claim blocks re-entry. Only after an
-acknowledged write may read-back retry an exact subset of that invocation's
-acknowledged rows or known transient GET failures. Foreign or conflicting
-claim evidence, malformed rows and duplicates are fatal; verification
-requires the exact full claim ledger with complete pagination.
-
-Each required acknowledged-ledger verification allows at most five attempts,
-not five across the whole invocation. All receipt checks and waits, including
-asynchronous work, share one 30-second monotonic deadline. Receipt GETs are
-aborted within five seconds or the remaining budget, whichever is smaller,
-with at least two seconds between retries.
-
-The helper verifies the real full ledger before passing its invocation-owned
-proof and validated inventory to shared quality revalidation. Any receipt
-visibility wait therefore precedes fresh mutable-authority reads. Authority
-is fully revalidated before writes and after read-backs; no receipt check is
-skipped and no replay is enabled. Proof remains private to that invocation,
-not in a persistent store or cross-invocation recovery API.
-
-Stage 2A activation also requires a separately authorized workflow change that
-invokes the wrapper with an explicitly mapped least-privilege GitHub read
-token. Activated CI must reject a missing token, attach it only to GitHub API
-requests, and keep it out of Docker arguments and environment, the candidate
-environment, logs, diagnostics, and artifacts. API failures remain
-fail-closed, with rate-limit and permission failures distinguishable from
-malformed repository evidence. This inert foundation neither adds that token
-wiring nor changes `production-build.yml`.
-
-After promotion, the promoted pair becomes the ordinary trusted default and
-validation returns to the inert default-equal state. No standalone post-squash
-synchronization PR is required; a later bounded candidate incorporates current
-`master` before promotion. Rollback is a separately reviewed forward correction
-or revert through the normal branch flow, not reuse of an earlier
-authorization. Once either one-use receipt has been spent, later correction
-must preserve that historical interpretation rather than making the consumed
-authority appear unused. Ending or crashing after any receipt row was written
-permanently fences that claim against re-entry. Pending is not consumed or
-successful. A success receipt stays spent even if later quality publication
-fails; no compensation or reset revives it.
+Two legacy files, `.github/scripts/test-coverage-matrix.js` and
+`.github/scripts/test-test-coverage-matrix.js`, remain byte-identical because
+the current trusted publisher compares their blobs with the trusted default.
+Legacy coverage parsing also remains temporarily. Removal depends on a
+compatible protected-control replacement; these retained files are not an
+activation mandate or a usable standalone coverage tool after descriptor
+removal. The workflow inventory still rejects the reserved `tests-telemetry`
+identity. No new workflow or token wiring is enabled.
 
 ## Application test layers
 
@@ -396,8 +331,8 @@ After deployment:
 ## Evidence rules
 
 - Evidence belongs to an exact immutable SHA.
-- Pull request titles are short, understandable outcomes; merge safety rejects
-  single-word, overlong, or ambiguous `chore`/`misc`/`wip` titles.
+- Plain-language titles aid review but are not quality or approval authority.
+  Legacy merge-helper presentation checks still apply until replaced.
 - A skipped, stale, pending, unrelated, or branch-name-only check is not
   success.
 - A rerun cannot replace first-attempt provenance when the contract requires
@@ -431,20 +366,34 @@ writes no additional receipt states. Before any success-capable publication,
 it repeats authority, exact PR snapshot, selector uniqueness, protected-ref,
 ancestry, freshness and expiry, and shared-budget checks. Partial, malformed,
 foreign, conflicting, or different-run receipts remain consumed and are
-rejected fail closed. Coverage receipts are unchanged and non-resumable.
+rejected fail closed. Legacy coverage receipts remain non-resumable.
+
+The compatibility-stage publisher correction keeps one shared 30-second
+allowance for receipt/selector network IO and retry waits. Unrelated full
+quality revalidation no longer consumes that allowance. Per-request
+cancellation and cumulative IO exhaustion remain enforced; no timeout is
+increased. The focused regression distinguishes slow full revalidation from
+exhausted receipt IO. This local correction is not evidence of trusted rollout.
+
+Receipt rows remain immutable. Complete ledger validation, exact acknowledged
+row identity, bounded read-back retries, and authority rechecks before writes
+and after read-backs remain required. Ambiguous writes are not retried, and
+same-owner resumption writes no new receipt states. A completed receipt stays
+spent even if quality publication later fails.
 
 Workflow expiry is checked on a fresh clock immediately before every receipt
 POST and quality-success POST. Expiry between receipt success and quality
 publication leaves the receipt spent and prevents quality success. Coverage
 authorizations keep their immutable transition/run eligibility rules: an
 otherwise eligible run may complete after expiry.
-Historical coverage integration receipts retain full validation, with
-revalidation reads bounded by the shared deadline and per-request cap.
+Historical coverage integration receipts retain full validation, with their
+receipt reads bounded by the shared IO allowance and per-request cap.
 
 Receipt-protocol repair and declaration retirement follow normal protected
 integration and promotion; retirement grants no replacement authority and
-preserves all claim history. A standalone post-squash synchronization PR is
-not required, but a later promotion candidate must contain current `master`.
+preserves all claim history. Integration and promotion preserve ancestry;
+reconciliation is needed only when ancestry requires it, and a promotion
+candidate must contain current `master`.
 Replacement integration/promotion grants are reviewed and promoted separately
 into trusted `master` before the consuming workflow change enters `dev`.
 Provisioning alone is not merge or deployment permission.
@@ -474,7 +423,7 @@ nor unnecessary duplicate full-suite runs improve the evidence.
 
 A known regression, unexplained behavior change, or missing required proof
 prevents readiness. Report actual results and unrun checks explicitly.
-Independent evidence selected by the risk profile remains required; routine
+Independent evidence for changed trust/state boundaries remains required; routine
 routing or design acceptance cannot turn a failed technical gate green. See
 [[Agents]] for bounded corrections and review triggers.
 
@@ -483,10 +432,9 @@ routing or design acceptance cannot turn a failed technical gate green. See
 Documentation-impact evidence is mandatory for every change; a separate
 public-wiki supporting unit is not. Canonical wiki pages are reviewed source
 files, and relevant changes join the complete candidate in the same pull
-request as the behavior they describe, before the independent review selected
-by the risk profile. Their tests require the expected handbook pages and
-navigation, and
-reject known classes of sensitive public content such as private authority
+request as the behavior they describe, before source acceptance and applicable
+independent verification. Their tests require the expected handbook pages and
+navigation, and reject known classes of sensitive public content such as private authority
 mechanics, user-specific paths, and globally routable infrastructure
 addresses. After the exact commit merges, the authorized orchestrator, not
 the wiki editor, publishes canonical pages byte-identically and verifies the

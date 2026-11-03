@@ -105,23 +105,13 @@ if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   exit 1
 fi
 
-if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
-  STUB_TITLE='chore: update files' \
-  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
-  echo "merge safety accepted an ambiguous chore title" >&2
-  exit 1
-fi
-
-if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
-  STUB_TITLE='Update' \
-  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
-  echo "merge safety accepted a single-word title" >&2
-  exit 1
-fi
-
-env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
-  STUB_TITLE='Fix live slip alignment' \
-  "$MERGE_SAFETY" 224 >/dev/null
+for title in 'chore: update files' 'Update' 'Fix live slip alignment'; do
+  if ! env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+    STUB_TITLE="$title" "$MERGE_SAFETY" 224 >/dev/null; then
+    echo "merge safety rejected a presentation-only title" >&2
+    exit 1
+  fi
+done
 
 if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   "$MERGE_SAFETY" 225 >/dev/null 2>&1; then

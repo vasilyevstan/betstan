@@ -7,7 +7,7 @@ before acting; do not rely on stale conversation state or branch names.
 
 - Contributor and branch rules: [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
 - Durable engineering lessons: [`../LEARNINGS.md`](../LEARNINGS.md)
-- Reusable agent workflow: [`agents/README.md`](agents/README.md)
+- Conditional agent capabilities: [`agents/README.md`](agents/README.md)
 - Pull-request evidence: [`pull_request_template.md`](pull_request_template.md)
 - Branch procedure: [`skills/betstan-branch-governance/SKILL.md`](skills/betstan-branch-governance/SKILL.md)
 - Security guardrails: [`../docs/copilot-security-guardrails.md`](../docs/copilot-security-guardrails.md)
@@ -18,19 +18,19 @@ before acting; do not rely on stale conversation state or branch names.
 - Never commit or push directly to protected `dev` or `master`.
 - Immediately handle eligible CLI-owned approvals/merges at startup, resume, and checkpoints; never await a personal prompt.
   Check pending gates first; retain canonical authority, all technical gates, and human-origin approval rules.
-- Use risk-conditional validation: low-risk reversible work needs one owner, one independent critic or test pass, and exact CI; add only diff-triggered specialists.
-  PerfettoStan may stop optional process expansion and then use one simplifier pass to return a smaller continuation. Reserve three-model synthesis for disputed, materially complex, or irreversible design, final validation for multi-specialist/irreversible decisions, and the conductor for parallel/asynchronous/external/mutating work needing recovery.
-- Record a documentation-impact assessment for every change. Register the
-  public-wiki editor only when public impact is plausible or ambiguous;
-  otherwise retain exact-diff, path-specific no-public-change evidence.
+- Use one accountable owner and proportionate verification; independently verify changed trust/state boundaries.
+  Roles are capabilities, not a required agent sequence, model quorum, or review-of-review. Reuse accepted evidence and keep required exact-SHA CI.
+- Record a documentation-impact assessment for every change. Use the
+  public-wiki editor when its expertise is needed; otherwise the owner records
+  exact-diff, path-specific impact evidence.
   Relevant product, architecture, operations, UI, quality, release, or agent
-  changes update canonical `docs/wiki/` sources before final validation.
+  changes update canonical `docs/wiki/` sources before source acceptance.
 - Keep corrections in the originating agent context; do not create duplicate
   agents or status-only handoffs.
 - Preserve unrelated tracked, staged, and untracked work.
 - Never expose credentials, tokens, private records, or session artifacts.
 - Never mutate production, data, protected environments, or release state
-  outside the authorized exact-SHA workflow and specialist gates.
+  outside authorized exact-SHA controls. Existing controls apply until proven cutover.
 - Treat skipped, stale, pending, neutral, branch-name-only, or unrelated checks
   as non-success.
 - Keep changes backward compatible unless an explicit migration and rollback
@@ -56,5 +56,5 @@ These labels are informational only: do not branch checks, approval, merge,
 release, or rollback decisions on their presence or value.
 
 Only Copilot CLI may apply `copilot-cli-managed` to a PR it created and owns.
-That label selects the no-personal-prompt path but never bypasses technical
+That label alone proves neither origin nor ownership and never bypasses technical
 gates. Every other PR requires approval bound to its exact current head SHA.

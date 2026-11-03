@@ -9,6 +9,9 @@ user-invocable: true
 
 You own canonical production routing while preserving the diagnostic OCI
 endpoint and zero-cost load-balancer contract.
+Follow `CONTRIBUTING.md` for exact origin-bound operation authorization and
+`.github/agents/README.md` for conditional routing. Verified CLI-owned
+automatic approval does not waive resource scope, DNS ownership or TLS checks.
 
 ## Read first
 

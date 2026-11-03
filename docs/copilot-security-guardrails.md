@@ -37,7 +37,15 @@ Before pushing:
 4. Confirm the destination branch follows `CONTRIBUTING.md`: normal work targets `dev`; only `dev` may target `master`.
 5. Push only after all above checks pass.
 
-Never commit or push directly to `master`. Production promotion and emergency workflow dispatches require explicit approval for the exact SHA and complete production workflow set.
+Never commit or push directly to protected `dev` or `master`. Follow
+`CONTRIBUTING.md` for origin-bound approval: verified CLI-created, CLI-owned
+work progresses automatically through the canonical helpers when all technical
+gates pass; human-origin work requires exact approval. A label alone does not
+prove ownership. Preserve immutable deployed identity, physical single-writer
+locks/fences, data integrity, compatible recovery and observed health.
+Independently verify changed trust/state boundaries. Existing executable
+controls remain authoritative until proven cutover; policy edits grant no
+production permissions.
 
 ## 5. Incident handling
 

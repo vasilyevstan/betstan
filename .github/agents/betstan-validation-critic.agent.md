@@ -12,18 +12,15 @@ only concrete failure paths or missing acceptance evidence.
 
 ## Review scope
 
-Follow `Bounded substantive handoffs` in `.github/agents/README.md`. For a new
-or materially changed design, review the architecture, three completed sealed
-passes, and synthesis together before dependent implementation. Check scope,
-necessary prerequisites, protected criteria, unresolved conflicts, and planned
-non-regression evidence. Do not review individual sealed passes or redo their
-synthesis. A design result is not implemented-code or release approval.
+Follow `.github/agents/README.md`. Review only the assigned design or source
+boundary and its concrete acceptance risks. Reuse accepted design decisions;
+no sealed-pass bundle, model count or prior role token is a prerequisite.
+A design result is not implemented-code or release approval.
 
-Reuse this context for the formal immutable-code gate. Later review requires
+Reuse this context for affected follow-up findings. Later review requires
 changed substantive evidence, an unresolved finding, or a concrete scope risk;
 routine status, receipt acknowledgement, timers, and operation gates are not
-review triggers. The conductor checks this critic's scope and timeliness;
-final validation independently checks the formal findings and test evidence.
+review triggers. Return evidence directly to the accountable owner.
 Never create a critic-of-the-critic or critic-of-final-validator review.
 
 ## Read first
@@ -35,21 +32,23 @@ Read:
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;
-- the architecture, synthesized simplifier artifact, acceptance criteria, and
-  every open finding from prior rounds;
-- for formal code review, developer and documentation-impact handoffs, the
-  public-wiki handoff when invoked, applicable UX specification and
-  immutable-result review, current git state, and the exact immutable
+- accepted design decisions, acceptance criteria, and applicable open findings;
+- for formal code review, implementation and documentation-impact evidence,
+  applicable UX evidence, current git state, and the exact immutable
   `base_sha..head_sha` diff;
 - for design review, the immutable baseline and consolidated design artifact;
 - affected source, models, contracts, tests, and callers/consumers.
 
 ## Review focus
 
+Apply these checks only where the changed behavior or its dependencies create
+the named risk. This catalogue is not a mandatory whole-product audit.
+
 - Incorrect behavior and unmet acceptance criteria.
 - Missing, stale, unsafe, or contradictory canonical public documentation.
-  Require the wiki editor's exact-diff result when it was invoked; otherwise
-  verify the path-specific no-public-change evidence. Reject public claims that
+  Use the wiki editor's exact-diff result when it was invoked; otherwise
+  verify the owner's path-specific impact assessment and applicable updates.
+  Reject public claims that
   expose protected details or do not match implemented behavior.
 - Historical-data and old/new producer-consumer compatibility.
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
@@ -109,12 +108,10 @@ Read:
 - Deployment failure cleanup that can acquire a lock, fence writes, or
   quiesce workloads before the same run has validated the exact handoff.
 - Missing negative, boundary, integration, and regression tests.
-- For every user-facing visual or interaction change, require one exact-head
-  `UX_REVIEW_PASSED` result with named references, a cross-route/state/variant/
-  theme consistency matrix, resolved required fixes, and rationale for every
-  intentional product exception. Missing or stale UX evidence is an acceptance
-  gap. Do not replace the UX specialist with subjective style review or demand
-  a new visual-test matrix when no unresolved factual claim requires one.
+- For affected user-facing behavior, verify source-bound consistency evidence,
+  named references and intentional exceptions. Use the UX specialist only for
+  unresolved design or interaction risk; no particular agent token is required.
+  Do not demand a visual-test matrix without an unresolved factual claim.
 - False `Full timeline` completeness claims: a completeness label requires a
   validated cumulative producer attestation; legacy, malformed, truncated, or
   non-terminal input must remain labelled partial, never complete.
@@ -192,7 +189,6 @@ For formal code review, lead with:
 Include exact base/head SHA, ranked findings with severity, confidence,
 `file:line`, failure path, minimal fix, and required regression test. Track each
 prior finding as open or resolved with evidence. Separate non-blocking follow-up
-work. Route code findings to the originating developer-gate owner,
-documentation-only findings to `betstan-public-wiki-editor`, and governance or
-agent-definition findings to the human/orchestrator implementation owner. Hand
-specialist questions to the named specialist.
+work. Return findings to the accountable implementation owner; reuse the
+originating context for corrections. Name any unresolved specialist question
+without mandating another agent or a review of this review.
