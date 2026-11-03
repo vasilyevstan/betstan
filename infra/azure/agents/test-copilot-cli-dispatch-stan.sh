@@ -2607,8 +2607,18 @@ for at in (1, 2):
         assert (d / "dispatches").read_text() == "0", (at, mutation)
         assert intent(d)["state"] == "prepared", (at, mutation)
         if mutation not in {"request", "seal", "intent-mode", "capture", "capture-replace"}:
-            run(d, "--discard-prepared")
+            # Keep shell cleanup at each checkpoint; its disabled-workflow
+            # preflight is identical after drift is cleared. Other cases still
+            # exercise the real snapshot-bound, locked cleanup on their files.
+            if mutation == "added":
+                run(d, "--discard-prepared")
+            else:
+                options = cleanup_options(d)
+                invoke("discard-prepared", {
+                    **options, "expected_snapshot": invoke("prepared-context", options),
+                })
             assert not list((d / "authority").glob("request-*.json"))
+            assert not (d / "authority" / previous["captureFile"]).exists()
     print(f"prepared_checkpoint_mutations=PASS checkpoint={at} cases={len(mutations)}", flush=True)
 
 for state, mutation in (
