@@ -66,6 +66,10 @@ publication also waits for accepted merged source.
 6. Preserve ancestry during promotion as well. Reconcile protected branches
    only when ancestry requires it; do not create content-identical
    synchronization PRs as a ritual. Validate the exact resulting snapshot.
+   The merge commit left on `master` by an earlier promotion does not require
+   synchronization when its tree equals the `dev` commit it promoted and that
+   commit is already in the new promotion head; any other `master`-only commit
+   blocks promotion.
 
 Direct pushes to `dev` or `master` are not part of the supported flow. Only
 `dev` may be promoted to `master`.

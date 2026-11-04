@@ -45,6 +45,37 @@ fail() {
   exit 1
 }
 
+# Merge-commit promotions leave one master-only merge per promotion. Accept a
+# diverged master only when every master-only commit is such a merge whose tree
+# equals its dev parent and that parent is already in the promotion head.
+master_only_commits_are_promotion_merges() {
+  local base="$1" head="$2" listing merge_tree dev_parent dev_tree dev_status
+  listing="$(
+    gh api "repos/$REPO/compare/${head}...${base}" \
+      --jq '{total_commits, commits: [.commits[] | {sha, tree: .commit.tree.sha, parents: [.parents[].sha]}]}'
+  )" || return 1
+  listing="$(python3 - "$listing" <<'PY'
+import json, re, sys
+data = json.loads(sys.argv[1])
+commits = data.get("commits") or []
+if not commits or data.get("total_commits") != len(commits) or len(commits) > 20:
+    raise SystemExit(1)
+sha = re.compile(r"^[0-9a-f]{40}$")
+for commit in commits:
+    parents = commit.get("parents") or []
+    if len(parents) != 2 or not all(sha.match(str(v)) for v in (commit.get("tree"), *parents)):
+        raise SystemExit(1)
+    print(commit["tree"], parents[1])
+PY
+  )" || return 1
+  while read -r merge_tree dev_parent; do
+    dev_tree="$(gh api "repos/$REPO/git/commits/$dev_parent" --jq '.tree.sha')" || return 1
+    dev_status="$(gh api "repos/$REPO/compare/${dev_parent}...${head}" --jq '.status')" || return 1
+    [[ "$merge_tree" == "$dev_tree" ]] || return 1
+    [[ "$dev_status" == "ahead" || "$dev_status" == "identical" ]] || return 1
+  done <<<"$listing"
+}
+
 meta_json="$(
   gh pr view "$PR_NUMBER" --repo "$REPO" \
     --json number,title,state,mergeable,mergeStateStatus,headRefName,headRefOid,headRepository,baseRefName,baseRefOid,labels,url
@@ -176,8 +207,14 @@ if [[ "$base_ref" == "master" ]]; then
   compare_status="$(
     gh api "repos/$REPO/compare/${base_sha}...${head_sha}" --jq '.status'
   )"
-  [[ "$compare_status" == "ahead" || "$compare_status" == "identical" ]] ||
+  if [[ "$compare_status" == "diverged" ]] &&
+    master_only_commits_are_promotion_merges "$base_sha" "$head_sha"; then
+    compare_status="ahead-of-promotion-merges"
+  fi
+  [[ "$compare_status" == "ahead" || "$compare_status" == "identical" ||
+     "$compare_status" == "ahead-of-promotion-merges" ]] ||
     fail "current master tip is not an ancestor of the promotion head status=$compare_status"
+  echo "master_ancestry=$compare_status"
 
   REPO="$REPO" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="$PR_NUMBER" \
     "$PRODUCTION_RUN_EXCLUSIVITY" ||
