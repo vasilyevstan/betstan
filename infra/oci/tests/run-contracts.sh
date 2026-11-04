@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TESTS_DIR="$ROOT_DIR/infra/oci/tests"
+AGENTS_DIR="$ROOT_DIR/infra/azure/agents"
 
 # Deterministic suite order within each isolated CI shard.
 core_suites=(
@@ -22,6 +23,7 @@ core_suites=(
   "$TESTS_DIR/test-approval-binding-drift-stan.sh"
   "$TESTS_DIR/test-mongo-upgrade.sh"
   "$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh"
+  "$ROOT_DIR/infra/ci/test_suite_gate.py"
 )
 
 live_suites=(
@@ -51,6 +53,18 @@ rollback_suites=(
   "$TESTS_DIR/rollback-contract.sh"
 )
 
+# CLI governance suites; production-build skips them for most pull requests.
+governance_suites=(
+  "$AGENTS_DIR/test-pr-merge-safety-stan.sh"
+  "$AGENTS_DIR/test-copilot-cli-protected-operation-policy-stan.sh"
+  "$AGENTS_DIR/test-copilot-cli-run-approval-stan.sh"
+  "$AGENTS_DIR/test-production-run-exclusivity-stan.sh"
+)
+
+dispatch_suites=(
+  "$AGENTS_DIR/test-copilot-cli-dispatch-stan.sh"
+)
+
 shard="${BETSTAN_CONTRACT_SHARD:-all}"
 case "$shard" in
   all)
@@ -59,6 +73,8 @@ case "$shard" in
       "${live_suites[@]}"
       "${provenance_suites[@]}"
       "${rollback_suites[@]}"
+      "${governance_suites[@]}"
+      "${dispatch_suites[@]}"
     )
     ;;
   core)
@@ -72,6 +88,12 @@ case "$shard" in
     ;;
   rollback)
     suites=("${rollback_suites[@]}")
+    ;;
+  governance)
+    suites=("${governance_suites[@]}")
+    ;;
+  dispatch)
+    suites=("${dispatch_suites[@]}")
     ;;
   *)
     printf 'unknown OCI contract shard: %s\n' "$shard" >&2

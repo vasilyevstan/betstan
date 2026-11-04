@@ -995,6 +995,9 @@ assert_oci_scope focused "infra/oci/agents/health-check-stan.sh"
 assert_oci_scope full "infra/oci/tests/test-contract.sh"
 assert_oci_scope none "docs/wiki/Quality-Gates.md"
 assert_oci_scope none ".github/workflows/production-build.yml"
+assert_oci_scope full "infra/azure/agents/copilot-cli-dispatch-stan.sh"
+assert_oci_scope full "infra/ci/suite_gate.py"
+assert_oci_scope full ".github/workflows/branch-policy.yml"
 assert_oci_scope full $'infra/oci/scripts/deploy.sh\ninfra/oci/agents/health-check-stan.sh'
 for moved_contract in \
   test-deploy-validation-loop-stan.sh \

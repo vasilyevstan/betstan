@@ -39,9 +39,11 @@ jobs:
               infra/oci/tests/test-ghcr-contract.sh)
                 [ "$mode" = full ] || mode=focused
                 ;;
-              infra/oci/*|\
-              .github/workflows/oci-*.yml|\
-              .github/workflows/ghcr-package-management.yml)
+              .github/workflows/production-build.yml)
+                ;;
+              infra/*|\
+              .github/workflows/*)
+                # Heavy suites self-select through infra/ci/suite_gate.py.
                 mode=full
                 ;;
             esac
@@ -95,11 +97,11 @@ jobs:
     needs: scope
     if: needs.scope.outputs.mode == 'full'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        shard: [core, live, provenance, rollback]
+        shard: [core, live, provenance, rollback, governance, dispatch]
     steps:
       - name: Checkout pull request
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
