@@ -184,6 +184,39 @@ jq -e '
   exit 1
 }
 
+recent_finish="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+jq --arg recent "$recent_finish" '
+  def restarted($pod; $terminated):
+    (.items[] | select(.metadata.name == $pod) | .status.containerStatuses[0]) |=
+      (.restartCount = 1 | .lastState = {terminated: $terminated});
+  restarted("gaming-auth-mongo-pod";
+    {reason: "Unknown", finishedAt: "2000-01-01T00:00:00Z"}) |
+  restarted("gaming-rabbitmq-pod"; {reason: "Error", finishedAt: $recent})
+' "$WORK_DIR/projector-pods.json" > "$WORK_DIR/projector-restarts.json"
+jq '
+  (.items[] | select(.metadata.name == "gaming-rabbitmq-pod") |
+    .status.containerStatuses[0].lastState.terminated) |= del(.finishedAt)
+' "$WORK_DIR/projector-restarts.json" > "$WORK_DIR/projector-restarts-unknown.json"
+python3 "$WORK_DIR/pod-projector.py" \
+  "$WORK_DIR/projector-restarts.json" "$WORK_DIR/images.tsv" \
+  > "$WORK_DIR/projector-restarts-output.json"
+python3 "$WORK_DIR/pod-projector.py" \
+  "$WORK_DIR/projector-restarts-unknown.json" "$WORK_DIR/images.tsv" \
+  > "$WORK_DIR/projector-restarts-unknown-output.json"
+jq -e '
+  any(.[]; .name == "gaming-auth-mongo-pod" and .restarts == 0 and
+    .last_reason == "") and
+  any(.[]; .name == "gaming-rabbitmq-pod" and .restarts == 1 and
+    .last_reason == "Error")
+' "$WORK_DIR/projector-restarts-output.json" >/dev/null &&
+  jq -e '
+    any(.[]; .name == "gaming-rabbitmq-pod" and .restarts == 1 and
+      .last_reason == "Error")
+  ' "$WORK_DIR/projector-restarts-unknown-output.json" >/dev/null || {
+  echo "embedded pod projector did not bound restarts to recent terminations" >&2
+  exit 1
+}
+
 OCI_HEALTH_FIXTURE_FILE="$HEALTHY" "$HEALTH" | grep -qx DEPLOYED_HEALTHY
 jq '
   .context.runtime_mode="k3s" |
