@@ -451,6 +451,14 @@ The trusted publisher currently requires the protected quality workflow to be by
 
 If the workflow file itself must change, first add and independently review a fail-closed, one-use exact-blob authorization mechanism in the trusted publisher without changing the workflow. Promote that policy separately, then authorize and merge only the intended workflow blob, remove the authorization, and verify fresh statuses come from the expected workflow IDs. Do not invent or document an authorization variable before the publisher implements and tests it.
 
+Prove the strict integration-base ancestry before declaring a bootstrap route
+viable. Retaining the default workflow on a branch cut from `master` does not
+make that branch up to date with `dev`; passing local merge safety does not
+override GitHub's strict protection. A temporary return to the trusted workflow
+must itself enter through a current-base PR. Reapplying the reviewed workflow
+after that bootstrap requires a distinct reviewed source grant and receipt
+context; retire the consumed declaration without resetting its receipt.
+
 When the future pull-request number cannot be reserved safely, a workflow
 authorization may use `pullNumber: null` to select the first eligible open PR
 matching the exact repository, head repository, head ref, base ref, trusted
@@ -460,6 +468,25 @@ the publisher revalidates the live head and base refs, the complete PR
 snapshot, and `dev` ancestry over `master` for promotions. Source and promotion
 selectors use separate declarations and receipt contexts; a closed, stale,
 pre-issuance, ambiguous, or already-consumed match grants no authority.
+
+An open, same-repository, content-identical ancestry-sync PR into `dev` may
+retain a workflow already integrated through an exact authorized PR. The
+publisher requires equal base/head/test-merge trees, the current protected
+base and master ancestry, unchanged full workflow blobs, and the original
+merged source's complete bot-authored receipt from a successful trusted
+publisher run. The original declaration must remain valid, and the source
+must have one unambiguous successful first-attempt quality run with a
+successful aggregate gate. A merged source's native run/PR association may be
+absent, but contradictory associations fail closed. Current PR associations
+remain mandatory.
+
+This is read-only provenance verification, not permission to reuse or reset
+the source receipt. The sync still needs its own exact current-SHA quality
+run and transition; the source proof, protected refs and expiry are rechecked
+around success publication. Content changes and promotions do not receive
+this exception. Preserve normal protected integration and promotion when
+bootstrapping the publisher itself; no rule edit bypasses a currently
+enforced gate.
 
 An exact-blob authorization is consumed by the first successful exact quality
 run for its PR transition. A workflow-producing pull-request event first
