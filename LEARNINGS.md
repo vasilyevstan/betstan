@@ -61,6 +61,15 @@ runs/check suites for the pushed SHA, including zero-job definition failures,
 before waiting for the expected PR jobs; a fixed list of expected run IDs can
 miss this early failure.
 
+## Actions script context shape
+
+`actions/github-script` exposes `context.repo` and `context.issue` as `Context`
+prototype getters. Object spread copies only own properties, so a rebuilt
+`{ ...context }` silently loses `repo`. The legacy `workflow_run` completion
+publisher failed this way on every PR after promotion, while plain-object test
+fixtures passed. Derive modified contexts from the original prototype, and keep
+publisher fixtures shaped like the real `Context`.
+
 ## Repository overview
 
 `betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities live in the normal tracked `common/` package and are published as `@betstan/common`; never recreate `common/` as a gitlink or submodule.
@@ -601,6 +610,12 @@ cd resulting && npm ci && npm run test:ci
 - Squash promotions lost ancestry and caused avoidable validation cycles.
   Use ancestry-preserving integration and promotion; reconcile protected
   branches only when ancestry actually requires it.
+- Merge promotions leave a content-neutral merge commit on `master`, and
+  `master`'s strict up-to-date protection reports the next promotion as
+  `BEHIND` until `dev` contains it. Branches created from `dev` after a
+  promotion therefore cost an extra full CI cycle (#943). Merge
+  `origin/master` into the next `dev`-bound branch instead; a merge-safety
+  script relaxation (#944) was reverted because GitHub enforces this itself.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
 - The trusted PR publisher compares the exact `production-build.yml` blob with the default branch. When adding a repository-wide static guard, prefer invoking it from an existing trusted entrypoint already called by that workflow; changing the trusted workflow and its verifier in the same PR intentionally fails closed.

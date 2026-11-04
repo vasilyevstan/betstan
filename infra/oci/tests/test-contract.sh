@@ -740,8 +740,7 @@ for lesson in \
 done
 for agent in \
     betstan-migration-recovery \
-    betstan-domain-ingress \
-    betstan-azure-retirement; do
+    betstan-domain-ingress; do
     agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
     [[ -f "$agent_file" ]] || fail "required recovery agent is missing: $agent"
     grep -Fq "infra/oci/LESSONS_LEARNED.md" "$agent_file" ||
@@ -1096,40 +1095,9 @@ grep -Fq "one bounded in-pod deletion loop" \
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
     fail "domain ingress agent lacks the canonical host"
-grep -Fq "A successful delete command alone is not" \
-    "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
-    fail "Azure retirement agent trusts delete acceptance"
-grep -Fq 'runtime_deploy_source_sha' \
-    "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
-    fail "Azure retirement agent omits recovery deployment lineage"
-grep -Fq 'never replace optimistic concurrency with a wildcard' \
-    "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
-    fail "Azure retirement agent permits an unfenced AKS delete"
-retirement_operator="$ROOT_DIR/infra/azure/agents/retire-production-stan.sh"
 migration_success_contract="$OCI_DIR/scripts/migration-success-contract.sh"
-[[ -x "$retirement_operator" ]] ||
-  fail "checked-in Azure retirement operator is missing or not executable"
 [[ -x "$migration_success_contract" ]] ||
   fail "shared migration-success contract is missing or not executable"
-grep -Fq \
-    'MODE=validate "$ROOT_DIR/infra/oci/scripts/migration-success-contract.sh"' \
-    "$retirement_operator" ||
-  fail "Azure retirement does not consume the shared migration-success contract"
-for retirement_contract in \
-    'oci-migration-success-provenance-${MIGRATION_RUN_ID}-${MIGRATION_RUN_ATTEMPT}' \
-    'validate_initial_inventory "$INITIAL_INVENTORY_FILE"' \
-    'az rest' \
-    '--headers "If-Match=${CLUSTER_ETAG}"' \
-    'wait_for_cluster_absence' \
-    'validate_inventory_subset "$CURRENT_INVENTORY_FILE"' \
-    'verify_subscription_absence' \
-    'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'; do
-    grep -Fq -- "$retirement_contract" "$retirement_operator" ||
-      fail "Azure retirement operator omits contract: $retirement_contract"
-done
-! grep -Eq 'az (ad|role)|gh secret (delete|set)|oci |kubectl ' \
-  "$retirement_operator" ||
-  fail "Azure retirement operator crosses identity, OCI, or Kubernetes boundaries"
 
 # shellcheck source=../scripts/lib.sh
 source "$OCI_DIR/scripts/lib.sh"
@@ -3533,9 +3501,6 @@ if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
   "$OCI_DIR/tests/test-migration-recovery-contract.sh"
   "$OCI_DIR/tests/test-mongo-upgrade.sh"
   "$OCI_DIR/agents/test-health-contract-stan.sh"
-  "$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh"
-  "$ROOT_DIR/infra/azure/agents/test-retire-migration-identities-stan.sh"
-  "$ROOT_DIR/infra/azure/agents/test-audit-oci-primary-retirement-stan.sh"
 fi
 
 echo "oci_offline_contract=PASS"

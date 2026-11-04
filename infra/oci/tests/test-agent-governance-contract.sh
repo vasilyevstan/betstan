@@ -19,14 +19,14 @@ expected = {
     "validation-critic", "test-engineer", "final-validator", "conductor",
     "service-contract-reviewer", "quality-gate-reviewer",
     "branch-governance-reviewer", "auth-security-reviewer", "ux-ui-expert",
-    "oci-health-reviewer", "azure-cost-analyst", "deployment-safety",
-    "aks-operator", "oci-operator", "domain-ingress", "mongo-migration",
-    "migration-recovery", "azure-retirement", "public-wiki-editor",
+    "oci-health-reviewer", "deployment-safety",
+    "oci-operator", "domain-ingress", "mongo-migration",
+    "migration-recovery", "public-wiki-editor",
     "PerfettoStan",
 }
 manual_expected = {
-    "aks-operator", "oci-operator", "oci-health-reviewer", "domain-ingress",
-    "mongo-migration", "migration-recovery", "azure-retirement",
+    "oci-operator", "oci-health-reviewer", "domain-ingress",
+    "mongo-migration", "migration-recovery",
 }
 if set(roles) != expected:
     raise SystemExit("supported agent inventory changed")

@@ -32,7 +32,6 @@ Before changing or assessing deployment behavior, read:
 - `.github/pull_request_template.md`
 - `infra/oci/scripts/live-betting-control-stan.sh`
 - `infra/oci/scripts/revalidate-live-activation-stan.sh`
-- `infra/azure/LESSONS_LEARNED.md`
 - `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `infra/azure/agents/pre-commit-infra-check-stan.sh`
@@ -41,7 +40,6 @@ Before changing or assessing deployment behavior, read:
 - `.github/agents/betstan-mongo-migration.agent.md`
 - `.github/agents/betstan-migration-recovery.agent.md`
 - `.github/agents/betstan-domain-ingress.agent.md`
-- `.github/agents/betstan-azure-retirement.agent.md`
 
 Inspect the current git graph and remote default branch. Do not infer that a merged PR is missing merely because its old head differs from a newer `master`; use `git merge-base --is-ancestor` and inspect the current tree.
 Resolve the remote default branch's full SHA through the GitHub API or

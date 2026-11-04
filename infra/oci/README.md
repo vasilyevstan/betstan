@@ -719,26 +719,6 @@ not a hang. Recovery uses the journal SHA and fencing generation, not a newer
 default branch. Provider deletion is asynchronous, and successful CLI output
 does not prove terminal state.
 
-Azure is started only as a frozen data source for the protected migration.
-After exact data parity and repeated OCI canonical health pass, the separately
-approved Azure-retirement operation removes AKS and all associated billable
-resources. Repository and GitHub configuration remain the only future Azure
-recreation source.
-
-Run `infra/azure/agents/retire-production-stan.sh plan` only with the exact
-successful migration run, attempt, ID, SHA, diagnostic URL, cluster-resource
-fingerprint, and a private absolute state directory. Review its 28-resource
-inventory digest, then pass that digest and exact confirmation to `execute`.
-The operator deletes AKS first, resumes asynchronous deletion by fenced phase,
-removes only the two exact resource groups, and verifies subscription-wide
-absence twice. It reports resource retirement separately from delayed Cost
-Management completion. AKS resource fingerprints and ETags are
-case-preserving; do not normalize or wildcard either value.
-
-After resource absence, run the separate
-`infra/azure/agents/retire-migration-identities-stan.sh` state machine with the
-exact private migration identity metadata, then run
-`infra/azure/agents/audit-oci-primary-retirement-stan.sh`. The identity
-operator must retain general Azure recreation configuration. The terminal
-audit reports resource completion separately from delayed billing ingestion
-and never mutates GitHub merely to clear an inert historical run record.
+Azure is no longer used. The former Azure retirement operators, identity
+cleanup and terminal billing audit are archived, unexecuted, in
+`archive/azure/`.

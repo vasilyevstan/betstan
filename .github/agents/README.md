@@ -60,12 +60,10 @@ cloud access or a live baseline.
 | Protected ancestry and approval policy | `betstan-branch-governance-reviewer` |
 | Auth, session, identity and authorization | `betstan-auth-security-reviewer` |
 | Deployment and rollback evidence | `betstan-deployment-safety` |
-| AKS runtime operations | `betstan-aks-operator` |
 | OCI runtime operations | `betstan-oci-operator` |
 | Independent OCI runtime health | `betstan-oci-health-reviewer` |
 | Ingress and TLS | `betstan-domain-ingress` |
 | Mongo migration and recovery | `betstan-mongo-migration`, `betstan-migration-recovery` |
-| Azure cost analysis and retirement | `betstan-azure-cost-analyst`, `betstan-azure-retirement` |
 
 Application developers edit only their assigned source/test/config paths and
 do not perform Git or deployment actions. Infrastructure and public-wiki

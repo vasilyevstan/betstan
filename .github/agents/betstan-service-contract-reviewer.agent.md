@@ -37,7 +37,7 @@ Do not rely on an earlier conversation or stale branch.
 - Never print credentials, cookies, JWTs, private resource identifiers, or production
   records.
 - Defer deployment approval and operations to `betstan-deployment-safety` and
-  `betstan-aks-operator`.
+  `betstan-oci-operator`.
 
 ## Review method
 
