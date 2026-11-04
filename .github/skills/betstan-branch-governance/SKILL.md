@@ -17,7 +17,10 @@ this skill is its procedure, not another approval hierarchy.
 - Use ancestry-preserving merges. Prove required feature commits are included
   in the exact protected aggregate and verify the exact tested snapshot.
   Reconcile branches only when ancestry requires it; a promotion does not
-  automatically require a content-identical synchronization PR.
+  automatically require a content-identical synchronization PR. Strict
+  `master` protection does require the next promotion head to contain the
+  previous promotion merge, so merge `origin/master` into each new
+  `dev`-bound branch when `dev` lacks it.
 - Require successful trusted, base-scoped branch-policy and quality statuses
   on the current head and unique merge snapshot. Stale, skipped, pending,
   neutral, unrelated or branch-name-only checks are not success.
