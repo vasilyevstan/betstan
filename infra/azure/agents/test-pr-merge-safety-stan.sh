@@ -5,9 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 MERGE_SAFETY="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
 HEAD_SHA="1111111111111111111111111111111111111111"
 BASE_SHA="0000000000000000000000000000000000000000"
-PROMOTED_BASE_SHA="4444444444444444444444444444444444444444"
-DEV_PARENT_SHA="5555555555555555555555555555555555555555"
-MERGE_TREE_SHA="6666666666666666666666666666666666666666"
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -76,24 +73,15 @@ gh() {
     fi
     printf '%s\n' \
       "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":$nodes}}}}}"
-  elif [[ "$1" == "api" && "$2" == "repos/example/repo/compare/$BASE_SHA...$HEAD_SHA" ]]; then
+  elif [[ "$1" == "api" && "$2" == *"/compare/"* ]]; then
     echo "${STUB_COMPARE_STATUS:-ahead}"
-  elif [[ "$1" == "api" && "$2" == "repos/example/repo/compare/$HEAD_SHA...$BASE_SHA" ]]; then
-    local parents="\"$PROMOTED_BASE_SHA\",\"$DEV_PARENT_SHA\""
-    [[ "${STUB_MASTER_ONLY:-hotfix}" == "hotfix" ]] && parents="\"$PROMOTED_BASE_SHA\""
-    printf '{"total_commits":%s,"commits":[{"sha":"%s","tree":"%s","parents":[%s]}]}\n' \
-      "${STUB_MASTER_ONLY_TOTAL:-1}" "$BASE_SHA" "$MERGE_TREE_SHA" "$parents"
-  elif [[ "$1" == "api" && "$2" == "repos/example/repo/git/commits/$DEV_PARENT_SHA" ]]; then
-    echo "${STUB_DEV_PARENT_TREE:-$MERGE_TREE_SHA}"
-  elif [[ "$1" == "api" && "$2" == "repos/example/repo/compare/$DEV_PARENT_SHA...$HEAD_SHA" ]]; then
-    echo "${STUB_DEV_PARENT_STATUS:-ahead}"
   else
     echo "unexpected gh invocation: $*" >&2
     return 1
   fi
 }
 export -f gh
-export HEAD_SHA BASE_SHA PROMOTED_BASE_SHA DEV_PARENT_SHA MERGE_TREE_SHA
+export HEAD_SHA BASE_SHA
 
 common_env=(
   "REPO=example/repo"
@@ -116,25 +104,6 @@ if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   echo "master promotion accepted a candidate without current master ancestry" >&2
   exit 1
 fi
-
-promotion_merge_output="$(
-  env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
-    STUB_COMPARE_STATUS=diverged STUB_MASTER_ONLY=promotion-merge \
-    "$MERGE_SAFETY" 224
-)"
-grep -Fq "master_ancestry=ahead-of-promotion-merges" <<<"$promotion_merge_output"
-
-for unsafe in \
-  "STUB_DEV_PARENT_TREE=7777777777777777777777777777777777777777" \
-  "STUB_DEV_PARENT_STATUS=diverged" \
-  "STUB_MASTER_ONLY_TOTAL=2"; do
-  if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
-    STUB_COMPARE_STATUS=diverged STUB_MASTER_ONLY=promotion-merge "$unsafe" \
-    "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
-    echo "master promotion accepted unsafe master-only history ($unsafe)" >&2
-    exit 1
-  fi
-done
 
 for title in 'chore: update files' 'Update' 'Fix live slip alignment'; do
   if ! env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \

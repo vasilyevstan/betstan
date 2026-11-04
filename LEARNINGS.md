@@ -610,12 +610,6 @@ cd resulting && npm ci && npm run test:ci
 - Squash promotions lost ancestry and caused avoidable validation cycles.
   Use ancestry-preserving integration and promotion; reconcile protected
   branches only when ancestry actually requires it.
-- Merge promotions leave a content-neutral merge commit on `master`, so a
-  strict "`master` is an ancestor of the promotion head" check blocked every
-  following promotion unless a synchronization PR (another full CI cycle) ran
-  first. Merge safety now accepts only such promotion merges (tree equal to
-  their `dev` parent, parent already in the head); see
-  `test-pr-merge-safety-stan.sh`.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
 - The trusted PR publisher compares the exact `production-build.yml` blob with the default branch. When adding a repository-wide static guard, prefer invoking it from an existing trusted entrypoint already called by that workflow; changing the trusted workflow and its verifier in the same PR intentionally fails closed.
