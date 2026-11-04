@@ -461,6 +461,25 @@ snapshot, and `dev` ancestry over `master` for promotions. Source and promotion
 selectors use separate declarations and receipt contexts; a closed, stale,
 pre-issuance, ambiguous, or already-consumed match grants no authority.
 
+An open, same-repository, content-identical ancestry-sync PR into `dev` may
+retain a workflow already integrated through an exact authorized PR. The
+publisher requires equal base/head/test-merge trees, the current protected
+base and master ancestry, unchanged full workflow blobs, and the original
+merged source's complete bot-authored receipt from a successful trusted
+publisher run. The original declaration must remain valid, and the source
+must have one unambiguous successful first-attempt quality run with a
+successful aggregate gate. A merged source's native run/PR association may be
+absent, but contradictory associations fail closed. Current PR associations
+remain mandatory.
+
+This is read-only provenance verification, not permission to reuse or reset
+the source receipt. The sync still needs its own exact current-SHA quality
+run and transition; the source proof, protected refs and expiry are rechecked
+around success publication. Content changes and promotions do not receive
+this exception. Preserve normal protected integration and promotion when
+bootstrapping the publisher itself; no rule edit bypasses a currently
+enforced gate.
+
 An exact-blob authorization is consumed by the first successful exact quality
 run for its PR transition. A workflow-producing pull-request event first
 publishes an unbound pending transition barrier, then binds the exact newly

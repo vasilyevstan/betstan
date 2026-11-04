@@ -85,6 +85,13 @@ consumed, and source edits cannot reset its identity or expiry. See
 [[Quality Gates]] for the compatibility boundary, not a bootstrap execution
 procedure.
 
+Content-identical ancestry reconciliation into `dev` may retain an already
+integrated workflow only after the publisher verifies its original authorized
+source, consumed receipt, successful exact source run, unchanged trees and
+protected ancestry. It does not consume the receipt again or waive the
+reconciliation's own current-SHA checks. Ordinary source changes and
+production promotions keep their separate authorization requirements.
+
 ### Concurrent feature delivery
 
 Several development sessions may prepare and merge compatible features at the

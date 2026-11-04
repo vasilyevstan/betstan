@@ -510,6 +510,96 @@ function issueEvent(overrides = {}) {
   };
 }
 
+function workflowInheritanceFixture() {
+  const workflowPath = ".github/workflows/production-build.yml";
+  const sourceHead = "8".repeat(40);
+  const sourceBase = "9".repeat(40);
+  const sourcePull = pull({
+    number: 64,
+    state: "closed",
+    merged: true,
+    merged_at: "2026-09-02T08:30:00.000Z",
+    merge_commit_sha: SOURCE_MERGE_COMMIT_SHA,
+    changed_files: 1,
+    head: {
+      ref: "feature/lean-workflow",
+      sha: sourceHead,
+      repo: { full_name: "example/repo" },
+    },
+    base: { ref: "dev", sha: sourceBase },
+  });
+  const sourceRun = workflowRun({
+    id: 401,
+    head_sha: sourceHead,
+    head_branch: sourcePull.head.ref,
+    created_at: "2026-09-02T08:00:00.000Z",
+    pull_requests: [{
+      number: 64, head: { sha: sourceHead }, base: { sha: sourceBase },
+    }],
+  });
+  const authority = workflowAuthorization({
+    id: "inherited-source",
+    pullNumber: null,
+    headRef: sourcePull.head.ref,
+    baseRef: "dev",
+    receiptSha: ADVANCED_BASE_SHA,
+  });
+  return {
+    currentPull: pull({
+      head: {
+        ref: "sync/master-ancestry",
+        sha: HEAD_SHA,
+        repo: { full_name: "example/repo" },
+      },
+      base: { ref: "dev", sha: BASE_SHA },
+    }),
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [authority],
+    branchShas: { master: ADVANCED_BASE_SHA, dev: BASE_SHA },
+    commitsByRef: Object.fromEntries([BASE_SHA, HEAD_SHA, MERGE_SHA].map((sha) =>
+      [sha, { sha, commit: { tree: { sha: "c".repeat(40) } } }],
+    )),
+    assetBlobsByRef: {
+      [BASE_SHA]: { [workflowPath]: CHANGED_BLOB },
+      [sourceBase]: { [workflowPath]: TRUSTED_BLOB },
+    },
+    pullsByNumber: { 64: sourcePull },
+    authorizationStatuses: ["pending", "success"].map((state, index) => ({
+      id: 500 + index,
+      state,
+      context: `trusted-workflow-authorization/${authority.id}`,
+      description: `PR #64 ${workflowPath} ${CHANGED_BLOB.slice(0, 12)}`,
+      target_url: workflowRunUrl(402),
+      creator: ACTIONS_BOT,
+      created_at: `2026-09-02T08:0${6 + index}:01.000Z`,
+    })),
+    workflowRunsByHeadSha: { [sourceHead]: [sourceRun] },
+    workflowRunsById: {
+      401: sourceRun,
+      402: {
+        id: 402,
+        workflow_id: 201,
+        path: ".github/workflows/branch-policy.yml",
+        event: "workflow_run",
+        head_branch: "master",
+        head_sha: ADVANCED_BASE_SHA,
+        repository: { full_name: "example/repo" },
+        head_repository: { full_name: "example/repo" },
+        html_url: workflowRunUrl(402),
+        run_attempt: 1,
+        status: "completed",
+        conclusion: "success",
+        created_at: "2026-09-02T08:06:00.000Z",
+        updated_at: "2026-09-02T08:08:00.000Z",
+        pull_requests: [],
+      },
+    },
+    transitionStatuses: [
+      qualityTransitionStatus({ context: "trusted-quality-transition/dev" }),
+    ],
+  };
+}
+
 async function execute({
   currentProtocol = false,
   protocolContexts,
@@ -530,6 +620,7 @@ async function execute({
   eventName = "workflow_dispatch",
   eventAction = "edited",
   listedRuns,
+  workflowRunsByHeadSha = {},
   listedTotalCount,
   workflowAuthorizations,
   coverageAuthorizations,
@@ -544,6 +635,7 @@ async function execute({
     master: BASE_SHA,
     dev: currentPull.base.ref === "dev" ? currentPull.base.sha : HEAD_SHA,
   },
+  commitsByRef = {},
   statusSink,
   policyRunOverrides = {},
   policyRunOverridesById = {},
@@ -664,7 +756,7 @@ async function execute({
         } }),
         get: async () => ({ data: { default_branch: "master" } }),
         getCommit: async ({ ref }) => ({
-          data: { sha: branchShas[ref] },
+          data: commitsByRef[ref] ?? { sha: branchShas[ref] },
         }),
         getContent: async ({ path: filePath, ref }) => {
           assetReadCalls?.push({ path: filePath, ref });
@@ -846,9 +938,9 @@ async function execute({
           },
           };
         },
-        listWorkflowRuns: async ({ page, per_page: perPage }) => {
+        listWorkflowRuns: async ({ page, per_page: perPage, head_sha: headSha }) => {
           workflowRunListCalls?.push({ page, perPage });
-          const runs = listedRuns ?? [run];
+          const runs = workflowRunsByHeadSha[headSha] ?? listedRuns ?? [run];
           return {
             data: {
               total_count: listedTotalCount ?? runs.length,
@@ -1786,6 +1878,109 @@ async function main() {
       },
     ],
   );
+
+  for (const nativeRelations of ["retained", "removed"]) {
+    const fixture = workflowInheritanceFixture();
+    if (nativeRelations === "removed") {
+      fixture.workflowRunsById[401].pull_requests = [];
+    }
+    const result = await execute(fixture);
+    const quality = result.statuses.filter(({ context }) =>
+      context === "pr-quality-gates/dev",
+    );
+    assert(quality.length > 0);
+    assert(quality.every(({ state }) => state === "success"), result.messages.join("\n"));
+    assert.equal(fixture.authorizationStatuses.length, 2);
+    assert(!result.statuses.some(({ context }) =>
+      context.startsWith("trusted-workflow-authorization/"),
+    ), "inheritance must not claim a new receipt");
+  }
+  for (const [name, mutate] of [
+    ["content change", (f) => { f.currentPull.changed_files = 1; }],
+    ["tree drift", (f) => { f.commitsByRef[HEAD_SHA].commit.tree.sha = "d".repeat(40); }],
+    ["base advance", (f) => { f.branchShas.dev = ADVANCED_BASE_SHA; }],
+    ["base workflow drift", (f) => {
+      f.assetBlobsByRef[BASE_SHA][".github/workflows/production-build.yml"] = TRUSTED_BLOB;
+    }],
+    ["merge workflow drift", (f) => {
+      f.assetBlobsByRef[MERGE_SHA] = { ".github/workflows/production-build.yml": TRUSTED_BLOB };
+    }],
+    ["missing completed receipt", (f) => { f.authorizationStatuses.pop(); }],
+    ["forged receipt", (f) => { f.authorizationStatuses[0].creator = { id: 1, login: "other", type: "User" }; }],
+    ["unmerged source", (f) => { f.pullsByNumber[64].merged = false; }],
+    ["wrong source branch", (f) => { f.pullsByNumber[64].head.ref = "feature/other"; }],
+    ["source not integrated", (f) => {
+      f.comparisonsByBasehead = {
+        [`${SOURCE_MERGE_COMMIT_SHA}...${BASE_SHA}`]: { status: "diverged", mergeBase: BASE_SHA },
+      };
+    }],
+    ["untrusted receipt publisher", (f) => { f.workflowRunsById[402].path = ".github/workflows/other.yml"; }],
+    ["failed receipt publisher", (f) => { f.workflowRunsById[402].conclusion = "failure"; }],
+    ["failed source quality", (f) => { f.workflowRunsById[401].conclusion = "failure"; }],
+    ["source rerun", (f) => { f.workflowRunsById[401].run_attempt = 2; }],
+    ["contradictory historical relation", (f) => { f.workflowRunsById[401].pull_requests[0].base.sha = HEAD_SHA; }],
+    ["ambiguous source quality", (f) => {
+      const run = f.workflowRunsById[401];
+      f.workflowRunsByHeadSha[run.head_sha].push({
+        ...run, id: 403, html_url: workflowRunUrl(403),
+      });
+    }],
+    ["skipped source aggregate", (f) => {
+      f.workflowJobsByRunId = { 401: [workflowJob({
+        run_id: 401, head_sha: f.workflowRunsById[401].head_sha, conclusion: "skipped",
+      })] };
+    }],
+    ["expired source authority", (f) => { f.authorizationNow = "2026-09-05T12:00:00.000Z"; }],
+  ]) {
+    const fixture = workflowInheritanceFixture();
+    mutate(fixture);
+    const result = await execute(fixture);
+    assertNoQualitySuccess(result);
+    assert(result.statuses.some(({ context, state }) =>
+      context === "pr-quality-gates/dev" && state === "failure",
+    ), `${name}: ${result.messages.join("\n")}`);
+    assert(!result.statuses.some(({ context }) =>
+      context.startsWith("trusted-workflow-authorization/"),
+    ), `${name}: must not write source receipts`);
+  }
+  const inheritedCurrentFailure = await execute({
+    ...workflowInheritanceFixture(),
+    run: workflowRun({ conclusion: "failure" }),
+  });
+  assertNoQualitySuccess(inheritedCurrentFailure);
+  for (const phase of ["before-success", "after-success"]) {
+    const fixture = workflowInheritanceFixture();
+    let now = NOW;
+    let changed = false;
+    const statuses = [];
+    await assert.rejects(execute({
+      ...fixture,
+      statusSink: statuses,
+      authorizationNow: () => now,
+      beforeStatusWrite: (status) => {
+        const target = phase === "before-success" ? "branch-policy/dev" : "pr-quality-gates/dev";
+        if (!changed && status.context === target && status.state === "success") {
+          changed = true;
+          now = "2026-09-05T12:00:00.000Z";
+        }
+      },
+    }), /inherited workflow authority changed/);
+    assert.equal(statuses.filter(({ context }) => context === "pr-quality-gates/dev").at(-1).state, "pending");
+    assert.equal(fixture.authorizationStatuses.length, 2);
+  }
+  const slowInheritance = workflowInheritanceFixture();
+  let inheritanceReads = 0;
+  let inheritanceClock = NOW;
+  await assert.rejects(execute({
+    ...slowInheritance,
+    authorizationNow: () => inheritanceClock,
+    statusRead: ({ ref, data }) => {
+      if (ref === ADVANCED_BASE_SHA && ++inheritanceReads === 2) {
+        inheritanceClock = "2026-09-05T12:00:00.000Z";
+      }
+      return data;
+    },
+  }), /stale or expired/);
 
   const editedTransition = await execute({
     eventName: "pull_request_target",

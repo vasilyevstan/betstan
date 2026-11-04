@@ -2666,6 +2666,237 @@ async function assertAuthorizedSourceQuality({
   return { snapshotPull, run, transition };
 }
 
+async function resolveWorkflowInheritance({
+  github,
+  owner,
+  repo,
+  pull,
+  authorizations,
+  trustedBlob,
+  headBlob,
+  workflowId,
+  serverUrl,
+}) {
+  const repository = `${owner}/${repo}`;
+  if (
+    pull.state !== "open" ||
+    pull.baseRef !== "dev" ||
+    pull.headRepository !== repository ||
+    pull.changedFiles !== 0
+  ) {
+    return false;
+  }
+  const sources = authorizations.filter(
+    (authorization) =>
+      authorization.repository === repository &&
+      authorization.headRepository === repository &&
+      authorization.baseRef === "dev" &&
+      authorization.workflowPath === QUALITY_WORKFLOW_PATH &&
+      authorization.trustedBlob === trustedBlob &&
+      authorization.authorizedBlob === headBlob,
+  );
+  if (sources.length === 0) {
+    return false;
+  }
+  if (sources.length !== 1) {
+    throw new Error("inherited workflow has ambiguous source authority");
+  }
+  const authorization = sources[0];
+  const [masterSha, devSha, commits, baseBlob, mergeBlob, statuses] =
+    await Promise.all([
+      getBranchSha(github, owner, repo, "master"),
+      getBranchSha(github, owner, repo, "dev"),
+      Promise.all(
+        [pull.baseSha, pull.headSha, pull.mergeSha].map(async (ref) => {
+          const { data } = await github.rest.repos.getCommit({ owner, repo, ref });
+          if (
+            data?.sha !== ref ||
+            !/^[0-9a-f]{40}$/.test(data?.commit?.tree?.sha)
+          ) {
+            throw new Error("inherited workflow commit tree is invalid");
+          }
+          return data.commit.tree.sha;
+        }),
+      ),
+      getWorkflowBlob(github, repository, QUALITY_WORKFLOW_PATH, pull.baseSha),
+      getWorkflowBlob(github, repository, QUALITY_WORKFLOW_PATH, pull.mergeSha),
+      listCommitStatuses(github, owner, repo, authorization.receiptSha),
+    ]);
+  if (
+    devSha !== pull.baseSha ||
+    new Set(commits).size !== 1 ||
+    baseBlob !== headBlob ||
+    mergeBlob !== headBlob ||
+    pull.mergeSha === pull.headSha ||
+    pull.mergeSha === pull.baseSha
+  ) {
+    throw new Error("inherited workflow requires an unchanged current dev tree");
+  }
+
+  const context = workflowAuthorizationContext(authorization);
+  const ledger = statuses.filter((status) => status.context === context);
+  const description = ledger[0]?.description;
+  const targetUrl = ledger[0]?.target_url;
+  const match = typeof description === "string" && description.match(
+    /^PR #([1-9][0-9]*) \.github\/workflows\/production-build\.yml ([0-9a-f]{12})$/,
+  );
+  const sourceNumber = match && Number(match[1]);
+  const prefix = `${serverUrl.replace(/\/$/, "")}/${repository}/actions/runs/`;
+  const policyRunText = typeof targetUrl === "string" && targetUrl.startsWith(prefix)
+    ? targetUrl.slice(prefix.length)
+    : "";
+  const policyRunId = Number(policyRunText);
+  if (
+    !Number.isSafeInteger(sourceNumber) ||
+    sourceNumber === pull.number ||
+    match[2] !== headBlob.slice(0, 12) ||
+    (authorization.pullNumber !== null &&
+      authorization.pullNumber !== sourceNumber) ||
+    !/^[1-9][0-9]*$/.test(policyRunText) ||
+    !Number.isSafeInteger(policyRunId)
+  ) {
+    throw new Error("inherited workflow receipt is not bound to its source");
+  }
+  const completedLedger = assertReceiptLedger(statuses, {
+    context,
+    description,
+    targetUrl,
+    states: ["pending", "success"],
+  });
+  const [sourceResponse, policyResponse, branchWorkflow] = await Promise.all([
+    github.rest.pulls.get({ owner, repo, pull_number: sourceNumber }),
+    github.rest.actions.getWorkflowRun({ owner, repo, run_id: policyRunId }),
+    github.rest.actions.getWorkflow({ owner, repo, workflow_id: BRANCH_WORKFLOW }),
+  ]);
+  const rawSource = sourceResponse.data;
+  const source = pullIdentity(rawSource);
+  const sourceMergedAt = githubTimestampMilliseconds(
+    rawSource.merged_at,
+    "inherited workflow source merged_at",
+  );
+  if (
+    source.number !== sourceNumber ||
+    source.state !== "closed" ||
+    rawSource.merged !== true ||
+    source.headRepository !== repository ||
+    source.headRef !== authorization.headRef ||
+    source.baseRef !== "dev" ||
+    !/^[0-9a-f]{40}$/.test(source.headSha) ||
+    !/^[0-9a-f]{40}$/.test(source.baseSha) ||
+    !/^[0-9a-f]{40}$/.test(source.mergeSha)
+  ) {
+    throw new Error("inherited workflow source is not an authorized merged PR");
+  }
+  const policyRun = policyResponse.data;
+  const policyCreatedAt = githubTimestampMilliseconds(
+    policyRun?.created_at,
+    "inherited workflow policy created_at",
+  );
+  const policyCompletedAt = githubTimestampMilliseconds(
+    policyRun?.updated_at,
+    "inherited workflow policy updated_at",
+  );
+  const matchesHistoricalRelation = (run) =>
+    Array.isArray(run.pull_requests) &&
+    (run.pull_requests.length === 0 ||
+      (run.pull_requests.length === 1 &&
+        run.pull_requests[0]?.number === source.number &&
+        run.pull_requests[0].head?.sha === source.headSha &&
+        run.pull_requests[0].base?.sha === source.baseSha));
+  if (
+    policyRun?.id !== policyRunId ||
+    !Number.isSafeInteger(branchWorkflow.data?.id) ||
+    policyRun.workflow_id !== branchWorkflow.data.id ||
+    branchWorkflow.data.path !== BRANCH_WORKFLOW_PATH ||
+    policyRun.path !== BRANCH_WORKFLOW_PATH ||
+    policyRun.event !== "workflow_run" ||
+    policyRun.head_branch !== "master" ||
+    !/^[0-9a-f]{40}$/.test(policyRun.head_sha) ||
+    policyRun.repository?.full_name !== repository ||
+    policyRun.head_repository?.full_name !== repository ||
+    policyRun.html_url !== targetUrl ||
+    policyRun.run_attempt !== 1 ||
+    policyRun.status !== "completed" ||
+    policyRun.conclusion !== "success" ||
+    !matchesHistoricalRelation(policyRun) ||
+    policyCreatedAt < parseAuthorizationTime(authorization.issuedAt, "issuedAt") ||
+    completedLedger[0].createdAt < policyCreatedAt ||
+    completedLedger[1].createdAt > policyCompletedAt ||
+    policyCompletedAt > sourceMergedAt
+  ) {
+    throw new Error("inherited workflow receipt has untrusted publisher provenance");
+  }
+  const ancestry = [
+    [masterSha, pull.headSha],
+    [pull.baseSha, pull.headSha],
+    [pull.baseSha, pull.mergeSha],
+    [pull.headSha, pull.mergeSha],
+    [source.mergeSha, pull.baseSha],
+    [authorization.receiptSha, source.headSha],
+    [policyRun.head_sha, masterSha],
+  ];
+  const [comparisons, sourceBlobs, runs] = await Promise.all([
+    Promise.all(ancestry.map(([base, head]) =>
+      github.rest.repos.compareCommitsWithBasehead({
+        owner, repo, basehead: `${base}...${head}`,
+      }),
+    )),
+    Promise.all([source.baseSha, source.headSha, source.mergeSha].map((ref) =>
+      getWorkflowBlob(github, repository, QUALITY_WORKFLOW_PATH, ref),
+    )),
+    listQualityWorkflowRuns(github, owner, repo, workflowId, source.headSha, serverUrl),
+  ]);
+  if (
+    comparisons.some(({ data }, index) =>
+      !["ahead", "identical"].includes(data.status) ||
+      data.merge_base_commit?.sha !== ancestry[index][0],
+    ) ||
+    sourceBlobs[0] !== trustedBlob ||
+    sourceBlobs[1] !== headBlob ||
+    sourceBlobs[2] !== headBlob
+  ) {
+    throw new Error("inherited workflow source blob or protected ancestry differs");
+  }
+  // GitHub can remove native run/PR associations after merge. Only this
+  // receipt-backed historical proof permits absence; contradictory data fails.
+  const eligibleRuns = runs.filter((run) =>
+    run.workflow_id === workflowId &&
+    run.path === QUALITY_WORKFLOW_PATH &&
+    run.event === "pull_request" &&
+    run.head_repository.full_name === repository &&
+    run.head_sha === source.headSha &&
+    run.head_branch === source.headRef &&
+    run.status === "completed" &&
+    run.conclusion === "success" &&
+    Date.parse(run.created_at) >
+      parseAuthorizationTime(authorization.issuedAt, "issuedAt") &&
+    Date.parse(run.updated_at) <= policyCreatedAt,
+  );
+  if (
+    eligibleRuns.length !== 1 ||
+    eligibleRuns[0].run_attempt !== 1 ||
+    !matchesHistoricalRelation(eligibleRuns[0])
+  ) {
+    throw new Error("inherited workflow has no unique successful source quality run");
+  }
+  await requireSuccessfulAggregateQualityJob({
+    github, owner, repo, run: eligibleRuns[0],
+  });
+  return {
+    masterSha,
+    authorization: { ...authorization },
+    source: {
+      number: source.number,
+      headSha: source.headSha,
+      baseSha: source.baseSha,
+      mergeSha: source.mergeSha,
+    },
+    receiptIds: completedLedger.map(({ status }) => status.id),
+    policyRunId,
+    qualityRunId: eligibleRuns[0].id,
+  };
+}
+
 async function resolveQualityWorkflowTrust({
   github,
   owner,
@@ -2674,6 +2905,7 @@ async function resolveQualityWorkflowTrust({
   workflowAuthorizations,
   authorizationNow,
   fallbackUrl,
+  serverUrl,
 }) {
   const repository = `${owner}/${repo}`;
   const repositoryResponse = await github.rest.repos.get({ owner, repo });
@@ -2725,6 +2957,22 @@ async function resolveQualityWorkflowTrust({
         pull,
         now: authorizationNow,
       });
+      if (!authorization) {
+        const inheritance = await resolveWorkflowInheritance({
+          github,
+          owner,
+          repo,
+          pull,
+          authorizations: workflowAuthorizations,
+          trustedBlob,
+          headBlob,
+          workflowId,
+          serverUrl,
+        });
+        if (inheritance) {
+          return { workflowId, authorization: null, inheritance, failure: null };
+        }
+      }
     } catch (error) {
       return {
         failure: {
@@ -3346,6 +3594,7 @@ async function resolveTrustedQualityAssets({
     workflowAuthorizations,
     authorizationNow,
     fallbackUrl,
+    serverUrl,
   });
   if (workflowTrust.failure) {
     return workflowTrust;
@@ -3393,6 +3642,7 @@ async function resolveTrustedQualityAssets({
   return {
     workflowId: workflowTrust.workflowId,
     authorization,
+    inheritance: workflowTrust.inheritance,
     failure: null,
   };
 }
@@ -4855,6 +5105,7 @@ async function qualityDecision({
     authorization: authorization
       ? { ...authorization, run, transition }
       : null,
+    workflowInheritance: trust.inheritance,
   };
 }
 
@@ -5565,6 +5816,31 @@ async function publishLegacyPrPolicy({
     let assertClaimFresh;
     let revalidateClaim;
     let selectorClaim = false;
+    const revalidateInheritedWorkflow = async () => {
+      await assertCurrentPullSnapshot(github, owner, repo, pull);
+      const current = await resolveQualityWorkflowTrust({
+        github,
+        owner,
+        repo,
+        pull,
+        workflowAuthorizations,
+        authorizationNow: getAuthorizationNow(),
+        fallbackUrl: policyRunUrl,
+        serverUrl: context.serverUrl,
+      });
+      if (
+        current.failure ||
+        JSON.stringify(current.inheritance) !== JSON.stringify(quality.workflowInheritance)
+      ) {
+        throw new Error("inherited workflow authority changed before publication");
+      }
+      const now = getAuthorizationNow();
+      const milliseconds = now instanceof Date ? now.getTime() : Date.parse(String(now));
+      if (!Number.isFinite(milliseconds)) {
+        throw new Error("workflow authorization clock is invalid");
+      }
+      validateWorkflowAuthorization(quality.workflowInheritance.authorization, milliseconds);
+    };
     if (quality.state === "success" && quality.authorization) {
       try {
         const expectedControlSha = await getBranchSha(
@@ -5742,6 +6018,9 @@ async function publishLegacyPrPolicy({
     if (!qualityPrepublished || quality.state !== "pending") {
       try {
         for (const target of targets) {
+          if (quality.state === "success" && quality.workflowInheritance) {
+            await revalidateInheritedWorkflow();
+          }
           if (quality.state === "success" && claimedReceipt) {
             if (selectorClaim) {
               await revalidateClaim(claimedReceipt);
@@ -5762,6 +6041,9 @@ async function publishLegacyPrPolicy({
         }
         if (quality.state === "success" && claimedReceipt && selectorClaim) {
           await revalidateClaim(claimedReceipt);
+        }
+        if (quality.state === "success" && quality.workflowInheritance) {
+          await revalidateInheritedWorkflow();
         }
       } catch (error) {
         await invalidatePublishedSnapshot({
@@ -5821,6 +6103,7 @@ module.exports.findCoverageAssetAuthorization =
 module.exports.findCoveragePromotionAuthorization =
   findCoveragePromotionAuthorization;
 module.exports.findWorkflowAuthorization = findWorkflowAuthorization;
+module.exports.resolveQualityWorkflowTrust = resolveQualityWorkflowTrust;
 module.exports.findQualityTransitionRun = findQualityTransitionRun;
 module.exports.labelsFingerprint = labelsFingerprint;
 module.exports.listQualityWorkflowRuns = listQualityWorkflowRuns;

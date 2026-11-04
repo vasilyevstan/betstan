@@ -471,6 +471,19 @@ Source and promotion selectors remain separate one-use authorities and receipt
 contexts; closed, stale, pre-issuance, ambiguous, or consumed matches grant no
 authority and fail closed.
 
+An ancestry-only PR into `dev` can retain an already-authorized workflow when
+its base, head and test-merge trees are identical. This narrow inheritance
+rule verifies the live protected refs, original integrated source and full
+workflow blob, complete trusted publisher receipt, and one successful exact
+first-attempt source quality run and aggregate gate. GitHub may omit native
+run associations after the source merges; receipt-backed historical proof
+allows absence but never contradictory associations. It does not relax the
+current PR's required associations or exact transition/run binding.
+Inheritance writes no receipt states. Its proof, protected refs and declaration
+expiry are revalidated around success publication; changed or inconclusive
+evidence invalidates success. Content-changing PRs and promotions cannot use
+this exception.
+
 A workflow authorization receipt may be resumed only when its exact ledger is
 already the fully validated `pending` to `success` sequence for the same
 branch-policy run URL. Resumption reconstructs the acknowledged ledger and
