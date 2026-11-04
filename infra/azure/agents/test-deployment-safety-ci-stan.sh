@@ -718,18 +718,39 @@ fi
 grep -qF "every workflow job must declare effective permissions" "$test_output"
 
 
+run_parallel_contract_suites() (
+  local status=0 index suite
+  local -a suites=("$@") pids=()
+  for suite in "${suites[@]}"; do
+    "$suite" &
+    pids+=("$!")
+  done
+  for (( index = 0; index < ${#pids[@]}; index++ )); do
+    if ! wait "${pids[index]}"; then
+      echo "contract_suite_failed=${suites[index]}" >&2
+      status=1
+    fi
+  done
+  return "$status"
+)
+
+run_parallel_contract_suites true true
+if run_parallel_contract_suites true false >"$test_output" 2>&1 ||
+   run_parallel_contract_suites false true >"$test_output" 2>&1; then
+  echo "ERROR: a failed parallel contract suite was ignored" >&2
+  exit 1
+fi
+
 "$PR_MERGE_SAFETY_TEST"
 "$PROTECTED_OPERATION_POLICY_TEST"
-"$CLI_DISPATCH_TEST"
-"$RUN_APPROVAL_TEST"
-"$RUN_EXCLUSIVITY_TEST"
+contract_suites=("$CLI_DISPATCH_TEST" "$RUN_APPROVAL_TEST" "$RUN_EXCLUSIVITY_TEST")
 # The full OCI scope owns these suites in its live/provenance shards. A caller
 # may delegate them only when its aggregate requires those shard results.
 # Standalone production-build callers continue to execute both.
 if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
-  "$LIVE_DATA_ROLLOUT_TEST"
-  "$GHCR_CONTRACT_TEST"
+  contract_suites+=("$LIVE_DATA_ROLLOUT_TEST" "$GHCR_CONTRACT_TEST")
 fi
+run_parallel_contract_suites "${contract_suites[@]}"
 python3 -I - \
   "$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py" <<'PY'
 import pathlib

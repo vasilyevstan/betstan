@@ -1791,6 +1791,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import secrets
@@ -2464,6 +2465,14 @@ def cleanup_options(d):
         "workflow_path": workflow, "authority_dir": d / "authority", "repo_root": root,
     }
 
+def parallel_cases(check, cases):
+    # Separate processes isolate mocked clocks, stdout and per-case globals.
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=min(4, os.cpu_count() or 1),
+        mp_context=multiprocessing.get_context("fork"),
+    ) as pool:
+        list(pool.map(check, cases))
+
 d = setup()
 sealed = prepare(d)
 for seconds in (900, 1800):
@@ -2516,7 +2525,8 @@ assert (d / "dispatches").read_text() == "1", "post-CAS replay"
 run(d, "--resume-captured", state="active")
 
 saved_request = request
-for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-deploy"):
+def check_bound_successor_operation(operation):
+    global request
     successor_policy = json.loads(subprocess.check_output([policy_script, "get", operation]))
     request = {
         **copy.deepcopy(saved_request), "operation": operation,
@@ -2575,6 +2585,9 @@ for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-d
             calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
             assert all(not call["bound"] and call["successor"] is None for call in calls)
             assert all(call["boundary"] == "dispatch" for call in calls)
+parallel_cases(check_bound_successor_operation, (
+    "oci-live-data-continue-held-handoff", "oci-live-data-resume-deploy",
+))
 request = saved_request
 print("held_and_expired_bound_successor_prepared_materialization_and_both_resumes=PASS", flush=True)
 
@@ -2598,31 +2611,33 @@ mutations = (
     "ancestry compare-final historical-guard historical-source workflow-id workflow-path "
     "blob master state dirty request seal intent-mode capture capture-replace"
 ).split() + malformed_filters + forged_inventory
+def check_checkpoint_mutation(case):
+    at, mutation = case
+    d = setup()
+    local_prepare(d)
+    previous = intent(d)
+    result = run(d, "--dispatch-prepared", state="active", drift=mutation, at=at, ok=False)
+    if mutation in forged_inventory:
+        assert "observation run detail rejected" in result.stderr, result.stderr
+        assert intent(d) == previous, "forged inventory advanced prepared authority"
+        assert (d / "authority" / previous["captureFile"]).stat().st_size == 0
+    assert (d / "dispatches").read_text() == "0", (at, mutation)
+    assert intent(d)["state"] == "prepared", (at, mutation)
+    if mutation not in {"request", "seal", "intent-mode", "capture", "capture-replace"}:
+        # Keep shell cleanup at each checkpoint; its disabled-workflow
+        # preflight is identical after drift is cleared. Other cases still
+        # exercise the real snapshot-bound, locked cleanup on their files.
+        if mutation == "added":
+            run(d, "--discard-prepared")
+        else:
+            options = cleanup_options(d)
+            invoke("discard-prepared", {
+                **options, "expected_snapshot": invoke("prepared-context", options),
+            })
+        assert not list((d / "authority").glob("request-*.json"))
+        assert not (d / "authority" / previous["captureFile"]).exists()
 for at in (1, 2):
-    for mutation in mutations:
-        d = setup()
-        local_prepare(d)
-        previous = intent(d)
-        result = run(d, "--dispatch-prepared", state="active", drift=mutation, at=at, ok=False)
-        if mutation in forged_inventory:
-            assert "observation run detail rejected" in result.stderr, result.stderr
-            assert intent(d) == previous, "forged inventory advanced prepared authority"
-            assert (d / "authority" / previous["captureFile"]).stat().st_size == 0
-        assert (d / "dispatches").read_text() == "0", (at, mutation)
-        assert intent(d)["state"] == "prepared", (at, mutation)
-        if mutation not in {"request", "seal", "intent-mode", "capture", "capture-replace"}:
-            # Keep shell cleanup at each checkpoint; its disabled-workflow
-            # preflight is identical after drift is cleared. Other cases still
-            # exercise the real snapshot-bound, locked cleanup on their files.
-            if mutation == "added":
-                run(d, "--discard-prepared")
-            else:
-                options = cleanup_options(d)
-                invoke("discard-prepared", {
-                    **options, "expected_snapshot": invoke("prepared-context", options),
-                })
-            assert not list((d / "authority").glob("request-*.json"))
-            assert not (d / "authority" / previous["captureFile"]).exists()
+    parallel_cases(check_checkpoint_mutation, [(at, mutation) for mutation in mutations])
     print(f"prepared_checkpoint_mutations=PASS checkpoint={at} cases={len(mutations)}", flush=True)
 
 for state, mutation in (
@@ -3355,11 +3370,14 @@ assert a.find_blocking_authorities(d / "authority", normalized)
 other_request = copy.deepcopy(request); other_request["inputs"]["build_run_id"] = "99"
 other_normalized = a.validate_request_data(other_request, policy, repository, master)
 assert a.find_blocking_authorities(d / "authority", other_normalized) == []
-for mutation in ("attempt", "approval", "artifact", "pending", "version", "capture", "non-ancestor"):
+def check_zero_execution_drift(mutation):
     case, before, _ = zero_fixture()
     run(case, "--retire-zero-execution", zero_drift=mutation, ok=False)
     assert a.load_record(case / "authority", before["runId"])["state"] == "consumed"
     assert (case / "dispatches").read_text() == "1"
+parallel_cases(check_zero_execution_drift, (
+    "attempt", "approval", "artifact", "pending", "version", "capture", "non-ancestor",
+))
 run(d, "--retire-zero-execution", drift="other", ok=False)
 assert a.load_record(d / "authority", original["runId"]) == original
 
@@ -4127,9 +4145,7 @@ for field, pages in (
     run(d, "--retire-preflight-read-only-failure", ok=False)
     assert a.load_record(d / "authority", original["runId"]) == original
     del f[field]; write(d / "fixture.json", f)
-for mutation in ("attempt", "latest-updated", "attempt-updated", "latest-url", "attempt-url",
-                 "approval", "artifact", "pending", "master", "workflow",
-                 "helper", "local-helper", "version", "capture", "capture-replace", "intent", "request"):
+def check_preflight_drift(mutation):
     case, before, _ = preflight_fixture()
     f = json.loads((case / "fixture.json").read_text()); f["preflightDrift"] = mutation
     write(case / "fixture.json", f)
@@ -4138,6 +4154,11 @@ for mutation in ("attempt", "latest-updated", "attempt-updated", "latest-url", "
         assert "preflight-read terminal observations changed" in result.stderr
     assert json.loads((case / "authority" / f'{before["runId"]}.json').read_text())["state"] == "consumed"
     assert (case / "dispatches").read_text() == "1"
+parallel_cases(check_preflight_drift, (
+    "attempt", "latest-updated", "attempt-updated", "latest-url", "attempt-url",
+    "approval", "artifact", "pending", "master", "workflow", "helper", "local-helper",
+    "version", "capture", "capture-replace", "intent", "request",
+))
 case, before, _ = preflight_fixture()
 f = json.loads((case / "fixture.json").read_text()); f.update(preflightDrift="attempt", preflightDriftAt=4)
 write(case / "fixture.json", f)
