@@ -1416,6 +1416,12 @@ held = {
 }
 held_ready = revalidate(held, profile="held")
 assert held_ready.returncode == 0, held_ready.stderr
+renamed = copy.deepcopy(held)
+renamed["root"]["mount"]["source"], renamed["mongo"]["mount"]["source"] = (
+    held["mongo"]["mount"]["source"], held["root"]["mount"]["source"])
+renamed_ready = revalidate(renamed, profile="held")
+assert renamed_ready.returncode == 0, \
+    f"reboot device renaming was rejected: {renamed_ready.stderr}"
 
 cases = []
 def reject(name, mutation, reason):
@@ -1470,8 +1476,11 @@ reject("missing-public-evidence", lambda value: value.pop("publicRead"),
        "runtime snapshot has an unexpected schema")
 reject("node-drift", lambda value: value["runtime"].update(nodeName="different-node"),
        "runtime and kubelet capacity evidence name different nodes")
-reject("root-mount-drift", lambda value: value["root"]["mount"].update(source="/dev/other-root"),
-       "fresh release checkpoint stable identity differs")
+reject("root-fstype-drift", lambda value: value["root"]["mount"].update(fstype="xfs"),
+       "fresh release checkpoint stable identity differs: rootFsType")
+reject("mongo-capacity-drift", lambda value: value["mongo"]["mount"].update(
+           size=value["mongo"]["mount"]["size"] + 1),
+       "fresh release checkpoint stable identity differs: mongoMountCapacityBytes")
 reject("mongo-not-separate", lambda value: value["mongo"].update(separateFromRoot=False),
        "Mongo data is not proven to use a separate filesystem")
 reject("raw-one-byte-over",
@@ -1507,7 +1516,7 @@ for name, runtime, measured, candidates, reason in cases:
     result = revalidate(runtime, measured=measured, candidates=candidates)
     assert result.returncode != 0, f"released runtime accepted {name}"
     assert reason in result.stderr, f"{name} failed outside its boundary: {result.stderr}"
-print(f"released_runtime_checkpoint_contract=PASS cases={len(cases) + 4}")
+print(f"released_runtime_checkpoint_contract=PASS cases={len(cases) + 5}")
 PY
 
 raw_over_runtime="$work_dir/checkpoint-raw-over-runtime.json"
@@ -1679,7 +1688,8 @@ done
 for mutation in \
   '.runtime.k3sVersion = "k3s version v1.35.0+k3s1"' \
   '.runtime.containerRuntimeVersion = "containerd://2.2.0-k3s1"' \
-  '.root.mount.source = "/dev/substituted-root"' \
+  '.root.mount.fstype = "xfs"' \
+  '.mongo.mount.size += 1' \
   '.images[0].id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
   '.images[0].repoDigests[0] = "ghcr.io/vasilyevstan/betstan-images@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'; do
   drifted_runtime="$work_dir/checkpoint-held-drift-$(
