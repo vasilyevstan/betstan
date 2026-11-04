@@ -3854,6 +3854,88 @@ if rollouts != ["rollout:auth", "rollout:client"]:
     )
 PY
 
+prior_resume_artifact="$resume_fixture/prior-resume-artifact"
+mkdir -p "$prior_resume_artifact"
+cat >"$resume_fixture/bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "api repos/fixture/repo/actions/runs/4010" ]]; then
+  cat "${PRIOR_RESUME_RUN_JSON:?}"
+  exit 0
+fi
+[[ "$*" == "run download 4010 -R fixture/repo -n oci-live-data-rollout-4010-1 -D ${RUNNER_TEMP:?}/prior-retained-resume" ]]
+mkdir "$RUNNER_TEMP/prior-retained-resume"
+cp "${PRIOR_RESUME_ARTIFACT:?}"/* "$RUNNER_TEMP/prior-retained-resume/"
+SH
+chmod +x "$resume_fixture/bin/gh"
+cp "$resume_fixture/lock.json" "$resume_fixture/root-lock.json"
+write_prior_resume() {
+  local conclusion="$1" failed_deploy="$2" written_offset="$3"
+  python3 - "$resume_fixture" "$conclusion" "$failed_deploy" "$written_offset" <<'PY'
+import hashlib, json, sys, time
+from pathlib import Path
+root, conclusion, failed_deploy, written_offset = sys.argv[1:]
+root = Path(root)
+now = int(time.time())
+started, finished = now - 20000, now - 19000
+iso = lambda epoch: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+(root / "prior-run.json").write_text(json.dumps({
+    "path": ".github/workflows/oci-live-data-rollout.yml", "event": "workflow_dispatch",
+    "head_branch": "master", "head_repository": {"full_name": "fixture/repo"},
+    "status": "completed", "conclusion": conclusion, "run_attempt": 1, "head_sha": "3" * 40,
+    "run_started_at": iso(started), "updated_at": iso(finished)}))
+artifact = root / "prior-resume-artifact"
+files = {
+    "resume-authority.env": "\n".join([
+        "schema_version=live-betting-data-resume-v2", "applied_data_run_id=4007",
+        "applied_source_sha=" + "1" * 40, "failed_deploy_run_id=" + failed_deploy,
+        "resume_maintenance_mode=retained-hold", "current_source_sha=" + "3" * 40,
+        "status=PASS"]) + "\n",
+    "provenance.env": "\n".join([
+        "source_sha=" + "3" * 40, "phase=apply-slip-index", "status=PASS",
+        "runtime_held_for_deploy=true", "operation_lock_handoff=true"]) + "\n",
+}
+sums = []
+for name, content in files.items():
+    (artifact / name).write_text(content)
+    sums.append(f"{hashlib.sha256(content.encode()).hexdigest()}  {name}")
+(artifact / "SHA256SUMS").write_text("\n".join(sums) + "\n")
+written = finished - 300 + int(written_offset)
+lock = json.loads((root / "root-lock.json").read_text())
+lock["data"].update({
+    "holder": "live-data-4010-1", "source-sha": "3" * 40,
+    "acquired-at-epoch": str(started + 60), "lease-until-epoch": str(written + 10800),
+    "fencing-generation": "12"})
+(root / "lock.json").write_text(json.dumps(lock))
+PY
+}
+run_prior_resume_fixture() {
+  rm -rf "$resume_fixture/retained-lock.json" "$resume_fixture/prior-retained-resume"
+  REPOSITORY=fixture/repo GITHUB_RUN_ID=4020 SOURCE_SHA="$(printf '%040d' 7)" \
+  FAILED_DEPLOY_RUN_ID=4009 PRIOR_RESUME_RUN_JSON="$resume_fixture/prior-run.json" \
+  PRIOR_RESUME_ARTIFACT="$prior_resume_artifact" \
+    run_resume_fixture retained-hold
+}
+write_prior_resume success 4009 0
+run_prior_resume_fixture >/dev/null ||
+  fail "retained-hold resume rejected an untouched lock from a prior same-root resume"
+python3 - "$resume_fixture/retained-lock.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))["data"]
+assert data["holder"] == "live-data-4010-1" and data["source-sha"] == "3" * 40
+PY
+for prior_case in "success 4009 400" "success 4011 0" "failure 4009 0"; do
+  read -r prior_conclusion prior_failed prior_offset <<<"$prior_case"
+  write_prior_resume "$prior_conclusion" "$prior_failed" "$prior_offset"
+  if run_prior_resume_fixture >"$resume_fixture/prior-resume.out" 2>&1; then
+    fail "retained-hold resume accepted prior holder case: $prior_case"
+  fi
+  [ ! -e "$resume_fixture/retained-lock.json" ] ||
+    fail "rejected prior holder case wrote lock authority: $prior_case"
+done
+rm -f "$resume_fixture/bin/gh"
+mv "$resume_fixture/root-lock.json" "$resume_fixture/lock.json"
+
 reset_resume_fixture
 run_resume_fixture released-runtime >/dev/null ||
   fail "released-runtime resume rejected all candidate images"

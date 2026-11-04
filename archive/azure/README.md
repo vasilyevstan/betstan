@@ -5,9 +5,12 @@ Azure-only operators, retirement tooling, stage lifecycle helpers and
 Azure-specific agent definitions were moved here unchanged.
 
 Nothing in this directory is executed by CI, workflows, or active scripts,
-and the agent definitions are no longer discoverable as custom agents. The
-files are kept only as historical reference; restore one with `git mv` and a
-normal reviewed PR if a concrete need ever returns.
+and the agent definitions are no longer discoverable as custom agents. Only
+the Markdown references remain checked out. The archived shell scripts were
+removed from the tree because production recovery treats any non-Markdown
+path outside `.github/` and `infra/` as an application change; retrieve one
+from commit `2296153` (`git show 2296153:archive/azure/<path>`) and restore it
+through a normal reviewed PR if a concrete need ever returns.
 
 The Azure GitHub workflows (`production-deploy.yml`, `production-rollback.yml`,
 `oci-migrate.yml`, `oci-migration-recovery.yml`) are disabled on GitHub.

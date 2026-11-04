@@ -1090,6 +1090,8 @@ jobs:
           inputs.failed_deploy_run_id != '0' &&
           inputs.failed_activation_run_id == '0'
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
           RESUME_SOURCE_SHA: ${{ inputs.resume_source_sha }}
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
           NO_TAKEOVER_HANDOFF_QUALIFICATION: ${{ steps.provenance_request.outputs.no_takeover_handoff_qualification || 'none' }}
@@ -1331,9 +1333,51 @@ jobs:
             previous_holder_source="$RESUME_SOURCE_SHA"
             previous_lock_snapshot="$RUNNER_TEMP/pre-runtime-lock.json"
             previous_lease_seconds=1800
+            prior_resume_window=
             if [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
               previous_lock_snapshot="$RUNNER_TEMP/retained-lock.json"
               previous_lease_seconds=10800
+              current_holder="$(
+                kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json |
+                  jq -er '.data.holder'
+              )"
+              if [ "$HELD_HANDOFF_RUN_ID" = "0" ] &&
+                 [ "$current_holder" != "live-data-${PREREQUISITE_RUN_ID}-1" ]; then
+                # An earlier successful resume of this exact root may still hold
+                # the retained lock when its own deploy failed before adopting it.
+                [[ "$current_holder" =~ ^live-data-([1-9][0-9]*)-1$ ]]
+                previous_holder_run="${BASH_REMATCH[1]}"
+                [ "$previous_holder_run" != "$GITHUB_RUN_ID" ]
+                prior_run="$(gh api "repos/$REPOSITORY/actions/runs/$previous_holder_run")"
+                jq -e --arg repository "$REPOSITORY" '
+                  .path == ".github/workflows/oci-live-data-rollout.yml" and
+                  .event == "workflow_dispatch" and .head_branch == "master" and
+                  .head_repository.full_name == $repository and
+                  .status == "completed" and .conclusion == "success" and .run_attempt == 1
+                ' <<<"$prior_run" >/dev/null
+                previous_holder_source="$(jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' <<<"$prior_run")"
+                git merge-base --is-ancestor "$previous_holder_source" "$SOURCE_SHA"
+                prior_resume_window="$(
+                  jq -er '[.run_started_at, .updated_at] | map(fromdateiso8601) | @tsv' <<<"$prior_run"
+                )"
+                prior_dir="$RUNNER_TEMP/prior-retained-resume"
+                gh run download "$previous_holder_run" -R "$REPOSITORY" \
+                  -n "oci-live-data-rollout-${previous_holder_run}-1" -D "$prior_dir"
+                [ -z "$(find "$prior_dir" -type l -print -quit)" ]
+                (cd "$prior_dir" && sha256sum --quiet --check SHA256SUMS)
+                for entry in schema_version=live-betting-data-resume-v2 \
+                  "applied_data_run_id=$PREREQUISITE_RUN_ID" "applied_source_sha=$RESUME_SOURCE_SHA" \
+                  "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID" resume_maintenance_mode=retained-hold \
+                  "current_source_sha=$previous_holder_source" status=PASS; do
+                  [ "$(grep -c -x -F "$entry" "$prior_dir/resume-authority.env")" = 1 ]
+                done
+                for entry in "source_sha=$previous_holder_source" phase=apply-slip-index status=PASS \
+                  runtime_held_for_deploy=true operation_lock_handoff=true; do
+                  [ "$(grep -c -x -F "$entry" "$prior_dir/provenance.env")" = 1 ]
+                done
+                grep -q -x -F resume-authority.env <(awk '{sub(/^\*/, "", $2); print $2}' "$prior_dir/SHA256SUMS")
+                grep -q -x -F provenance.env <(awk '{sub(/^\*/, "", $2); print $2}' "$prior_dir/SHA256SUMS")
+              fi
             elif [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
               previous_holder_run="$HELD_HANDOFF_RUN_ID"
               previous_holder_source="$HELD_HANDOFF_SOURCE_SHA"
@@ -1343,6 +1387,7 @@ jobs:
                   "$RUNNER_TEMP/live-data-upstream-result.json"
               )"
             fi
+            PRIOR_RESUME_WINDOW="$prior_resume_window" \
             python3 - "$previous_lock_snapshot" \
               "$OCI_K8S_NAMESPACE" "$previous_holder_run" \
               "$previous_holder_source" "$previous_lease_seconds" \
@@ -1378,6 +1423,12 @@ jobs:
               int(data["lease-until-epoch"]) - int(data["lease-duration-seconds"])
           ) <= int(time.time()))
           require(data.get("released-at-epoch") == "0")
+          window = os.environ.get("PRIOR_RESUME_WINDOW", "")
+          if window:
+              started, finished = (int(value) for value in window.split("\t"))
+              written = int(data["lease-until-epoch"]) - int(data["lease-duration-seconds"])
+              require(started <= written <= finished)
+              require(int(data["lease-until-epoch"]) < int(time.time()))
           if qualification == "expired-own-handoff":
               require(duration == "1800" and int(data["lease-until-epoch"]) < int(time.time()))
               services = {"auth", "bet", "backoffice", "client", "event", "gamemaster",
