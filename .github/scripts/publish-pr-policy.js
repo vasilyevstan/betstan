@@ -143,21 +143,21 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 // short-lived policy change and removed immediately after their intended PR.
 const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
   {
-    id: "lean-delivery-production-build-source-selector-v2",
+    id: "lean-delivery-production-build-source-selector-v3",
     repository: "vasilyevstan/betstan",
     headRepository: "vasilyevstan/betstan",
     workflowPath: ".github/workflows/production-build.yml",
     trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
     authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
     pullNumber: null,
-    headRef: "fix/lean-delivery-workflow-restoration",
+    headRef: "ci/lean-production-build-blob",
     baseRef: "dev",
-    issuedAt: "2026-11-02T18:15:00.000Z",
-    expiresAt: "2026-11-03T18:15:00.000Z",
-    receiptSha: "19cb0058a961c2da5ec9d851dcab12a71d7bdebd",
+    issuedAt: "2026-11-04T16:00:00.000Z",
+    expiresAt: "2026-11-11T16:00:00.000Z",
+    receiptSha: "a1b9ec456eb2241f85294f0d3963d5fdfaebe827",
   },
   {
-    id: "lean-delivery-production-build-promotion-selector-v2",
+    id: "lean-delivery-production-build-promotion-selector-v3",
     repository: "vasilyevstan/betstan",
     headRepository: "vasilyevstan/betstan",
     workflowPath: ".github/workflows/production-build.yml",
@@ -166,9 +166,9 @@ const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
     pullNumber: null,
     headRef: "dev",
     baseRef: "master",
-    issuedAt: "2026-11-02T18:15:00.000Z",
-    expiresAt: "2026-11-03T18:15:00.000Z",
-    receiptSha: "19cb0058a961c2da5ec9d851dcab12a71d7bdebd",
+    issuedAt: "2026-11-04T16:00:00.000Z",
+    expiresAt: "2026-11-11T16:00:00.000Z",
+    receiptSha: "a1b9ec456eb2241f85294f0d3963d5fdfaebe827",
   },
 ]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;

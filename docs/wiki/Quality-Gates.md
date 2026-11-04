@@ -216,21 +216,35 @@ required aggregate gate includes:
 
 The PR-only, read-only `oci-validate` workflow selects scope first. Changes
 limited to OCI health or validation-routing files check workflow syntax and run
-the focused health and GHCR contracts. Other OCI or OCI-workflow
-changes run the complete offline contract suite across isolated `core`, `live`,
-`provenance`, and `rollback` shards. A single fail-closed `oci-validate`
+the focused health and GHCR contracts. Other `infra/` or workflow changes
+(except the separately validated `production-build.yml`) run the offline
+contract suite across isolated `core`, `live`, `provenance`, `rollback`,
+`governance`, and `dispatch` shards; the last two own the Copilot CLI
+merge-safety, protected-operation, run-approval, exclusivity, and dispatch
+suites. A single fail-closed `oci-validate`
 aggregate remains the required check and succeeds only when the scope,
 workflow-syntax, and selected contract jobs all succeed. Unaffected changes use
 an explicit no-OCI-impact sentinel without downloading actionlint. Each full
-shard has a 25-minute limit; timeout, shard failure, or partial completion is
+shard has a 40-minute limit; timeout, shard failure, or partial completion is
 not passing evidence. The complete local runner remains available in
 deterministic serial order.
+
+Heavy contract suites select themselves through `infra/ci/suite_gate.py`. On a
+GitHub Actions `pull_request` or `push`, a guarded suite exits successfully
+without running only when the first-parent diff touches none of its inputs:
+the suite, files it names, and files named by the non-test scripts it reaches.
+It runs whenever selection is uncertain: another event, a local run, a copied
+tree, a missing parent commit, any `infra/ci/` change, or a changed `infra/` or
+workflow file that no guarded suite references. Every decision prints a
+`suite_gate=` line. Suites started by a running guarded suite always run. The
+scheduled `ci-full-nightly` workflow runs every shard with
+`BETSTAN_CI_FULL=1` on `master` as the backstop for selection mistakes.
 
 The protected compatibility `production-build` uses the full
 trusted-master workflow, not lean path selection. It runs coverage for all ten
 application packages, the Client production build, Auth container smoke,
-runtime-script validation, and full deployment-safety contracts without
-changed-path selection. Its PR triggers include `edited`, so title/body edits
+runtime-script validation, and the deployment-safety contracts. Within those
+contracts, the heavy suites select themselves as described above. Its PR triggers include `edited`, so title/body edits
 can start full `production-build` validation. Usable quality evidence still
 follows the existing publisher marker and receipt rules; metadata edits cannot
 create or recover a trusted source-quality transition. An edit-triggered

@@ -895,13 +895,13 @@ scope = jobs.fetch("scope")
 abort "oci-validate scope output is missing" unless
   scope.dig("outputs", "mode") == "${{ steps.scope.outputs.mode }}"
 full = jobs.fetch("full-contracts")
-abort "OCI full contracts require a bounded 25-minute shard limit" unless
-  full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 25
+abort "OCI full contracts require a bounded 40-minute shard limit" unless
+  full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 40
 abort "OCI full contracts must retain every shard result" unless
   full.dig("strategy", "fail-fast") == false
 shards = full.dig("strategy", "matrix", "shard")
 abort "OCI full contract shards are incomplete" unless
-  shards == %w[core live provenance rollback]
+  shards == %w[core live provenance rollback governance dispatch]
 aggregate = jobs.fetch("offline-contract")
 abort "required OCI aggregate check changed identity" unless
   aggregate["name"] == "oci-validate"
@@ -995,6 +995,9 @@ assert_oci_scope focused "infra/oci/agents/health-check-stan.sh"
 assert_oci_scope full "infra/oci/tests/test-contract.sh"
 assert_oci_scope none "docs/wiki/Quality-Gates.md"
 assert_oci_scope none ".github/workflows/production-build.yml"
+assert_oci_scope full "infra/azure/agents/copilot-cli-dispatch-stan.sh"
+assert_oci_scope full "infra/ci/suite_gate.py"
+assert_oci_scope full ".github/workflows/branch-policy.yml"
 assert_oci_scope full $'infra/oci/scripts/deploy.sh\ninfra/oci/agents/health-check-stan.sh'
 for moved_contract in \
   test-deploy-validation-loop-stan.sh \
