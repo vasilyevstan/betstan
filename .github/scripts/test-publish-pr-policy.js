@@ -5442,18 +5442,18 @@ async function main() {
   ];
   const activeLeanDeliveryWorkflowAuthorizations = [
     {
-      id: "lean-delivery-production-build-source-selector-v3",
+      id: "lean-delivery-production-build-source-reapply-v1",
       repository: "vasilyevstan/betstan",
       headRepository: "vasilyevstan/betstan",
       workflowPath: ".github/workflows/production-build.yml",
       trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
       authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
       pullNumber: null,
-      headRef: "ci/lean-production-build-blob",
+      headRef: "ci/lean-production-build-reapply",
       baseRef: "dev",
-      issuedAt: "2026-11-04T16:00:00.000Z",
-      expiresAt: "2026-11-11T16:00:00.000Z",
-      receiptSha: "a1b9ec456eb2241f85294f0d3963d5fdfaebe827",
+      issuedAt: "2026-11-04T21:28:21.000Z",
+      expiresAt: "2026-11-06T21:28:21.000Z",
+      receiptSha: "07fedd21c7965a4a49df05b5b838b2ae176b3b81",
     },
     {
       id: "lean-delivery-production-build-promotion-selector-v3",
@@ -5489,7 +5489,7 @@ async function main() {
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: "2026-11-04T19:00:00.000Z",
+        now: "2026-11-04T22:00:00.000Z",
       }),
       authorization,
     );
@@ -5507,11 +5507,29 @@ async function main() {
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: "2026-11-04T19:00:00.000Z",
+        now: "2026-11-04T22:00:00.000Z",
       }),
       null,
     );
   }
+  assert.equal(
+    publishPrPolicy.findWorkflowAuthorization({
+      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+      repository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+      authorizedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
+      pull: {
+        number: 956,
+        state: "open",
+        headRepository: "vasilyevstan/betstan",
+        headRef: "ci/lean-production-build-blob",
+        baseRef: "dev",
+      },
+      now: "2026-11-04T22:00:00.000Z",
+    }),
+    null,
+  );
   for (const authorization of historicalNode24WorkflowAuthorizations) {
     const lookup = {
       authorizations: historicalNode24WorkflowAuthorizations,
@@ -5590,7 +5608,7 @@ async function main() {
           headRef: retired.headRef,
           baseRef: retired.baseRef,
         },
-        now: "2026-11-04T19:00:00.000Z",
+        now: "2026-11-04T22:00:00.000Z",
       }),
       null,
     );
@@ -5638,12 +5656,17 @@ async function main() {
   );
   assert(
     publisherSource.includes(
-      'id: "lean-delivery-production-build-source-selector-v3"',
+      'id: "lean-delivery-production-build-source-reapply-v1"',
     ),
   );
   assert(
     publisherSource.includes(
       'id: "lean-delivery-production-build-promotion-selector-v3"',
+    ),
+  );
+  assert(
+    !publisherSource.includes(
+      'id: "lean-delivery-production-build-source-selector-v3"',
     ),
   );
   assert(

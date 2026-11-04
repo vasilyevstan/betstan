@@ -451,6 +451,14 @@ The trusted publisher currently requires the protected quality workflow to be by
 
 If the workflow file itself must change, first add and independently review a fail-closed, one-use exact-blob authorization mechanism in the trusted publisher without changing the workflow. Promote that policy separately, then authorize and merge only the intended workflow blob, remove the authorization, and verify fresh statuses come from the expected workflow IDs. Do not invent or document an authorization variable before the publisher implements and tests it.
 
+Prove the strict integration-base ancestry before declaring a bootstrap route
+viable. Retaining the default workflow on a branch cut from `master` does not
+make that branch up to date with `dev`; passing local merge safety does not
+override GitHub's strict protection. A temporary return to the trusted workflow
+must itself enter through a current-base PR. Reapplying the reviewed workflow
+after that bootstrap requires a distinct reviewed source grant and receipt
+context; retire the consumed declaration without resetting its receipt.
+
 When the future pull-request number cannot be reserved safely, a workflow
 authorization may use `pullNumber: null` to select the first eligible open PR
 matching the exact repository, head repository, head ref, base ref, trusted

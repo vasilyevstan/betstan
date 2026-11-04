@@ -85,6 +85,11 @@ consumed, and source edits cannot reset its identity or expiry. See
 [[Quality Gates]] for the compatibility boundary, not a bootstrap execution
 procedure.
 
+Trusted workflow bytes alone do not establish a viable bootstrap: strict
+integration protection also requires current base ancestry. A temporary return
+to the trusted workflow and its later reapplication both follow normal protected
+PRs. A new reviewed grant is distinct from, and never resets, a consumed receipt.
+
 Content-identical ancestry reconciliation into `dev` may retain an already
 integrated workflow only after the publisher verifies its original authorized
 source, consumed receipt, successful exact source run, unchanged trees and
