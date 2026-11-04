@@ -162,7 +162,7 @@ class SuiteGateTest(unittest.TestCase):
             if path.startswith(("infra/ci/", "infra/azure/archive/")) or not path.endswith(".sh"):
                 continue
             text = (REPO / path).read_text(errors="ignore")
-            if "infra/ci/suite_gate.py" in text:
+            if GUARD.splitlines()[0] in text or "betstan_gate" in text:
                 guarded.append(path)
                 self.assertTrue(text.startswith("#!/usr/bin/env bash\nset -euo pipefail\n" + GUARD), path)
         self.assertGreaterEqual(len(guarded), 11)

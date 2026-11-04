@@ -895,13 +895,13 @@ scope = jobs.fetch("scope")
 abort "oci-validate scope output is missing" unless
   scope.dig("outputs", "mode") == "${{ steps.scope.outputs.mode }}"
 full = jobs.fetch("full-contracts")
-abort "OCI full contracts require a bounded 25-minute shard limit" unless
-  full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 25
+abort "OCI full contracts require a bounded 40-minute shard limit" unless
+  full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 40
 abort "OCI full contracts must retain every shard result" unless
   full.dig("strategy", "fail-fast") == false
 shards = full.dig("strategy", "matrix", "shard")
 abort "OCI full contract shards are incomplete" unless
-  shards == %w[core live provenance rollback]
+  shards == %w[core live provenance rollback governance dispatch]
 aggregate = jobs.fetch("offline-contract")
 abort "required OCI aggregate check changed identity" unless
   aggregate["name"] == "oci-validate"

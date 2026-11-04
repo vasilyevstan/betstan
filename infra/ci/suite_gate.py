@@ -18,7 +18,7 @@ import sys
 
 SKIP = 3
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-GUARD_MARKER = "infra/ci/suite_gate.py"
+GUARD_MARKER = "# Skip when the CI diff cannot affect this suite (infra/ci/suite_gate.py)."
 GENERIC_NAMES = {
     ".dockerignore", "Dockerfile", "app.js", "app.ts", "index.js", "index.ts",
     "package.json", "package-lock.json", "tsconfig.json",
