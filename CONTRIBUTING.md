@@ -15,11 +15,12 @@ Use this flow:
 6. Use ancestry-preserving merges for integration and promotion. Verify the
    intended protected ancestry and exact tested snapshot before merging.
    Reconcile `master` into `dev` only when ancestry requires it, not through an
-   automatic content-identical synchronization PR. Earlier merge promotions
-   leave only content-neutral merge commits on `master`; `pr-merge-safety-stan.sh`
-   accepts a promotion head that lacks them only when every `master`-only
-   commit is such a merge, its tree equals its `dev` parent, and that parent is
-   already in the head. Any other `master`-only commit blocks the promotion.
+   automatic content-identical synchronization PR. `master` enforces strict
+   up-to-date checks, so each merge promotion leaves a content-neutral merge
+   commit that the next promotion head must contain. Merge the current
+   `origin/master` into the next branch bound for `dev` (it changes no content);
+   open a standalone synchronization PR only when no other `dev` work precedes
+   the next promotion.
 
 Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
 
