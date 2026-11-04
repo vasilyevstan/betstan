@@ -1614,6 +1614,12 @@ Durable rules:
   stable identity, runtime versions, and immutable CRI residency. One byte
   above `capacityBytes * 70 / 100` blocks release even when display rounding
   says `70.00`.
+- Stable identity must be stable across reboots. Kernel names such as
+  `/dev/sda1` and `/dev/sdb` can swap after a node reboot; comparing their
+  hashes stranded a valid sealed checkpoint after a diagnostic reboot. Keep the
+  hashes as evidence, compare node, filesystem type/capacity, separation and
+  runtime identity, and report the differing key names on rejection. Do not
+  reboot a held production node outside the governed workflows.
 - Separate public and held evidence. Public collection remains strict about
   public/application state. Held collection is stable-only and must not query
   HTTP, RabbitMQ, queues, pods, Deployments, or mutable workload health, so a

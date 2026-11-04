@@ -300,6 +300,11 @@ repository-fixed arguments and the authoritative protected-environment runtime
 mode. A later public or held revalidation must reproduce the bound identity,
 filesystem capacity, mount, candidate, and rollback state before release
 mutation; the checkpoint is not a durable waiver for changed runtime state.
+Kernel block-device names such as `/dev/sdX` are not persistent across node
+reboots, so revalidation does not compare the sealed root/Mongo mount-source
+hashes. It still requires the same node, filesystem types and capacities,
+distinct root and Mongo filesystems, and k3s/container runtime versions, and
+a rejection names only the differing identity keys.
 
 Held revalidation deliberately excludes mutable application evidence. It uses
 only fresh kubelet and raw-root byte readings, root/Mongo mount and node/runtime

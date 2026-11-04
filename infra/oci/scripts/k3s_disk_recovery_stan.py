@@ -1555,6 +1555,14 @@ def checkpoint_residency(runtime, candidate_images, rollback_images=None):
     return candidate_residency, rollback_residency
 
 
+# Kernel block-device names (for example /dev/sdX) are not persistent across
+# node reboots. They remain sealed as evidence, while revalidation relies on
+# node, filesystem type/capacity, separation and runtime identity.
+REBOOT_VOLATILE_IDENTITY_KEYS = frozenset(
+    {"rootMountSourceSha256", "mongoMountSourceSha256"}
+)
+
+
 def checkpoint_stable_identity(runtime, capacity):
     return {
         "nodeNameSha256": hashlib.sha256(capacity["nodeName"].encode()).hexdigest(),
@@ -2042,8 +2050,17 @@ def revalidate_release_checkpoint(args):
             fail("fresh released-runtime application images differ from selected candidates")
     if capacity["capacityBytes"] != checkpoint["root"]["capacityBytes"]:
         fail("fresh release checkpoint filesystem capacity differs")
-    if checkpoint_stable_identity(runtime, capacity) != checkpoint["stableIdentity"]:
-        fail("fresh release checkpoint stable identity differs")
+    fresh_identity = checkpoint_stable_identity(runtime, capacity)
+    differing_identity = sorted(
+        key
+        for key, sealed in checkpoint["stableIdentity"].items()
+        if key not in REBOOT_VOLATILE_IDENTITY_KEYS and fresh_identity[key] != sealed
+    )
+    if differing_identity:
+        fail(
+            "fresh release checkpoint stable identity differs: "
+            + ",".join(differing_identity)
+        )
     rollback_images = (
         runtime["applicationImages"]
         if args.profile == "public"
