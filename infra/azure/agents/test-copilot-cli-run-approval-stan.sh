@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Skip when the CI diff cannot affect this suite (infra/ci/suite_gate.py).
+betstan_gate="$(dirname "${BASH_SOURCE[0]}")/../../ci/suite_gate.py"; betstan_gate_rc=0
+[[ ! -f "$betstan_gate" ]] || python3 -I "$betstan_gate" "${BASH_SOURCE[0]}" || betstan_gate_rc=$?
+[[ "$betstan_gate_rc" != 3 ]] || exit 0; [[ "$betstan_gate_rc" == 0 ]] || exit "$betstan_gate_rc"; export BETSTAN_SUITE_GATE_PASSED=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 APPROVER="$ROOT_DIR/infra/azure/agents/copilot-cli-run-approval-stan.sh"
