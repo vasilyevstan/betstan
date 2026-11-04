@@ -1377,6 +1377,9 @@ jobs:
                 done
                 grep -q -x -F resume-authority.env <(awk '{sub(/^\*/, "", $2); print $2}' "$prior_dir/SHA256SUMS")
                 grep -q -x -F provenance.env <(awk '{sub(/^\*/, "", $2); print $2}' "$prior_dir/SHA256SUMS")
+                # Without a held handoff, its final write was the 1800-second deploy handoff renewal.
+                [ "$(grep -c '^held_handoff_' "$prior_dir/resume-authority.env")" = 0 ]
+                previous_lease_seconds=1800
               fi
             elif [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
               previous_holder_run="$HELD_HANDOFF_RUN_ID"
