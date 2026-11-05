@@ -1598,6 +1598,17 @@ def file_identity(path):
     }
 
 
+def same_persisted_generation(observed, sealed):
+    # st_dev is not persistent: macOS renumbers APFS devices across reboots.
+    # Persisted seals bind the inode inside the fixed private authority
+    # directory; callers still bind size, timestamps, or content digests.
+    return observed["inode"] == sealed["inode"]
+
+
+def without_device(identity):
+    return {name: value for name, value in identity.items() if name != "device"}
+
+
 def validate_candidates(candidates):
     if not isinstance(candidates, list) or not 1 <= len(candidates) <= 100:
         fail("prepared candidates must be a nonempty bounded set")
@@ -4045,7 +4056,9 @@ def require_prepared_capture(directory, intent):
         fail("only a prepared v2 intent is eligible")
     if intent["dispatchStatus"] is not None or intent["runId"] is not None or intent["runUrl"] is not None:
         fail("prepared intent has ambiguous dispatch metadata")
-    if file_identity(directory / intent["captureFile"]) != intent["preparedSeal"]["captureIdentity"]:
+    if without_device(file_identity(directory / intent["captureFile"])) != without_device(
+        intent["preparedSeal"]["captureIdentity"]
+    ):
         fail("prepared capture generation changed or is not pristine")
 
 
@@ -4166,8 +4179,7 @@ def command_discard_prepared(args):
 def zero_execution_capture(directory, intent):
     path = directory / intent["captureFile"]
     identity = file_identity(path)
-    if any(identity[name] != intent["preparedSeal"]["captureIdentity"][name]
-           for name in ("device", "inode")):
+    if not same_persisted_generation(identity, intent["preparedSeal"]["captureIdentity"]):
         fail("zero-execution capture generation was replaced")
     contents = path.read_bytes()
     run_ids = set(re.findall(
@@ -5138,8 +5150,7 @@ def record_dispatch_status_under_lock(args, policy, normalized, directory, workf
         fail("dispatch command status is invalid")
     if intent["schemaVersion"] == PREPARED_INTENT_SCHEMA:
         identity = file_identity(directory / intent["captureFile"])
-        if any(identity[name] != intent["preparedSeal"]["captureIdentity"][name]
-               for name in ("device", "inode")):
+        if not same_persisted_generation(identity, intent["preparedSeal"]["captureIdentity"]):
             fail("dispatch capture generation was replaced")
     fsync_private_capture(directory / intent["captureFile"])
     intent["dispatchStatus"] = args.dispatch_status
@@ -5244,8 +5255,7 @@ def bind_intent_under_lock(args, policy, normalized, directory, workflow_id, key
     require_private_capture(capture_path)
     if intent["schemaVersion"] == PREPARED_INTENT_SCHEMA:
         identity = file_identity(capture_path)
-        original = intent["preparedSeal"]["captureIdentity"]
-        if any(identity[name] != original[name] for name in ("device", "inode")):
+        if not same_persisted_generation(identity, intent["preparedSeal"]["captureIdentity"]):
             fail("dispatch capture generation was replaced")
     text = capture_path.read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(
@@ -5454,8 +5464,7 @@ def preserve_spent_intent(directory, intent):
     if not retired_bound_intent(directory, intent):
         fail("only an exact retired bound generation may be preserved for replacement")
     identity = file_identity(directory / intent["captureFile"])
-    if any(identity[name] != intent["preparedSeal"]["captureIdentity"][name]
-           for name in ("device", "inode")):
+    if not same_persisted_generation(identity, intent["preparedSeal"]["captureIdentity"]):
         fail("spent capture generation was replaced")
     archive = directory / f"spent-{intent['requestKey']}-{Path(intent['captureFile']).stem}.json"
     if archive.exists() or archive.is_symlink():

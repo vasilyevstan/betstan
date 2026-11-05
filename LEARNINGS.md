@@ -105,6 +105,8 @@ Historical details are retained in
 - `cancel-in-progress: false` alone retains only one pending Actions run.
   The policy publisher uses supported `queue: max` to retain a bounded queue;
   event chronology still comes from authenticated transition evidence.
+- Every PR-routed focused suite must also be suite-gate classified. Unclassified
+  infra paths force every heavy master suite and can cost minutes per build.
 
 ## Release and recovery
 
@@ -120,6 +122,8 @@ Historical details are retained in
   Keep locks/fences and use the exact compatible held-recovery path.
 - Data handoff is not completion. Validate the same run's handoff before cleanup,
   deploy exact images, and release the database lock before the public fence.
+- Persisted local file seals bind the inode, never `st_dev`: macOS renumbers
+  APFS devices on reboot. Fix recurring authority defects; do not bypass them.
 
 ## Infrastructure and evidence
 
