@@ -4704,7 +4704,9 @@ def validate_failed_deploy_artifacts(
         root_run, root_source = capture["applied_data_run_id"], capture["applied_source_sha"]
     elif (
         not pre_runtime
-        and profile == "oci-failed-deploy-released-runtime-v1"
+        and profile in {
+            "oci-failed-deploy-released-runtime-v1", "oci-failed-deploy-retained-hold-v1",
+        }
         and predecessor_authority is not None
         and predecessor_authority["schema_version"] == "live-betting-data-resume-v2"
         and predecessor_authority["resume_maintenance_mode"] == "retained-hold"

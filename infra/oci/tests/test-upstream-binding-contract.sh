@@ -16571,18 +16571,26 @@ done
 APPLIED_SOURCE_SHA=1bf86112ba2458161e6039091b1aa6289fdfce1d
 earlier_source=b437710af5f796114ab619260c26f47317771bdf
 SUBJECT_SHA=30101f783162b166c75e9d6adaf92fc647c5a6a6
-prepare_pre_runtime_activation_chain
-write_profile_run 626 oci-production-deploy.yml "oci-deploy $earlier_source" \
-  7645 oci-production-baseline-626-1 "$earlier_source"
-write_profile_artifacts 626 false "$APPLIED_SOURCE_SHA" "$earlier_source"
-write_deploy_profile_jobs 626 failure skipped skipped skipped success
-write_profile_run 624 oci-production-deploy.yml "oci-deploy $SUBJECT_SHA" \
-  7645 oci-production-baseline-624-1
-write_profile_artifacts 624 false "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA"
-write_deploy_profile_jobs 624 success failure success success skipped
-PATH="$WORK/bin:$PATH" python3 -I - "$VALIDATOR" "$FIXTURE_DIR" "$WORK" \
+# The retained pass proves a second retained-hold failure keeps the original capture root.
+for chain_mode in retained released; do
+  prepare_pre_runtime_activation_chain
+  write_profile_run 626 oci-production-deploy.yml "oci-deploy $earlier_source" \
+    7645 oci-production-baseline-626-1 "$earlier_source"
+  write_profile_artifacts 626 false "$APPLIED_SOURCE_SHA" "$earlier_source"
+  write_deploy_profile_jobs 626 failure skipped skipped skipped success
+  write_profile_run 624 oci-production-deploy.yml "oci-deploy $SUBJECT_SHA" \
+    7645 oci-production-baseline-624-1
+  write_profile_artifacts 624 false "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA"
+  if [ "$chain_mode" = retained ]; then
+    chain_binding="$retained_binding"
+    write_deploy_profile_jobs 624 failure skipped skipped skipped success
+  else
+    chain_binding="$released_binding"
+    write_deploy_profile_jobs 624 success failure success success skipped
+  fi
+CHAIN_MODE="$chain_mode" PATH="$WORK/bin:$PATH" python3 -I - "$VALIDATOR" "$FIXTURE_DIR" "$WORK" \
   "$REPO" "$APPLIED_SOURCE_SHA" "$earlier_source" "$SUBJECT_SHA" \
-  "$released_binding" "$(profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA")" \
+  "$chain_binding" "$(profile_dispatch_inputs "$APPLIED_SOURCE_SHA" "$SUBJECT_SHA")" \
   "$WORK/repository" "$("$POLICY" get oci-live-data-resume-activation-released)" <<'PY'
 import base64, copy, datetime as dt, hashlib, importlib.util, io, json, os, pathlib, re, shutil, subprocess, sys, zipfile
 
@@ -16719,6 +16727,26 @@ prior_resume = dict(resume, approved_sha=earlier_source, resume_source_sha=root_
 native(626, "deploy", failed, "2025-12-31T22:25:30Z")
 native(43, "rollout", resume, "2025-12-31T23:01:30Z")
 native(49, "rollout", prior_resume, "2025-12-31T22:01:30Z")
+if os.environ.get("CHAIN_MODE") == "retained":
+    def bind_recovery_intent(**updates):
+        recovery = public / "deployment-recovery"
+        intent = env(recovery, "deployment-intent.env")
+        intent.update(updates)
+        write_env(recovery, "deployment-intent.env", intent)
+        intent_sha = hashlib.sha256((recovery / "deployment-intent.env").read_bytes()).hexdigest()
+        (recovery / "deployment-intent.sha256").write_text(f"{intent_sha}  deployment-intent.env\n")
+        failure = env(recovery, "failure-lineage.env")
+        failure["intent_sha256"] = intent_sha
+        write_env(recovery, "failure-lineage.env", failure)
+        seal(recovery)
+        pack(21624, recovery)
+    bind_recovery_intent(data_evidence_sha256=current_sha, baseline_sha256=baseline_sha,
+                         baseline_capture_run_id="42")
+    run_valid()
+    bind_recovery_intent(baseline_capture_run_id="43")
+    run_valid(False)
+    print("PASS distinct root42/earlier49/retained626/resume43/retained624 keeps capture42 and rejects resume capture43")
+    sys.exit(0)
 run_valid()
 print("PASS distinct root42/earlier49/retained626/resume43/released624 with actual native parser")
 
@@ -18465,6 +18493,7 @@ for mode, failed_run, resumed_run, template_run in (
     consume()
     print(f"PASS real {mode} authority/evidence -> native-enabled deployment preserves capture53/root42 and rejects root/capture substitution or missing frozen proof")
 PY
+done
 ok "released recovery authenticates distinct retained lineage and rejects substituted root, tuple, outcome, chronology and missing evidence"
 SUBJECT_SHA="$saved_subject"
 APPLIED_SOURCE_SHA="$saved_applied"
