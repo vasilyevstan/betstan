@@ -894,7 +894,8 @@ requires the exact receiver record before any binding API read; a retained prepa
 intent must match, while the canonical ordinary record-only post-bind state remains
 valid. Dispatch writes a context-only sentinel for every direct or conditional
 held-history profile before binding reads. Ordinary resume branches retain only this
-marker; a branch that qualifies for held-history reuse must also have the full sealed
+marker, including the dispatcher's own post-claim revalidation; any history
+collection after the claim still requires the sealed bundle. A branch that qualifies for held-history reuse must also have the full sealed
 bundle. Because both paths include the validator digest, a changed validator rejects
 before any binding API read. Native GitHub Actions validation remains an independent
 full live collection.
