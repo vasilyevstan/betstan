@@ -240,6 +240,12 @@ workflow file that no guarded suite references. Every decision prints a
 scheduled `ci-full-nightly` workflow runs every shard with
 `BETSTAN_CI_FULL=1` on `master` as the backstop for selection mistakes.
 
+The workflow-contract wrapper runs independent governance and data suites
+concurrently, waits for every child, and fails if any child fails. Independent
+dispatch fixtures use at most four isolated processes; mocked clocks, output
+capture and fixture state are not shared between cases. Both fresh checkpoints
+and the existing same-fixture concurrency tests remain covered.
+
 The protected compatibility `production-build` uses the full
 trusted-master workflow, not lean path selection. It runs coverage for all ten
 application packages, the Client production build, Auth container smoke,
