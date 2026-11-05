@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "41" ]] || {
-  echo "expected 41 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "42" ]] || {
+  echo "expected 42 protected operations, got $operation_count" >&2
   exit 1
 }
 
@@ -193,11 +193,47 @@ required_derived = {
   "ghcr-package-repair-build" => ["oci-production-build-repair"],
   "oci-migrate" => ["oci-migration-recovery-automatic"],
   "oci-migrate-recover-closed" => ["oci-migration-recovery-automatic"],
+  "oci-live-data-apply-slip-index" => ["oci-production-deploy-automatic"],
+  "oci-live-data-resume-deploy" => ["oci-production-deploy-automatic"],
+  "oci-live-data-continue-held-handoff" => ["oci-production-deploy-automatic"],
+  "oci-live-data-resume-deploy-released" => ["oci-production-deploy-automatic"],
+  "oci-live-data-resume-activation" => ["oci-production-deploy-automatic"],
+  "oci-live-data-resume-activation-released" => ["oci-production-deploy-automatic"],
 }
 required_derived.each do |operation, expected|
   policy = policies.find { |entry| entry["operation"] == operation }
   fail("missing #{operation}") unless policy
   fail("#{operation} lost derived authority") unless policy["derivedOperations"] == expected
+end
+
+native_deploy = policies.find { |policy| policy["operation"] == "oci-production-deploy-automatic" }
+final_producers = required_derived.select { |_, derived| derived == ["oci-production-deploy-automatic"] }.keys
+actual_final_producers = policies.select do |policy|
+  policy["workflow"] == "oci-live-data-rollout.yml" &&
+    policy["fixedInputs"]["phase"] == "apply-slip-index"
+end.map { |policy| policy["operation"] }
+fail("a supported final-data producer has no native deploy authority") unless actual_final_producers.sort == final_producers.sort
+unless native_deploy.fetch("authority") == "record-upstream" &&
+    native_deploy.fetch("requiresConsumedUpstream") &&
+    native_deploy.fetch("upstreamOperations").sort == final_producers.sort &&
+    native_deploy.fetch("upstreamConclusion") == "success"
+  fail("native deploy lost its consumed, successful final-data authority")
+end
+policies.reject { |policy| final_producers.include?(policy["operation"]) }.each do |policy|
+  if policy.fetch("derivedOperations").include?("oci-production-deploy-automatic")
+    fail("non-final data operation gained native deploy authority")
+  end
+end
+deploy = YAML.safe_load(File.read(File.join(root, ".github/workflows/oci-production-deploy.yml")), aliases: true)
+resolver = deploy.fetch("jobs").fetch("resolve")
+unless resolver.fetch("permissions") == {"actions" => "read", "contents" => "read"} &&
+    !resolver.key?("environment") &&
+    deploy.fetch("jobs").fetch("deploy").fetch("needs") == "resolve" &&
+    deploy.fetch("concurrency") == {"group" => "oci-control-plane", "cancel-in-progress" => false}
+  fail("native deploy lost its read-only resolver or protected serialization")
+end
+unless resolver.fetch("if").include?("github.event.workflow_run.display_title == format('oci-live-data apply-slip-index {0}', github.event.workflow_run.head_sha)")
+  fail("normal non-final data phases do not skip before native deploy resolution")
 end
 
 common_publish = policies.find do |entry|

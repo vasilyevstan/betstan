@@ -11,10 +11,12 @@ a local run or a copied tree outside GITHUB_WORKSPACE, a missing parent commit, 
 infra or workflow file that no guarded suite references. A suite started by an
 already running guarded suite always runs.
 """
+import fcntl
 import os
 import pathlib
 import subprocess
 import sys
+import time
 
 SKIP = 3
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -76,14 +78,26 @@ class Inputs:
 
 def changed_paths():
     head = git("rev-parse", "HEAD").strip()
-    has_parent = subprocess.run(
-        ["git", "-C", str(ROOT), "rev-parse", "-q", "--verify", "HEAD^1"], capture_output=True,
-    ).returncode == 0
-    if not has_parent:
-        subprocess.run(
-            ["git", "-C", str(ROOT), "fetch", "--no-tags", "-q", "--depth=2", "origin", head],
-            capture_output=True, timeout=120,
-        )
+    lock_path = ROOT / git("rev-parse", "--git-path", "suite-gate-fetch.lock").strip()
+    deadline = time.monotonic() + 120
+    # Parallel suites share Git's shallow boundary; only one may deepen it.
+    with lock_path.open("a") as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("suite gate fetch lock timed out")
+                time.sleep(0.1)
+        has_parent = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "-q", "--verify", "HEAD^1"], capture_output=True,
+        ).returncode == 0
+        if not has_parent:
+            subprocess.run(
+                ["git", "-C", str(ROOT), "fetch", "--no-tags", "-q", "--depth=2", "origin", head],
+                check=True, capture_output=True, timeout=max(1, deadline - time.monotonic()),
+            )
     return git("diff", "--no-renames", "--name-only", "HEAD^1", "HEAD").splitlines()
 
 

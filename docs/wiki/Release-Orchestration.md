@@ -311,6 +311,30 @@ Before deployment, the release chain verifies:
   source SHA, apply state, verification state, and rollback state;
 - absence of competing production operations.
 
+**Native final-data handoff.** Successful final-index data completion starts
+the deployment receiver through a native workflow-completion event. Nonfinal
+phases and unsuccessful producers skip the receiver. Its read-only resolver
+authenticates the exact first-attempt data run, current source, complete v6
+evidence and original build, infrastructure, checkpoint and recovery tuple.
+CLI-owned receivers derive approval only from the exact consumed upstream
+authority; locks, fences, lease budgets and protected gates remain in force.
+Manual deployment remains supported. Activation, rollback and other deployment
+consumers qualify native receivers against their original parent and consumed
+inputs, including historical deployments after protected source advances.
+
+**Aggregated read-only preflight.** Failed-deploy resumes collect independent
+baseline, fence, runtime-image and inherited-lock failures before producing
+resume authority. Held-state fencing is checked after the image checks.
+The existing baseline step writes resume authority only after the resume
+preflight succeeds and baseline validation completes.
+The existing baseline, released-activation and disk-checkpoint checks also
+finish before one outcome barrier permits database lock mutation. An applicable
+failed, cancelled, missing or skipped check cannot pass that barrier; only
+explicitly inapplicable checks may be skipped. This reports independent mismatch
+groups together without relaxing original owner, source, lease or checkpoint
+predicates. Existing qualified expired-lock recovery remains distinct from
+lease renewal or permission to take over another writer.
+
 **Upstream artifact transport.** The retry contract is limited to the same
 authenticated byte-read GET: at most three attempts, each with a
 120-second subprocess timeout, and 1/2-second backoffs only before eligible retries.
@@ -411,6 +435,18 @@ fresh kubelet node-filesystem and raw-root byte measurements, each satisfying
 `usedBytes * 100 <= capacityBytes * 70`. Equality passes; one byte over either
 limit withholds eligibility. Revalidation also retains stable node/root/Mongo
 identity, exact capacity equality and fresh filesystem cross-checks.
+
+Newly collected release checkpoints additionally seal hashes of the root and
+Mongo filesystem UUIDs and the Mongo volume identity. The read-only collector
+cross-checks the mounted device against the managed attachment, and the wrapper
+requires a current, writable, non-shareable attachment to the bound instance.
+Revalidation requires every sealed identity to match; changed or missing UUIDs
+or a different volume fail closed. Kernel device names may change after reboot
+without changing those identities. Existing checkpoints remain valid under
+their original identity contract and are never rewritten to invent new proof.
+Failure to recapture volume identity after reclaim retains incomplete evidence
+and cannot produce a release checkpoint.
+
 The separate governed diagnosis path remains
 available over the limit. During standalone finalization, candidate-verification
 or candidacy-preload failure stops further preload work and removes candidate

@@ -151,13 +151,23 @@ enforce_rollback_readiness_contract() {
 validate_source_run() {
   local run_json_file="$1"
   local workflow_id="$2"
-  python3 - "$run_json_file" "$workflow_id" "$REPO" "$BASELINE_RETENTION_DAYS" <<'PY'
+  local expected_event=workflow_dispatch
+  if [[ "$(jq -r .event "$run_json_file")" == workflow_run ]]; then
+    expected_event="$(
+      "$SCRIPT_DIR/upstream_run_binding_stan.py" validate-deployment \
+        --repository "$REPO" --subject-sha "$(jq -r .head_sha "$run_json_file")" \
+        --run-id "$(jq -r .id "$run_json_file")" \
+        --conclusion "$(jq -r .conclusion "$run_json_file")"
+    )" || return 1
+  fi
+  python3 - "$run_json_file" "$workflow_id" "$REPO" "$BASELINE_RETENTION_DAYS" "$expected_event" <<'PY'
 import json
 import sys
 from datetime import datetime, timedelta, timezone
 
 run = json.load(open(sys.argv[1], encoding='utf-8'))
 workflow_id, repository, retention_days = sys.argv[2:5]
+expected_event = sys.argv[5]
 created_at = run.get('created_at') or run.get('run_started_at') or run.get('updated_at')
 if not created_at:
     raise SystemExit('source run metadata is missing a timestamp')
@@ -167,7 +177,7 @@ if datetime.now(timezone.utc) - created > timedelta(days=int(retention_days)):
 valid = (
     str(run.get('workflow_id', '')) == workflow_id and
     run.get('path') == '.github/workflows/oci-production-deploy.yml' and
-    run.get('event') == 'workflow_dispatch' and
+    run.get('event') == expected_event and
     run.get('head_branch') == 'master' and
     ((run.get('head_repository') or {}).get('full_name') == repository) and
     run.get('status') == 'completed' and
@@ -314,6 +324,14 @@ validate_run_metadata() {
   local expected_path="$3"
   local expected_event="$4"
   local expected_sha="$5"
+  if [[ "$expected_path" == .github/workflows/oci-production-deploy.yml &&
+        "$(jq -r .event "$run_json_file")" == workflow_run ]]; then
+    expected_event="$(
+      "$SCRIPT_DIR/upstream_run_binding_stan.py" validate-deployment \
+        --repository "$REPO" --subject-sha "$expected_sha" \
+        --run-id "$(jq -r .id "$run_json_file")" --conclusion success
+    )" || return 1
+  fi
   python3 - "$run_json_file" "$workflow_id" "$expected_path" "$expected_event" "$expected_sha" "$REPO" "$BASELINE_RETENTION_DAYS" <<'PY'
 import json
 import sys

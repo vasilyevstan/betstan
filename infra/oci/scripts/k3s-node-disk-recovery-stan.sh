@@ -291,6 +291,36 @@ capture_capacity() {
     "$CAPACITY_HELPER" measure >/dev/null
 }
 
+capture_storage_identity() {
+  local runtime_file="$1" attachment="$WORK_DIR/checkpoint-volume-attachment.json" volume_hash
+  [[ "$instance_ocid" == "$baseline_instance" &&
+     "$baseline_instance_fingerprint" == "$(oci_fingerprint "$baseline_instance")" &&
+     "${mongo_volume_ocid:-}" =~ ^ocid1\.volume\.[a-z0-9.-]+$ &&
+     "${mongo_volume_attachment_ocid:-}" =~ ^ocid1\.volumeattachment\.[a-z0-9.-]+$ ]] ||
+    fail "checkpoint volume authority is unavailable or mismatched"
+  oci compute volume-attachment get --volume-attachment-id "$mongo_volume_attachment_ocid" \
+    --connection-timeout 5 --read-timeout 10 --max-retries 0 \
+    >"$attachment" 2>"$WORK_DIR/checkpoint-volume-attachment.stderr" ||
+    fail "checkpoint volume attachment read failed"
+  jq -e --arg instance "$instance_ocid" --arg volume "$mongo_volume_ocid" \
+    --arg attachment "$mongo_volume_attachment_ocid" '
+      .data.id == $attachment and .data."instance-id" == $instance and
+      .data."volume-id" == $volume and .data."lifecycle-state" == "ATTACHED" and
+      (.data."attachment-type" | ascii_downcase) == "paravirtualized" and
+      .data."is-read-only" == false and .data."is-shareable" == false and
+      .data.device == "/dev/oracleoci/oraclevdb"
+    ' "$attachment" >/dev/null ||
+    fail "checkpoint volume attachment identity differs"
+  volume_hash="$(printf '%s' "$mongo_volume_ocid" | sha256sum | awk '{print $1}')"
+  jq -e --arg volume "$volume_hash" '
+    if (.root.mount.uuid | type) == "string" and (.mongo.mount.uuid | type) == "string"
+    then .mongo.volumeIdSha256 = $volume
+    else error("checkpoint filesystem UUIDs are unavailable") end
+  ' "$runtime_file" >"$WORK_DIR/runtime-with-storage-identity.json" ||
+    fail "checkpoint filesystem UUIDs are unavailable"
+  mv "$WORK_DIR/runtime-with-storage-identity.json" "$runtime_file"
+}
+
 capture_baseline() {
   local name="$1" prefix="$WORK_DIR/baseline-$1"
   oci compute instance get --instance-id "$baseline_instance" \
@@ -364,6 +394,11 @@ if [[ "$ACTION" == "revalidate" && "$REVALIDATION_PROFILE" == "held" ]]; then
 fi
 run_remote "$snapshot_action" "[]" >"$runtime_before" ||
   fail "read-only runtime snapshot failed"
+if [[ "$historical" == "false" && -n "$CHECKPOINT_OUTPUT_FILE" ]] ||
+   { [[ "$ACTION" == "revalidate" && -f "$CHECKPOINT_FILE" ]] &&
+     jq -e '.stableIdentity | has("mongoVolumeIdSha256")' "$CHECKPOINT_FILE" >/dev/null; }; then
+  capture_storage_identity "$runtime_before"
+fi
 capture_capacity "$capacity_before" ||
   fail "kubelet filesystem cross-check failed"
 
@@ -502,6 +537,11 @@ esac
 
 post_capture_succeeded=true
 run_remote snapshot "[]" >"$runtime_after" || post_capture_succeeded=false
+if [[ "$post_capture_succeeded" == "true" && -n "$CHECKPOINT_OUTPUT_FILE" ]]; then
+  if ! (capture_storage_identity "$runtime_after"); then
+    post_capture_succeeded=false
+  fi
+fi
 capture_capacity "$capacity_after" || post_capture_succeeded=false
 if [[ "$post_capture_succeeded" != "true" ]]; then
   "$EVIDENCE_HELPER" write-incomplete-reclaim \

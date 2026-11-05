@@ -464,16 +464,25 @@ jobs:
           validate_deploy() {
             local source_sha="$1" build_run_id="$2" deploy_run_id="$3" role="$4"
             local workflow_id run artifact_name artifact_count artifact_dir provenance
+            local event=workflow_dispatch title="oci-deploy $source_sha"
             workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
             run="$(gh api "repos/$REPO/actions/runs/$deploy_run_id/attempts/1")"
+            if [ "$(jq -r .event <<<"$run")" = workflow_run ]; then
+              event="$(
+                ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+                  --repository "$REPO" --subject-sha "$source_sha" \
+                  --run-id "$deploy_run_id" --conclusion success
+              )" || return 1
+              title="$(jq -r .display_title <<<"$run")"
+            fi
             jq -e \
               --argjson workflow_id "$workflow_id" \
               --arg sha "$source_sha" \
               --arg repo "$REPO" \
-              --arg title "oci-deploy $source_sha" '
+              --arg event "$event" --arg title "$title" '
                 .workflow_id == $workflow_id and
                 .path == ".github/workflows/oci-production-deploy.yml" and
-                .event == "workflow_dispatch" and
+                .event == $event and
                 .head_sha == $sha and
                 .head_branch == "master" and
                 .head_repository.full_name == $repo and

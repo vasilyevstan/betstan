@@ -458,7 +458,13 @@ jobs:
             )"
             [ "$observed_workflow" = "$workflow_id" ]
             [ "$path" = ".github/workflows/$workflow_file" ]
-            [ "$event" = "$expected_event" ]
+            if [ "$workflow_file" = oci-production-deploy.yml ] && [ "$event" = workflow_run ]; then
+              ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+                --repository "$REPOSITORY" --subject-sha "$expected_sha" \
+                --run-id "$run_id" --conclusion "$expected_conclusion" >/dev/null
+            else
+              [ "$event" = "$expected_event" ]
+            fi
             [ "$head_sha" = "$expected_sha" ]
             [ "$head_branch" = "master" ]
             [ "$repository" = "$REPOSITORY" ]
@@ -1085,6 +1091,8 @@ jobs:
           ./infra/oci/scripts/configure-k3s-access.sh open
 
       - name: Verify exact failed-deploy resume state
+        id: resume_preflight
+        continue-on-error: true
         if: >-
           inputs.phase != 'incident-restore' &&
           inputs.failed_deploy_run_id != '0' &&
@@ -1123,6 +1131,7 @@ jobs:
           resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
           prior_evidence=artifacts/prerequisite/provenance.env
           baseline_dir=artifacts/oci-data-baseline-before
+          verify_resume_baseline() {
           [ -f "$resume_images" ] && [ -f "$prior_evidence" ]
           expected_baseline_sha="$(
             awk -F= '$1 == "baseline_sha256" {
@@ -1159,21 +1168,23 @@ jobs:
           EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
           REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
             ./infra/oci/scripts/validate-rollback-baseline-stan.sh
+          }
 
+          verify_resume_fence() {
           case "$RESUME_MAINTENANCE_MODE" in
             released-runtime)
               ;;
-            pre-runtime-hold)
+            pre-runtime-hold|retained-hold)
               ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
-              ;;
-            retained-hold)
               ;;
             *)
               echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
               exit 1
               ;;
           esac
+          }
 
+          verify_resume_images() {
           runtime_images="$resume_images"
           services=(auth bet backoffice client event gamemaster moderation resulting slip)
           supporting_services=(auth client)
@@ -1326,9 +1337,11 @@ jobs:
             fi
           done
 
+          }
+
+          verify_resume_lock() {
           if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ] ||
              [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
-            ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
             previous_holder_run="$PREREQUISITE_RUN_ID"
             previous_holder_source="$RESUME_SOURCE_SHA"
             previous_lock_snapshot="$RUNNER_TEMP/pre-runtime-lock.json"
@@ -1390,7 +1403,7 @@ jobs:
                   "$RUNNER_TEMP/live-data-upstream-result.json"
               )"
             fi
-            PRIOR_RESUME_WINDOW="$prior_resume_window" \
+            PREFLIGHT_PRIOR_STATUS="$preflight_status" PRIOR_RESUME_WINDOW="$prior_resume_window" \
             python3 - "$previous_lock_snapshot" \
               "$OCI_K8S_NAMESPACE" "$previous_holder_run" \
               "$previous_holder_source" "$previous_lease_seconds" \
@@ -1401,6 +1414,7 @@ jobs:
               if not value:
                   raise SystemExit("inherited lock snapshot is invalid")
           path, namespace, predecessor_run, source, duration, qualification, baseline_dir = sys.argv[1:]
+          require(os.environ["PREFLIGHT_PRIOR_STATUS"] in ("0", "1"))
           require(re.fullmatch(r"[1-9][0-9]*", predecessor_run))
           require(re.fullmatch(r"[0-9a-f]{40}", source))
           result = subprocess.run(
@@ -1498,59 +1512,41 @@ jobs:
                       require(isinstance(containers[0].get("imageID"), str)
                               and any(containers[0]["imageID"].endswith("@" + digest)
                                       for digest in images[service][3:5]))
-              runtime_path = str(Path(path).with_name("expired-handoff-runtime.json"))
-              fd = os.open(runtime_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              if os.environ["PREFLIGHT_PRIOR_STATUS"] == "0":
+                  runtime_path = str(Path(path).with_name("expired-handoff-runtime.json"))
+                  fd = os.open(runtime_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                  with os.fdopen(fd, "w") as output:
+                      json.dump({"deployments": deployments, "pods": pods}, output)
+                      output.flush()
+                      os.fsync(output.fileno())
+          if os.environ["PREFLIGHT_PRIOR_STATUS"] == "0":
+              fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
               with os.fdopen(fd, "w") as output:
-                  json.dump({"deployments": deployments, "pods": pods}, output)
+                  json.dump(lock, output)
                   output.flush()
                   os.fsync(output.fileno())
-          fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-          with os.fdopen(fd, "w") as output:
-              json.dump(lock, output)
-              output.flush()
-              os.fsync(output.fileno())
           PY
           fi
+          }
 
-          mkdir -p artifacts/oci-live-data-rollout/evidence
-          resume_schema=live-betting-data-resume-v2
-          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5
-          cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
-          schema_version=$resume_schema
-          applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
-          applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA
-          failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
-          resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
-          failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}
-          public_validate_job_conclusion=${{ steps.provenance_request.outputs.public_validate_job_conclusion }}
-          lock_release_step_conclusion=${{ steps.provenance_request.outputs.lock_release_step_conclusion }}
-          fence_release_step_conclusion=${{ steps.provenance_request.outputs.fence_release_step_conclusion }}
-          rehold_step_conclusion=${{ steps.provenance_request.outputs.rehold_step_conclusion }}
-          failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
-          current_source_sha=$SOURCE_SHA
-          baseline_sha256=$observed_baseline_sha
-          runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
-          checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
-          disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
-          disk_checkpoint_sha256=${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
-          disk_checkpoint_disposition=${{ steps.provenance.outputs.disk_checkpoint_disposition }}
-          application_change_scope=github-infra-docs-only
-          status=PASS
-          EOF
-          if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
-            held_evidence_sha="$(
-              jq -er '.held_handoff_run_id.held_handoff_evidence_sha256 |
-                select(type == "string" and test("^[0-9a-f]{64}$"))' \
-                "$RUNNER_TEMP/live-data-upstream-result.json"
-            )"
-            {
-              printf 'held_handoff_run_id=%s\n' "$HELD_HANDOFF_RUN_ID"
-              printf 'held_handoff_source_sha=%s\n' "$HELD_HANDOFF_SOURCE_SHA"
-              printf 'held_handoff_evidence_sha256=%s\n' "$held_evidence_sha"
-            } >>artifacts/oci-live-data-rollout/evidence/resume-authority.env
-          fi
+          preflight_checks=(verify_resume_baseline verify_resume_images verify_resume_fence verify_resume_lock)
+          preflight_status=0
+          # Baseline validation creates the image projection consumed by later checks.
+          # Child checks retain errexit; conditional function calls would disable it.
+          for check in "${preflight_checks[@]}"; do
+            ("$check") &
+            if wait "$!"; then
+              printf 'resume_preflight=%s status=PASS\n' "$check"
+            else
+              printf '::error::Resume preflight failed: %s\n' "$check" >&2
+              preflight_status=1
+            fi
+          done
+          [ "$preflight_status" = 0 ] || exit 1
 
       - name: Capture and validate pre-mutation rollback baseline
+        id: baseline_preflight
+        continue-on-error: true
         if: inputs.phase != 'incident-restore'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1562,6 +1558,10 @@ jobs:
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           SSE_REQUIREMENT: deployed-source
           RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
+          RESUME_PREFLIGHT_OUTCOME: ${{ steps.resume_preflight.outcome }}
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
+          RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance_request.outputs.applied_data_run_id || steps.provenance.outputs.resume_applied_data_run_id }}
+          RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance_request.outputs.applied_source_sha || steps.provenance.outputs.resume_applied_source_sha }}
         run: |
           set -euo pipefail
           if [ "$RELEASED_ACTIVATION_QUALIFICATION" = "pre-arm-no-account" ]; then
@@ -1607,8 +1607,51 @@ jobs:
           printf 'BASELINE_SHA256=%s\n' \
             "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
             >> "$GITHUB_ENV"
+          if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then
+            resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
+            observed_baseline_sha="$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')"
+            mkdir -p artifacts/oci-live-data-rollout/evidence
+            resume_schema=live-betting-data-resume-v2
+            [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5
+            cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
+          schema_version=$resume_schema
+          applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
+          applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA
+          failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
+          failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}
+          public_validate_job_conclusion=${{ steps.provenance_request.outputs.public_validate_job_conclusion }}
+          lock_release_step_conclusion=${{ steps.provenance_request.outputs.lock_release_step_conclusion }}
+          fence_release_step_conclusion=${{ steps.provenance_request.outputs.fence_release_step_conclusion }}
+          rehold_step_conclusion=${{ steps.provenance_request.outputs.rehold_step_conclusion }}
+          failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
+          current_source_sha=$SOURCE_SHA
+          baseline_sha256=$observed_baseline_sha
+          runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
+          checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
+          disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+          disk_checkpoint_sha256=${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
+          disk_checkpoint_disposition=${{ steps.provenance.outputs.disk_checkpoint_disposition }}
+          application_change_scope=github-infra-docs-only
+          status=PASS
+          EOF
+            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+              held_evidence_sha="$(
+                jq -er '.held_handoff_run_id.held_handoff_evidence_sha256 |
+                  select(type == "string" and test("^[0-9a-f]{64}$"))' \
+                  "$RUNNER_TEMP/live-data-upstream-result.json"
+              )"
+              {
+                printf 'held_handoff_run_id=%s\n' "$HELD_HANDOFF_RUN_ID"
+                printf 'held_handoff_source_sha=%s\n' "$HELD_HANDOFF_SOURCE_SHA"
+                printf 'held_handoff_evidence_sha256=%s\n' "$held_evidence_sha"
+              } >>artifacts/oci-live-data-rollout/evidence/resume-authority.env
+            fi
+          fi
 
       - name: Verify reader-qualified released activation state
+        id: activation_preflight
+        continue-on-error: true
         if: >-
           inputs.phase != 'incident-restore' &&
           steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account'
@@ -1729,6 +1772,8 @@ jobs:
           PY
 
       - name: Revalidate exact release disk checkpoint before lock mutation
+        id: disk_preflight
+        continue-on-error: true
         if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
@@ -1762,6 +1807,34 @@ jobs:
           DISK_CHECKPOINT_RUN_ID="$DISK_CHECKPOINT_RUN_ID" \
           REVALIDATION_PROFILE="$profile" \
             ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
+
+      - name: Require complete read-only preflight before lock mutation
+        if: inputs.phase != 'incident-restore'
+        env:
+          RESUME_OUTCOME: ${{ steps.resume_preflight.outcome }}
+          RESUME_REQUIRED: ${{ inputs.failed_deploy_run_id != '0' && inputs.failed_activation_run_id == '0' }}
+          BASELINE_OUTCOME: ${{ steps.baseline_preflight.outcome }}
+          ACTIVATION_OUTCOME: ${{ steps.activation_preflight.outcome }}
+          ACTIVATION_REQUIRED: ${{ steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account' }}
+          DISK_OUTCOME: ${{ steps.disk_preflight.outcome }}
+          DISK_REQUIRED: ${{ env.OCI_RUNTIME_MODE == 'k3s' }}
+        run: |
+          set -euo pipefail
+          preflight_status=0
+          require_preflight() {
+            local expected=skipped
+            if [ "$3" = true ]; then expected=success; fi
+            if [ "$2" != "$expected" ]; then
+              printf '::error::Read-only preflight %s: expected %s, observed %s\n' "$1" "$expected" "$2" >&2
+              preflight_status=1
+            fi
+          }
+          require_preflight resume "$RESUME_OUTCOME" "$RESUME_REQUIRED"
+          require_preflight baseline "$BASELINE_OUTCOME" true
+          require_preflight activation "$ACTIVATION_OUTCOME" "$ACTIVATION_REQUIRED"
+          require_preflight disk "$DISK_OUTCOME" "$DISK_REQUIRED"
+          [ "$preflight_status" = 0 ] || exit 1
+          echo "read_only_preflight=PASS mutation_authority=unchanged"
 
       - name: Acquire database operation lock
         if: inputs.phase != 'incident-restore'

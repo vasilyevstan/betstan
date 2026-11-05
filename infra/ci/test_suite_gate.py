@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 GATE = REPO / "infra/ci/suite_gate.py"
@@ -139,6 +141,26 @@ class SuiteGateTest(unittest.TestCase):
         self.git("init", "-q")
         self.commit("root only")
         self.assertGate(0, "diff-unavailable")
+
+    def test_concurrent_shallow_fetches_skip_unaffected_suite(self):
+        self.change("services/app/src/feature.ts")
+        clone = self.root.parent / "shallow"
+        subprocess.run(
+            ["git", "clone", "-q", "--depth=1", self.root.as_uri(), str(clone)],
+            check=True, capture_output=True, env=self.env(),
+        )
+        self.root = clone
+        start = Barrier(8)
+
+        def select_suite(_):
+            start.wait(timeout=60)
+            return self.gate()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(select_suite, range(8)))
+        for code, stderr in results:
+            self.assertEqual(code, 3, stderr)
+            self.assertIn("reason=no-input-changed", stderr)
 
     def test_nested_suite_runs_silently(self):
         self.change("services/app/src/feature.ts")

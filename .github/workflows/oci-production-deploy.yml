@@ -1,7 +1,11 @@
 name: oci-production-deploy
-run-name: oci-deploy ${{ inputs.approved_sha }}
+run-name: oci-deploy ${{ inputs.approved_sha || github.event.workflow_run.head_sha }}${{ github.event_name == 'workflow_run' && format(' data-{0}', github.event.workflow_run.id) || '' }}
 
 on:
+  workflow_run:
+    workflows: [oci-live-data-rollout]
+    types: [completed]
+    branches: [master]
   workflow_dispatch:
     inputs:
       approved_sha:
@@ -52,7 +56,59 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    if: >-
+      github.run_attempt == 1 &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.display_title == format('oci-live-data apply-slip-index {0}', github.event.workflow_run.head_sha) &&
+        github.event.workflow_run.event == 'workflow_dispatch' &&
+        github.event.workflow_run.head_branch == 'master' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        github.event.workflow_run.run_attempt == 1))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      deploy_inputs: ${{ steps.resolve.outputs.deploy_inputs }}
+    steps:
+      - name: Checkout immutable workflow source without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve final data handoff
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_INPUTS: ${{ toJSON(inputs) }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = master ]
+          [ "$GITHUB_RUN_ATTEMPT" = 1 ]
+          [ "$GITHUB_SHA" = "$(gh api "repos/$REPOSITORY/git/ref/heads/master" --jq '.object.sha')" ]
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            resolved="$(
+              ./infra/oci/scripts/upstream_run_binding_stan.py resolve-deploy \
+                --repository "$REPOSITORY" \
+                --subject-sha "$GITHUB_SHA" \
+                --upstream-run-id "$UPSTREAM_RUN_ID" \
+                --event-file "$GITHUB_EVENT_PATH"
+            )"
+          else
+            [ "$EVENT_NAME" = workflow_dispatch ]
+            resolved="$(jq -ce . <<<"$DISPATCH_INPUTS")"
+          fi
+          printf 'deploy_inputs=%s\n' "$resolved" >> "$GITHUB_OUTPUT"
+
   deploy:
+    needs: resolve
     if: github.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -63,16 +119,16 @@ jobs:
     environment:
       name: oci-production
     env:
-      SOURCE_SHA: ${{ inputs.approved_sha }}
-      BUILD_RUN_ID: ${{ inputs.build_run_id }}
-      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
-      DATA_RUN_ID: ${{ inputs.data_run_id }}
-      CHECKPOINT_SOURCE_SHA: ${{ inputs.checkpoint_source_sha }}
-      DISK_CHECKPOINT_RUN_ID: ${{ inputs.disk_checkpoint_run_id }}
-      BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
-      BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
-      CONFIRMATION: ${{ inputs.confirmation }}
-      DISPATCH_INPUTS: ${{ toJSON(inputs) }}
+      SOURCE_SHA: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}
+      BUILD_RUN_ID: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).build_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).infrastructure_run_id }}
+      DATA_RUN_ID: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).data_run_id }}
+      CHECKPOINT_SOURCE_SHA: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).checkpoint_source_sha }}
+      DISK_CHECKPOINT_RUN_ID: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).disk_checkpoint_run_id }}
+      BASELINE_RECOVERY_RUN_ID: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).baseline_recovery_run_id }}
+      BASELINE_RECOVERY_SOURCE_SHA: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).baseline_recovery_source_sha }}
+      CONFIRMATION: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).confirmation }}
+      DISPATCH_INPUTS: ${{ needs.resolve.outputs.deploy_inputs }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
       OCI_REGION: ${{ vars.OCI_REGION }}
@@ -124,7 +180,7 @@ jobs:
       - name: Checkout approved master commit
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.approved_sha }}
+          ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 0
 
       - name: Validate exact SHA and trusted upstream runs
@@ -270,47 +326,47 @@ jobs:
       - name: Download exact OCI image provenance
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: oci-image-provenance-${{ inputs.checkpoint_source_sha }}-${{ inputs.build_run_id }}-1
+          name: oci-image-provenance-${{ env.CHECKPOINT_SOURCE_SHA }}-${{ env.BUILD_RUN_ID }}-1
           path: artifacts/build
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.build_run_id }}
+          run-id: ${{ env.BUILD_RUN_ID }}
 
       - name: Download exact OCI infrastructure provenance
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          name: oci-infrastructure-provenance-${{ env.INFRASTRUCTURE_RUN_ID }}-1
           path: artifacts/infrastructure
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.infrastructure_run_id }}
+          run-id: ${{ env.INFRASTRUCTURE_RUN_ID }}
 
       - name: Download exact live data readiness evidence
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: oci-live-data-rollout-${{ inputs.data_run_id }}-1
+          name: oci-live-data-rollout-${{ env.DATA_RUN_ID }}-1
           path: artifacts/data
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.data_run_id }}
+          run-id: ${{ env.DATA_RUN_ID }}
 
       - name: Download exact release disk checkpoint
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: oci-release-disk-checkpoint-${{ inputs.checkpoint_source_sha }}-${{ inputs.disk_checkpoint_run_id }}-1
+          name: oci-release-disk-checkpoint-${{ env.CHECKPOINT_SOURCE_SHA }}-${{ env.DISK_CHECKPOINT_RUN_ID }}-1
           path: artifacts/disk-checkpoint
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.disk_checkpoint_run_id }}
+          run-id: ${{ env.DISK_CHECKPOINT_RUN_ID }}
 
       - name: Download exact pre-mutation rollback baseline
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: oci-live-data-baselines-${{ inputs.data_run_id }}-1
+          name: oci-live-data-baselines-${{ env.DATA_RUN_ID }}-1
           path: artifacts/data-baselines
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.data_run_id }}
+          run-id: ${{ env.DATA_RUN_ID }}
 
       - name: Verify immutable image and infrastructure provenance
         id: provenance
@@ -799,9 +855,9 @@ jobs:
           OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
           OCI_E2E_ALREADY_PASSED: "1"
           OCI_EXPECT_HTTP_MUTATION_FENCE: "1"
-          EXPECTED_OPERATION_LOCK_HOLDER: live-data-${{ inputs.data_run_id }}-1
+          EXPECTED_OPERATION_LOCK_HOLDER: live-data-${{ env.DATA_RUN_ID }}-1
           EXPECTED_OPERATION_LOCK_ID: live-data-apply-slip-index
-          EXPECTED_OPERATION_LOCK_SOURCE_SHA: ${{ inputs.approved_sha }}
+          EXPECTED_OPERATION_LOCK_SOURCE_SHA: ${{ env.SOURCE_SHA }}
           LIVE_BETTING_READINESS_MODE: dark
           LIVE_READINESS_REQUEST_TIMEOUT: "15"
           LIVE_READINESS_SSE_TIMEOUT: "20"
@@ -1029,7 +1085,7 @@ jobs:
           rm -f artifacts/oci-deploy/rendered.yaml
 
   public-validate:
-    needs: deploy
+    needs: [resolve, deploy]
     if: github.run_attempt == 1 && needs.deploy.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1039,13 +1095,13 @@ jobs:
       - name: Checkout exact deployed commit without credentials
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.approved_sha }}
+          ref: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Validate public-check identity
         env:
-          SOURCE_SHA: ${{ inputs.approved_sha }}
+          SOURCE_SHA: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}
           OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ needs.deploy.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ needs.deploy.outputs.diagnostic_url }}

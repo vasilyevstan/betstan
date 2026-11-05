@@ -910,8 +910,8 @@ infrastructure_source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 instance_fingerprint="$(printf '%s' ocid1.instance.oc1..fixture | sha256sum | awk '{print $1}')"
 ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" "$deploy_fixture" <<'RUBY'
 workflow = YAML.load_file(ARGV[0]).fetch("jobs").fetch("deploy")
-abort "control source wiring changed" unless workflow.fetch("env").fetch("SOURCE_SHA") == "${{ inputs.approved_sha }}"
-abort "checkpoint source wiring changed" unless workflow.fetch("env").fetch("CHECKPOINT_SOURCE_SHA") == "${{ inputs.checkpoint_source_sha }}"
+abort "control source wiring changed" unless workflow.fetch("env").fetch("SOURCE_SHA") == "${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}"
+abort "checkpoint source wiring changed" unless workflow.fetch("env").fetch("CHECKPOINT_SOURCE_SHA") == "${{ fromJSON(needs.resolve.outputs.deploy_inputs).checkpoint_source_sha }}"
 steps = workflow.fetch("steps")
 %w[renew_lock release_lock].each do |id|
   File.write(File.join(ARGV[1], "#{id}.sh"), steps.find { |step| step["id"] == id }.fetch("run"))

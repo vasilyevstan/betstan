@@ -4080,6 +4080,199 @@ def validate_live_v6_lineage(
             fail(f"{label} field {key} does not match the complete v6 state")
 
 
+def resolve_deploy_inputs(
+    repository, subject_sha, data_run, *, event=None, upstream_inputs=None,
+    require_current_master=True,
+):
+    """Read immutable final-data inputs; never source or execute artifact content."""
+    if (
+        REPOSITORY.fullmatch(repository) is None
+        or FULL_SHA.fullmatch(subject_sha) is None
+        or POSITIVE_INTEGER.fullmatch(data_run) is None
+    ):
+        fail("native deploy identity is malformed")
+    label = "native final-data handoff"
+    parent = require_fixed_run(
+        repository, data_run, "oci-live-data-rollout.yml", "success",
+        subject_sha, f"oci-live-data apply-slip-index {subject_sha}", label,
+    )
+    if type(parent.get("id")) is not int or type(parent.get("run_attempt")) is not int:
+        fail(f"{label} native identity is malformed")
+    if event is not None:
+        if (
+            not isinstance(event, dict)
+            or event.get("action") != "completed"
+            or (event.get("repository") or {}).get("full_name") != repository
+            or not isinstance(event.get("workflow_run"), dict)
+        ):
+            fail(f"{label} completion event is invalid")
+        trigger = event["workflow_run"]
+        for key in (
+            "id", "workflow_id", "path", "event", "head_sha", "head_branch",
+            "status", "conclusion", "run_attempt",
+        ):
+            if trigger.get(key) != parent.get(key):
+                fail(f"{label} completion event substituted {key}")
+        if (trigger.get("head_repository") or {}).get("full_name") != repository:
+            fail(f"{label} completion event repository differs")
+    values, _, files = parse_live_v6_artifact(
+        repository, data_run, label, include_files=True,
+    )
+    inputs = {
+        "approved_sha": subject_sha,
+        "data_run_id": data_run,
+        "confirmation": "DEPLOY OCI EXACT SHA",
+        **{key: values[key] for key in (
+            "build_run_id", "infrastructure_run_id", "checkpoint_source_sha",
+            "disk_checkpoint_run_id", "baseline_recovery_run_id",
+            "baseline_recovery_source_sha",
+        )},
+    }
+    artifact = exact_artifact(
+        repository, inputs["disk_checkpoint_run_id"],
+        f"oci-release-disk-checkpoint-{inputs['checkpoint_source_sha']}-"
+        f"{inputs['disk_checkpoint_run_id']}-1", label,
+    )
+    checkpoint_files = artifact_files(repository, artifact, label)
+    path, raw = unique_artifact_file(checkpoint_files, "checkpoint.json", label)
+    if set(checkpoint_files) != {path}:
+        fail(f"{label} checkpoint has unexpected files")
+    try:
+        checkpoint = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"{label} checkpoint is malformed")
+    if not isinstance(checkpoint, dict):
+        fail(f"{label} checkpoint is not an object")
+    validate_live_v6_lineage(
+        values, checkpoint, inputs, data_run, subject_sha, "apply-slip-index", label,
+    )
+    authority = parse_resume_authority(files, values, label)
+    if upstream_inputs is not None:
+        if not isinstance(upstream_inputs, dict):
+            fail(f"{label} upstream authority inputs are invalid")
+        for key in inputs.keys() - {"data_run_id", "confirmation"}:
+            if upstream_inputs.get(key) != inputs[key]:
+                fail(f"{label} differs from consumed authority input {key}")
+        if upstream_inputs.get("phase") != "apply-slip-index":
+            fail(f"{label} authority is not a final-data operation")
+        if authority is not None:
+            for key, original in (
+                ("applied_source_sha", "resume_source_sha"),
+                ("applied_data_run_id", "prerequisite_run_id"),
+                ("failed_deploy_run_id", "failed_deploy_run_id"),
+            ):
+                if authority.get(key) != upstream_inputs.get(original):
+                    fail(f"{label} substituted original resume input {original}")
+    if require_current_master:
+        current = gh_api(f"repos/{repository}/git/ref/heads/master")
+        if not isinstance(current, dict) or (current.get("object") or {}).get("sha") != subject_sha:
+            fail(f"{label} no longer matches current master")
+    return inputs
+
+
+def qualify_native_deployment(repository, metadata, label):
+    """Bind a completed native receiver to its actual consumed final-data tuple."""
+    run_id, source = str(metadata["id"]), metadata["head_sha"]
+    if metadata.get("event") != "workflow_run":
+        fail(f"{label} is not a native deployment")
+    workflow_path = ".github/workflows/oci-production-deploy.yml"
+    source_file = gh_api(f"repos/{repository}/contents/{workflow_path}?ref={source}")
+    try:
+        raw = base64.b64decode(source_file["content"].replace("\n", ""), validate=True)
+        workflow = raw.decode("utf-8")
+    except (KeyError, TypeError, AttributeError, ValueError, UnicodeDecodeError):
+        fail(f"{label} native workflow source is unreadable")
+    if (
+        source_file.get("type") != "file" or source_file.get("path") != workflow_path
+        or source_file.get("encoding") != "base64"
+        or source_file.get("sha") != hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+        or re.findall(r"(?m)^run-name: (.+)$", workflow) != [
+            "oci-deploy ${{ inputs.approved_sha || github.event.workflow_run.head_sha }}"
+            "${{ github.event_name == 'workflow_run' && format(' data-{0}', "
+            "github.event.workflow_run.id) || '' }}"
+        ]
+    ):
+        fail(f"{label} native title is not bound to the immutable completion event")
+    jobs = jobs_for_run(repository, run_id, label)
+    resolver = exact_job(jobs, "resolve", label)
+    if (
+        type(resolver.get("id")) is not int or resolver["id"] < 1
+        or resolver.get("run_id") != int(run_id)
+        or resolver.get("status") != "completed"
+        or resolver.get("conclusion") != "success"
+        or step_conclusion(resolver, "Resolve final data handoff", label) != "success"
+    ):
+        fail(f"{label} native resolver did not succeed")
+    inputs = failed_deploy_native_inputs(
+        repository, run_id, source, label, expected_step_conclusion="success",
+        deployment_consumer=True,
+    )
+    parent_id = require_dispatch_run(inputs, "data_run_id")
+    if metadata.get("display_title") != f"oci-deploy {source} data-{parent_id}":
+        fail(f"{label} native deployment substituted its data parent")
+    expected = resolve_deploy_inputs(
+        repository, source, parent_id, require_current_master=False,
+    )
+    if inputs != expected:
+        fail(f"{label} native deployment differs from its final-data input tuple")
+    parent = require_fixed_run(
+        repository, parent_id, "oci-live-data-rollout.yml", "success",
+        source, f"oci-live-data apply-slip-index {source}", label,
+    )
+    if parse_timestamp(parent.get("updated_at"), label) > parse_timestamp(
+        metadata.get("created_at"), label,
+    ):
+        fail(f"{label} native deployment began before its data parent completed")
+    return inputs
+
+
+def deployment_title_matches(metadata, title):
+    if metadata.get("event") == "workflow_run":
+        return re.fullmatch(
+            re.escape(title) + r" data-[1-9][0-9]*", metadata.get("display_title", ""),
+        ) is not None
+    return metadata.get("display_title") == title
+
+
+def command_validate_deployment(args):
+    if (
+        REPOSITORY.fullmatch(args.repository) is None
+        or FULL_SHA.fullmatch(args.subject_sha) is None
+        or POSITIVE_INTEGER.fullmatch(args.run_id) is None
+    ):
+        fail("deployment consumer identity is malformed")
+    metadata = require_fixed_run(
+        args.repository, args.run_id, "oci-production-deploy.yml", args.conclusion,
+        args.subject_sha, f"oci-deploy {args.subject_sha}", "deployment consumer",
+    )
+    print(metadata["event"])
+
+
+def command_resolve_deploy(args):
+    event = None
+    if args.event_file:
+        try:
+            event = json.loads(Path(args.event_file).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            fail("native deploy completion event is unreadable")
+    inputs = resolve_deploy_inputs(
+        args.repository, args.subject_sha, args.upstream_run_id, event=event,
+        upstream_inputs=json.loads(args.upstream_inputs) if args.upstream_inputs else None,
+    )
+    if args.receiver_run_id:
+        receiver = receiver_handoff_run(
+            args.repository, args.subject_sha, args.boundary, args.receiver_run_id,
+            "native final-data receiver", data_run=args.upstream_run_id,
+        )
+        if receiver["event"] != "workflow_run":
+            fail("native final-data authority requires a workflow_run receiver")
+    validate_receiver_handoff_timing(
+        args.repository, args.upstream_run_id, args.subject_sha,
+        args.boundary, args.receiver_run_id, require_native_renewal=True,
+    )
+    print(json.dumps(inputs, sort_keys=True, separators=(",", ":")))
+
+
 def parse_infrastructure_provenance(
     repository,
     source_sha,
@@ -4526,7 +4719,7 @@ def validate_failed_deploy_artifacts(
             f"{label} retained failure",
         )
         failed_source = failed["head_sha"]
-        if failed.get("display_title") != f"oci-deploy {failed_source}":
+        if not deployment_title_matches(failed, f"oci-deploy {failed_source}"):
             fail(f"{label} retained failure title differs")
         validate_descendant_scope(failed_source, subject_sha)
         retained_profile = "oci-failed-deploy-retained-hold-v1"
@@ -4791,7 +4984,12 @@ def require_fixed_run(
     )
     if metadata.get("head_sha") != head_sha:
         fail(f"{label} source SHA differs from its artifact lineage")
-    if metadata.get("display_title") != title:
+    title_matches = (
+        deployment_title_matches(metadata, title)
+        if workflow == "oci-production-deploy.yml"
+        else metadata.get("display_title") == title
+    )
+    if not title_matches:
         fail(f"{label} title differs from its fixed workflow title")
     return metadata
 
@@ -4928,7 +5126,7 @@ def native_step_log_lines(raw, step, label):
 def failed_deploy_native_inputs(
     repository, run_id, source_sha, label, *, resume_dispatch=False,
     expected_step_conclusion="failure", prove_expired_handoff=False,
-    native_jobs=None, native_log_files=None,
+    native_jobs=None, native_log_files=None, deployment_consumer=False,
 ):
     """Read only runner-generated environment in the exact failed step log.
 
@@ -4942,6 +5140,10 @@ def failed_deploy_native_inputs(
             resume_dispatch or expected_step_conclusion != "success"
         )
         or (native_jobs is None) != (native_log_files is None)
+        or type(deployment_consumer) is not bool
+        or deployment_consumer and (
+            resume_dispatch or prove_expired_handoff or expected_step_conclusion != "success"
+        )
     ):
         fail(f"{label} native deployment step expectation is invalid")
     jobs = (
@@ -4956,6 +5158,7 @@ def failed_deploy_native_inputs(
         fail(f"{label} native job identity is invalid")
     step_name = (
         "Validate exact SHA phase and trusted upstream runs" if resume_dispatch
+        else "Validate exact SHA and trusted upstream runs" if deployment_consumer
         else "Verify immutable image and infrastructure provenance"
     )
     step = [
@@ -5335,7 +5538,375 @@ def exact_current_reader_edits(value, edits, label, *, inverse=False):
     return value
 
 
+def without_native_deployment_consumer(workflow, label):
+    before = '\n            [ "$event" = "$expected_event" ]\n'
+    after = """
+            if [ "$workflow_file" = oci-production-deploy.yml ] && [ "$event" = workflow_run ]; then
+              ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \\
+                --repository "$REPOSITORY" --subject-sha "$expected_sha" \\
+                --run-id "$run_id" --conclusion "$expected_conclusion" >/dev/null
+            else
+              [ "$event" = "$expected_event" ]
+            fi
+"""
+    if "upstream_run_binding_stan.py validate-deployment" not in workflow:
+        return workflow
+    return exact_current_reader_edits(workflow, ((before, after),), label, inverse=True)
+
+
+CURRENT_READER_PREFLIGHT_EDITS = (
+    (
+        "      - name: Verify exact failed-deploy resume state\n        if: >-\n",
+        "      - name: Verify exact failed-deploy resume state\n"
+        "        id: resume_preflight\n        continue-on-error: true\n        if: >-\n",
+    ),
+    (
+        '          baseline_dir=artifacts/oci-data-baseline-before\n'
+        '          [ -f "$resume_images" ] && [ -f "$prior_evidence" ]\n',
+        '          baseline_dir=artifacts/oci-data-baseline-before\n'
+        '          verify_resume_baseline() {\n'
+        '          [ -f "$resume_images" ] && [ -f "$prior_evidence" ]\n',
+    ),
+    (
+        r"""            ./infra/oci/scripts/validate-rollback-baseline-stan.sh
+
+          case "$RESUME_MAINTENANCE_MODE" in
+            released-runtime)
+              ;;
+            pre-runtime-hold)
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+              ;;
+            retained-hold)
+              ;;
+            *)
+              echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
+              exit 1
+              ;;
+          esac
+
+          runtime_images="$resume_images"
+""",
+        r"""            ./infra/oci/scripts/validate-rollback-baseline-stan.sh
+          }
+
+          verify_resume_fence() {
+          case "$RESUME_MAINTENANCE_MODE" in
+            released-runtime)
+              ;;
+            pre-runtime-hold|retained-hold)
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+              ;;
+            *)
+              echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
+              exit 1
+              ;;
+          esac
+          }
+
+          verify_resume_images() {
+          runtime_images="$resume_images"
+""",
+    ),
+    (
+        r"""          done
+
+          if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ] ||
+             [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
+            ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+            previous_holder_run="$PREREQUISITE_RUN_ID"
+""",
+        r"""          done
+
+          }
+
+          verify_resume_lock() {
+          if [ "$RESUME_MAINTENANCE_MODE" = "pre-runtime-hold" ] ||
+             [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]; then
+            previous_holder_run="$PREREQUISITE_RUN_ID"
+""",
+    ),
+    (
+        r"""            PRIOR_RESUME_WINDOW="$prior_resume_window" \
+            python3 - "$previous_lock_snapshot" \
+""",
+        r"""            PREFLIGHT_PRIOR_STATUS="$preflight_status" PRIOR_RESUME_WINDOW="$prior_resume_window" \
+            python3 - "$previous_lock_snapshot" \
+""",
+    ),
+    (
+        r"""          path, namespace, predecessor_run, source, duration, qualification, baseline_dir = sys.argv[1:]
+          require(re.fullmatch(r"[1-9][0-9]*", predecessor_run))
+""",
+        r"""          path, namespace, predecessor_run, source, duration, qualification, baseline_dir = sys.argv[1:]
+          require(os.environ["PREFLIGHT_PRIOR_STATUS"] in ("0", "1"))
+          require(re.fullmatch(r"[1-9][0-9]*", predecessor_run))
+""",
+    ),
+    (
+        r"""              runtime_path = str(Path(path).with_name("expired-handoff-runtime.json"))
+              fd = os.open(runtime_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(fd, "w") as output:
+                  json.dump({"deployments": deployments, "pods": pods}, output)
+                  output.flush()
+                  os.fsync(output.fileno())
+          fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, "w") as output:
+              json.dump(lock, output)
+              output.flush()
+              os.fsync(output.fileno())
+""",
+        r"""              if os.environ["PREFLIGHT_PRIOR_STATUS"] == "0":
+                  runtime_path = str(Path(path).with_name("expired-handoff-runtime.json"))
+                  fd = os.open(runtime_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                  with os.fdopen(fd, "w") as output:
+                      json.dump({"deployments": deployments, "pods": pods}, output)
+                      output.flush()
+                      os.fsync(output.fileno())
+          if os.environ["PREFLIGHT_PRIOR_STATUS"] == "0":
+              fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(fd, "w") as output:
+                  json.dump(lock, output)
+                  output.flush()
+                  os.fsync(output.fileno())
+""",
+    ),
+    (
+        r"""          PY
+          fi
+
+          mkdir -p artifacts/oci-live-data-rollout/evidence
+          resume_schema=live-betting-data-resume-v2
+          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5
+          cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
+          schema_version=$resume_schema
+          applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
+          applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA
+          failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
+          failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}
+          public_validate_job_conclusion=${{ steps.provenance_request.outputs.public_validate_job_conclusion }}
+          lock_release_step_conclusion=${{ steps.provenance_request.outputs.lock_release_step_conclusion }}
+          fence_release_step_conclusion=${{ steps.provenance_request.outputs.fence_release_step_conclusion }}
+          rehold_step_conclusion=${{ steps.provenance_request.outputs.rehold_step_conclusion }}
+          failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
+          current_source_sha=$SOURCE_SHA
+          baseline_sha256=$observed_baseline_sha
+          runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
+          checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
+          disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+          disk_checkpoint_sha256=${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
+          disk_checkpoint_disposition=${{ steps.provenance.outputs.disk_checkpoint_disposition }}
+          application_change_scope=github-infra-docs-only
+          status=PASS
+          EOF
+          if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+            held_evidence_sha="$(
+              jq -er '.held_handoff_run_id.held_handoff_evidence_sha256 |
+                select(type == "string" and test("^[0-9a-f]{64}$"))' \
+                "$RUNNER_TEMP/live-data-upstream-result.json"
+            )"
+            {
+              printf 'held_handoff_run_id=%s\n' "$HELD_HANDOFF_RUN_ID"
+              printf 'held_handoff_source_sha=%s\n' "$HELD_HANDOFF_SOURCE_SHA"
+              printf 'held_handoff_evidence_sha256=%s\n' "$held_evidence_sha"
+            } >>artifacts/oci-live-data-rollout/evidence/resume-authority.env
+          fi
+
+      - name: Capture and validate pre-mutation rollback baseline
+""",
+        r"""          PY
+          fi
+          }
+
+          preflight_checks=(verify_resume_baseline verify_resume_images verify_resume_fence verify_resume_lock)
+          preflight_status=0
+          # Baseline validation creates the image projection consumed by later checks.
+          # Child checks retain errexit; conditional function calls would disable it.
+          for check in "${preflight_checks[@]}"; do
+            ("$check") &
+            if wait "$!"; then
+              printf 'resume_preflight=%s status=PASS\n' "$check"
+            else
+              printf '::error::Resume preflight failed: %s\n' "$check" >&2
+              preflight_status=1
+            fi
+          done
+          [ "$preflight_status" = 0 ] || exit 1
+
+      - name: Capture and validate pre-mutation rollback baseline
+""",
+    ),
+    (
+        "      - name: Capture and validate pre-mutation rollback baseline\n"
+        "        if: inputs.phase != 'incident-restore'\n",
+        "      - name: Capture and validate pre-mutation rollback baseline\n"
+        "        id: baseline_preflight\n        continue-on-error: true\n"
+        "        if: inputs.phase != 'incident-restore'\n",
+    ),
+    (
+        r"""          RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
+        run: |
+""",
+        r"""          RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
+          RESUME_PREFLIGHT_OUTCOME: ${{ steps.resume_preflight.outcome }}
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
+          RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance_request.outputs.applied_data_run_id || steps.provenance.outputs.resume_applied_data_run_id }}
+          RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance_request.outputs.applied_source_sha || steps.provenance.outputs.resume_applied_source_sha }}
+        run: |
+""",
+    ),
+    (
+        r"""          printf 'BASELINE_SHA256=%s\n' \
+            "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
+            >> "$GITHUB_ENV"
+
+      - name: Verify reader-qualified released activation state
+""",
+        r"""          printf 'BASELINE_SHA256=%s\n' \
+            "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
+            >> "$GITHUB_ENV"
+          if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then
+            resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
+            observed_baseline_sha="$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')"
+            mkdir -p artifacts/oci-live-data-rollout/evidence
+            resume_schema=live-betting-data-resume-v2
+            [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5
+            cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
+          schema_version=$resume_schema
+          applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
+          applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA
+          failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
+          failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}
+          public_validate_job_conclusion=${{ steps.provenance_request.outputs.public_validate_job_conclusion }}
+          lock_release_step_conclusion=${{ steps.provenance_request.outputs.lock_release_step_conclusion }}
+          fence_release_step_conclusion=${{ steps.provenance_request.outputs.fence_release_step_conclusion }}
+          rehold_step_conclusion=${{ steps.provenance_request.outputs.rehold_step_conclusion }}
+          failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
+          current_source_sha=$SOURCE_SHA
+          baseline_sha256=$observed_baseline_sha
+          runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
+          checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
+          disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+          disk_checkpoint_sha256=${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
+          disk_checkpoint_disposition=${{ steps.provenance.outputs.disk_checkpoint_disposition }}
+          application_change_scope=github-infra-docs-only
+          status=PASS
+          EOF
+            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+              held_evidence_sha="$(
+                jq -er '.held_handoff_run_id.held_handoff_evidence_sha256 |
+                  select(type == "string" and test("^[0-9a-f]{64}$"))' \
+                  "$RUNNER_TEMP/live-data-upstream-result.json"
+              )"
+              {
+                printf 'held_handoff_run_id=%s\n' "$HELD_HANDOFF_RUN_ID"
+                printf 'held_handoff_source_sha=%s\n' "$HELD_HANDOFF_SOURCE_SHA"
+                printf 'held_handoff_evidence_sha256=%s\n' "$held_evidence_sha"
+              } >>artifacts/oci-live-data-rollout/evidence/resume-authority.env
+            fi
+          fi
+
+      - name: Verify reader-qualified released activation state
+""",
+    ),
+    (
+        "      - name: Verify reader-qualified released activation state\n        if: >-\n",
+        "      - name: Verify reader-qualified released activation state\n"
+        "        id: activation_preflight\n        continue-on-error: true\n        if: >-\n",
+    ),
+    (
+        "      - name: Revalidate exact release disk checkpoint before lock mutation\n"
+        "        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'\n",
+        "      - name: Revalidate exact release disk checkpoint before lock mutation\n"
+        "        id: disk_preflight\n        continue-on-error: true\n"
+        "        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'\n",
+    ),
+    (
+        r"""            ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
+
+      - name: Acquire database operation lock
+""",
+        r"""            ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh revalidate
+
+      - name: Require complete read-only preflight before lock mutation
+        if: inputs.phase != 'incident-restore'
+        env:
+          RESUME_OUTCOME: ${{ steps.resume_preflight.outcome }}
+          RESUME_REQUIRED: ${{ inputs.failed_deploy_run_id != '0' && inputs.failed_activation_run_id == '0' }}
+          BASELINE_OUTCOME: ${{ steps.baseline_preflight.outcome }}
+          ACTIVATION_OUTCOME: ${{ steps.activation_preflight.outcome }}
+          ACTIVATION_REQUIRED: ${{ steps.provenance_request.outputs.released_activation_qualification == 'pre-arm-no-account' }}
+          DISK_OUTCOME: ${{ steps.disk_preflight.outcome }}
+          DISK_REQUIRED: ${{ env.OCI_RUNTIME_MODE == 'k3s' }}
+        run: |
+          set -euo pipefail
+          preflight_status=0
+          require_preflight() {
+            local expected=skipped
+            if [ "$3" = true ]; then expected=success; fi
+            if [ "$2" != "$expected" ]; then
+              printf '::error::Read-only preflight %s: expected %s, observed %s\n' "$1" "$expected" "$2" >&2
+              preflight_status=1
+            fi
+          }
+          require_preflight resume "$RESUME_OUTCOME" "$RESUME_REQUIRED"
+          require_preflight baseline "$BASELINE_OUTCOME" true
+          require_preflight activation "$ACTIVATION_OUTCOME" "$ACTIVATION_REQUIRED"
+          require_preflight disk "$DISK_OUTCOME" "$DISK_REQUIRED"
+          [ "$preflight_status" = 0 ] || exit 1
+          echo "read_only_preflight=PASS mutation_authority=unchanged"
+
+      - name: Acquire database operation lock
+""",
+    ),
+)
+CURRENT_READER_PREFLIGHT_REGION_SHA256 = (
+    "990404ff986071acece98d6453a15461d31a332364d607a5d5e23413e9008de4",
+    "943ea1a36c85827d0860c163cda1adb68bf4bfc3cb849fe729b8919f903487a4",
+)
+
+
+def current_reader_preflight_aggregation(workflow, label, *, inverse=False):
+    """Translate only the reviewed pre-mutation region, including unchanged predicates."""
+    if type(workflow) is not str or type(inverse) is not bool:
+        fail(f"{label} preflight source input is invalid")
+    start = "\n      - name: Verify exact failed-deploy resume state\n"
+    end = "\n      - name: Acquire database operation lock\n"
+    def require_region(value, expected):
+        if value.count(start) != 1 or value.count(end) != 1:
+            fail(f"{label} preflight source boundaries are absent or duplicated")
+        first, last = value.index(start), value.index(end)
+        if first >= last or hashlib.sha256(
+            value[first:last].encode(),
+        ).hexdigest() != expected:
+            fail(f"{label} preflight validation bodies or aggregate barrier changed")
+    before, after = CURRENT_READER_PREFLIGHT_REGION_SHA256
+    require_region(workflow, after if inverse else before)
+    result = exact_current_reader_edits(
+        workflow, CURRENT_READER_PREFLIGHT_EDITS, label, inverse=inverse,
+    )
+    require_region(result, before if inverse else after)
+    return result
+
+
+def without_read_only_preflight(workflow, label):
+    markers = (
+        "id: resume_preflight", "id: baseline_preflight",
+        "id: activation_preflight", "id: disk_preflight",
+        "verify_resume_baseline()", "verify_resume_fence()",
+        "verify_resume_images()", "verify_resume_lock()",
+        "preflight_checks=", "Require complete read-only preflight before lock mutation",
+    )
+    if not any(marker in workflow for marker in markers):
+        return workflow
+    return current_reader_preflight_aggregation(workflow, label, inverse=True)
+
+
 def current_reader_workflow_v5(workflow, label, *, inverse=False):
+    if inverse:
+        workflow = without_read_only_preflight(workflow, label)
+        workflow = without_native_deployment_consumer(workflow, label)
     return exact_current_reader_edits(
         workflow, CURRENT_READER_WORKFLOW_V5_EDITS, label, inverse=inverse,
     )
@@ -5598,7 +6169,7 @@ def handoff_remaining_guard_v5(deadline, now, phase, elapsed):
     )
 
 
-def receiver_handoff_run(repository, source, boundary, receiver_run, label):
+def receiver_handoff_run(repository, source, boundary, receiver_run, label, *, data_run=""):
     if POSITIVE_INTEGER.fullmatch(receiver_run) is None:
         fail("receiver timing run ID is malformed")
     if boundary in ("dispatch", "materialization"):
@@ -5620,14 +6191,21 @@ def receiver_handoff_run(repository, source, boundary, receiver_run, label):
     ):
         fail("receiver timing workflow identity or lifecycle state changed")
     for run in (latest, first):
+        if not isinstance(run, dict):
+            fail("receiver timing run metadata is invalid")
+        expected_title = f"oci-deploy {source}"
+        if run.get("event") == "workflow_run" and POSITIVE_INTEGER.fullmatch(data_run):
+            expected_title += f" data-{data_run}"
+        elif run.get("event") != "workflow_dispatch":
+            fail("receiver timing has no authenticated native data parent")
         if (
             not isinstance(run, dict) or type(run.get("id")) is not int
             or run["id"] != int(receiver_run) or type(run.get("run_attempt")) is not int
             or run["run_attempt"] != 1 or run.get("head_sha") != source
             or run.get("workflow_id") != workflow["id"] or run.get("path") != workflow["path"]
-            or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "master"
+            or run.get("head_branch") != "master"
             or (run.get("head_repository") or {}).get("full_name") != repository
-            or run.get("display_title") != f"oci-deploy {source}"
+            or run.get("display_title") != expected_title
             or run.get("status") not in {"queued", "waiting", "requested", "pending", "in_progress"}
             or run.get("conclusion") is not None
         ):
@@ -5639,7 +6217,7 @@ def receiver_handoff_run(repository, source, boundary, receiver_run, label):
 
 def validate_receiver_handoff_timing_staged(
     repository, source, producer, deadline, generation, boundary, receiver_run,
-    schema_version,
+    schema_version, *, data_run="",
 ):
     stages, execution_seconds, lease_seconds = staged_handoff_profile(
         schema_version,
@@ -5653,7 +6231,9 @@ def validate_receiver_handoff_timing_staged(
     if boundary != "dispatch" and not receiver_run:
         fail("receiver timing boundary has no exact native receiving run")
     if receiver_run:
-        first = receiver_handoff_run(repository, source, boundary, receiver_run, label)
+        first = receiver_handoff_run(
+            repository, source, boundary, receiver_run, label, data_run=data_run,
+        )
         created = parse_timestamp(first.get("created_at"), label).timestamp()
         elapsed["admission"] = created - packaged
         phase, phase_started = "approval", created
@@ -5754,23 +6334,27 @@ def validate_receiver_handoff_timing_staged(
 
 def validate_receiver_handoff_timing_v4(
     repository, source, producer, deadline, generation, boundary, receiver_run,
+    *, data_run="",
 ):
     return validate_receiver_handoff_timing_staged(
         repository, source, producer, deadline, generation, boundary,
-        receiver_run, "live-betting-data-resume-v4",
+        receiver_run, "live-betting-data-resume-v4", data_run=data_run,
     )
 
 
 def validate_receiver_handoff_timing_v5(
     repository, source, producer, deadline, generation, boundary, receiver_run,
+    *, data_run="",
 ):
     return validate_receiver_handoff_timing_staged(
         repository, source, producer, deadline, generation, boundary,
-        receiver_run, "live-betting-data-resume-v5",
+        receiver_run, "live-betting-data-resume-v5", data_run=data_run,
     )
 
 
-def validate_receiver_handoff_timing(repository, data_run, source, boundary, receiver_run=""):
+def validate_receiver_handoff_timing(
+    repository, data_run, source, boundary, receiver_run="", *, require_native_renewal=False,
+):
     label = "receiver handoff timing"
     producer = require_fixed_run(
         repository, data_run, "oci-live-data-rollout.yml", "success", source,
@@ -5778,15 +6362,25 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     )
     evidence, _, files = parse_live_v6_artifact(repository, data_run, label, include_files=True)
     authority = parse_resume_authority(files, evidence, label)
-    if authority is None or authority["schema_version"] == "live-betting-data-resume-v2":
-        return None
+    legacy = authority is None or authority["schema_version"] == "live-betting-data-resume-v2"
+    if legacy:
+        if not require_native_renewal and receiver_run:
+            receiver = gh_api(f"repos/{repository}/actions/runs/{receiver_run}")
+            require_native_renewal = isinstance(receiver, dict) and receiver.get("event") == "workflow_run"
+        if not require_native_renewal:
+            return None
     if evidence["source_sha"] != source or evidence["workflow_run_id"] != data_run:
         fail("receiver handoff timing producer differs from its authenticated package")
-    workflow = current_held_source(repository, source, label)
-    if held_handoff_source_version(workflow, label) != authority["schema_version"]:
-        fail("receiver handoff source and resume authority profiles differ")
-    schema_version = authority["schema_version"]
-    lease_seconds = handoff_profile_lease_seconds(schema_version, label)
+    if legacy:
+        # A new native receiver proves the producer's actual 1800-second renewal;
+        # historical manual receivers and held-continuation profiles stay unchanged.
+        schema_version, lease_seconds = "native-final-data-1800", 1800
+    else:
+        workflow = current_held_source(repository, source, label)
+        if held_handoff_source_version(workflow, label) != authority["schema_version"]:
+            fail("receiver handoff source and resume authority profiles differ")
+        schema_version = authority["schema_version"]
+        lease_seconds = handoff_profile_lease_seconds(schema_version, label)
     jobs = jobs_for_run(repository, data_run, label)
     job = exact_job(jobs, "rollout", label)
     if (
@@ -5800,10 +6394,12 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     if schema_version == "live-betting-data-resume-v4":
         return validate_receiver_handoff_timing_v4(
             repository, source, producer, deadline, generation, boundary, receiver_run,
+            data_run=data_run,
         )
     if schema_version == "live-betting-data-resume-v5":
         return validate_receiver_handoff_timing_v5(
             repository, source, producer, deadline, generation, boundary, receiver_run,
+            data_run=data_run,
         )
     renewal = deadline - 1800
     now = time.time()
@@ -5812,7 +6408,9 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     if boundary != "dispatch" and not receiver_run:
         fail("receiver timing boundary has no exact native receiving run")
     if receiver_run:
-        first = receiver_handoff_run(repository, source, boundary, receiver_run, label)
+        first = receiver_handoff_run(
+            repository, source, boundary, receiver_run, label, data_run=data_run,
+        )
         created = parse_timestamp(first.get("created_at"), label).timestamp()
         elapsed["admission"] = created - packaged
         if boundary.startswith("approval-") or boundary == "materialization":
@@ -5867,7 +6465,7 @@ def validate_receiver_handoff_timing(repository, data_run, source, boundary, rec
     if now - renewal > 1200:
         fail("receiver handoff whole renewal-to-renewal ceiling was exhausted")
     return {
-        "profile": authority["schema_version"], "lease_seconds": 1800,
+        "profile": schema_version, "lease_seconds": 1800,
         "execution_seconds": 1200, "reserve_seconds": HANDOFF_RESERVE_SECONDS,
         "deadline": deadline, "generation": generation, "boundary": boundary,
         "unfinished_seconds": tail, "remaining_seconds": int(deadline - now),
@@ -6859,6 +7457,8 @@ def _failed_held_current_reader(repository, subject_sha, profile):
     current_workflow = held_source_bytes(
         repository, subject_sha, workflow_path, label,
     )
+    current_workflow = without_native_deployment_consumer(current_workflow, label)
+    current_workflow = without_read_only_preflight(current_workflow, label)
     historical_lines = historical_workflow.splitlines(keepends=True)
     removed = [
         index for index, line in enumerate(historical_lines)
@@ -7912,6 +8512,8 @@ def _failed_clean_reader_current_reader(repository, subject_sha, profile):
     current_workflow = held_source_bytes(
         repository, subject_sha, workflow_path, label,
     )
+    current_workflow = without_native_deployment_consumer(current_workflow, label)
+    current_workflow = without_read_only_preflight(current_workflow, label)
     if (
         current_reader_workflow_v5(
             historical_workflow, label,
@@ -8736,6 +9338,8 @@ def _failed_pre_cas_current_reader(repository, subject_sha, profile):
     current_workflow = held_source_bytes(
         repository, subject_sha, workflow_path, label,
     )
+    current_workflow = without_native_deployment_consumer(current_workflow, label)
+    current_workflow = without_read_only_preflight(current_workflow, label)
     historical_verifier = held_source_bytes(
         repository, profile["control"], verifier_path, label,
     )
@@ -10700,7 +11304,7 @@ def validate_pre_runtime_resume_chain(
             "post-runtime resume failed deployment",
         )
         source_sha = metadata["head_sha"]
-        if metadata.get("display_title") != f"oci-deploy {source_sha}":
+        if not deployment_title_matches(metadata, f"oci-deploy {source_sha}"):
             fail("post-runtime failed deployment title differs")
         validate_descendant_scope(source_sha, evidence["source_sha"])
         retained = authority["resume_maintenance_mode"] == "retained-hold"
@@ -11182,7 +11786,7 @@ def validate_released_activation_pre_arm(
         repository, failed_run, "oci-production-deploy.yml", "failure", label,
     )
     failed_source = failed_metadata["head_sha"]
-    if failed_metadata.get("display_title") != f"oci-deploy {failed_source}":
+    if not deployment_title_matches(failed_metadata, f"oci-deploy {failed_source}"):
         fail(f"{label} historical failed-deployment title differs")
     validate_descendant_scope(failed_source, source_sha)
     failed_inputs = failed_deploy_native_inputs(
@@ -11571,8 +12175,7 @@ def validate_failed_activation_artifacts(
         )
         if (
             failed_metadata.get("head_sha") != applied_source
-            or failed_metadata.get("display_title")
-            != f"oci-deploy {applied_source}"
+            or not deployment_title_matches(failed_metadata, f"oci-deploy {applied_source}")
         ):
             fail(f"{label} failed deployment source lineage is invalid")
         failed_baseline = exact_artifact(
@@ -11686,6 +12289,16 @@ def validate_failed_activation_artifacts(
 
 def validate_failed_deploy_jobs(repository, run_id, profile, label):
     jobs = jobs_for_run(repository, run_id, label)
+    has_resolver = any(job.get("name") == "resolve" for job in jobs)
+    if has_resolver:
+        resolver = exact_job(jobs, "resolve", label)
+        if (
+            len(jobs) != 3 or resolver.get("run_id") != int(run_id)
+            or resolver.get("status") != "completed" or resolver.get("conclusion") != "success"
+            or step_conclusion(resolver, "Resolve final data handoff", label) != "success"
+        ):
+            fail(f"{label} completed deployment resolver is invalid")
+        jobs = [job for job in jobs if job is not resolver]
     deploy = exact_job(jobs, "deploy", label)
     public = exact_job(jobs, "public-validate", label)
     lock = step_conclusion(
@@ -11718,13 +12331,17 @@ def validate_failed_deploy_jobs(repository, run_id, profile, label):
             workflow = blob.stdout.decode("utf-8")
         except UnicodeDecodeError:
             fail(f"{label} trusted workflow is not UTF-8")
-        if re.findall(r"(?m)^  ([a-z][a-z-]*):$", workflow.partition("\njobs:\n")[2]) != [
-            "deploy", "public-validate"
-        ]:
+        expected_jobs = (
+            ["resolve", "deploy", "public-validate"] if has_resolver
+            else ["deploy", "public-validate"]
+        )
+        if re.findall(
+            r"(?m)^  ([a-z][a-z-]*):$", workflow.partition("\njobs:\n")[2],
+        ) != expected_jobs:
             fail(f"{label} trusted workflow job inventory changed")
         names = re.findall(
             r"(?m)^      - name: (.+)$",
-            workflow.split("\n  public-validate:\n")[0],
+            workflow.partition("\n  deploy:\n")[2].partition("\n  public-validate:\n")[0],
         )
         boundary = "Verify immutable image and infrastructure provenance"
         if len(names) != len(set(names)) or names.count(boundary) != 1:
@@ -11910,6 +12527,12 @@ def fixed_run_metadata(
     )
     if not isinstance(base, dict) or not isinstance(attempt, dict):
         fail(f"{label} run metadata is invalid")
+    native_deploy = (
+        workflow == "oci-production-deploy.yml" and event == "workflow_dispatch"
+        and base.get("event") == "workflow_run"
+    )
+    if native_deploy:
+        event = "workflow_run"
     expected_path = f".github/workflows/{workflow}"
     checks = {
         "id": (base.get("id"), int(run_id)),
@@ -11953,6 +12576,8 @@ def fixed_run_metadata(
     head_sha = base.get("head_sha")
     if not isinstance(head_sha, str) or FULL_SHA.fullmatch(head_sha) is None:
         fail(f"{label} control SHA is invalid")
+    if native_deploy:
+        qualify_native_deployment(repository, base, label)
     return base
 
 
@@ -13384,15 +14009,25 @@ def validate_binding(
 
     event = base.get("event")
     titles = binding["titleTemplates"]
-    if event not in titles:
+    native_deploy = (
+        binding["workflow"] == "oci-production-deploy.yml"
+        and event == "workflow_run"
+        and titles.get("workflow_dispatch") == "oci-deploy {subject_sha}"
+    )
+    if native_deploy:
+        qualify_native_deployment(repository, base, binding["input"])
+    elif event not in titles:
         fail(
             f"{binding['input']} run {run_id} event {event!r} is not permitted; "
             f"permitted events are {sorted(titles)}"
         )
-    template = titles[event]
+    template = titles["workflow_dispatch"] if native_deploy else titles[event]
     if template is not None:
         expected_title = substitute(template, expected_head_sha, run_id)
-        if base.get("display_title") != expected_title:
+        if not (
+            deployment_title_matches(base, expected_title) if native_deploy
+            else base.get("display_title") == expected_title
+        ):
             fail(
                 f"{binding['input']} run {run_id} title "
                 f"{base.get('display_title')!r} is not {expected_title!r}"
@@ -13971,6 +14606,25 @@ def main():
     every.add_argument("--successor-run-id", default="")
     every.add_argument("--held-history-file", default="")
     every.set_defaults(func=command_validate_all)
+
+    resolve = sub.add_parser("resolve-deploy")
+    resolve.add_argument("--repository", required=True)
+    resolve.add_argument("--subject-sha", required=True)
+    resolve.add_argument("--upstream-run-id", required=True)
+    resolve.add_argument("--event-file", default="")
+    resolve.add_argument("--upstream-inputs", default="")
+    resolve.add_argument("--receiver-run-id", default="")
+    resolve.add_argument(
+        "--boundary", choices=("dispatch", "approval-1", "approval-3"), default="dispatch",
+    )
+    resolve.set_defaults(func=command_resolve_deploy)
+
+    deployment = sub.add_parser("validate-deployment")
+    deployment.add_argument("--repository", required=True)
+    deployment.add_argument("--subject-sha", required=True)
+    deployment.add_argument("--run-id", required=True)
+    deployment.add_argument("--conclusion", choices=("success", "failure"), required=True)
+    deployment.set_defaults(func=command_validate_deployment)
 
     args = parser.parse_args()
     args.func(args)

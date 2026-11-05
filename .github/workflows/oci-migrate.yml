@@ -192,6 +192,13 @@ jobs:
             )"
             [ "$observed_workflow" = "$workflow_id" ]
             [ "$path" = ".github/workflows/$workflow_file" ]
+            if [ "$workflow_file" = oci-production-deploy.yml ] && [ "$event" = workflow_run ]; then
+              expected_event="$(
+                ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+                  --repository "$REPOSITORY" --subject-sha "$expected_sha" \
+                  --run-id "$run_id" --conclusion success
+              )" || return 1
+            fi
             [ "$event" = "$expected_event" ]
             [ "$head_sha" = "$expected_sha" ]
             [ "$head_branch" = "master" ]

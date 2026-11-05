@@ -152,6 +152,7 @@ RUBY
 
 python3 - "$ROOT_DIR" "$WORK_DIR" "$ORIGINAL_PATH" <<'PY'
 import hashlib
+import itertools
 import json
 from pathlib import Path
 import re
@@ -194,7 +195,10 @@ infra.write_text(
     f"instance_fingerprint={hashlib.sha256(b'fixture-instance').hexdigest()}\n"
 )
 
-for scenario in ("checkpoint", "old-mapping", "missing", "substituted", "malformed", "equal-source"):
+for event, scenario in itertools.product(
+    ("workflow_dispatch", "workflow_run"),
+    ("checkpoint", "old-mapping", "missing", "substituted", "malformed", "equal-source"),
+):
     actual = dict(mapping)
     approved = checkpoint if scenario == "equal-source" else control
     if scenario == "old-mapping":
@@ -205,15 +209,23 @@ for scenario in ("checkpoint", "old-mapping", "missing", "substituted", "malform
         actual["OCI_EXPECTED_SOURCE_SHA"] = "b" * 40
     elif scenario == "malformed":
         actual["OCI_EXPECTED_SOURCE_SHA"] = "not-a-sha"
-    inputs = {"approved_sha": approved, "checkpoint_source_sha": checkpoint}
+    resolved_inputs = {"approved_sha": approved, "checkpoint_source_sha": checkpoint}
+    inputs = dict(resolved_inputs) if event == "workflow_dispatch" else {}
 
     def resolve(value):
         def expression(match):
-            context, name = match.group(1).split(".", 1)
+            reference = match.group(1)
+            if reference.startswith("fromJSON("):
+                return resolved_inputs[reference.rsplit(".", 1)[1]]
+            context, name = reference.split(".", 1)
             return inputs[name] if context == "inputs" else resolve(actual[name])
-        return re.sub(r"\$\{\{\s*((?:inputs|env)\.[A-Za-z_]+)\s*\}\}", expression, value)
+        return re.sub(
+            r"\$\{\{\s*((?:inputs|env)\.[A-Za-z_]+|"
+            r"fromJSON\(needs\.resolve\.outputs\.deploy_inputs\)\.[A-Za-z_]+)\s*\}\}",
+            expression, value,
+        )
 
-    log = work / f"health-{scenario}.calls"
+    log = work / f"health-{event}-{scenario}.calls"
     env = {
         "PATH": str(bin_dir) + ":" + sys.argv[3], "HOME": str(work),
         "TMPDIR": str(work), "OCI_CLI_VERSION": mapping["OCI_CLI_VERSION"], "OCI_RUNTIME_MODE": "k3s",
@@ -222,7 +234,7 @@ for scenario in ("checkpoint", "old-mapping", "missing", "substituted", "malform
         "OCI_DIAGNOSTIC_URL": "https://203.0.113.10.nip.io",
         "INFRA_PROVENANCE_FILE": str(infra),
         "IMAGE_PROVENANCE_FILE": str(work / "success.images.tsv"),
-        "OUTPUT_DIR": str(work / f"health-{scenario}"), "PREFLIGHT_CALL_LOG": str(log),
+        "OUTPUT_DIR": str(work / f"health-{event}-{scenario}"), "PREFLIGHT_CALL_LOG": str(log),
     }
     for key in ("SOURCE_SHA", "CHECKPOINT_SOURCE_SHA", "OCI_EXPECTED_SOURCE_SHA",
                 "EXPECTED_OPERATION_LOCK_SOURCE_SHA", "OCI_PUBLIC_CHECKS_ALREADY_PASSED",
@@ -246,7 +258,7 @@ for scenario in ("checkpoint", "old-mapping", "missing", "substituted", "malform
         }.get(scenario, "health source SHA differs from infrastructure provenance")
         assert result.returncode == 1 and message in result.stderr, (scenario, result.stderr)
         assert not log.exists(), f"{scenario} reached provider access before source admission"
-    print(f"health_source_preflight=PASS scenario={scenario}")
+    print(f"health_source_preflight=PASS event={event} scenario={scenario}")
 PY
 
 echo 'oci_deploy_validation_loop_tests=PASS scenarios=2'

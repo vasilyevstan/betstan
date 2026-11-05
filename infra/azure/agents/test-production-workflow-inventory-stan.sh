@@ -1447,7 +1447,9 @@ for baseline_mutation in \
   both-successor-bindings resume-operation unconditional-successor \
   missing-continuation-initializer resume-history-argument default-successor \
   current-plain-expansion legacy-portable-expansion unsupported-expansion \
-  history-destination ignored-error; do
+  history-destination ignored-error native-missing native-command native-run \
+  native-source native-conclusion native-workflow native-event native-manual \
+  native-caller native-shadow native-extra; do
   reset_fixtures
   write_complete_oci_set
   python3 - "$tmp_dir/oci-live-data-rollout.yml" "$baseline_mutation" <<'PY'
@@ -1560,10 +1562,31 @@ changes = {
         "        id: provenance_request\n",
         "        id: provenance_request\n        continue-on-error: true\n",
     ),
+    "native-missing": (
+        "              ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment",
+        "              # ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment",
+    ),
+    "native-command": ("upstream_run_binding_stan.py validate-deployment", "upstream_run_binding_stan.py validate-all"),
+    "native-run": ('--run-id "$run_id" --conclusion "$expected_conclusion"', '--run-id "$FAILED_DEPLOY_RUN_ID" --conclusion "$expected_conclusion"'),
+    "native-source": ('--subject-sha "$expected_sha"', '--subject-sha "$SOURCE_SHA"'),
+    "native-conclusion": ('--conclusion "$expected_conclusion"', '--conclusion success'),
+    "native-workflow": ('[ "$workflow_file" = oci-production-deploy.yml ]', '[ "$workflow_file" = oci-infrastructure.yml ]'),
+    "native-event": ('[ "$event" = workflow_run ]', '[ "$event" != workflow_dispatch ]'),
+    "native-manual": ('[ "$event" = "$expected_event" ]', 'true'),
+    "native-caller": ('oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID"', 'oci-production-deploy.yml "$PREREQUISITE_RUN_ID"'),
+    "native-shadow": (
+        "          validate_run \\\n            oci-production-build.yml",
+        "          validate_run() { :; }\n          validate_run \\\n            oci-production-build.yml",
+    ),
+    "native-extra": (
+        "          ./infra/oci/scripts/upstream_run_binding_stan.py validate-all",
+        "          ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment --run-id 999\n"
+        "          ./infra/oci/scripts/upstream_run_binding_stan.py validate-all",
+    ),
 }
 old, new = changes[mutation]
 prefix = suffix = ""
-if mutation in {"commented-validator", "wrong-policy", "both-successor-bindings"}:
+if mutation in {"commented-validator", "wrong-policy", "both-successor-bindings"} or mutation.startswith("native-"):
     start = text.index("      - name: Validate exact SHA phase and trusted upstream runs\n")
     end = text.index("\n      - name:", start + 1)
     prefix, text, suffix = text[:start], text[start:end], text[end:]
@@ -1881,6 +1904,72 @@ text = path.read_text()
 path.write_text(text.replace("on:\n  workflow_dispatch:", "on:\n  push:\n    branches: [master]\n  workflow_dispatch:"))
 PY
 assert_fail "automatic OCI deployment" "oci-production-deploy must be workflow_dispatch-only"
+
+reset_fixtures
+write_complete_oci_set
+cp "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" "$tmp_dir/"
+assert_pass "$full_set"
+
+for native_mutation in \
+  trigger extra-trigger missing-resolver resolver-event resolver-phase \
+  resolver-repository resolver-permissions resolver-credentials resolver-call \
+  resolver-parent resolver-event-file resolver-extra resolver-manual \
+  source-input data-input dispatch-inputs deploy-dependency public-dependency \
+  public-checkout shadow-input; do
+  reset_fixtures
+  write_complete_oci_set
+  cp "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" "$tmp_dir/"
+  python3 - "$tmp_dir/oci-production-deploy.yml" "$native_mutation" <<'PY'
+from pathlib import Path
+import sys
+
+path, mutation = Path(sys.argv[1]), sys.argv[2]
+text = path.read_text()
+start, end = text.index("  resolve:\n"), text.index("  deploy:\n")
+if mutation == "missing-resolver":
+    text = text[:start] + text[end:]
+else:
+    changes = {
+        "trigger": ("workflows: [oci-live-data-rollout]", "workflows: [oci-infrastructure]"),
+        "extra-trigger": ("\non:\n", "\non:\n  push:\n    branches: [master]\n"),
+        "resolver-event": ("github.event.workflow_run.event == 'workflow_dispatch'", "github.event.workflow_run.event != 'push'"),
+        "resolver-phase": ("oci-live-data apply-slip-index {0}", "oci-live-data apply-backfills {0}"),
+        "resolver-repository": ("github.event.workflow_run.head_repository.full_name == github.repository", "true"),
+        "resolver-permissions": ("actions: read", "actions: write"),
+        "resolver-credentials": ("persist-credentials: false", "persist-credentials: true"),
+        "resolver-call": ("upstream_run_binding_stan.py resolve-deploy", "upstream_run_binding_stan.py validate-deployment"),
+        "resolver-parent": ('--upstream-run-id "$UPSTREAM_RUN_ID"', '--upstream-run-id "$GITHUB_RUN_ID"'),
+        "resolver-event-file": ('--event-file "$GITHUB_EVENT_PATH"', "--event-file unbound.json"),
+        "resolver-extra": (
+            "          set -euo pipefail\n",
+            "          set -euo pipefail\n          ./infra/oci/scripts/upstream_run_binding_stan.py resolve-deploy --upstream-run-id 999\n",
+        ),
+        "resolver-manual": ('resolved="$(jq -ce . <<<"$DISPATCH_INPUTS")"', 'resolved="{}"'),
+        "source-input": ("SOURCE_SHA: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}", "SOURCE_SHA: ${{ github.sha }}"),
+        "data-input": ("DATA_RUN_ID: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).data_run_id }}", "DATA_RUN_ID: ${{ inputs.data_run_id }}"),
+        "dispatch-inputs": ("DISPATCH_INPUTS: ${{ needs.resolve.outputs.deploy_inputs }}", "DISPATCH_INPUTS: ${{ toJSON(inputs) }}"),
+        "deploy-dependency": ("    needs: resolve\n", "    needs: []\n"),
+        "public-dependency": ("    needs: [resolve, deploy]\n", "    needs: deploy\n"),
+        "public-checkout": ("ref: ${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}", "ref: ${{ github.sha }}"),
+        "shadow-input": (
+            "      - name: Validate exact SHA and trusted upstream runs\n        env:\n",
+            "      - name: Validate exact SHA and trusted upstream runs\n        env:\n          SOURCE_SHA: unbound\n",
+        ),
+    }
+    prefix = suffix = ""
+    if mutation.startswith("resolver-"):
+        prefix, text, suffix = text[:start], text[start:end], text[end:]
+    elif mutation == "source-input":
+        public = text.index("  public-validate:\n")
+        prefix, text, suffix = text[:end], text[end:public], text[public:]
+    before, after = changes[mutation]
+    assert text.count(before) == 1, (mutation, text.count(before))
+    text = prefix + text.replace(before, after) + suffix
+path.write_text(text)
+PY
+  assert_fail "qualified native deployment mutation $native_mutation" \
+    "oci-production-deploy native deploy binding is invalid"
+done
 
 reset_fixtures
 write_complete_oci_set

@@ -1503,7 +1503,62 @@ def validate_live_data_rollout_workflow!(file, document, content)
   script = producer["run"].to_s
   commands = shell_logical_commands(script)
   validator_calls = commands.select do |command|
-    command.start_with?("./infra/oci/scripts/upstream_run_binding_stan.py ")
+    command.include?("./infra/oci/scripts/upstream_run_binding_stan.py")
+  end
+  native_consumer = <<~'SH'
+    validate_run() {
+      local workflow_file="$1"
+      local run_id="$2"
+      local expected_event="$3"
+      local expected_sha="$4"
+      local expected_conclusion="$5"
+      local workflow_id
+      workflow_id="$(
+        gh api "repos/$REPOSITORY/actions/workflows/$workflow_file" --jq '.id'
+      )"
+      read -r observed_workflow path event head_sha head_branch repository status conclusion attempt <<<"$(
+        gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1" \
+          --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+      )"
+      [ "$observed_workflow" = "$workflow_id" ]
+      [ "$path" = ".github/workflows/$workflow_file" ]
+      if [ "$workflow_file" = oci-production-deploy.yml ] && [ "$event" = workflow_run ]; then
+        ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+          --repository "$REPOSITORY" --subject-sha "$expected_sha" \
+          --run-id "$run_id" --conclusion "$expected_conclusion" >/dev/null
+      else
+        [ "$event" = "$expected_event" ]
+      fi
+      [ "$head_sha" = "$expected_sha" ]
+      [ "$head_branch" = "master" ]
+      [ "$repository" = "$REPOSITORY" ]
+      [ "$status" = "completed" ]
+      [ "$conclusion" = "$expected_conclusion" ]
+      [ "$attempt" = "1" ]
+    }
+  SH
+  native_pattern = /^\s*#{native_consumer.split.map { |word| Regexp.escape(word) }.join('\s+')}\s*$/
+  native_binding = script.match(native_pattern)
+  native_caller = <<~'SH'
+    if [ "$FAILED_DEPLOY_RUN_ID" != "0" ] &&
+       [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
+      validate_run \
+        oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID" \
+        workflow_dispatch "$prerequisite_source_sha" failure
+  SH
+  caller_pattern = /^\s*#{native_caller.split.map { |word| Regexp.escape(word) }.join('\s+')}\s*$/
+  caller_binding = script.match(caller_pattern)
+  native_arguments = %w[
+    ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment
+    --repository $REPOSITORY --subject-sha $expected_sha
+    --run-id $run_id --conclusion $expected_conclusion >/dev/null
+  ]
+  unless validator_calls.length == 2 &&
+      Shellwords.shellsplit(validator_calls.last) == native_arguments &&
+      script.scan(native_pattern).length == 1 &&
+      script.scan(/^\s*(?:function\s+)?validate_run\s*(?:\(\s*\))?\s*\{/).length == 1 &&
+      script.scan(caller_pattern).length == 1
+    fail_inventory(binding_error)
   end
   expected_validator = %w[
     ./infra/oci/scripts/upstream_run_binding_stan.py validate-all
@@ -1553,7 +1608,7 @@ def validate_live_data_rollout_workflow!(file, document, content)
   SH
   publisher_pattern = publisher.split.map { |word| Regexp.escape(word) }.join('\s+')
   continuation_binding = nil
-  if validator_calls.length == 1
+  if validator_calls.length == 2
     validator_arguments = Shellwords.shellsplit(validator_calls.first)
     [
       [expected_validator, continuation],
@@ -1569,12 +1624,15 @@ def validate_live_data_rollout_workflow!(file, document, content)
   sanitizer_pattern = sanitizer.split.map { |word| Regexp.escape(word) }.join('\s+')
   sanitizer_binding = script.match(/^\s*#{sanitizer_pattern}\s*$/)
   unless commands.first == "set -euo pipefail" &&
-         validator_calls.length == 1 &&
+         validator_calls.length == 2 &&
          continuation_binding &&
          continuation_binding.end(0) <= script.index("./infra/oci/scripts/upstream_run_binding_stan.py") &&
          sanitizer_binding &&
          sanitizer_binding.end(0) <= script.index("./infra/oci/scripts/upstream_run_binding_stan.py") &&
+         native_binding.begin(0) > script.index("./infra/oci/scripts/upstream_run_binding_stan.py") &&
+         native_binding.end(0) < caller_binding.begin(0) &&
          publication &&
+         caller_binding.end(0) <= publication.begin(0) &&
          publication.begin(0) > script.index("./infra/oci/scripts/upstream_run_binding_stan.py")
     fail_inventory(binding_error)
   end
@@ -1937,13 +1995,157 @@ def validate_oci_production_deploy_binding!(name, document, content)
   end
 end
 
+def normalized_native_deploy_binding!(name, document, content)
+  triggers = workflow_triggers(document)
+  jobs = document.fetch("jobs", {})
+  return unless triggers.key?("workflow_run") || (jobs.is_a?(Hash) && jobs.key?("resolve"))
+
+  error = "#{name} native deploy binding is invalid"
+  expected_trigger = {
+    "workflows" => ["oci-live-data-rollout"],
+    "types" => ["completed"], "branches" => ["master"]
+  }
+  title = <<~'TITLE'.chomp
+    oci-deploy ${{ inputs.approved_sha || github.event.workflow_run.head_sha }}${{ github.event_name == 'workflow_run' && format(' data-{0}', github.event.workflow_run.id) || '' }}
+  TITLE
+  unless triggers.keys.sort == %w[workflow_dispatch workflow_run] &&
+      triggers["workflow_run"] == expected_trigger &&
+      document["run-name"] == title &&
+      document["permissions"] == { "actions" => "read", "contents" => "read" } &&
+      document["concurrency"] == { "group" => "oci-control-plane", "cancel-in-progress" => false } &&
+      jobs.is_a?(Hash) && jobs.keys == %w[resolve deploy public-validate] &&
+      jobs.values.all? { |job| job.is_a?(Hash) }
+    fail_inventory(error)
+  end
+  resolver_condition = <<~'IF'.split.join(" ")
+    github.run_attempt == 1 &&
+    (github.event_name == 'workflow_dispatch' ||
+     (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.display_title == format('oci-live-data apply-slip-index {0}', github.event.workflow_run.head_sha) &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.run_attempt == 1))
+  IF
+  resolver_script = <<~'SH'
+    set -euo pipefail
+    [ "$GITHUB_REF_NAME" = master ]
+    [ "$GITHUB_RUN_ATTEMPT" = 1 ]
+    [ "$GITHUB_SHA" = "$(gh api "repos/$REPOSITORY/git/ref/heads/master" --jq '.object.sha')" ]
+    if [ "$EVENT_NAME" = workflow_run ]; then
+      resolved="$(
+        ./infra/oci/scripts/upstream_run_binding_stan.py resolve-deploy \
+          --repository "$REPOSITORY" \
+          --subject-sha "$GITHUB_SHA" \
+          --upstream-run-id "$UPSTREAM_RUN_ID" \
+          --event-file "$GITHUB_EVENT_PATH"
+      )"
+    else
+      [ "$EVENT_NAME" = workflow_dispatch ]
+      resolved="$(jq -ce . <<<"$DISPATCH_INPUTS")"
+    fi
+    printf 'deploy_inputs=%s\n' "$resolved" >> "$GITHUB_OUTPUT"
+  SH
+  expected_resolver = {
+    "if" => resolver_condition, "runs-on" => "ubuntu-latest", "timeout-minutes" => 10,
+    "permissions" => { "actions" => "read", "contents" => "read" },
+    "outputs" => { "deploy_inputs" => "${{ steps.resolve.outputs.deploy_inputs }}" },
+    "steps" => [
+      {
+        "name" => "Checkout immutable workflow source without credentials",
+        "uses" => "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+        "with" => { "ref" => "${{ github.sha }}", "persist-credentials" => false }
+      },
+      {
+        "name" => "Resolve final data handoff", "id" => "resolve",
+        "env" => {
+          "GH_TOKEN" => "${{ github.token }}", "REPOSITORY" => "${{ github.repository }}",
+          "EVENT_NAME" => "${{ github.event_name }}", "DISPATCH_INPUTS" => "${{ toJSON(inputs) }}",
+          "UPSTREAM_RUN_ID" => "${{ github.event.workflow_run.id }}"
+        },
+        "run" => resolver_script
+      }
+    ]
+  }
+  resolver = jobs["resolve"].dup
+  resolver["if"] = resolver["if"].to_s.split.join(" ")
+  unless resolver == expected_resolver &&
+      jobs["deploy"]["needs"] == "resolve" &&
+      jobs["deploy"]["if"] == "github.run_attempt == 1" &&
+      jobs["public-validate"]["needs"] == %w[resolve deploy] &&
+      jobs["public-validate"]["if"] == "github.run_attempt == 1 && needs.deploy.result == 'success'"
+    fail_inventory(error)
+  end
+  bindings = %w[
+    SOURCE_SHA BUILD_RUN_ID INFRASTRUCTURE_RUN_ID DATA_RUN_ID
+    CHECKPOINT_SOURCE_SHA DISK_CHECKPOINT_RUN_ID
+    BASELINE_RECOVERY_RUN_ID BASELINE_RECOVERY_SOURCE_SHA CONFIRMATION
+  ].to_h { |variable| [variable, variable == "SOURCE_SHA" ? "approved_sha" : variable.downcase] }
+  bindings.each do |variable, input|
+    unless jobs["deploy"].dig("env", variable) == "${{ fromJSON(needs.resolve.outputs.deploy_inputs).#{input} }}"
+      fail_inventory(error)
+    end
+  end
+  unless jobs["deploy"].dig("env", "DISPATCH_INPUTS") == "${{ needs.resolve.outputs.deploy_inputs }}"
+    fail_inventory(error)
+  end
+  %w[deploy public-validate].each do |job_name|
+    job = jobs[job_name]
+    if workflow_scalar_values(job).any? { |value| value.match?(/\$\{\{[^}]*\binputs\./) }
+      fail_inventory(error)
+    end
+    checkouts = job.fetch("steps", []).select { |step| step.fetch("uses", "").start_with?("actions/checkout@") }
+    expected_ref = job_name == "deploy" ? "${{ env.SOURCE_SHA }}" :
+      "${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}"
+    fail_inventory(error) unless checkouts.length == 1 && checkouts.first.dig("with", "ref") == expected_ref
+    job.fetch("steps").each do |step|
+      bindings.each do |variable, input|
+        next unless step.fetch("env", {}).key?(variable)
+        unless step.dig("env", variable) == "${{ fromJSON(needs.resolve.outputs.deploy_inputs).#{input} }}"
+          fail_inventory(error)
+        end
+      end
+      if step.fetch("env", {}).key?("DISPATCH_INPUTS") &&
+          step.dig("env", "DISPATCH_INPUTS") != "${{ needs.resolve.outputs.deploy_inputs }}"
+        fail_inventory(error)
+      end
+    end
+  end
+  identities = jobs["public-validate"].fetch("steps").select { |step| step["name"] == "Validate public-check identity" }
+  unless identities.length == 1 &&
+      identities.first.dig("env", "SOURCE_SHA") == "${{ fromJSON(needs.resolve.outputs.deploy_inputs).approved_sha }}"
+    fail_inventory(error)
+  end
+
+  # Only the exact read-only resolver is excluded from protected-job/manual checks.
+  normalized = Marshal.load(Marshal.dump(document))
+  normalized.delete(true)
+  normalized["on"] = { "workflow_dispatch" => triggers["workflow_dispatch"] }
+  normalized["jobs"].delete("resolve")
+  resolver_block = /^  resolve:\n.*?(?=^  deploy:\n)/m
+  fail_inventory(error) unless content.scan(resolver_block).length == 1
+  normalized_content = content.sub(resolver_block, "")
+  bindings.each do |variable, input|
+    normalized_content = normalized_content.gsub(
+      "${{ fromJSON(needs.resolve.outputs.deploy_inputs).#{input} }}", "${{ inputs.#{input} }}"
+    ).gsub(
+      "${{ env.#{variable} }}", "${{ inputs.#{input} }}"
+    )
+  end
+  normalized_content = normalized_content.gsub(
+    "${{ needs.resolve.outputs.deploy_inputs }}", "${{ toJSON(inputs) }}"
+  )
+  [normalized, normalized_content]
+end
+
 def validate_oci_workflow!(name, file, document, content)
   expected_file = "#{name}.yml"
   unless File.basename(file) == expected_file
     fail_inventory("#{name} must use .github/workflows/#{expected_file}")
   end
 
-  validate_environment!(name, document)
+  native_deploy = normalized_native_deploy_binding!(name, document, content) if name == "oci-production-deploy"
+  validate_environment!(name, native_deploy ? native_deploy.first : document)
   reject_content(
     content,
     /(?:^|:)latest(?:\s|$)/i,
@@ -2015,7 +2217,7 @@ def validate_oci_workflow!(name, file, document, content)
   elsif name == "oci-live-betting-disable"
     validate_live_betting_disable_workflow!(file, document, content)
   elsif name == "oci-production-deploy"
-    validate_oci_production_deploy_binding!(name, document, content)
+    validate_oci_production_deploy_binding!(name, *(native_deploy || [document, content]))
   elsif name == "oci-ghcr-cache-recovery"
     validate_ghcr_cache_recovery_workflow!(name, document, content)
   else

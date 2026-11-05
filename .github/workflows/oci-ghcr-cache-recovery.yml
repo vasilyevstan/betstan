@@ -114,6 +114,13 @@ jobs:
             workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/$workflow" --jq .id)"
             base_run="$(gh api "repos/$REPOSITORY/actions/runs/$run_id")"
             run="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1")"
+            if [ "$workflow" = oci-production-deploy.yml ] && [ "$(jq -r .event <<<"$run")" = workflow_run ]; then
+              event="$(
+                ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+                  --repository "$REPOSITORY" --subject-sha "$source_sha" \
+                  --run-id "$run_id" --conclusion success
+              )" || return 1
+            fi
             jq -e '.run_attempt == 1' <<<"$base_run" >/dev/null
             jq -e --argjson base "$base_run" '
               .id == $base.id and .workflow_id == $base.workflow_id and

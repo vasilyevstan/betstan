@@ -564,6 +564,26 @@ POLICIES = {
         upstream_operations=["ghcr-package-repair-build"],
         requires_consumed_upstream=True,
     ),
+    "oci-production-deploy-automatic": automatic(
+        "oci-production-deploy-automatic",
+        "oci-production-deploy.yml",
+        "workflow_run",
+        "oci-production",
+        "record-upstream",
+        "oci-deploy {control_sha} data-{upstream_run_id}",
+        upstream_workflow="oci-live-data-rollout.yml",
+        upstream_event="workflow_dispatch",
+        upstream_conclusion="success",
+        upstream_operations=[
+            "oci-live-data-apply-slip-index",
+            "oci-live-data-resume-deploy",
+            "oci-live-data-continue-held-handoff",
+            "oci-live-data-resume-deploy-released",
+            "oci-live-data-resume-activation",
+            "oci-live-data-resume-activation-released",
+        ],
+        requires_consumed_upstream=True,
+    ),
     "oci-production-deploy": dispatch(
         "oci-production-deploy",
         "oci-production-deploy.yml",
@@ -1303,6 +1323,7 @@ POLICIES = {
         },
         subject_input="approved_sha",
         subject_relation="current",
+        derived_operations=["oci-production-deploy-automatic"],
         upstream_run_bindings=[
             OCI_BUILD_RUN_BINDING,
             OCI_CURRENT_INFRASTRUCTURE_BINDING,
@@ -1343,6 +1364,7 @@ POLICIES = {
         },
         subject_input="approved_sha",
         subject_relation="current",
+        derived_operations=["oci-production-deploy-automatic"],
         upstream_run_bindings=[
             OCI_BUILD_RUN_BINDING,
             OCI_CURRENT_INFRASTRUCTURE_BINDING,
@@ -1386,6 +1408,7 @@ POLICIES = {
         patterns={"baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$"},
         subject_input="approved_sha",
         subject_relation="current",
+        derived_operations=["oci-production-deploy-automatic"],
         upstream_run_bindings=[
             OCI_BUILD_RUN_BINDING, OCI_CURRENT_INFRASTRUCTURE_BINDING, OCI_DISK_CHECKPOINT_BINDING,
             {
@@ -1433,6 +1456,7 @@ POLICIES = {
         },
         subject_input="approved_sha",
         subject_relation="current",
+        derived_operations=["oci-production-deploy-automatic"],
         upstream_run_bindings=[
             OCI_BUILD_RUN_BINDING,
             OCI_CURRENT_INFRASTRUCTURE_BINDING,
@@ -1479,6 +1503,7 @@ POLICIES = {
         object_id_or_literals={"failed_activation_user_id": []},
         subject_input="approved_sha",
         subject_relation="current",
+        derived_operations=["oci-production-deploy-automatic"],
         upstream_run_bindings=[
             OCI_BUILD_RUN_BINDING,
             OCI_CURRENT_INFRASTRUCTURE_BINDING,
@@ -1524,6 +1549,7 @@ POLICIES = {
         object_id_or_literals={"failed_activation_user_id": ["0"]},
         subject_input="approved_sha",
         subject_relation="current",
+        derived_operations=["oci-production-deploy-automatic"],
         upstream_run_bindings=[
             OCI_BUILD_RUN_BINDING,
             OCI_CURRENT_INFRASTRUCTURE_BINDING,

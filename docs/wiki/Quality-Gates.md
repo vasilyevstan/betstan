@@ -48,6 +48,11 @@ GitHub accepts every candidate workflow. The workflow guard rejects `runner`
 expressions in job-level environment values; runner-dependent values belong
 in step environments.
 
+The live-data contract also checks the native 21,000-character limit for each
+workflow shell body. Syntax-only lint does not enforce that platform limit.
+Keep large checks in bounded existing steps without weakening their outcome
+barrier or evidence requirements.
+
 ## Compatibility-stage delivery redesign
 
 Repository policy consolidation does not replace executable controls or
@@ -239,6 +244,12 @@ workflow file that no guarded suite references. Every decision prints a
 `suite_gate=` line. Suites started by a running guarded suite always run. The
 scheduled `ci-full-nightly` workflow runs every shard with
 `BETSTAN_CI_FULL=1` on `master` as the backstop for selection mistakes.
+
+Concurrent selectors serialize shallow-history deepening within the checkout,
+then recheck that the first parent is available. This prevents competing Git
+fetches from turning an unrelated change into several full safety runs.
+Lock/fetch timeouts, unavailable history and unknown inputs still select full
+validation; selection never treats a failed fetch as proof that a diff is empty.
 
 The workflow-contract wrapper runs independent governance and data suites
 concurrently, waits for every child, and fails if any child fails. Independent
