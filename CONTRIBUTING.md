@@ -4,613 +4,102 @@
 
 `master` is the production branch. Never commit or push directly to it.
 
-Use this flow:
-
-1. Make normal changes on a feature, fix, or operations branch and integrate them into `dev`.
+1. Make changes on a feature, fix, or operations branch and integrate them into `dev` by pull request. Never push directly to `dev`.
 2. Validate the complete `dev` branch.
-3. Promote production only with an up-to-date pull request from `dev` to `master`.
-4. Require the trusted, base-scoped `branch-policy/master` and `pr-quality-gates/master` statuses on both the promotion head and current merge snapshot to pass.
-5. Before merging a promotion, verify origin/ownership and the applicable
-   exact-head approval mode, including every production-capable workflow.
-6. Use ancestry-preserving merges for integration and promotion. Verify the
-   intended protected ancestry and exact tested snapshot before merging.
-   Reconcile `master` into `dev` only when ancestry requires it, not through an
-   automatic content-identical synchronization PR. `master` enforces strict
-   up-to-date checks, so each merge promotion leaves a content-neutral merge
-   commit that the next promotion head must contain. Merge the current
-   `origin/master` into the next branch bound for `dev` (it changes no content);
-   open a standalone synchronization PR only when no other `dev` work precedes
-   the next promotion.
+3. Promote only with an up-to-date pull request from `dev` to `master`. PRs into `master` from any other branch are forbidden.
+4. Require the trusted, base-scoped `branch-policy/master` and `pr-quality-gates/master` statuses to pass on both the promotion head and current merge snapshot.
+5. Before merging a promotion, verify origin/ownership and the applicable exact-head approval, including every production-capable workflow.
+6. Use ancestry-preserving merges. Verify protected ancestry and the exact tested snapshot before merging.
+7. After a promotion, merge the current `origin/master` into the next `dev`-bound branch (content-neutral) so the next promotion head contains the previous promotion merge. Open a standalone sync PR only when no other `dev` work precedes the next promotion.
 
-Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
+Never rewrite or force-push `master` or `dev`. Preserve unrelated tracked, staged, and untracked work.
 
 ### Concurrent feature delivery
 
-Independent sessions may develop and merge compatible changes through separate
-pull requests. A `dev`-to-`master` promotion may intentionally contain several
-reviewed features; a release is not required to reproduce one session's tree
-in isolation.
-
-Each releasing session records the commit or commits its requirement depends
-on. Before claiming release completion, prove every required commit is an
-ancestor of the exact current `master` SHA selected for build and deployment.
-Additional protected commits are allowed, but the complete aggregate candidate
-must pass its own exact-SHA checks, workflow inventory, rollback readiness, and
-production acceptance. If `master` advances during a release chain, supersede
-the stale chain and adopt the new exact current-master candidate when it still
-contains the required commits; never reset `master` or deploy an older SHA to
-preserve session exclusivity.
-
-Development and PR integration may proceed concurrently. Production-capable
-workflow dispatches, data mutations, deployments, activation, rollback, and
-recovery remain serialized by the existing exclusivity and operation-lock
-contracts.
+Sessions may merge compatible changes independently; a promotion may aggregate several features. Before claiming release completion, prove every required commit is an ancestor of the exact `master` SHA built and deployed. Additional protected commits are allowed, but the aggregate must pass its own exact-SHA checks, workflow inventory, rollback readiness and production acceptance. If `master` advances mid-release, adopt the new exact candidate; never reset `master` or deploy an older SHA. Production dispatches, data mutations, deployments, activation, rollback and recovery stay serialized by the exclusivity and operation-lock contracts.
 
 ## Pull request evidence
 
-Treat every pull request description as durable review and release evidence,
-not as a short notification. Use `.github/pull_request_template.md`. The
-following core evidence is required on every PR; conditional operational fields
-remain present and say `not applicable` when they do not apply:
+Use `.github/pull_request_template.md`; the description is durable review and release evidence. Every PR records:
 
-- why the change exists and the failure or requirement that triggered it;
-- exact base/head SHAs and, for promotions or ancestry syncs, the resulting
-  merge SHA;
-- changed scope, compatibility effects, and explicit exclusions;
-- commands and exact validation outcomes;
-- full production, data, feature-flag, and rollback evidence when applicable;
-  keep each field present and write `not applicable` otherwise;
-- the reason for an intentional closure, replacement, or zero-diff ancestry
-  change.
+- why the change exists;
+- exact base/head SHAs and, for promotions or syncs, the merge SHA;
+- scope, compatibility effects and exclusions;
+- commands and exact outcomes;
+- production, data, feature-flag and rollback evidence, or `not applicable`;
+- the reason for any closure, replacement or zero-diff ancestry change.
 
-Every PR also carries public-safe informational context labels:
+For user-facing changes, record affected routes, components, states, themes and viewports, reference patterns, intentional exceptions, verification source and any evidence gap. Otherwise write `not applicable`.
 
-- `session:<slug>` identifies the bounded development session, for example
-  `session:live-betting-2026-09-04`;
-- `feature:<slug>` groups the durable product or engineering feature, for
-  example `feature:live-betting`.
+Use short, plain titles. Title wording and presentation are informational; missing rationale, source, approval, compatibility or validation evidence is blocking.
 
-Keep the same pair on the session's implementation, promotion, and required
-reconciliation PRs. A shared promotion may carry multiple session
-and feature labels because it can aggregate reviewed work from several
-sessions. Never expose an internal session UUID, local path, user identity,
-credential, private runtime reference, or production identifier in a label.
-CLI work applies a pair with
-`PR_SESSION_TAG=<slug> PR_FEATURE_TAG=<slug>
-./infra/azure/agents/pr-context-labels-stan.sh <pr>`.
+### Context labels
 
-These labels are discoverability metadata only. They never grant authority,
-select automatic approval, satisfy a check, block a merge, authorize a
-release, or alter rollback. Valid `session:` and `feature:` labels are excluded
-from the trusted PR-label fingerprint; `copilot-cli-managed` and every unknown
-or malformed label retain their existing policy meaning. The helper adds
-labels without removing current labels and warns rather than blocking the PR
-flow when GitHub label mutation is temporarily unavailable.
+Every PR carries one public-safe `session:<slug>` (bounded session) and one `feature:<slug>` (durable feature) label, kept across implementation, promotion and sync PRs; aggregate promotions may carry several. Never use a session UUID, local path, identity, credential or production identifier. Apply with:
 
-For user-facing changes, record the affected routes, components, states,
-themes and viewports, relevant reference patterns, intentional exceptions and
-their rationale, verification source and any evidence gap. Use the UX
-specialist when design or interaction risk needs that expertise; a separate
-two-phase specialist invocation is not compulsory for every visual edit.
-Non-user-facing changes write `not applicable`.
+```bash
+PR_SESSION_TAG=<slug> PR_FEATURE_TAG=<slug> ./infra/azure/agents/pr-context-labels-stan.sh <pr>
+```
 
-Prefer short, plain-language PR titles that a reviewer can
-understand without opening the diff, such as `Add second-half score betting` or
-`Fix live slip alignment`. Title wording, body presentation and session/feature
-labels are informational, not safety authority. Actual missing rationale,
-source, approval, compatibility or validation evidence remains blocking.
-This candidate's `pr-merge-safety-stan.sh` no longer rejects title wording;
-its approval, current-source, ancestry and exclusivity checks remain.
-Executable checks in not-yet-replaced protected revisions still govern their
-runs until proven cutover; no remote cutover is implied.
+These labels are discoverability metadata only. They never grant authority, select approval, satisfy or block a check, or affect release or rollback, and are excluded from the trusted label fingerprint. The helper only adds labels and warns instead of blocking.
+
+### Origin and approval
+
+Only Copilot CLI may apply `copilot-cli-managed`, and only to a PR the active CLI workflow created and owns; never relabel a human PR. The CLI and `gh` share one GitHub identity, so the label is an operational convention, not proof of origin.
+
+Verified CLI-created and CLI-owned PRs use `COPILOT_CLI_AUTO_APPROVE=true` without a separate personal prompt, only after `pr-merge-safety-stan.sh` verifies the label, exact refs, trusted checks, resolved threads, production workflow inventory and no competing production activity. Every other PR requires `APPROVED_SHA` equal to its exact current head, including PRs into `dev`; human `master` promotions also require the exact `APPROVED_WORKFLOWS`. Automatic mode never skips checks or production safety.
+
+Progress eligible CLI-owned merges and follow-on protected Actions promptly through the canonical approval path, and respect approved wait timers. Never adopt human-origin work or another owner's operation. Do not merge until `pr-merge-safety-stan.sh` passes for the exact current head.
 
 ## Public documentation impact
 
-Every change records a documentation-impact assessment after implementation
-and before source acceptance. The accountable owner may perform it directly;
-use `betstan-public-wiki-editor` when its expertise is needed. When the exact
-diff clearly has no public documentation impact, the task record names the inspected
-paths and explains why no canonical page changes are needed.
+Every change records a documentation-impact assessment before source acceptance (the owner may do it; use `betstan-public-wiki-editor` when expertise is needed). A no-impact result names the inspected paths and why. Changes to product behavior, architecture, contracts, data lifecycle, security, infrastructure, quality gates, release, UI/UX or agent responsibilities update the relevant `docs/wiki/` pages in the same PR. After merge, publish `docs/wiki/*.md` byte-for-byte to the GitHub wiki and verify. Public docs omit credentials, private approval records, local/session paths, private infrastructure identifiers, production data and bypass procedures.
 
-Changes to product behavior, architecture, contracts, data lifecycle,
-security, infrastructure, quality gates, release behavior, UI/UX, or agent
-responsibilities update the relevant canonical `docs/wiki/` pages in the same
-pull request.
+## Verification
 
-## Risk-conditional validation
-
-Use one accountable owner and the smallest verification that covers the exact
-diff: relevant existing tests, inspection or build checks for ordinary changes.
-Trust or state-boundary changes require independent verification of the
-changed authorization, CI trust, release authority, physical writer ownership,
-data integrity, migration or recovery behavior. The author cannot supply their
-own independent verification. This is not a blanket no-review or no-test policy.
-
-Implementation, verification and privileged execution are responsibilities,
-not a compulsory sequence of agents. `.github/agents/README.md` owns capability
-routing and evidence reuse. There is no mandatory architect/simplifier/
-developer/critic/test-engineer/final-validator conveyor, model quorum,
-unanimity veto, review-of-review or repeated test/status-only handoff. Reuse
-accepted design and unaffected evidence; independently verify the actual
-changed trust/state boundaries, not the existence of prior review tokens.
-
-Before adding process, name its unmet acceptance criterion or evidenced
-blocker. The owner may remove optional duplication directly without a
-separate simplification or continuation round. Keep required current-SHA CI,
-protected ancestry, origin/ownership approval, immutable deployed identity,
-physical single-writer locks/fences, data integrity, compatible recovery and
-observed health. Existing executable controls remain authoritative until
-their replacements are proven and activated. No new source-snapshot verifier
-or controller is made active by these documentation changes.
-
-The repository files are the reviewed source of truth. After the exact commit
-is merged, publish `docs/wiki/*.md` byte-for-byte to the GitHub wiki and verify
-the resulting pages and links. Public documentation must omit credentials,
-private approval records, local/session paths, private infrastructure
-identifiers, unredacted production data, and actionable bypass or emergency
-procedures.
-
-The UX specialist may establish a consistency finding from source, stable
-references, or supplied screenshots. A new screenshot suite is not mandatory
-solely because a change is visual, but precise clipping, collision, overflow,
-touch-target, pixel-geometry, or dynamic-interaction claims require the
-smallest appropriate rendered evidence. See
-`docs/wiki/UI-UX-Consistency.md`.
-
-Keep this detail on implementation, promotion, synchronization, and closed
-attempt PRs. The lean `production-build.yml` validates `opened`, `reopened`
-and `synchronize`, not title/body edits. V4 quality identity excludes metadata;
-legacy markers retain their original freshness rules until replaced by a real
-source transition. Derive the exact head SHA immediately before preparing the
-description. Create the CLI and context labels together when possible; the
-required context-label helper is read-only when they already exist.
-
-Copilot CLI-created pull requests carry the `copilot-cli-managed` label. Only
-Copilot CLI may apply it, and only to a PR that the active CLI workflow created
-and owns; never relabel an existing human PR. Because the CLI and a human using
-`gh` share the same GitHub identity, this label is an operational convention,
-not cryptographic attestation.
-
-Verified CLI-created and CLI-owned PRs use `COPILOT_CLI_AUTO_APPROVE=true`
-without a separate personal prompt only after the merge-safety script verifies the label, exact
-refs, trusted required checks, resolved review threads, production workflow
-inventory, and absence of actionable competing production activity. Every
-other PR requires `APPROVED_SHA` equal to its exact current head, including
-PRs targeting `dev`. Human `master` promotions also require the exact
-`APPROVED_WORKFLOWS` inventory. Automatic mode never skips required checks,
-immutable-SHA gates, or production safety.
-
-Promptly progress eligible CLI-owned merges and follow-on protected Actions
-through the canonical approval path, including later gates in the same chain.
-Respect approved environment wait timers. Never adopt human-origin work or
-another owner's operation; the managed label alone is not proof of ownership.
-
-Do not merge a PR until `pr-merge-safety-stan.sh` passes in the correct
-automatic or human mode for its exact current head.
+- One accountable owner; the smallest verification covering the exact diff. Targeted checks during correction, one full validation of the final SHA.
+- Trust or state-boundary changes (authorization, CI trust, release authority, physical writer ownership, data integrity, migration, recovery) need independent verification; the author cannot supply it.
+- No mandatory agent conveyor, model quorum, review-of-review or status-only handoff ([agent routing](.github/agents/README.md)). Name an unmet criterion before adding process.
+- Always keep current-SHA CI, protected ancestry, origin/ownership approval, immutable deployed identity, physical single-writer locks/fences, data integrity, compatible recovery and observed health. Existing executable controls stay authoritative until replacements are proven and activated.
+- Precise UI geometry or interaction claims need the smallest rendered evidence; see `docs/wiki/UI-UX-Consistency.md`.
 
 ## Shared Common package
 
-`common/src/` is the repository-owned source for the next
-`@betstan/common` package candidate. It must remain a normal tracked directory,
-never a submodule, gitlink, workspace dependency, or `file:` dependency.
-Deployable services compile against the exact published version in their own
-manifest and lockfile; source existing in this repository is not implicitly
-available to those images.
+`common/src/` is the source for the next `@betstan/common` candidate: a normal tracked directory, never a submodule, gitlink, workspace or `file:` dependency. Services compile against their exact published pin. Read `common/README.md` first; keep all eight backend consumers on one exact version, bump after each publish, prove old/new and rollback compatibility, and validate the packed artifact. Only `.github/workflows/common-package-publish.yml` may publish, from an exact current `master` first attempt via `common-package-release`, under `next`, preserving `latest`.
 
-Read `common/README.md` before changing a shared contract. Keep all eight
-backend consumers on one exact published version, bump the Common source
-version after an immutable version has been published, prove old/new
-producer-consumer and rollback compatibility, and validate the packed artifact
-without allowing npm to re-resolve unrelated dependencies. Package publication
-and consumer repinning are separate reviewed release steps.
+## Protected operations
 
-Only `.github/workflows/common-package-publish.yml` may publish this package.
-It is a protected, first-attempt, exact-current-`master` dispatch through
-`common-package-release`; it publishes one reviewed tarball under `next`,
-preserves `latest`, and retains registry byte-identity and provenance evidence.
+Approval is classified by origin, not workflow type, for deploy, activation, capacity, infrastructure, GHCR, live-data, migration, recovery and rollback.
 
-Protected environment approval is classified by origin, not workflow type.
-Every protected operation dispatched by the active Copilot CLI must use
-`copilot-cli-dispatch-stan.sh` with an operation-specific JSON request stored
-outside the repository. Before calling GitHub, the dispatcher persists a
-private `dispatching` intent and mode-`0600` output capture. It then binds the
-exact returned run ID, workflow ID/path/blob, transport input hash, current
-control SHA, subject or historical target SHA, title, event, and environment
-to a private one-run authority record. `copilot-cli-run-approval-stan.sh` may
-approve that exact first attempt without a personal prompt. Automatic build
-chains receive the same durable approval record after deriving authority from
-the labelled promotion and exact upstream run; recovery chains must derive
-from an exact consumed upstream record. A human dispatch, direct
-`gh workflow run`, scheduled run, stale master, rerun, mismatched record, or
-competing production run remains personally gated.
-
-This authority applies equally to deploy, activation, capacity,
-infrastructure, GHCR package management and cache repair, live-data work,
-broad migration, recovery, and rollback. It never bypasses workflow
-confirmations, package visibility checks, provenance, rollback readiness,
-runtime locks, or post-operation validation. A package sentinel still does
-not replace the one-time Package settings visibility change or anonymous-pull
-proof. Build repair must cite the exact failed first-attempt build and its
-successful first-attempt `production-build`; it rebuilds and digest-compares
-existing tags instead of trusting or overwriting them.
-
-The repository and `gh` use one GitHub identity, so the private one-run record
-is an operational ownership boundary rather than cryptographic identity.
-Never create, copy, or retrofit a record for a human-created run. An ambiguous
-dispatch with no captured run URL remains blocked for explicit operator
-reconciliation; never infer a run from timing or title. After a dispatcher
-crash, use `--resume-captured` when the durable capture contains the URL, or
-`--resume-run <run-id>` after a bound run has not materialized. The default
-terminal first-attempt retirement rule requires zero jobs and zero pending
-deployments. The separate approved-zero-execution proof still requires empty
-step lists and no assigned runner. The distinct v5
-`preflight-read-only-failure` proof admits only the fixed, reviewed
-`oci-live-data-resume-deploy` execution profile: complete authenticated native
-evidence and the pinned executable closure must prove that every
-production-capable step was skipped. It preserves the original consumed
-generation and receipts; it never reruns that attempt, changes the runtime
-hold, or creates execution authority. Replacement requires a separate normal
-preparation and fresh one-use authority with all existing gates.
-
-An ambiguous approval response leaves the record
-`inflight`; use the approver's explicit `--reconcile` path and never replay the
-POST directly. Reconciliation may consume the gate only when GitHub review
-history contains a new exact approved review for the recorded reviewer,
-comment, environment, downstream run, and operation. Otherwise it restores
-retry authority only while the same active gate remains, or stays unresolved
-and fail-closed.
-
-When disabled history for either frozen prepared-transition workflow -- the
-live-data handoff or live-betting activation -- contains only
-evidence-complete unmaterialized queue records, use the dispatcher's explicit
-prepared lifecycle before external workflow enablement. The request's
-policy-resolved workflow is sealed independently, while every other workflow
-keeps the default blocking rules. The prepared intent blocks every competing
-protected request; the dispatcher then revalidates it twice after enablement
-before atomically moving to the existing ambiguous `dispatching` state. Never
-substitute run-ID exclusions, reseal while active, or discard after that
-provider-call boundary.
-
-Dispatch authority is forward-only while any v2 request, bound intent, or
-spent-generation artifact exists in the private authority directory. Rolling
-the authority helper or dispatcher back below v2 parsing is prohibited: old
-readers intentionally fail closed. Retain the exact recovery and audit
-evidence, including captures and spent seals. Never delete spent archives or
-manually edit private authority state to make an older reader work; use exact
-recovery or a reviewed forward correction instead.
-
-Promote v5-compatible authority readers and writer together before emitting a
-v5 retirement record. Existing v1-v4 records retain their original meaning;
-older readers must reject v5 rather than reinterpret it. Once v5 exists, retain
-compatible readers or use a reviewed forward correction, never relabel records
-or delete their preserved evidence to permit a rollback.
-
-Any unresolved `dispatching` or `bound` intent, or `claimed` or `inflight`
-record, blocks every protected dispatch for the same repository and control
-SHA even when the requested operation or inputs differ. An `issued` or
-`consumed` record blocks the same operation and exact transport input hash;
-changed inputs are a new request and still require all normal policy,
-lineage, exclusivity, and recovery checks. `retired` is the only inert
-replacement exception. After persisting a pristine dispatch intent, recheck
-master, workflow blob, and active state before dispatch and cancel only that
-untouched intent if authority drifted.
-
-The shared policy also declares the required workflow state at approval.
-`oci-capacity-acquire.yml`, `oci-infrastructure.yml`,
-`oci-live-betting-activate.yml`, `oci-live-data-rollout.yml`,
-`oci-migration-recovery.yml`, and `oci-production-deploy.yml` must be
-`disabled_manually`; every other protected workflow must be `active`.
-Revalidate control, workflow state/blob, and promotion authority after the
-local `inflight` claim. If they changed, release the exact claim back to its
-previous `issued` or `consumed` state and do not call GitHub.
-
-Each OCI release runs its protected chain in a fixed order: public GHCR
-package validation, then, on k3s only, `oci-capacity-acquire` for that exact
-SHA, then `oci-infrastructure` finalization, then the live-data handoff, then
-deployment. Capacity acquisition is a k3s Free Tier concern: it is never
-required on OKE and is never a prepare prerequisite in either runtime mode.
-Preparation is likewise split into `oci-infrastructure-prepare-k3s` and
-`oci-infrastructure-prepare-oke` so every run maps one-to-one to its operation
-and mode through a distinct title and run name.
-Finalization is split into `oci-infrastructure-finalize-k3s` and
-`oci-infrastructure-finalize-oke`, each pinning an immutable hash-covered
-`runtime_mode` that must equal the authoritative Actions environment mode. The
-k3s operation requires an exact `capacity_acquisition_run_id`; the OKE operation
-forces it empty and rejects a supplied one. Every finalize prerequisite -- GHCR
-build, GHCR package validation and, for k3s, capacity acquisition -- is an
-explicit transport input covered by the dispatch input hash, never an implicit
-scan. One shared validator enforces workflow identity, repository, branch,
-subject SHA, permitted event, exact event-specific title, current run attempt 1,
-successful completion, and a unique unexpired non-empty artifact. The dispatcher
-runs it on fresh dispatch and both resume paths before enabling a workflow or
-issuing authority; the workflow runs it from a checked-in manifest proven
-equivalent to the same policy, before any cloud access or mutation. An
-observation route runs exactly one fixed `approval-1` full proof before
-`ELIGIBLE` or `WAIT`. An initially actionable automatic approval retains all
-lightweight checks, takes its durable claim, then runs exactly one fixed
-`approval-3` full proof before the final mutable checks and GitHub approval
-call, releasing that exact claim and leaving issued authority intact if any
-binding drifted. This ordering is mandatory because protected authority is
-one-use: a prerequisite discovered mid-run would otherwise consume the
-authority for that master SHA permanently, and recovery would require
-promoting a new hardened SHA.
-
-Current OCI data and deployment authority also requires the exact
-canonical-checksummed `k3s-release-disk-checkpoint.v1` artifact. The k3s shape
-seals raw root bytes, complete stable node/mount/runtime identity, exact
-candidate and rollback CRI residency, public-state status, and flat
-diagnosis/reclaim lineage; the OKE shape contains only common fields with
-`terminalStatus=RELEASE_ELIGIBLE` and `disposition=NOT_APPLICABLE`. Missing or
-extra keys, runtime-version drift, identity
-drift, incomplete residency, a rerun, or a byte count above the integer
-70-percent boundary fails closed.
-
-Failure-recovery run profiles are fixed repository contracts, not run-metadata
-shortcuts. They download their exact baseline, deployment, predecessor-v6, and
-activation artifacts; reject unsafe or incomplete ZIPs and checksum drift; and
-bind complete build, infrastructure, checkpoint, deployment, and recovery
-lineage. On an allowed descendant resume, build, infrastructure, and disk
-checkpoint identities stay bound to the original `checkpoint_source_sha`.
-The workflow/control SHA advances, while the predecessor, failed-deploy, or
-failed-activation runs bind the hash-covered `resume_source_sha`, which may be
-that SHA or the proven allowed ancestor. A nonzero baseline recovery also
-binds its explicit source and exact repository-validated artifact before
-authority. A new byte-equivalent build or infrastructure run is not a
-substitute. Failed-activation recovery must demote and verify the exact
-artifact-bound account as `USER` before bounded Slip cleanup. It recursively
-resolves the failed activation through its successful deployment and actual
-v6 handoff, then uses public revalidation and a fresh exact lock because that
-deployment released the earlier runtime hold. Slip deletion predicates bind
-each inspected document's immutable identity and board revision/fingerprint;
-a concurrent change or count conflict fails closed. Either cleanup failure
-blocks the data phase.
-
-Every OCI release requires a new exact-SHA final
-`oci-live-data-rollout` handoff before deployment. Application or schema
-changes chain `dry-run` → `apply-backfills` → `apply-slip-index`; only the
-workflow's validated GitHub/infra/Markdown-only descendant resume may reuse an
-already applied chain, and it still produces a new final handoff.
-`oci-production-deploy` requires that hash-bound evidence and pre-mutation
-rollback baseline from the same build and infrastructure runs. Mutating phases
-fence public writes and quiesce legacy data writers. A successful final phase
-deliberately retains that maintenance state and the shared-Mongo operation lock
-until the exact deployment passes protected validation, so dispatch the bound
-deployment immediately; an incomplete deployment re-enters the same
-fail-closed state for a safe retry.
-
-The final public disk revalidation is the last read-only operation before a
-fresh data path acquires the lock; baseline and predecessor work must already
-be complete, with no intervening capture or operation. A retained hold and
-deployment use a stable-only held snapshot: raw bytes, root/Mongo mount and
-node/runtime identity, and candidate/rollback residency. Held collection must
-not call HTTP, RabbitMQ, queues, pods, Deployments, or mutable workload-health
-checks. Deployment renews the transferred lock without an acquire fallback,
-revalidates the held snapshot again after protected health, and releases lock
-before fence.
-
-That fenced state also supports an exit that is not a retry.
-`oci-production-rollback` gains a maintenance-aware mode, bound to the exact
-incomplete deployment, its immutable baseline artifact and attempt, the exact
-deployed generation, the exact target, and positive evidence that the
-deployment re-entered maintenance. It asserts the expected fenced state instead
-of waiving readiness, restores baseline digests and replica counts, proves the
-previously failing workload is stable, releases the database lock and then the
-write fence, and finally requires ordinary steady-state readiness. It is never a
-skip, force, or bypass switch, and standard rollback behaviour is unchanged. A
-generation that failed its own deployment is never an accepted rollback
-baseline.
-
-### Exceptional fixed-manifest incident restoration
-
-`oci-live-data-incident-restore` is an exceptional, incident-specific path for
-the single held baseline fixed in `infra/oci/incident/manifest.json`. It is not
-a normal release, rollback, deploy, activation, build, or trusted-CI bypass.
-Do not add caller-selected manifests, digests, runs, artifacts, search,
-pagination, or provider-history traversal. The bounded
-`incident_manifest_stan.py` verifier must prove the exact finite evidence,
-current-control ancestry, and unchanged image inputs at the existing dispatcher
-and approver prerequisite boundaries before any intent, claim, or authority can
-be issued. Approval and workflow verification must also bind the exact
-attempt-one current-run metadata digest and immutable GitHub `created_at`.
-Takeover is allowed only when that creation epoch is strictly after the exact
-preimage lease cutoff; immediately before CAS, bind a fresh exact-run GitHub
-response `Date` and derive the new lease from that provider epoch. Runner wall
-clock never grants incident takeover authority.
-
-Continuation is permitted only from the exact first-attempt terminal failed or
-cancelled predecessor and its issued or consumed authority. One protected
-successor generation may win; a descendant control additionally requires the
-exact journal-control handoff with unchanged manifest and image inputs. Persist
-and classify exact lock/fence/publication phases rather than replaying the
-takeover CAS. Every generation must inherit the complete authority-linked,
-maximum-32-entry OKE/k3s access-cleanup lineage, append its immediate
-predecessor even when that predecessor opened no resource, reconcile all exact
-obligations oldest-first, preserve unrelated resources, and refuse terminal
-success while any obligation remains.
+- CLI-dispatched operations use `copilot-cli-dispatch-stan.sh` with an operation-specific request stored outside the repository. It binds the exact run, workflow ID/path/blob, input hash, control and subject SHAs, event and environment to a private one-run record; `copilot-cli-run-approval-stan.sh` may approve that exact first attempt. Human dispatches, direct `gh workflow run`, schedules, reruns, stale master or mismatched records stay personally gated. Never create or retrofit a record for a human run.
+- Ambiguous dispatch without a captured run stays blocked; recover only via the dispatcher's resume paths, never by inference or redispatch. Ambiguous approval stays `inflight`; use the approver's `--reconcile`, never replay the POST. Terminal zero-job runs may only be `retired`, never approved or rerun.
+- Unresolved `dispatching`/`bound`/`claimed`/`inflight` state blocks every protected dispatch for the repository and control SHA; `issued`/`consumed` blocks the same operation and input hash. Only `retired` is inert.
+- Authority formats are forward-only: never roll the helper or dispatcher back below a version whose records exist (v2, v5), delete spent archives or hand-edit authority; use exact recovery or a reviewed forward correction.
+- Workflow state at approval is policy-defined: the OCI capacity, infrastructure, live-betting activation, live-data rollout, migration-recovery and production-deploy workflows are `disabled_manually`; others `active`. Keep a disabled workflow enabled only until the captured run shows a real job and pending gate. Revalidate control, state, blob and promotion authority after each claim.
+- OCI release order: GHCR validation, then (k3s only) capacity acquisition, infrastructure finalization, live-data handoff, deployment. Every prerequisite is an explicit hash-covered input validated before authority is issued, because authority is one-use.
+- Data and deploy authority require the exact `k3s-release-disk-checkpoint.v1` artifact; any key, identity, residency or 70-percent drift fails closed.
+- Recovery profiles are fixed contracts binding original build, infrastructure and checkpoint lineage; byte-equivalent new runs are not substitutes.
+- Every OCI release needs a fresh exact-SHA final `oci-live-data-rollout` handoff before deployment. The handoff keeps maintenance and the shared-Mongo lock until the bound deployment validates; deploy immediately. Deployment renews the lock without acquire fallback and releases lock before fence.
+- `oci-production-rollback` maintenance mode is bound to the exact incomplete deployment and baseline; it is never a skip or bypass. A failed generation is never a rollback baseline.
+- `oci-live-data-incident-restore` is limited to `infra/oci/incident/manifest.json`, verified by `incident_manifest_stan.py`; no caller-selected inputs, and takeover authority comes from provider timestamps, never runner clocks.
 
 ## Production safety
 
-Merging to `master` runs validation, then queues the first-attempt image build for approval through the master-only `production-emergency` environment. Production never deploys automatically. After the build succeeds, dispatch `production-deploy` from `master` with the exact full SHA and build run ID; the same environment requires a second approval. The workflow validates all nine build artifacts and deploys immutable tag-plus-digest image references. Rerun builds are not deployable, and retired workflow identities remain disabled.
-
-For a manually disabled production workflow, a successful dispatch command or
-returned run URL proves only that GitHub accepted the event. Keep the workflow
-enabled until the captured exact run has a real job and, when protected, the
-expected `pending_deployments` gate. Then disable it before approval. Capture
-the run ID through the policy dispatcher's durable capture instead of
-depending on an early display title. Recover a captured URL or delayed bound
-run through the exact resume path; never redispatch it. A terminal record with
-zero jobs and zero pending deployments is not release authority and may only
-be persisted as `retired`; it must never be approved or rerun.
-
-Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, staged, and untracked work.
+Merging to `master` runs validation and queues the first-attempt image build for approval in `production-emergency`; production never deploys automatically. Dispatch `production-deploy` from `master` with the exact full SHA and build run ID; it needs a second approval and deploys immutable tag-plus-digest images. Rerun builds are not deployable; retired workflows stay disabled.
 
 ## Trusted-check bootstrap
 
-The trusted publisher currently requires the protected quality workflow to be byte-identical to the default-branch copy. Prefer extending an existing checked-in guard or test entrypoint that `production-build.yml` already invokes; this preserves the trusted workflow identity while still exercising the new validation.
+The trusted publisher requires the protected quality workflow to be byte-identical to the default branch. Prefer extending an existing guard that `production-build.yml` already runs.
 
-If the workflow file itself must change, first add and independently review a fail-closed, one-use exact-blob authorization mechanism in the trusted publisher without changing the workflow. Promote that policy separately, then authorize and merge only the intended workflow blob, remove the authorization, and verify fresh statuses come from the expected workflow IDs. Do not invent or document an authorization variable before the publisher implements and tests it.
+To change the workflow itself: first promote a separate, reviewed, fail-closed one-use exact-blob authorization in the publisher; then authorize and merge only the intended blob, remove the authorization, and verify fresh statuses from the expected workflow IDs. Prove strict base ancestry first. Never invent an authorization variable before the publisher implements and tests it, and never reset a consumed receipt.
 
-Prove the strict integration-base ancestry before declaring a bootstrap route
-viable. Retaining the default workflow on a branch cut from `master` does not
-make that branch up to date with `dev`; passing local merge safety does not
-override GitHub's strict protection. A temporary return to the trusted workflow
-must itself enter through a current-base PR. Reapplying the reviewed workflow
-after that bootstrap requires a distinct reviewed source grant and receipt
-context; retire the consumed declaration without resetting its receipt.
+Transition markers, label ledger, ancestry-sync provenance and receipt rules are implemented in [`publish-pr-policy.js`](.github/scripts/publish-pr-policy.js) and [`branch-policy.yml`](.github/workflows/branch-policy.yml), the sole status-writing workflow. Rollback must keep readers for every emitted marker version (v3 ledger authority included); tombstones dominate, conflicts fail closed.
 
-When the future pull-request number cannot be reserved safely, a workflow
-authorization may use `pullNumber: null` to select the first eligible open PR
-matching the exact repository, head repository, head ref, base ref, trusted
-blob, and authorized blob. The matching PR transition and bound quality run
-must both be created after authorization issuance. Before receipt publication,
-the publisher revalidates the live head and base refs, the complete PR
-snapshot, and `dev` ancestry over `master` for promotions. Source and promotion
-selectors use separate declarations and receipt contexts; a closed, stale,
-pre-issuance, ambiguous, or already-consumed match grants no authority.
-
-An open, same-repository, content-identical ancestry-sync PR into `dev` may
-retain a workflow already integrated through an exact authorized PR. The
-publisher requires equal base/head/test-merge trees, the current protected
-base and master ancestry, unchanged full workflow blobs, and the original
-merged source's complete bot-authored receipt from a successful trusted
-publisher run. The original declaration must remain valid, and the source
-must have one unambiguous successful first-attempt quality run with a
-successful aggregate gate. A merged source's native run/PR association may be
-absent, but contradictory associations fail closed. Current PR associations
-remain mandatory.
-
-This is read-only provenance verification, not permission to reuse or reset
-the source receipt. The sync still needs its own exact current-SHA quality
-run and transition; the source proof, protected refs and expiry are rechecked
-around success publication. Content changes and promotions do not receive
-this exception. Preserve normal protected integration and promotion when
-bootstrapping the publisher itself; no rule edit bypasses a currently
-enforced gate.
-
-An exact-blob authorization is consumed by the first successful exact quality
-run for its PR transition. A workflow-producing pull-request event first
-publishes an unbound pending transition barrier, then binds the exact newly
-registered quality run. Only that transition's completed workflow run may
-publish success. The trusted marker is stored on the exact merge snapshot and
-binds the exact head/base through native run relations. The publisher accepts it only from
-the GitHub Actions bot with a validated repository `branch-policy` run target,
-and that run must carry the exact PR, head, and base relation. Governance keeps
-`branch-policy.yml` as the sole status-writing workflow and requires every
-workflow job to declare effective token permissions instead of inheriting the
-mutable repository default. Only the bound run may satisfy the transition; a
-different `workflow_run` completion remains pending, and the selected run must
-strictly postdate both the event timestamp and any authorization issuance. A
-delayed run can bind an unbound marker through its exact `workflow_run` or a
-manual trusted refresh, but a manual refresh cannot create a missing marker or
-act as quality evidence.
-
-### Metadata-neutral quality transitions
-
-New markers use `v4|<pr>|<action>|<cutoff-ms>|<p|x|runId>`. They bind the
-authenticated transition, exact merge snapshot and successful native run,
-not title, body, labels or mutable `updated_at`. Source, base, merge, workflow,
-attempt, run and authorization drift still fail closed. The opening event may
-precede GitHub's merge calculation; capture and recheck the live unique merge
-rather than treating the event's provisional merge field as tested identity.
-
-Metadata refreshes may complete an existing exact v4 binding without creating
-quality evidence or consuming a new authorization. Missing markers, actual
-failed/cancelled quality runs and conflicting run bindings remain blocking.
-Origin and exact human/CLI approval are checked independently at merge or
-operation time; a label change cannot grant production authority.
-
-The sole publisher keeps its existing serialized group and uses `queue: max`
-with cancellation disabled. This retains up to 100 waiting runs instead of
-replacing the pending opening event with metadata events. Queue overflow still
-cancels excess arrivals; queue order is not proof of event order. Existing
-cutoffs, source checks and trusted refresh rules remain necessary.
-
-### Legacy transition compatibility
-
-Already-emitted version 3 quality markers use
-`v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.
-`u` records only an unconfirmed direct opening-label snapshot mismatch, `p`
-records a confirmed transition without a bound run, a positive run ID records
-the confirmed exact binding, and `x` permanently tombstones the cutoff. A `u`
-marker cannot bind a run, publish quality success, or consume an authorization
-receipt. The qualifying exact `labeled` event appends durable `p` before any
-optional run binding, and a label handler never consumes an authorization
-receipt. Opening-label reconciliation is authorized only when the server-owned
-label timestamp is at or after the original `opened` transition cutoff and no
-more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution
-cannot extend that window. GitHub may serialize distinct creation and label
-mutations to the same whole-second timestamp. Equality is accepted only with
-the complete direct or inverse proof; a timestamp even 1 ms before the cutoff
-is not reconciliation authority. Direct ordering also requires the label
-timestamp to strictly precede the earliest exact-lineage status creation, while
-inverse ordering requires identical event and live `updated_at` values and
-allows the marker on either side of the label. An exact replay of the same
-qualifying `labeled` event is inert after `p` or a run is durable; a later label
-mutation remains drift.
-Recovered opening-label authority is revalidated before every success-capable
-refresh, `workflow_run`, manual dispatch, or replayed `opened` event by a
-bounded server-owned issue-event ledger. The ledger must prove exactly one
-`copilot-cli-managed` `labeled` event within the original five-minute window
-and no matching `unlabeled` event. Any managed-label removal, second
-application, or application outside that window is proven drift and writes
-permanent `x`. Any fully validated managed `unlabeled` event, second managed
-`labeled` event, or out-of-window managed `labeled` event is individually
-sufficient, irreversible disproof: it writes permanent `x` immediately even
-on a full ledger page because unread appended events cannot restore the
-lineage; only positive authority requires scan completion. API, schema,
-duplicate-ID, missing, and incomplete ledger evidence remains inconclusive
-without `x` only when no disqualifying event has already been observed.
-`branch-policy.yml` grants only `issues: read` for this ledger; the publisher
-and permission must promote together.
-The broad opening snapshot mismatch permits only fail-closed inspection and
-never grants reconciliation: an out-of-window replay without a marker stays
-pending, an existing mismatch writes the permanent tombstone, and any
-intervening `updated_at` change fails closed. A same-cutoff tombstone cannot be
-replaced or revived; only a strictly later `synchronize` or `reopened`
-transition can recover the lineage. The original transition cutoff,
-run binding, and policy-run target remain authoritative. `labeled` and
-`unlabeled` are non-producing refreshes. All other post-marker label drift
-appends a permanent pending tombstone, so restoring labels, completing an older
-run, or manually refreshing cannot revive that lineage. At the greatest
-cutoff, `x` dominates every other state; absent `x`, any version 1 or version 2
-marker makes that cutoff fail-closed legacy; otherwise one compatible version
-3 lineage resolves positive run ID over `p` over `u`, independent of status
-order. Conflicting positive run IDs or incompatible action, content, policy-run
-target, or label progression fail closed, and a lower state cannot downgrade a
-higher state. Version 1 and version 2 markers cannot newly bind, succeed, or
-consume an authorization receipt; a version 2 `x` remains a permanent
-tombstone. Only a strictly later `synchronize` or `reopened` transition may
-recover, never a metadata edit or a later or replayed `opened` event. Once any
-version 3 marker exists, operational rollback must retain version 3 parsing
-and ledger authority: recovered opening-label authority is not durable in
-marker v3, so every publisher able to bind or succeed such a lineage must
-revalidate the ledger; retaining version 3 parsing alone is insufficient, and
-rollback to a publisher lacking ledger authority is prohibited; use a
-reviewed forward correction. For v3, the fetched `updated_at` and label
-fingerprint remain freshness checks around receipt claiming and publication:
-removing then restoring labels cannot revive authority. V4 metadata neutrality
-does not reinterpret or weaken existing v3 evidence.
-
-Rollback must retain readers for every emitted marker version, including v4,
-and the v3 ledger/freshness rules. Conflicting versions at the same cutoff fail
-closed; tombstones remain dominant. Every source transition still needs its
-applicable exact run and authorization; consumed receipts are never reset.
-
-The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
-
-Before proposing a production promotion:
+## Commands
 
 ```bash
 ./infra/azure/agents/pre-commit-infra-check-stan.sh
-# Inspect and explicitly review the printed head_sha and production_workflows.
-./infra/azure/agents/pr-merge-safety-stan.sh <pr-number>
-# Re-run with the exact reviewed SHA and production workflow inventory.
-APPROVED_SHA=<head-sha> APPROVED_WORKFLOWS=<comma-separated-workflows> \
-  ./infra/azure/agents/pr-merge-safety-stan.sh <pr-number>
-```
-
-After an approved promotion:
-
-```bash
-PR=<promotion-pr-number> ./infra/azure/agents/post-merge-verification-stan.sh
+./infra/azure/agents/pr-merge-safety-stan.sh <pr>          # review head_sha and production_workflows
+APPROVED_SHA=<sha> APPROVED_WORKFLOWS=<list> ./infra/azure/agents/pr-merge-safety-stan.sh <pr>
+PR=<promotion-pr> ./infra/azure/agents/post-merge-verification-stan.sh
 ```

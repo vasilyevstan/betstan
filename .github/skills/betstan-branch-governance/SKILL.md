@@ -5,81 +5,29 @@ description: Enforce BetStan's dev-to-master branch flow, exact-SHA CI checks, a
 
 # BetStan branch governance
 
-Use for branches, commits, pushes, PRs, CI gates, merges and production
-dispatches. [CONTRIBUTING.md](../../../CONTRIBUTING.md) is the canonical policy;
-this skill is its procedure, not another approval hierarchy.
+Use for branches, commits, pushes, PRs, CI gates, merges and production dispatches. [CONTRIBUTING.md](../../../CONTRIBUTING.md) is canonical; this is its procedure.
 
-## Retained contract
+## Required flow
 
-- Never commit or push directly to protected `dev` or `master`, or rewrite
-  their history. Normal work enters `dev` through a focused PR; only an
-  up-to-date `dev` PR may target production `master`.
-- Use ancestry-preserving merges. Prove required feature commits are included
-  in the exact protected aggregate and verify the exact tested snapshot.
-  Reconcile branches only when ancestry requires it; a promotion does not
-  automatically require a content-identical synchronization PR. Strict
-  `master` protection does require the next promotion head to contain the
-  previous promotion merge, so merge `origin/master` into each new
-  `dev`-bound branch when `dev` lacks it.
-- Require successful trusted, base-scoped branch-policy and quality statuses
-  on the current head and unique merge snapshot. Stale, skipped, pending,
-  neutral, unrelated or branch-name-only checks are not success.
-- Verified CLI-created, CLI-owned work progresses automatically through the
-  canonical helpers when technical gates pass, including follow-on Actions.
-  Never add `copilot-cli-managed` to human-origin work or treat that label alone
-  as proof of origin/ownership. Every other PR requires `APPROVED_SHA` equal to
-  its current head; human promotions also require `APPROVED_WORKFLOWS`.
-- Preserve comprehensive [PR evidence](../../pull_request_template.md):
-  rationale, exact refs, scope/exclusions, compatibility, validation, risks,
-  workflow inventory, data, flags, rollback and remaining work. Conditional
-  fields stay present as `not applicable` when appropriate.
-- Title/body presentation and public-safe session/feature labels are
-  informational. Actual missing evidence remains blocking. The lean
-  `production-build.yml` validates source transitions, not title/body edits.
-  V4 quality markers exclude metadata; legacy markers retain their original
-  freshness rules. Read the live protected publisher before relying on a
-  newly merged protocol. No documentation edit activates it.
-- No agent verdict bypasses immutable deployed identity, physical
-  single-writer locks/fences, data integrity, compatible recovery or observed
-  health. Explicit pauses still apply to otherwise automatic progression.
+- Never commit or push directly to `dev` or `master`, or rewrite their history. Work enters `dev` by focused PR; only an up-to-date `dev` PR may target `master`.
+- Use ancestry-preserving merges. After a promotion, merge `origin/master` into the next `dev`-bound branch (or a standalone sync PR when nothing else precedes the next promotion) so the next promotion head contains it.
+- Require successful trusted `branch-policy` and `pr-quality-gates` statuses on the current head and unique merge snapshot.
+- PR body follows the [template](../../pull_request_template.md); add `session:`/`feature:` labels with `pr-context-labels-stan.sh` (informational only).
+- CLI-created, CLI-owned PRs (`copilot-cli-managed`) progress automatically via canonical helpers when gates pass. Every other PR needs `APPROVED_SHA` equal to its head; human promotions also `APPROVED_WORKFLOWS`.
+- Protected operations use the canonical dispatcher/approver; unknown outcomes are reconciled, never replayed.
 
-## Scoped read-only baseline
+## Baseline before acting
 
-Inspect only what the authorized action needs. A repository-only policy edit
-does not authorize remote configuration changes or a production baseline.
+1. Inspect the worktree; preserve unrelated work.
+2. For a live decision, fetch refs and check protection, PR head/base, mergeability and trusted checks.
+3. Use ancestry, not tip equality. `pr-validation-stan.sh` binds head/base/merge snapshot and workflow IDs.
+4. Run `pr-merge-safety-stan.sh` in the correct mode immediately before merging.
+5. Observe jobs and pending gates to terminal state; respect approved wait timers.
 
-1. Inspect the specified worktree and exact source; preserve unrelated work.
-2. For a live PR/merge decision, resolve current remote refs, default branch,
-   protection, PR head/base, mergeability and trusted check conclusions.
-3. Use ancestry, not branch-tip equality. Run `pr-validation-stan.sh` to bind
-   repository, current head/base, merge snapshot and trusted workflow IDs.
-4. Check actual PR evidence and origin/ownership. Run
-   `pr-merge-safety-stan.sh` in the correct automatic or exact human mode
-   immediately before a merge; a stale recommendation is not authorization.
-5. For a protected operation, use the canonical dispatcher and approver from
-   `CONTRIBUTING.md`, preserving operation-specific prerequisites, current
-   workflow identity/state, exact run attempt and one-use authority.
-6. Observe jobs and pending environment gates through terminal effects.
-   Progress eligible automatic gates promptly; respect an approved wait timer.
-   Unknown dispatch/approval outcomes require exact reconciliation, not replay.
+## Trust mechanics
 
-## Current trust and cutover
+Quality-marker versions, label ledger and receipt rules are enforced in [`publish-pr-policy.js`](../../scripts/publish-pr-policy.js) and [`branch-policy.yml`](../../workflows/branch-policy.yml); read them, not memory. Trusted-workflow changes follow `Trusted-check bootstrap` in CONTRIBUTING. Never let candidate code authorize itself, reset receipts, weaken protection or roll back to an incompatible reader.
 
-Existing executable controls remain authoritative until replacements are
-proven and activated. This skill does not activate a new source-snapshot
-verifier or controller. Read the current
-[`publish-pr-policy.js`](../../scripts/publish-pr-policy.js) and
-[`branch-policy.yml`](../../workflows/branch-policy.yml) for publisher identity,
-transition/receipt compatibility and status-writing authority.
+## NO_GO
 
-When a trusted workflow itself changes, follow `Trusted-check bootstrap` in
-`CONTRIBUTING.md` and its tested executable path. Do not invent an authorization
-variable, let candidate code authorize itself, reset consumed receipts, weaken
-protection or roll back to a reader incompatible with existing authority.
-Fresh required statuses and exact source relations must still be proven.
-
-Return `NO_GO` for unauthorized protected pushes, wrong promotion source,
-stale ancestry/checks, incomplete approval, unknown mutation outcomes or failed
-runtime prerequisites. Name the concrete blocker and smallest safe next action.
-Never expose credentials, private logs, infrastructure identifiers or session
-paths.
+Return `NO_GO` for: a direct protected push; a non-`dev` PR into `master`; stale ancestry or promotion; missing, stale or failing checks; incomplete approval; unknown mutation outcomes; failed runtime prerequisites; a promotion head missing the previous promotion merge. Name the blocker and smallest safe next action. Never expose credentials, private logs, infrastructure identifiers or session paths.
