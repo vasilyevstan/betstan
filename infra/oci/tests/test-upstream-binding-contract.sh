@@ -367,17 +367,22 @@ receiver = dict(parent, id=78, workflow_id=9, event="workflow_run",
                 path=".github/workflows/oci-production-deploy.yml",
                 display_title=f"oci-deploy {source} data-77",
                 status="waiting", conclusion=None, created_at="2026-01-01T00:00:01Z")
-receiver_workflow = dict(id=9, path=receiver["path"], state="disabled_manually")
+receiver_workflow = dict(id=9, path=receiver["path"], state="active")
 with patch.object(m, "gh_api", side_effect=lambda path:
                   receiver_workflow if "/workflows/" in path else receiver):
     assert m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture",
                                   data_run="77") == receiver
     reject(lambda: m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture",
                                           data_run="79"))
+    receiver_workflow["state"] = "disabled_manually"
+    reject(lambda: m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture",
+                                          data_run="77"))
+    receiver_workflow["state"] = "active"
     receiver["run_attempt"] = 2
     reject(lambda: m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture",
                                           data_run="77"))
     receiver.update(run_attempt=1, event="workflow_dispatch", display_title=f"oci-deploy {source}")
+    receiver_workflow["state"] = "disabled_manually"
     assert m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture") == receiver
 print("native_final_data_deploy_resolution=PASS exact_tuple=true malformed_and_nonfinal=REJECTED manual=compatible")
 PY
@@ -4664,6 +4669,39 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
                     reject(lambda: m.validate_receiver_handoff_timing(
                         "example/repo", producer_run, source, boundary, receiver_run))
                 workflow["state"] = expected_state
+    # Ungated environments: a chained workflow_run receiver keeps the deploy
+    # workflow active at every boundary; a disabled workflow is drift.
+    dispatched_receiver = copy.deepcopy(receiver)
+    receiver.update(event="workflow_run", display_title=f"oci-deploy {source} data-{producer_run}")
+    for boundary, now in (
+        ("materialization", 160), ("approval-1", 200), ("approval-3", 320),
+        ("native-validation", 330), ("startup-snapshot", 340), ("receiver-renewal", 350),
+    ):
+        workflow["state"] = "active"
+        with patch.object(m.time, "time", return_value=base + now):
+            result = m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, boundary, receiver_run)
+            assert result["deadline"] == deadline and result["generation"] == 11
+            assert result["unfinished_seconds"] == tails[boundary]
+            for wrong_state in ("disabled_manually", "disabled_inactivity"):
+                workflow["state"] = wrong_state
+                reject(lambda: m.validate_receiver_handoff_timing(
+                    "example/repo", producer_run, source, boundary, receiver_run))
+    workflow["state"] = "active"
+    for mutate in (
+        lambda: receiver.update(display_title=f"oci-deploy {source}"),
+        lambda: receiver.update(display_title=f"oci-deploy {source} data-79"),
+        lambda: receiver.update(event="push"),
+    ):
+        saved_receiver = copy.deepcopy(receiver)
+        mutate()
+        with patch.object(m.time, "time", return_value=base + 330):
+            reject(lambda: m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "native-validation", receiver_run))
+        receiver.clear(); receiver.update(saved_receiver)
+    receiver.clear(); receiver.update(dispatched_receiver)
+    workflow["state"] = "disabled_manually"
+    print("PASS chained workflow_run receiver requires the active deploy workflow at every boundary")
     with patch.object(m.time, "time", return_value=base + 330):
         reject(lambda: m.validate_receiver_handoff_timing(
             "example/repo", producer_run, source, "caller-zero-tail", receiver_run))
@@ -4718,6 +4756,7 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
             ))
         with patch.object(m, "parse_resume_authority", return_value=legacy), \
                 patch.dict(receiver, event="workflow_run", display_title=f"oci-deploy {source} data-{producer_run}"), \
+                patch.dict(workflow, state="active"), \
                 patch.object(m.time, "time", return_value=base + 200):
             timing = m.validate_receiver_handoff_timing(
                 "example/repo", producer_run, source, "approval-1", receiver_run,
@@ -6325,6 +6364,30 @@ jobs = copy.deepcopy(original)
 artifacts = [{"id": 1}]
 reject(validate)
 artifacts = []
+admission = names.index("Validate exact SHA and trusted upstream runs")
+early = copy.deepcopy(original)
+for step in early[0]["steps"]:
+    if step["name"] in names and step["name"] not in {
+        "Remove isolated OCI client state", "Upload sanitized live readiness evidence",
+    }:
+        offset = names.index(step["name"])
+        step["conclusion"] = (
+            "success" if offset < admission else "failure" if offset == admission else "skipped"
+        )
+jobs = copy.deepcopy(early)
+assert validate() == ("skipped", "skipped", "skipped")
+jobs = copy.deepcopy(early)
+next(s for s in jobs[0]["steps"] if s["name"] == names[boundary])["conclusion"] = "failure"
+reject(validate)
+for name in names[admission + 1:boundary + 1]:
+    jobs = copy.deepcopy(early)
+    next(s for s in jobs[0]["steps"] if s["name"] == name)["conclusion"] = "success"
+    reject(validate)
+jobs = copy.deepcopy(original)
+next(s for s in jobs[0]["steps"] if s["name"] == names[admission + 1])["conclusion"] = "failure"
+next(s for s in jobs[0]["steps"] if s["name"] == names[boundary])["conclusion"] = "skipped"
+reject(validate)
+jobs = copy.deepcopy(original)
 mapping = {
     "approved_sha": "SOURCE_SHA", "build_run_id": "BUILD_RUN_ID",
     "infrastructure_run_id": "INFRASTRUCTURE_RUN_ID", "data_run_id": "DATA_RUN_ID",
@@ -6356,6 +6419,13 @@ native_log += b"2026-10-07T09:09:17Z env:\n2026-10-07T09:09:17Z   GH_TOKEN: inst
 native_log += b"2026-10-07T09:09:17Z ##[group]Run actions/upload-artifact\n2026-10-07T09:09:17Z env:\n2026-10-07T09:09:17Z ##[endgroup]\n"
 m.gh_api_bytes = lambda _: log_archive(native_log)
 assert m.failed_deploy_native_inputs("example/repo", "77", source, "fixture") == inputs
+jobs = copy.deepcopy(early)
+assert m.failed_deploy_native_inputs("example/repo", "77", source, "fixture") == inputs
+reject(lambda: m.failed_deploy_native_inputs(
+    "example/repo", "77", source, "fixture", expected_step_conclusion="success",
+))
+jobs = copy.deepcopy(original)
+print("PASS pre-runtime retained hold accepts only an exact-SHA admission or provenance failure")
 archive_endpoint = "repos/example/repo/actions/runs/77/attempts/1/logs"
 for resume_dispatch in (False, True):
     job_name = "rollout" if resume_dispatch else "deploy"

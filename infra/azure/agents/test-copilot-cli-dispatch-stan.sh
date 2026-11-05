@@ -283,6 +283,10 @@ elif mode == "blocked":
     request["inputs"]["build_run_id"] = "49"
 elif mode == "state-race":
     request["inputs"]["build_run_id"] = "50"
+elif mode == "ungated":
+    request["inputs"]["build_run_id"] = "51"
+elif mode == "executed":
+    request["inputs"]["build_run_id"] = "52"
 elif mode == "common":
     request["operation"] = "common-package-publish"
     request["inputs"] = {
@@ -549,8 +553,8 @@ PY
         printf '{"id":%s,"workflow_id":%s,"path":".github/workflows/%s","display_title":"%s","event":"workflow_dispatch","head_sha":"%s","head_branch":"master","head_repository":{"full_name":"%s"},"run_attempt":1,"status":"completed","conclusion":"failure"}\n' \
           "$run_id" "$WORKFLOW_ID" "$workflow" "$title" "$SHA" "$REPOSITORY"
       else
-        printf '{"id":%s,"workflow_id":%s,"path":".github/workflows/%s","display_title":"%s","event":"workflow_dispatch","head_sha":"%s","head_branch":"master","head_repository":{"full_name":"%s"},"run_attempt":1,"status":"waiting","conclusion":null}\n' \
-          "$run_id" "$WORKFLOW_ID" "$workflow" "$title" "$SHA" "$REPOSITORY"
+        printf '{"id":%s,"workflow_id":%s,"path":".github/workflows/%s","display_title":"%s","event":"workflow_dispatch","head_sha":"%s","head_branch":"master","head_repository":{"full_name":"%s"},"run_attempt":1,"status":"%s","conclusion":null}\n' \
+          "$run_id" "$WORKFLOW_ID" "$workflow" "$title" "$SHA" "$REPOSITORY" "${STUB_RUN_STATUS:-waiting}"
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
@@ -1459,6 +1463,30 @@ jq -e '.state == "issued" and .runId == 7011' \
   "$authority_dir/7011.json" >/dev/null
 [[ "$(cat "$dispatch_count_file")" = "8" ]]
 
+# Ungated environments start runs immediately; an in-progress exact run is
+# materialized, and an executed terminal run settles as spent, not claimed.
+write_request ungated
+STUB_RUN_ID=7012 STUB_RUN_STATUS=in_progress \
+  run_dispatcher "$request_file" --dispatch >"$output_file"
+grep -qF "authority_state=issued" "$output_file"
+jq -e '.state == "issued" and .runId == 7012' \
+  "$authority_dir/7012.json" >/dev/null
+[[ "$(cat "$dispatch_count_file")" = "9" ]]
+write_request executed
+STUB_RUN_ID=7013 STUB_RUN_COMPLETED=true \
+  run_dispatcher "$request_file" --dispatch >"$output_file"
+grep -qF "dispatch=SETTLED run_id=7013 authority_state=issued conclusion=failure" \
+  "$output_file"
+jq -e '.state == "issued" and .runId == 7013' \
+  "$authority_dir/7013.json" >/dev/null
+if STUB_RUN_ID=7098 \
+  run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file"; then
+  echo "settled executed request unexpectedly redispatched" >&2
+  exit 1
+fi
+grep -qF "blocked by issued authority 7013" "$error_file"
+[[ "$(cat "$dispatch_count_file")" = "10" ]]
+
 prepare_unmaterialized_claim 7300
 unmaterialized_record="$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json"
 unmaterialized_record_before="$tmp_dir/unmaterialized-record-before.json"
@@ -1779,7 +1807,7 @@ if STUB_HUMAN_PROMOTION=true \
   exit 1
 fi
 grep -qF "not bound to exactly one CLI-managed dev promotion" "$error_file"
-[[ "$(cat "$dispatch_count_file")" = "8" ]]
+[[ "$(cat "$dispatch_count_file")" = "10" ]]
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT_DIR" "$tmp_dir" <<'PY'
 import base64

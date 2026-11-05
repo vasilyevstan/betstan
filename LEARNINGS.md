@@ -128,6 +128,9 @@ Historical details are retained in
   inherits the original capture root. Test repeated failures, not only one.
 - A post-claim revalidation must not treat its own claim as a foreign
   generation. Test pre- and post-claim passes with a real intent present.
+- Removing environment reviewers changes run timing: runs start or finish
+  before materialization, and pre-runtime failures can occur at admission.
+  Test ungated in-progress, terminal and chained-receiver paths explicitly.
 
 ## Infrastructure and evidence
 
