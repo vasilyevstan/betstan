@@ -126,6 +126,8 @@ Historical details are retained in
   APFS devices on reboot. Fix recurring authority defects; do not bypass them.
 - Recovery lineage must compose: a failure after a resume, of any profile,
   inherits the original capture root. Test repeated failures, not only one.
+- A post-claim revalidation must not treat its own claim as a foreign
+  generation. Test pre- and post-claim passes with a real intent present.
 
 ## Infrastructure and evidence
 

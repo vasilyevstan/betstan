@@ -2599,7 +2599,10 @@ class HeldHistoryProofBundle:
 
     def preflight(self):
         self.acquire_collection_lock()
-        self.require_generation_before_collection()
+        # A pre-claim context sentinel lets the dispatcher's own post-claim
+        # revalidation proceed; any history collection still needs the bundle.
+        if not (self.boundary == "dispatch" and self.load_context_sentinel()):
+            self.require_generation_before_collection()
         self.ensure_dispatch_context_sentinel()
         self.require_post_provider_bundle(allow_context_sentinel=True)
 

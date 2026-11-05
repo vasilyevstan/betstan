@@ -637,6 +637,79 @@ PY
 ok "shared authority loader serializes, reenters, restores flags and covers all import sites"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location("held_dispatch_sentinel", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+blocking = []
+
+def atomic_create(path, payload):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+authority = SimpleNamespace(
+    canonical_input_hash=lambda inputs: "a" * 64,
+    find_blocking_authorities=lambda directory, identity: list(blocking),
+    repository_claim_lock=lambda directory: contextlib.nullcontext(),
+    atomic_create=atomic_create,
+    load_json_file=lambda path, label, **kwargs: json.loads(
+        Path(path).read_text(encoding="utf-8"),
+    ),
+)
+context = {
+    "repository": "example/repo",
+    "operation": "oci-live-data-resume-deploy",
+    "controlSha": "f" * 40,
+    "dispatchInputs": {"failed_deploy_run_id": "12"},
+    "requestKey": "b" * 64,
+}
+owned = "active authority generation owns the missing held-history proof"
+
+def rejected(action):
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        try:
+            action()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("missing held-history proof was accepted")
+    assert owned in stderr.getvalue(), stderr.getvalue()
+
+def bundle(directory):
+    return m.HeldHistoryProofBundle(context, directory, "dispatch", authority)
+
+root = Path(sys.argv[2]) / "held-dispatch-sentinel"
+root.mkdir(mode=0o700)
+pre_claim = bundle(root)
+pre_claim.preflight()
+pre_claim.close()
+assert pre_claim.context_path.exists() and not pre_claim.path.exists()
+blocking.append(("intent:" + "b" * 64, "dispatching"))
+post_claim = bundle(root)
+post_claim.preflight()
+rejected(post_claim.require_generation_before_collection)
+post_claim.close()
+
+unregistered = Path(sys.argv[2]) / "held-dispatch-unregistered"
+unregistered.mkdir(mode=0o700)
+fresh = bundle(unregistered)
+rejected(fresh.preflight)
+fresh.close()
+assert not fresh.context_path.exists()
+PY
+ok "dispatch post-claim revalidation reuses only its pre-claim context sentinel"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import base64
 import concurrent.futures
 import contextlib
