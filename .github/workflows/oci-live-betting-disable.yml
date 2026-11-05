@@ -96,7 +96,13 @@ jobs:
 
           deployment_json="$(gh api "repos/$GH_REPO/actions/runs/$DEPLOYMENT_RUN_ID")"
           [ "$(jq -r .path <<<"$deployment_json")" = ".github/workflows/oci-production-deploy.yml" ]
-          [ "$(jq -r .event <<<"$deployment_json")" = "workflow_dispatch" ]
+          if [ "$(jq -r .event <<<"$deployment_json")" = workflow_run ]; then
+            ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+              --repository "$GH_REPO" --subject-sha "$SOURCE_SHA" \
+              --run-id "$DEPLOYMENT_RUN_ID" --conclusion success >/dev/null
+          else
+            [ "$(jq -r .event <<<"$deployment_json")" = "workflow_dispatch" ]
+          fi
           [ "$(jq -r .head_sha <<<"$deployment_json")" = "$SOURCE_SHA" ]
           [ "$(jq -r .head_branch <<<"$deployment_json")" = "master" ]
           [ "$(jq -r .head_repository.full_name <<<"$deployment_json")" = "$GITHUB_REPOSITORY" ]

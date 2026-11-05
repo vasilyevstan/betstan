@@ -449,13 +449,22 @@ capture_sse() {
 validate_deploy_metadata() {
   local metadata_file="$1"
   local workflow_id="$2"
-  python3 - "$metadata_file" "$workflow_id" "$REPO" "$BASELINE_RETENTION_DAYS" <<'PY'
+  local expected_event=workflow_dispatch
+  if [[ "$(jq -r .event "$metadata_file")" == workflow_run ]]; then
+    expected_event="$(
+      "$SCRIPT_DIR/upstream_run_binding_stan.py" validate-deployment \
+        --repository "$REPO" --subject-sha "$(jq -r .head_sha "$metadata_file")" \
+        --run-id "$(jq -r .id "$metadata_file")" --conclusion success
+    )" || return 1
+  fi
+  python3 - "$metadata_file" "$workflow_id" "$REPO" "$BASELINE_RETENTION_DAYS" "$expected_event" <<'PY'
 import json
 import sys
 from datetime import datetime, timedelta, timezone
 
 run = json.load(open(sys.argv[1], encoding='utf-8'))
 workflow_id, repository, retention_days = sys.argv[2:5]
+expected_event = sys.argv[5]
 created_at = run.get('created_at') or run.get('run_started_at') or run.get('updated_at')
 if not created_at:
     raise SystemExit('deploy run metadata is missing a timestamp')
@@ -465,7 +474,7 @@ if datetime.now(timezone.utc) - created > timedelta(days=int(retention_days)):
 valid = (
     str(run.get('workflow_id', '')) == workflow_id and
     run.get('path') == '.github/workflows/oci-production-deploy.yml' and
-    run.get('event') == 'workflow_dispatch' and
+    run.get('event') == expected_event and
     run.get('head_branch') == 'master' and
     ((run.get('head_repository') or {}).get('full_name') == repository) and
     run.get('status') == 'completed' and

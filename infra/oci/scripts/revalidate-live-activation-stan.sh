@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_SHA="${SOURCE_SHA:-}"
 BUILD_RUN_ID="${BUILD_RUN_ID:-}"
 INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
@@ -96,6 +97,13 @@ verify_run() {
     gh api "repos/$REPOSITORY/actions/runs/$run_id" \
       --jq '[.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
   )"
+  if [[ "$workflow_file" == oci-production-deploy.yml && "$event" == workflow_run ]]; then
+    expected_event="$(
+      "$SCRIPT_DIR/upstream_run_binding_stan.py" validate-deployment \
+        --repository "$REPOSITORY" --subject-sha "$expected_head_sha" \
+        --run-id "$run_id" --conclusion success
+    )" || return 1
+  fi
   [[ "$path" == ".github/workflows/$workflow_file" ]] &&
     [[ "$event" == "$expected_event" ]] &&
     [[ "$head_sha" == "$expected_head_sha" ]] &&

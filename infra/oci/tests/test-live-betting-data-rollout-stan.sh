@@ -45,6 +45,74 @@ fail() {
 [[ "$(grep -Fc '/variables/OCI_RUNTIME_MODE' "$WORKFLOW")" == "0" ]] ||
   fail "data workflow must not call the OCI_RUNTIME_MODE environment endpoint"
 
+ruby -ryaml -rjson - "$WORKFLOW" >"$work_dir/preflight-steps.json" <<'RUBY'
+puts JSON.generate(YAML.load_file(ARGV[0]).fetch("jobs").fetch("rollout").fetch("steps"))
+RUBY
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$work_dir" <<'PY'
+import json, os, subprocess, sys, tempfile
+from pathlib import Path
+work = Path(sys.argv[1])
+steps = json.loads((work / "preflight-steps.json").read_text())
+barrier_name = "Require complete read-only preflight before lock mutation"
+barrier = next(step for step in steps if step["name"] == barrier_name)
+resume = next(step for step in steps if step.get("id") == "resume_preflight")
+acquire = next(step for step in steps if step["name"] == "Acquire database operation lock")
+assert steps.index(barrier) < steps.index(acquire)
+for step_id in ("resume_preflight", "baseline_preflight", "activation_preflight", "disk_preflight"):
+    step = next(step for step in steps if step.get("id") == step_id)
+    assert step["continue-on-error"] is True and steps.index(step) < steps.index(barrier)
+assert "continue-on-error" not in barrier
+assert barrier["if"] == "inputs.phase != 'incident-restore'"
+body = resume["run"]
+join_end = '[ "$preflight_status" = 0 ] || exit 1\n'
+join = body[body.index("preflight_checks=("):body.index(join_end) + len(join_end)]
+checks = ("verify_resume_baseline", "verify_resume_fence", "verify_resume_images", "verify_resume_lock")
+for failed in (set(), {checks[2]}, set(checks)):
+    with tempfile.TemporaryDirectory(dir=work) as directory:
+        root = Path(directory)
+        functions = "\n".join(
+            f'{name}() {{ touch {name}.visited; '
+            + ("false; touch escaped-errexit; " if name in failed else "")
+            + "}"
+            for name in checks
+        )
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", functions + "\n" + join + "\ntouch authority"],
+            cwd=root, capture_output=True, text=True, timeout=10,
+        )
+        assert (result.returncode == 0) == (not failed), result.stderr
+        assert all((root / f"{name}.visited").exists() for name in checks)
+        assert not (root / "escaped-errexit").exists()
+        assert (root / "authority").exists() == (not failed)
+        assert all(f"Resume preflight failed: {name}" in result.stderr for name in failed)
+base = dict(os.environ, RESUME_OUTCOME="success", RESUME_REQUIRED="true",
+            BASELINE_OUTCOME="success", ACTIVATION_OUTCOME="skipped", ACTIVATION_REQUIRED="false",
+            DISK_OUTCOME="success", DISK_REQUIRED="true")
+cases = [
+    ({}, True),
+    (dict(RESUME_OUTCOME="skipped", RESUME_REQUIRED="false",
+          DISK_OUTCOME="skipped", DISK_REQUIRED="false"), True),
+    (dict(ACTIVATION_REQUIRED="true", ACTIVATION_OUTCOME="success"), True),
+    (dict(RESUME_OUTCOME="failure", BASELINE_OUTCOME="failure", DISK_OUTCOME="failure"), False),
+    (dict(RESUME_OUTCOME="skipped"), False),
+    (dict(ACTIVATION_REQUIRED="true"), False),
+    (dict(BASELINE_OUTCOME=""), False),
+    (dict(DISK_OUTCOME="cancelled"), False),
+]
+for changes, passed in cases:
+    with tempfile.TemporaryDirectory(dir=work) as directory:
+        root = Path(directory)
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", barrier["run"] + "\ntouch mutation"],
+            cwd=root, env=dict(base, **changes), capture_output=True, text=True, timeout=10,
+        )
+        assert (result.returncode == 0) == passed, (changes, result.stderr)
+        assert (root / "mutation").exists() == passed
+        if changes.get("BASELINE_OUTCOME") == "failure":
+            assert all(f"preflight {name}:" in result.stderr for name in ("resume", "baseline", "disk"))
+print("PASS read-only preflight reports every failed group and blocks authority/mutation")
+PY
+
 ruby -ryaml -rjson - "$DEPLOY_WORKFLOW" >"$work_dir/receiver-steps.json" <<'RUBY'
 steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("deploy").fetch("steps")
 puts JSON.generate(steps.select { |step|
@@ -705,12 +773,14 @@ def run(body, env):
 cases = ("success", "enabled", "missing-flag", "duplicate-flag", "lease-zero", "lease-empty",
          "generation", "writer", "support-pod", "images", "foreign-owner", "foreign-source",
          "not-expired", "duration", "fence", "exclusivity", "workload-drift", "pod-drift",
-         "lock-rv", "release-cas", "acquire-cas", "positive-released-duration")
+         "lock-rv", "release-cas", "acquire-cas", "positive-released-duration", "combined-preflight")
 for failure in cases:
     env = dict(base)
     d, p, l = copy.deepcopy(deployments), copy.deepcopy(pods), copy.deepcopy(lock)
-    for name in ("pre-runtime-lock.json", "expired-handoff-runtime.json", "writes", "replaces"):
+    for name in ("pre-runtime-lock.json", "expired-handoff-runtime.json", "writes", "replaces",
+                 "artifacts/oci-live-data-rollout/evidence/resume-authority.env"):
         (root / name).unlink(missing_ok=True)
+    (root / "artifacts/prerequisite/provenance.env").write_text(f"baseline_sha256={baseline_sha}\n")
     gm = next(item for item in d if item["metadata"]["name"] == "gaming-gamemaster-depl")
     flags = gm["spec"]["template"]["spec"]["containers"][0]["env"]
     if failure == "enabled": flags[0]["value"] = "true"
@@ -729,6 +799,11 @@ for failure in cases:
         l["data"].update({"acquired-at-epoch": str(start), "lease-until-epoch": str(start + 1800)})
     elif failure == "duration": l["data"]["lease-duration-seconds"] = "14400"
     elif failure == "fence": env["EXPIRED_BAD_FENCE"] = "true"
+    elif failure == "combined-preflight":
+        env["EXPIRED_BAD_FENCE"] = "true"
+        gm["spec"]["template"]["spec"]["containers"][0]["image"] = "foreign"
+        l["data"]["source-sha"] = "1" * 40
+        (root / "artifacts/prerequisite/provenance.env").write_text("baseline_sha256=invalid\n")
     for path, value in ((root / "deployments.json", {"items": d}),
                         (root / "pods.json", {"items": p}), (root / "lock.json", l)):
         path.write_text(json.dumps(value))
@@ -738,6 +813,10 @@ for failure in cases:
     if failure not in after_snapshot:
         assert result.returncode != 0, failure
         assert not (root / "writes").exists(), failure
+        assert not (root / "artifacts/oci-live-data-rollout/evidence/resume-authority.env").exists()
+        if failure == "combined-preflight":
+            assert all(f"Resume preflight failed: verify_resume_{name}" in result.stderr
+                       for name in ("baseline", "fence", "images", "lock")), result.stderr
         continue
     assert result.returncode == 0, (failure, result.stderr)
     assert stat.S_IMODE((root / "pre-runtime-lock.json").stat().st_mode) == 0o600
@@ -5329,10 +5408,6 @@ require_order(
     ],
     "failed-deploy resume",
 )
-if resume.rindex("live-data-maintenance-stan.sh verify-held") < resume.index(
-    "Resume supporting pod image mismatch"
-):
-    raise SystemExit("retained held-fence verification precedes supporting pod validation")
 if "Resume pod image mismatch" in resume:
     raise SystemExit("failed-deploy resume still requires pods for quiesced writers")
 if resume.count("backoffice|bet|event|gamemaster|moderation|resulting|slip)") != 1:
@@ -5387,9 +5462,11 @@ revalidation = data[
     data.index("- name: Revalidate exact release disk checkpoint before lock mutation"):
     data.index("- name: Acquire database operation lock")
 ]
-if revalidation.count("\n      - name:") != 0:
+if revalidation.count("\n      - name:") != 1 or (
+    "\n      - name: Require complete read-only preflight before lock mutation\n"
+) not in revalidation:
     raise SystemExit(
-        "another workflow operation intervenes between checkpoint revalidation "
+        "an operation other than the read-only outcome barrier intervenes between checkpoint revalidation "
         "and lock acquisition"
     )
 for literal in (
@@ -5522,9 +5599,9 @@ if data.count(resume_mode_env) != 3:
     )
 
 for literal in (
-    "EXPECTED_OPERATION_LOCK_HOLDER: live-data-${{ inputs.data_run_id }}-1",
+    "EXPECTED_OPERATION_LOCK_HOLDER: live-data-${{ env.DATA_RUN_ID }}-1",
     "EXPECTED_OPERATION_LOCK_ID: live-data-apply-slip-index",
-    "EXPECTED_OPERATION_LOCK_SOURCE_SHA: ${{ inputs.approved_sha }}",
+    "EXPECTED_OPERATION_LOCK_SOURCE_SHA: ${{ env.SOURCE_SHA }}",
     'OCI_EXPECT_HTTP_MUTATION_FENCE: "1"',
     "shared-mongo-operation-lock-stan.sh verify-released",
 ):

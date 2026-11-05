@@ -1330,6 +1330,75 @@ jq '{
   --producer-run-id 700 \
   --profile held >/dev/null
 
+python3 - "$HELPER" "$checkpoint_runtime" "$checkpoint_capacity" \
+  "$candidate_images" "$SOURCE_SHA" "$work_dir" <<'PY'
+import copy
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+helper, runtime_file, capacity, candidates, source, directory = sys.argv[1:]
+work = Path(directory)
+runtime = json.loads(Path(runtime_file).read_text())
+runtime["root"]["mount"]["uuid"] = "11111111-1111-1111-1111-111111111111"
+runtime["mongo"]["mount"]["uuid"] = "22222222-2222-2222-2222-222222222222"
+runtime["mongo"]["volumeIdSha256"] = hashlib.sha256(b"ocid1.volume.oc1..fixture").hexdigest()
+snapshot = work / "storage-runtime.json"
+snapshot.write_text(json.dumps(runtime))
+diagnosis = work / "storage-diagnosis.json"
+checkpoint = work / "storage-checkpoint.json"
+subprocess.run([
+    helper, "diagnose", "--runtime", str(snapshot), "--capacity", capacity,
+    "--candidate-images", candidates, "--source-sha", source,
+    "--infrastructure-run-id", "400", "--ghcr-build-run-id", "300",
+    "--workflow-run-id", "713", "--output", str(diagnosis),
+], check=True, stdout=subprocess.DEVNULL)
+subprocess.run([
+    helper, "write-release-checkpoint", "--diagnosis", str(diagnosis),
+    "--runtime", str(snapshot), "--capacity", capacity, "--source-sha", source,
+    "--control-sha", source, "--producer-run-id", "713", "--output", str(checkpoint),
+], check=True, stdout=subprocess.DEVNULL)
+sealed = json.loads(checkpoint.read_text())["stableIdentity"]
+assert sealed["rootFsUuidSha256"] == hashlib.sha256(runtime["root"]["mount"]["uuid"].encode()).hexdigest()
+assert sealed["mongoFsUuidSha256"] == hashlib.sha256(runtime["mongo"]["mount"]["uuid"].encode()).hexdigest()
+assert sealed["mongoVolumeIdSha256"] == runtime["mongo"]["volumeIdSha256"]
+held = {
+    "schemaVersion": "k3s-node-disk-held-runtime.v1", "snapshotProfile": "held",
+    **{key: runtime[key] for key in ("applicationRepository", "root", "mongo", "images", "runtime")},
+}
+
+def revalidate(value):
+    snapshot.write_text(json.dumps(value))
+    return subprocess.run([
+        helper, "revalidate-release-checkpoint", "--checkpoint", str(checkpoint),
+        "--runtime", str(snapshot), "--capacity", capacity, "--candidate-images", candidates,
+        "--source-sha", source, "--producer-run-id", "713", "--profile", "held",
+    ], capture_output=True, text=True)
+
+renamed = copy.deepcopy(held)
+renamed["root"]["mount"]["source"] = "/dev/sdb1"
+renamed["mongo"]["mount"]["source"] = "/dev/sdc"
+result = revalidate(renamed)
+assert result.returncode == 0, result.stderr
+for label in ("root", "mongo"):
+    changed = copy.deepcopy(renamed)
+    changed[label]["mount"]["uuid"] = "33333333-3333-3333-3333-333333333333"
+    result = revalidate(changed)
+    assert result.returncode != 0 and f"{label}FsUuidSha256" in result.stderr, result.stderr
+changed = copy.deepcopy(renamed)
+changed["mongo"]["volumeIdSha256"] = "f" * 64
+result = revalidate(changed)
+assert result.returncode != 0 and "mongoVolumeIdSha256" in result.stderr, result.stderr
+missing = copy.deepcopy(renamed)
+for label in ("root", "mongo"):
+    del missing[label]["mount"]["uuid"]
+del missing["mongo"]["volumeIdSha256"]
+result = revalidate(missing)
+assert result.returncode != 0 and "stable identity differs" in result.stderr, result.stderr
+PY
+
 released_runtime="$work_dir/released-runtime.json"
 released_checkpoint="$work_dir/released-checkpoint.json"
 python3 - "$HELPER" "$checkpoint_runtime" "$checkpoint_capacity" \
@@ -1967,6 +2036,21 @@ else
 fi
 SH
 chmod +x "$stub_bin/kubectl"
+cat >"$stub_bin/oci" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "compute volume-attachment get --volume-attachment-id ocid1.volumeattachment.oc1..fixture --connection-timeout 5 --read-timeout 10 --max-retries 0" ]] || {
+  echo "unexpected checkpoint provider read" >&2
+  exit 1
+}
+if [[ -n "${STUB_VOLUME_READ_LOG:-}" ]]; then
+  printf 'read\n' >>"$STUB_VOLUME_READ_LOG"
+  [[ "$(wc -l <"$STUB_VOLUME_READ_LOG" | tr -d ' ')" != "${STUB_VOLUME_READ_FAILURE_AT:-0}" ]] ||
+    exit 43
+fi
+printf '%s\n' '{"data":{"id":"ocid1.volumeattachment.oc1..fixture","instance-id":"ocid1.instance.oc1..test","volume-id":"ocid1.volume.oc1..fixture","lifecycle-state":"ATTACHED","attachment-type":"paravirtualized","is-read-only":false,"is-shareable":false,"device":"/dev/oracleoci/oraclevdb"}}'
+SH
+chmod +x "$stub_bin/oci"
 cat >"$work_dir/summary-before.json" <<'JSON'
 {"node":{"fs":{"capacityBytes":50000000000,"usedBytes":37000000000,"availableBytes":13000000000}}}
 JSON
@@ -2016,7 +2100,9 @@ case "$action" in
           "$(awk '$1 == "snapshot" {count++} END {print count+0}' "$STUB_REMOTE_LOG")" == "$STUB_SNAPSHOT_AT" ]]; then
       exec "$STUB_SNAPSHOT_RUNNER"
     fi
-    cat "${STUB_CURRENT_RUNTIME:?}"
+    jq '.root.mount.uuid="11111111-1111-1111-1111-111111111111" |
+        .mongo.mount.uuid="22222222-2222-2222-2222-222222222222"' \
+      "${STUB_CURRENT_RUNTIME:?}"
     ;;
   reclaim-cri-owned-unused-images)
     cp "${STUB_POST_RUNTIME:?}" "${STUB_CURRENT_RUNTIME:?}"
@@ -2068,6 +2154,8 @@ runtime_mode=k3s
 instance_ocid=ocid1.instance.oc1..test
 instance_fingerprint=0938f1aad31453e408d76d875f5348a89c4e9a4c636f5ca1c4c23e4eb8945ab3
 instance_private_ip=10.0.0.2
+mongo_volume_ocid=ocid1.volume.oc1..fixture
+mongo_volume_attachment_ocid=ocid1.volumeattachment.oc1..fixture
 EOF
 
 common_env=(
@@ -2709,12 +2797,13 @@ SH
 chmod +x "$journal_bin/journalctl"
 
 for journal_case in success candidacy candidacy-over fatal mutation-failure rotate-failure vacuum-failure \
-  post-capture-failure fatal-post-capture candidacy-post-capture; do
+  post-capture-failure fatal-post-capture candidacy-post-capture volume-post-capture; do
   cp "$journal_cases/before.json" "$work_dir/current-runtime.json"
   cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
   : >"$work_dir/remote.log"
   : >"$work_dir/journal-capacity.log"
   : >"$work_dir/journal-command.log"
+  : >"$work_dir/journal-volume-read.log"
   journal_checkpoint="$work_dir/journal-$journal_case-checkpoint.json"
   journal_result="$work_dir/journal-$journal_case-reclaim.json"
   journal_log="$work_dir/journal-$journal_case.log"
@@ -2746,6 +2835,10 @@ for journal_case in success candidacy candidacy-over fatal mutation-failure rota
       ;;
   esac
   case "$journal_case" in
+    volume-post-capture)
+      journal_args+=(STUB_VOLUME_READ_FAILURE_AT=2
+        STUB_VOLUME_READ_LOG="$work_dir/journal-volume-read.log")
+      ;;
     *post-capture*) journal_args+=(STUB_POST_CAPTURE_STATUS=43) ;;
   esac
   journal_status=0
@@ -3382,11 +3475,14 @@ if [[ -n "${STUB_SNAPSHOT_COMMAND_LOG:-}" ]]; then
   printf '%s:%s\n' "${0##*/}" "$*" >>"$STUB_SNAPSHOT_COMMAND_LOG"
 fi
 case "${0##*/}:$*" in
-  "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /")
-    jq '{filesystems:[.root.mount]}' "$STUB_CURRENT_RUNTIME"
+  "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,UUID --target /")
+    jq '{filesystems:[.root.mount + {uuid:"11111111-1111-1111-1111-111111111111"}]}' "$STUB_CURRENT_RUNTIME"
     ;;
-  "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /var/lib/betstan/mongo")
-    jq '{filesystems:[.mongo.mount]}' "$STUB_CURRENT_RUNTIME"
+  "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,UUID --target /var/lib/betstan/mongo")
+    jq '{filesystems:[.mongo.mount + {uuid:"22222222-2222-2222-2222-222222222222"}]}' "$STUB_CURRENT_RUNTIME"
+    ;;
+  "readlink:-e -- /dev/oracleoci/oraclevdb")
+    printf '/dev/sdb\n'
     ;;
   "findmnt:--noheadings --output TARGET --target /var/log/journal")
     printf '/\n'
@@ -3453,7 +3549,7 @@ case "${0##*/}:$*" in
 esac
 SH
 chmod +x "$snapshot_bin/jq" "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
-for snapshot_command in findmnt df du k3s systemctl; do
+for snapshot_command in findmnt readlink df du k3s systemctl; do
   ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
 done
 snapshot_journal_mount="$(

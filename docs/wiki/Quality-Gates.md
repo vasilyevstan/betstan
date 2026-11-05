@@ -240,6 +240,12 @@ workflow file that no guarded suite references. Every decision prints a
 scheduled `ci-full-nightly` workflow runs every shard with
 `BETSTAN_CI_FULL=1` on `master` as the backstop for selection mistakes.
 
+Concurrent selectors serialize shallow-history deepening within the checkout,
+then recheck that the first parent is available. This prevents competing Git
+fetches from turning an unrelated change into several full safety runs.
+Lock/fetch timeouts, unavailable history and unknown inputs still select full
+validation; selection never treats a failed fetch as proof that a diff is empty.
+
 The workflow-contract wrapper runs independent governance and data suites
 concurrently, waits for every child, and fails if any child fails. Independent
 dispatch fixtures use at most four isolated processes; mocked clocks, output

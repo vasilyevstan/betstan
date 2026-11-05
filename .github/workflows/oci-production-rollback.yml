@@ -211,7 +211,13 @@ jobs:
               )"
             [ "$fenced_workflow" = "$deploy_workflow_id" ]
             [ "$fenced_path" = ".github/workflows/oci-production-deploy.yml" ]
-            [ "$fenced_event" = "workflow_dispatch" ]
+            if [ "$fenced_event" = workflow_run ]; then
+              ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+                --repository "$REPOSITORY" --subject-sha "$DEPLOYED_SOURCE_SHA" \
+                --run-id "$FENCED_DEPLOY_RUN_ID" --conclusion failure >/dev/null
+            else
+              [ "$fenced_event" = "workflow_dispatch" ]
+            fi
             [ "$fenced_head_sha" = "$DEPLOYED_SOURCE_SHA" ]
             [ "$fenced_branch" = "master" ]
             [ "$fenced_repository" = "$REPOSITORY" ]
