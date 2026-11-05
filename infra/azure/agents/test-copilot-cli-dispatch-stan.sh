@@ -2525,8 +2525,9 @@ assert (d / "dispatches").read_text() == "1", "post-CAS replay"
 run(d, "--resume-captured", state="active")
 
 saved_request = request
-def check_bound_successor_operation(operation):
+def check_bound_successor_operation(case):
     global request
+    operation, resume, wrong_read, missing = case
     successor_policy = json.loads(subprocess.check_output([policy_script, "get", operation]))
     request = {
         **copy.deepcopy(saved_request), "operation": operation,
@@ -2537,7 +2538,7 @@ def check_bound_successor_operation(operation):
     }
     if operation == "oci-live-data-continue-held-handoff":
         request["inputs"].update(held_handoff_run_id="48", held_handoff_source_sha=old)
-    for resume in ("", "--resume-captured", "--resume-run"):
+    if wrong_read is None:
         d = setup()
         fixture = json.loads((d / "fixture.json").read_text())
         fixture.update(boundContext=True, pauseIssue=bool(resume))
@@ -2570,24 +2571,29 @@ def check_bound_successor_operation(operation):
         )
         run(d, "--dispatch-prepared", state="active", ok=False)
         assert (d / "dispatches").read_text() == "1"
-    for wrong_read in (1, 2):
-        for missing in (False, True):
-            d = setup()
-            fixture = json.loads((d / "fixture.json").read_text())
-            fixture.update(boundContext=True, wrongSummaryRead=wrong_read)
-            if missing:
-                fixture["wrongSummaryRunId"] = None
-            write(d / "fixture.json", fixture)
-            prepare(d)
-            result = run(d, "--dispatch-prepared", state="active", ok=False)
-            assert "authority record does not match the bound materialization run" in result.stderr
-            assert json.loads((d / "authority" / f'{fixture["newRun"]}.json').read_text())["state"] == "claimed"
-            calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
-            assert all(not call["bound"] and call["successor"] is None for call in calls)
-            assert all(call["boundary"] == "dispatch" for call in calls)
-parallel_cases(check_bound_successor_operation, (
-    "oci-live-data-continue-held-handoff", "oci-live-data-resume-deploy",
-))
+    else:
+        d = setup()
+        fixture = json.loads((d / "fixture.json").read_text())
+        fixture.update(boundContext=True, wrongSummaryRead=wrong_read)
+        if missing:
+            fixture["wrongSummaryRunId"] = None
+        write(d / "fixture.json", fixture)
+        prepare(d)
+        result = run(d, "--dispatch-prepared", state="active", ok=False)
+        assert "authority record does not match the bound materialization run" in result.stderr
+        assert json.loads((d / "authority" / f'{fixture["newRun"]}.json').read_text())["state"] == "claimed"
+        calls = [json.loads(line) for line in (d / "bound-context-calls").read_text().splitlines()]
+        assert all(not call["bound"] and call["successor"] is None for call in calls)
+        assert all(call["boundary"] == "dispatch" for call in calls)
+# Each lifecycle has its own setup; schedule cases rather than two serial batches.
+parallel_cases(check_bound_successor_operation, [
+    (operation, resume, wrong_read, missing)
+    for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-deploy")
+    for resume, wrong_read, missing in (
+        [("", None, False), ("--resume-captured", None, False), ("--resume-run", None, False)]
+        + [("", wrong_read, missing) for wrong_read in (1, 2) for missing in (False, True)]
+    )
+])
 request = saved_request
 print("held_and_expired_bound_successor_prepared_materialization_and_both_resumes=PASS", flush=True)
 
