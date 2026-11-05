@@ -2888,13 +2888,14 @@ workflow_file = ARGV.fetch(0)
 workflow_text = File.read(workflow_file)
 trusted_workflow_blob = "1e3118276cc4746e824303245339c25de4411c15"
 lean_workflow_blob = "7f036e038c780d929417ea7e9f6227bdf9d5fb89"
+native_dispatch_workflow_blob = "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"
 workflow_blob = Digest::SHA1.hexdigest(
   "blob #{workflow_text.bytesize}\0#{workflow_text}"
 )
-unless [trusted_workflow_blob, lean_workflow_blob].include?(workflow_blob)
+unless [trusted_workflow_blob, lean_workflow_blob, native_dispatch_workflow_blob].include?(workflow_blob)
   abort("production-build is neither the trusted restoration nor the reviewed lean workflow")
 end
-lean_workflow = workflow_blob == lean_workflow_blob
+lean_workflow = workflow_blob != trusted_workflow_blob
 expected_checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
 approved_action_refs = {
   "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
@@ -2904,7 +2905,11 @@ approved_action_refs = {
   "docker/login-action" => "dbcb813823bdd20940b903addbd779551569679f",
   "docker/build-push-action" => "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
   "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
-}.freeze
+}
+if workflow_blob == native_dispatch_workflow_blob
+  approved_action_refs["actions/github-script"] = "ed597411d8f924073f98dfc5c65a23a2325f34cd"
+end
+approved_action_refs.freeze
 expected_syntax_targets = [
   "infra/azure/agents/test-deployment-safety-ci-stan.sh",
 ]
@@ -3064,7 +3069,16 @@ def validate_workflow(
     end
   end
   errors << "deployment-safety-contracts must not declare job env" if safety_job.key?("env")
-  errors << "deployment-safety-contracts must not declare job permissions" if safety_job.key?("permissions")
+  native_dispatch = Array(safety_job["steps"]).find { |step| step["id"] == "dispatch-original" }
+  if native_dispatch
+    expected_read_permissions = { "contents" => "read", "actions" => "read", "attestations" => "read" }
+    errors << "dispatch proof must use only read permissions" unless safety_job["permissions"] == expected_read_permissions
+    errors << "dispatch proof needs preserved previous-master control" unless native_dispatch["if"] == "github.event_name == 'push' && steps.dispatch-control-copy.outcome == 'success'"
+    errors << "dispatch proof action changed" unless native_dispatch["uses"] == "actions/github-script@#{approved_action_refs['actions/github-script']}"
+    errors << "dispatch proof must use the native token" unless native_dispatch["env"] == { "GH_TOKEN" => "${{ github.token }}" }
+  else
+    errors << "deployment-safety-contracts must not declare job permissions" if safety_job.key?("permissions")
+  end
 
   safety_job_strings = flatten_strings(safety_job)
   if safety_job_strings.any? { |value| value.include?("secrets.") || value.include?("${{ secrets.") }
@@ -3109,6 +3123,14 @@ def validate_workflow(
     step["name"] == "Validate affected Azure deployment contracts"
   end || {}
   errors << "deployment-safety meta contract must run whenever the job runs" if validate_step.key?("if")
+  if native_dispatch
+    expected_dispatch_env = {
+      "BETSTAN_NATIVE_DISPATCH_REUSED" => "${{ steps.dispatch-original.outputs.kind == 'REUSED' && '1' || '0' }}"
+    }
+    errors << "dispatch must execute normally unless original verification succeeded" unless validate_step["env"] == expected_dispatch_env
+  else
+    errors << "legacy deployment safety must not delegate dispatch" if validate_step.key?("env")
+  end
   unless full_step["if"] == "needs.change-scope.outputs.deployment_safety == 'full'"
     errors << "deployment-safety full contract routing changed"
   end

@@ -10,13 +10,21 @@ on:
 permissions:
   contents: read
 
+env:
+  # Observation only. Freeze an adoption variant after ordinary-PR identity qualification.
+  NATIVE_DISPATCH_REUSE: 'disabled'
+
 jobs:
   scope:
     name: oci-scope
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       mode: ${{ steps.scope.outputs.mode }}
+      native_source: ${{ steps.native-source.outputs.source }}
     steps:
       - name: Checkout pull request
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -35,13 +43,17 @@ jobs:
             case "$path" in
               infra/oci/agents/health-check-stan.sh|\
               infra/oci/agents/test-health-contract-stan.sh|\
-              .github/workflows/oci-validate.yml|\
               infra/oci/tests/test-ghcr-contract.sh)
                 [ "$mode" = full ] || mode=focused
                 ;;
               .github/workflows/production-build.yml)
                 ;;
               infra/*|\
+              .github/scripts/source-quality.js|\
+              .github/scripts/consume-source-quality.js|\
+              .github/scripts/quality-attestation.js|\
+              .github/scripts/pr-source-snapshot.js|\
+              .github/scripts/source-input-selection.js|\
               .github/workflows/*)
                 # Heavy suites self-select through infra/ci/suite_gate.py.
                 mode=full
@@ -50,6 +62,19 @@ jobs:
           done < <(git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA")
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "oci_contract_scope=$mode"
+
+      - name: Capture optional native dispatch plan
+        id: native-source
+        if: steps.scope.outputs.mode == 'full'
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const { captureNativeDispatchSource } = require('./.github/scripts/source-quality.js');
+            const source = await captureNativeDispatchSource({
+              github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            });
+            core.setOutput('source', JSON.stringify(source));
 
   syntax:
     name: oci-workflow-syntax
@@ -101,7 +126,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [core, live, provenance, rollback, governance, dispatch]
+        shard: [core, live, provenance, rollback, governance]
     steps:
       - name: Checkout pull request
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -111,9 +136,169 @@ jobs:
           BETSTAN_CONTRACT_SHARD: ${{ matrix.shard }}
         run: ./infra/oci/tests/run-contracts.sh
 
+  dispatch-contracts:
+    name: oci-full-contracts (dispatch)
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    outputs:
+      worker: ${{ steps.observation.outputs.worker || steps.worker.outputs.worker }}
+      execution_kind: ${{ steps.execute.outcome == 'success' && steps.worker.outcome == 'success' && steps.worker.outputs.selected == 'true' && 'EXECUTED' || steps.reused.outcome == 'success' && 'REUSED' || steps.selected-out.outcome == 'success' && 'SELECTED_OUT' || 'UNAVAILABLE' }}
+    steps:
+      - name: Checkout protected dispatch verifier
+        id: protected-checkout
+        continue-on-error: true
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Preserve protected dispatch verifier before candidate checkout
+        id: protected-copy
+        if: steps.protected-checkout.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir "$RUNNER_TEMP/dispatch-control"
+          cp .github/scripts/{source-quality,consume-source-quality,quality-attestation,pr-source-snapshot,source-input-selection}.js \
+            "$RUNNER_TEMP/dispatch-control/"
+
+      - name: Checkout pull request
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Capture dispatch worker before candidate tests
+        id: worker
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          PLANNED_SOURCE: ${{ needs.scope.outputs.native_source }}
+          PROTECTED_CONTROL_READY: ${{ steps.protected-copy.outcome == 'success' }}
+        with:
+          script: |
+            const { execFileSync, spawnSync } = require('node:child_process');
+            const { isDeepStrictEqual } = require('node:util');
+            core.setOutput('selected', 'true');
+            const mode = process.env.NATIVE_DISPATCH_REUSE;
+            if (!['enabled', 'disabled'].includes(mode)) throw new Error('Unknown dispatch execution mode');
+            if (mode === 'disabled') {
+              core.setOutput('observation', 'true');
+              core.info('Observation cannot authorize selection; full dispatch assertions required');
+              return;
+            }
+            if (process.env.PROTECTED_CONTROL_READY !== 'true') {
+              core.warning('Protected control unavailable; full dispatch assertions required');
+              return;
+            }
+            const prefix = `${process.env.RUNNER_TEMP}/dispatch-control`;
+            const control = require(`${prefix}/source-quality.js`);
+            const { nativeDispatchPolicy } = require(`${prefix}/consume-source-quality.js`);
+            const { QualityEvidenceError } = require(`${prefix}/pr-source-snapshot.js`);
+            if (typeof control.captureNativeDispatchSource !== 'function' ||
+                typeof nativeDispatchPolicy !== 'function') {
+              core.warning('Protected dispatch profile unavailable; full assertions required');
+              return;
+            }
+            try {
+              const source = await control.captureNativeDispatchSource({
+                github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+              });
+              if (!isDeepStrictEqual(source, JSON.parse(process.env.PLANNED_SOURCE))) {
+                throw new QualityEvidenceError('Native dispatch source changed since the isolated plan');
+              }
+              const profile = control.captureDispatchProfile();
+              const policy = await nativeDispatchPolicy({ github, context });
+              const actual = await control.dispatchControl(github, context.repo, source.commit.sha);
+              const controlApproved = isDeepStrictEqual(policy.records,
+                actual.records.filter((row) => control.DISPATCH_CONTROL_PATHS.includes(row.path)));
+              let selected = true;
+              if (controlApproved) {
+                const gate = spawnSync('python3', ['-I', 'infra/ci/suite_gate.py',
+                  'infra/azure/agents/test-copilot-cli-dispatch-stan.sh'], { encoding: 'utf8' });
+                if (gate.error) throw gate.error;
+                core.info(gate.stdout);
+                core.info(gate.stderr);
+                if (![0, 3].includes(gate.status)) throw new Error('Dispatch selector failed');
+                selected = gate.status === 0;
+              } else {
+                core.warning('Unapproved candidate control; full assertions required and original publication unavailable');
+              }
+              const changedControl = execFileSync('git', ['diff', '--name-only', 'HEAD^1', 'HEAD', '--',
+                ...control.DISPATCH_CONTROL_PATHS, '.github/workflows/oci-validate.yml'], { encoding: 'utf8' }).trim();
+              selected = selected || changedControl !== '';
+              core.setOutput('selected', String(selected));
+              core.setOutput('approved', String(controlApproved));
+              core.setOutput('worker', JSON.stringify({ source, profile, selected, controlApproved }));
+            } catch (error) {
+              if (!(error instanceof QualityEvidenceError) && !(error instanceof SyntaxError) &&
+                  ![403, 404, 410, 429, 500, 502, 503, 504].includes(error?.status)) throw error;
+              core.warning(`Dispatch proof unavailable: ${error.message}; full assertions required`);
+            }
+
+      - name: Verify direct native dispatch original
+        id: original
+        if: steps.worker.outputs.approved == 'true' && steps.worker.outputs.selected == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER: ${{ steps.worker.outputs.worker }}
+        with:
+          script: |
+            const { selectNativeDispatchOriginal } = require(`${process.env.RUNNER_TEMP}/dispatch-control/consume-source-quality.js`);
+            const result = await selectNativeDispatchOriginal({
+              github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            }, JSON.parse(process.env.WORKER).profile);
+            core.info(JSON.stringify(result));
+            core.setOutput('kind', result.kind);
+
+      - name: Capture observational dispatch facts
+        id: observation
+        if: steps.worker.outputs.observation == 'true'
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            // Execution decisions are already closed. These candidate facts
+            // affect optional observations only, never selection or reuse.
+            const control = require('./.github/scripts/source-quality.js');
+            const source = await control.captureNativeDispatchSource({
+              github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            });
+            core.setOutput('worker', JSON.stringify({
+              source, profile: control.captureDispatchProfile(), selected: true, controlApproved: false,
+            }));
+
+      - name: Execute original dispatch assertions
+        id: execute
+        if: steps.worker.outputs.selected != 'false' && steps.original.outputs.kind != 'REUSED'
+        env:
+          BETSTAN_CI_FULL: '1'
+          BETSTAN_CONTRACT_SHARD: dispatch
+        run: ./infra/oci/tests/run-contracts.sh
+
+      - name: Record selected-out dispatch
+        id: selected-out
+        if: steps.worker.outputs.selected == 'false'
+        run: echo 'dispatch=SELECTED_OUT (not original evidence)'
+
+      - name: Record authenticated dispatch reuse
+        id: reused
+        if: steps.original.outputs.kind == 'REUSED'
+        run: echo 'dispatch=REUSED (direct authenticated original, not a new execution)'
+
+      - name: Report unavailable dispatch capture
+        if: always() && steps.worker.outcome != 'success'
+        run: echo 'dispatch_original=UNAVAILABLE (capture failed; ordinary assertions retain ownership)'
+
   offline-contract:
     name: oci-validate
-    needs: [scope, syntax, focused-contracts, full-contracts]
+    needs: [scope, syntax, focused-contracts, full-contracts, dispatch-contracts]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -125,6 +310,7 @@ jobs:
           SYNTAX_RESULT: ${{ needs.syntax.result }}
           FOCUSED_RESULT: ${{ needs.focused-contracts.result }}
           FULL_RESULT: ${{ needs.full-contracts.result }}
+          DISPATCH_RESULT: ${{ needs.dispatch-contracts.result }}
         run: |
           set -euo pipefail
           [ "$SCOPE_RESULT" = success ]
@@ -133,20 +319,116 @@ jobs:
               [ "$SYNTAX_RESULT" = skipped ]
               [ "$FOCUSED_RESULT" = skipped ]
               [ "$FULL_RESULT" = skipped ]
+              [ "$DISPATCH_RESULT" = skipped ]
               echo "OCI contracts unaffected by this pull request"
               ;;
             focused)
               [ "$SYNTAX_RESULT" = success ]
               [ "$FOCUSED_RESULT" = success ]
               [ "$FULL_RESULT" = skipped ]
+              [ "$DISPATCH_RESULT" = skipped ]
               ;;
             full)
               [ "$SYNTAX_RESULT" = success ]
               [ "$FOCUSED_RESULT" = skipped ]
               [ "$FULL_RESULT" = success ]
+              [ "$DISPATCH_RESULT" = success ]
               ;;
             *)
               echo "invalid OCI contract scope: ${MODE:-missing}" >&2
               exit 1
               ;;
           esac
+
+  dispatch-original:
+    name: oci-dispatch-original
+    needs: [scope, dispatch-contracts, offline-contract]
+    if: ${{ !cancelled() && needs.offline-contract.result == 'success' && needs.dispatch-contracts.outputs.execution_kind == 'EXECUTED' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Optional publication cannot turn successful computation into a failed run.
+    # The required aggregate deliberately does not depend on this job.
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout protected dispatch signer
+        id: protected-checkout
+        if: env.NATIVE_DISPATCH_REUSE == 'enabled'
+        continue-on-error: true
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Preserve protected dispatch signer before candidate checkout
+        id: protected-copy
+        if: env.NATIVE_DISPATCH_REUSE == 'enabled' && steps.protected-checkout.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir "$RUNNER_TEMP/dispatch-signer-control"
+          cp .github/scripts/{source-quality,consume-source-quality,quality-attestation,pr-source-snapshot,source-input-selection}.js \
+            "$RUNNER_TEMP/dispatch-signer-control/"
+
+      - name: Checkout certified inline signer
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Reconstruct original from native jobs
+        id: collect
+        if: steps.checkout.outcome == 'success' && (env.NATIVE_DISPATCH_REUSE == 'disabled' || steps.protected-copy.outcome == 'success')
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          WORKER: ${{ needs.dispatch-contracts.outputs.worker }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const mode = process.env.NATIVE_DISPATCH_REUSE;
+            if (!['enabled', 'disabled'].includes(mode)) throw new Error('Unknown dispatch signing mode');
+            const observationOnly = mode === 'disabled';
+            const prefix = observationOnly ? './.github/scripts' : `${process.env.RUNNER_TEMP}/dispatch-signer-control`;
+            const { collectNativeDispatchOriginal } = require(`${prefix}/source-quality.js`);
+            const manifest = await collectNativeDispatchOriginal({
+              github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            }, JSON.parse(process.env.WORKER), { observationOnly });
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/quality-manifest.json`, JSON.stringify(manifest));
+
+      - name: Attest dispatch original
+        id: attest
+        if: steps.collect.outcome == 'success'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/quality-manifest.json
+
+      - name: Upload dispatch original
+        id: upload
+        if: steps.attest.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ env.NATIVE_DISPATCH_REUSE == 'enabled' && 'dispatch-original' || 'dispatch-observation' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quality-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Confirm original publication
+        if: steps.collect.outcome == 'success' && steps.attest.outcome == 'success' && steps.upload.outcome == 'success'
+        run: |
+          if [ "$NATIVE_DISPATCH_REUSE" = enabled ]; then
+            echo 'dispatch_original=PUBLISHED'
+          else
+            echo 'dispatch_observation=PUBLISHED (identity bring-up only; permanently ineligible for reuse)'
+          fi
+
+      - name: Report unavailable original
+        if: always() && (steps.collect.outcome != 'success' || steps.attest.outcome != 'success' || steps.upload.outcome != 'success')
+        run: echo 'dispatch_original=UNAVAILABLE (computation remains valid; reuse is not authorized)'

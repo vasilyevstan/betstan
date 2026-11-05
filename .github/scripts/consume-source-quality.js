@@ -270,6 +270,199 @@ async function authenticateReuseReferences({ options, source, references }, {
   return reusedResults;
 }
 
+async function nativeDispatchPolicy(options) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const crypto = require("node:crypto");
+  const { dispatchCommit, dispatchControl, DISPATCH_CONTROL_PATHS, DISPATCH_CALLER_BLOBS } = require("./source-quality.js");
+  const { github, context } = options;
+  const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: "master" });
+  if (branch?.protected !== true) throw new QualityEvidenceError("Dispatch approval is not protected master");
+  let approvalSha = branch.commit?.sha;
+  if (context.eventName === "push") {
+    const before = context.payload.before;
+    if (context.ref !== "refs/heads/master" || branch.commit?.sha !== context.sha ||
+      context.payload.after !== context.sha || context.payload.forced !== false ||
+      !/^[0-9a-f]{40}$/.test(before ?? "") || /^0+$/.test(before) ||
+      (await dispatchCommit(github, context.repo, context.sha)).parents[0] !== before) {
+      throw new QualityEvidenceError("Dispatch approval is not the platform push-before protected predecessor");
+    }
+    approvalSha = before;
+  }
+  const approved = await dispatchControl(github, context.repo, approvalSha);
+  const records = approved.records.filter((record) => DISPATCH_CONTROL_PATHS.includes(record.path));
+  // The verifier runs from the pre-candidate protected checkout. Refuse a stale
+  // or substituted copy instead of treating candidate JSON as control approval.
+  for (const record of records.filter((entry) => entry.path.startsWith(".github/scripts/"))) {
+    const bytes = fs.readFileSync(path.join(__dirname, path.basename(record.path)));
+    const actual = crypto.createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+    if (actual !== record.sha) throw new QualityEvidenceError("Executing dispatch verifier differs from protected approval");
+  }
+  const { data: workflow } = await github.rest.actions.getWorkflow({
+    ...context.repo, workflow_id: "oci-validate.yml",
+  });
+  if (workflow?.path !== ".github/workflows/oci-validate.yml" || workflow.state !== "active" ||
+    !Number.isSafeInteger(workflow.id) || workflow.id < 1) {
+    throw new QualityEvidenceError("Native dispatch producer workflow is unavailable");
+  }
+  return { sha: approved.commit.sha, records, workflowId: workflow.id, callers: DISPATCH_CALLER_BLOBS };
+}
+
+async function authenticateNativeDispatchOriginal({
+  options, current, profile, policy, runId, artifactId, content,
+}, { verify = require("./quality-attestation.js").verifyNativeDispatchManifest } = {}) {
+  const {
+    DISPATCH_WORKFLOW, DISPATCH_CONTROL_PATHS, dispatchControl, assertDispatchProfile, assertDispatchJobs,
+    nativeDispatchAssociationsMatch,
+  } = require("./source-quality.js");
+  const { github, context } = options;
+  if (!Number.isSafeInteger(runId) || runId < 1 || runId === current.runId ||
+    !Number.isSafeInteger(artifactId) || artifactId < 1 || typeof content !== "string" ||
+    Buffer.byteLength(content) > 1024 * 1024) {
+    throw new QualityEvidenceError("Invalid or self-referential native dispatch original");
+  }
+  assertDispatchProfile(profile);
+  const fetchNative = async () => {
+    const [{ data: run }, { data: artifact }] = await Promise.all([
+      github.rest.actions.getWorkflowRun({ ...context.repo, run_id: runId }),
+      github.rest.actions.getArtifact({ ...context.repo, artifact_id: artifactId }),
+    ]);
+    if (run?.id !== runId || run.run_attempt !== 1 || run.workflow_id !== policy.workflowId ||
+      run.path !== DISPATCH_WORKFLOW || run.event !== "pull_request" ||
+      run.repository?.id !== current.repositoryId || run.repository?.full_name !== current.repository ||
+      run.status !== "completed" || run.conclusion !== "success" ||
+      !/^[0-9a-f]{40}$/.test(run.head_sha ?? "") ||
+      artifact?.id !== artifactId || artifact.name !== `dispatch-original-${runId}-1` ||
+      artifact.expired !== false || artifact.workflow_run?.id !== runId ||
+      artifact.workflow_run?.repository_id !== current.repositoryId ||
+      artifact.workflow_run?.head_sha !== run.head_sha) {
+      throw new QualityEvidenceError("Original native dispatch run/artifact is unsigned, stale, retried or unsuccessful");
+    }
+    return { run, artifact };
+  };
+  const native = await fetchNative();
+  const certificate = await verify({
+    content,
+    expected: {
+      repository: current.repository, repositoryId: current.repositoryId, runId, attempt: 1,
+      event: "pull_request", validator: { workflowPath: DISPATCH_WORKFLOW },
+    },
+  });
+  // Fetch ACTUAL certified control; hashes claimed in the signed document are
+  // not executable approval. The strict inline certificate shape is deliberate.
+  if (certificate.signerSha !== certificate.sourceSha || certificate.callerSha !== certificate.sourceSha) {
+    throw new QualityEvidenceError("Unsupported native inline signer/caller/source relationship");
+  }
+  const actual = await dispatchControl(github, context.repo, certificate.sourceSha);
+  const helpers = actual.records.filter((record) => DISPATCH_CONTROL_PATHS.includes(record.path));
+  const workflow = actual.records.find((record) => record.path === DISPATCH_WORKFLOW);
+  // The observational caller remains ineligible even after its helpers land.
+  if (!isDeepStrictEqual(helpers, policy.records) || workflow.sha !== policy.callers[DISPATCH_WORKFLOW]?.at(-1)) {
+    throw new QualityEvidenceError("Certified dispatch workflow or executed helper closure is not independently approved");
+  }
+  const manifest = JSON.parse(content);
+  const source = manifest?.source;
+  if (manifest?.schemaVersion !== 1 || manifest.purpose !== "native-dispatch-original" ||
+    manifest.suiteId !== "cli-dispatch" || manifest.execution?.kind !== "EXECUTED" ||
+    !source || source.repository !== current.repository || source.repositoryId !== current.repositoryId ||
+    source.runId !== runId || source.attempt !== 1 || source.workflowId !== policy.workflowId ||
+    source.workflowPath !== DISPATCH_WORKFLOW || source.event !== "pull_request" ||
+    source.headSha !== native.run.head_sha || !isDeepStrictEqual(source.commit, actual.commit) ||
+    source.ref !== certificate.sourceRef || source.ref !== `refs/pull/${source.snapshot?.number}/merge` ||
+    !Number.isSafeInteger(source.snapshot?.number) || source.snapshot.number < 1 ||
+    source.snapshot?.repository !== current.repository || !["dev", "master"].includes(source.snapshot?.baseRef) ||
+    source.snapshot?.mergeSha !== certificate.sourceSha || source.snapshot?.headSha !== native.run.head_sha ||
+    !nativeDispatchAssociationsMatch(native.run.pull_requests, source.snapshot, current.repositoryId) ||
+    !isDeepStrictEqual(actual.commit.parents, [source.snapshot?.baseSha, native.run.head_sha]) ||
+    actual.commit.treeSha !== current.commit.treeSha || !isDeepStrictEqual(profile, manifest.profile)) {
+    throw new QualityEvidenceError("Dispatch original does not bind the exact tested tree, PR merge or execution profile");
+  }
+  assertDispatchProfile(manifest.profile);
+  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+    ...context.repo, run_id: runId, filter: "all", per_page: 100,
+  });
+  if (!isDeepStrictEqual(assertDispatchJobs(jobs, source), manifest.execution)) {
+    throw new QualityEvidenceError("Dispatch original does not identify actual complete native execution");
+  }
+  const final = await fetchNative();
+  if (!isDeepStrictEqual(native, final)) throw new QualityEvidenceError("Original dispatch evidence changed during authentication");
+  return {
+    kind: "REUSED", suiteId: "cli-dispatch", repository: current.repository,
+    runId, attempt: 1, artifactId, contentSha256: certificate.contentSha256,
+    originalCommitSha: actual.commit.sha, testedTreeSha: actual.commit.treeSha,
+  };
+}
+
+async function selectNativeDispatchOriginal(options, profile, {
+  git, verify, policy: readPolicy = nativeDispatchPolicy,
+  readArtifact = (reference) => readQualityArtifact({
+    repository: `${options.context.repo.owner}/${options.context.repo.repo}`, artifactId: reference.artifactId,
+  }),
+  onMiss = (reason) => console.warn(`Dispatch proof unavailable: ${reason}; ordinary computation required`),
+} = {}) {
+  const {
+    captureNativeDispatchSource, dispatchControl, DISPATCH_CONTROL_PATHS, assertDispatchProfile,
+  } = require("./source-quality.js");
+  const misses = [];
+  const miss = (error) => {
+    if (!(error instanceof QualityEvidenceError) && !(error instanceof SyntaxError) &&
+      ![403, 404, 410, 429, 500, 502, 503, 504].includes(error?.status)) throw error;
+    const reason = error instanceof SyntaxError ? "Malformed original JSON" : error.message;
+    misses.push(reason);
+    onMiss(reason);
+  };
+  try {
+    assertDispatchProfile(profile);
+    const current = await captureNativeDispatchSource(options, git);
+    const policy = await readPolicy(options);
+    const control = await dispatchControl(options.github, options.context.repo, current.commit.sha);
+    const helpers = control.records.filter((record) => DISPATCH_CONTROL_PATHS.includes(record.path));
+    const caller = control.records.find((record) => record.path === current.workflowPath);
+    if (!isDeepStrictEqual(helpers, policy.records) || !policy.callers[current.workflowPath]?.includes(caller.sha)) {
+      throw new QualityEvidenceError("Current caller/control is not approved for native dispatch reuse");
+    }
+    const { data: recent } = await options.github.rest.actions.listWorkflowRuns({
+      ...options.context.repo, workflow_id: policy.workflowId, status: "success", per_page: 5, page: 1,
+    });
+    if (!Array.isArray(recent?.workflow_runs) || recent.workflow_runs.length > 5) {
+      throw new QualityEvidenceError("Invalid bounded native original discovery");
+    }
+    for (const run of recent.workflow_runs) {
+      try {
+        if (!run || run.id === current.runId || run.run_attempt !== 1 || run.event !== "pull_request" ||
+          run.workflow_id !== policy.workflowId) {
+          throw new QualityEvidenceError("Self, retry or unsupported original candidate");
+        }
+        const { data: inventory } = await options.github.rest.actions.listWorkflowRunArtifacts({
+          ...options.context.repo, run_id: run.id, per_page: 100, page: 1,
+        });
+        if (!Array.isArray(inventory?.artifacts) || inventory.total_count !== inventory.artifacts.length ||
+          inventory.total_count > 100) throw new QualityEvidenceError("Incomplete original artifact inventory");
+        const matches = inventory.artifacts.filter((artifact) =>
+          artifact?.name === `dispatch-original-${run.id}-1` && artifact.expired === false);
+        if (matches.length !== 1) throw new QualityEvidenceError("No unique published original; reused/selected-out jobs cannot seed proof");
+        const reference = { runId: run.id, artifactId: matches[0].id };
+        const original = await authenticateNativeDispatchOriginal({
+          options, current, profile, policy, ...reference, content: await readArtifact(reference),
+        }, { verify });
+        const final = await captureNativeDispatchSource(options, git);
+        const finalPolicy = await readPolicy(options);
+        if (!isDeepStrictEqual(final, current) || !isDeepStrictEqual(finalPolicy, policy)) {
+          throw new QualityEvidenceError("Current dispatch source or protected approval changed before acceptance");
+        }
+        return original;
+      } catch (error) {
+        miss(error);
+      }
+    }
+    if (misses.length === 0) miss(new QualityEvidenceError("No authenticated native originals exist"));
+  } catch (error) {
+    miss(error);
+  }
+  return { kind: "EXECUTE", suiteId: "cli-dispatch", reasons: misses };
+}
+
 module.exports = {
   consumeSourceQuality, authenticateOriginalManifest, authenticateReuseReferences, consumeFullSourceQuality,
+  nativeDispatchPolicy, authenticateNativeDispatchOriginal, selectNativeDispatchOriginal,
 };
