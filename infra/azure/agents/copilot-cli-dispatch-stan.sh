@@ -529,6 +529,7 @@ operation="$(
     --repo-root "$ROOT_DIR"
 )"
 cross_master_rejection=false
+cross_master_settlement=false
 rejection_context=""
 rejection_state=""
 if [[ "$ACTION" = "--resume-run" ]] &&
@@ -544,7 +545,10 @@ if [[ "$ACTION" = "--resume-run" ]] &&
   current_master="$(jq -r '.controlSha' <<<"$rejection_context")"
   rejection_state="$(jq -r '.state' <<<"$rejection_context")"
   if [[ "$current_master" != "$live_master" ]]; then
-    if [[ "$rejection_state" != "rejecting" &&
+    if [[ "$rejection_state" = "claimed" ]]; then
+      # A terminal claimed run may settle under its recorded control SHA.
+      cross_master_settlement=true
+    elif [[ "$rejection_state" != "rejecting" &&
       "$rejection_state" != "retired" ]] ||
       [[ "$(jq -r '.prerequisiteRejection' <<<"$rejection_context")" != true ]]; then
       fail "only a persisted prerequisite rejection can resume across master advancement"
@@ -562,6 +566,9 @@ if [[ "$cross_master_rejection" = true ]]; then
   target_sha="$(jq -r '.targetSha // ""' <<<"$rejection_context")"
   input_hash="$(jq -r '.inputHash' <<<"$rejection_context")"
   policy_json=""
+  if [[ "$cross_master_settlement" = true ]]; then
+    policy_json="$("$POLICY_SCRIPT" get "$(jq -r '.operation' <<<"$rejection_context")")"
+  fi
 
   [[ "$workflow" =~ ^[A-Za-z0-9_.-]+\.yml$ ]] ||
     fail "recorded workflow name is invalid"
@@ -915,6 +922,23 @@ retire_terminal_claim() {
     --workflow-blob-sha "$workflow_blob_sha" \
     2>"$materialization_error"; then
     printf 'dispatch=RETIRED run_id=%s authority_state=retired\n' "$run_id"
+    return
+  fi
+  # An ungated run may execute before materialization; settle it as spent.
+  if "$AUTHORITY_HELPER" issue \
+    --authority-dir "$AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" \
+    --run-id "$run_id" \
+    --run-json "$run_file" \
+    --policy-json "$policy_json" \
+    --repository "$repository" \
+    --current-master "$current_master" \
+    --workflow-id "$workflow_id" \
+    --workflow-blob-sha "$workflow_blob_sha" \
+    --allow-terminal \
+    2>>"$materialization_error"; then
+    printf 'dispatch=SETTLED run_id=%s authority_state=issued conclusion=%s\n' \
+      "$run_id" "$(jq -r '.conclusion // ""' "$run_file")"
     return
   fi
   fail "dispatch run $run_id is terminal but not inert; do not redispatch or retire its authority"
@@ -1577,6 +1601,14 @@ if [[ "$cross_master_rejection" = true ]]; then
   if [[ "$rejection_state" = "retired" ]]; then
     printf 'dispatch=RETIRED run_id=%s authority_state=retired\n' \
       "$RESUME_RUN_ID"
+    exit 0
+  fi
+  if [[ "$cross_master_settlement" = true ]]; then
+    gh api "repos/$repository/actions/runs/$RESUME_RUN_ID" >"$run_file"
+    chmod 600 "$run_file"
+    [[ "$(jq -r '.status // ""' "$run_file")" = "completed" ]] ||
+      fail "only a terminal claimed run can settle across master advancement"
+    retire_terminal_claim "$RESUME_RUN_ID"
     exit 0
   fi
   rejection_version="$(jq -r '.version' <<<"$rejection_context")"

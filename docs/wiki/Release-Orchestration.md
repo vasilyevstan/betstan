@@ -368,6 +368,12 @@ authority; locks, fences, lease budgets and protected gates remain in force.
 Manual deployment remains supported. Activation, rollback and other deployment
 consumers qualify native receivers against their original parent and consumed
 inputs, including historical deployments after protected source advances.
+Chained receivers require the deployment workflow to stay active at every
+timing boundary; dispatched receivers keep the disabled-after-dispatch rule.
+With ungated environments a dispatched run may already be in progress or
+finished before materialization: in-progress exact runs are issued, and an
+executed terminal run settles as spent (`issued`) rather than leaving a global
+`claimed` fence, including across a later master under its recorded control.
 
 **Aggregated read-only preflight.** Failed-deploy resumes collect independent
 baseline, fence, runtime-image and inherited-lock failures before producing
@@ -623,7 +629,8 @@ through complete upstream validation, and verifies the physical runtime before t
 Failed deployment recovery is classified exactly. Provenance verification uses
 step-local default workflow authentication without expanded permissions. The
 existing retained-hold profile also admits a narrowly proven pre-runtime
-provenance failure with no deployment recovery artifact. Complete authenticated
+provenance failure, or an exact-SHA admission failure of an ungated chained
+receiver with all later steps skipped, with no deployment recovery artifact. Complete authenticated
 native run/step, trusted workflow-blob, and dispatch evidence must bind the
 original successful v6 handoff, build, infrastructure, checkpoint, and original
 before-baseline. That baseline, not candidate images, governs this case:

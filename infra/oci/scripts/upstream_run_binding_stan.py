@@ -5166,6 +5166,17 @@ def failed_deploy_native_inputs(
         else "Validate exact SHA and trusted upstream runs" if deployment_consumer
         else "Verify immutable image and infrastructure provenance"
     )
+    if (
+        not resume_dispatch and not deployment_consumer
+        and expected_step_conclusion == "failure"
+        and any(
+            item.get("name") == "Validate exact SHA and trusted upstream runs"
+            and item.get("conclusion") == "failure"
+            for item in deploy["steps"]
+        )
+    ):
+        # An ungated chained receiver can fail read-only admission before provenance.
+        step_name = "Validate exact SHA and trusted upstream runs"
     step = [
         item for item in deploy["steps"]
         if item.get("name") == step_name
@@ -6188,6 +6199,10 @@ def receiver_handoff_run(repository, source, boundary, receiver_run, label, *, d
         fail("receiver timing workflow boundary is unsupported")
     endpoint = f"repos/{repository}/actions/runs/{receiver_run}"
     latest, first = gh_api(endpoint), gh_api(endpoint + "/attempts/1")
+    if isinstance(first, dict) and first.get("event") == "workflow_run":
+        # GitHub only creates a chained receiver for an enabled workflow; the
+        # chain has no dispatcher to disable it, so it must remain active.
+        expected_workflow_state = "active"
     workflow = gh_api(f"repos/{repository}/actions/workflows/oci-production-deploy.yml")
     if (
         not isinstance(workflow, dict) or type(workflow.get("id")) is not int or workflow["id"] < 1
@@ -6215,7 +6230,7 @@ def receiver_handoff_run(repository, source, boundary, receiver_run, label, *, d
             or run.get("conclusion") is not None
         ):
             fail("receiver timing identity, first attempt or mutable state differs")
-    if any(latest.get(key) != first.get(key) for key in ("created_at", "status", "conclusion")):
+    if any(latest.get(key) != first.get(key) for key in ("created_at", "event", "status", "conclusion")):
         fail("receiver timing first-attempt observations drifted")
     return first
 
@@ -12363,9 +12378,16 @@ def validate_failed_deploy_jobs(repository, run_id, profile, label):
         }
         if set(names[:index]) != required_admissions:
             fail(f"{label} trusted pre-runtime admission inventory changed")
+        admission = "Validate exact SHA and trusted upstream runs"
+        failed_steps = [
+            item.get("name") for item in deploy["steps"]
+            if item.get("conclusion") == "failure"
+        ]
+        # The read-only exact-SHA admission may fail before provenance runs.
+        failure_index = names.index(admission) if failed_steps == [admission] else index
         expected = {
-            name: "success" if offset < index else
-            "failure" if offset == index else "skipped"
+            name: "success" if offset < failure_index else
+            "failure" if offset == failure_index else "skipped"
             for offset, name in enumerate(names)
         }
         expected.update({

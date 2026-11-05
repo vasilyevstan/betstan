@@ -143,6 +143,9 @@ run_json() {
   if [[ "$state" = "cancelled" ]]; then
     status=completed
     conclusion=cancelled
+  elif [[ "$state" = "executed" ]]; then
+    status=completed
+    conclusion=failure
   elif [[ "$state" = "cancelling" ]]; then
     status=waiting
     conclusion=""
@@ -179,6 +182,9 @@ jobs_json() {
   if [[ "$state" = "cancelled" ]]; then
     status=completed
     conclusion=cancelled
+  elif [[ "$state" = "executed" ]]; then
+    status=completed
+    conclusion=failure
   elif [[ "$state" = "cancelling" ]]; then
     status=waiting
     conclusion=""
@@ -580,6 +586,42 @@ fi
 grep -qF "runSha256 does not match evidence" "$WORK/err"
 [[ "$(cat "$CANCEL_COUNT_FILE")" = "$cancel_before" ]]
 unset STUB_DELAYED_CANCEL_RUN
+
+# Ungated runs can execute before materialization. A terminal claimed run
+# settles under its recorded control SHA after master advances; a nonterminal
+# claimed run stays fenced and is never cancelled.
+settle_authority="$WORK/settle-authority"
+settle_request="$WORK/settle-request.json"
+settle_normalized="$WORK/settle-normalized.json"
+make_request oci-infrastructure-prepare-k3s "$settle_request"
+prepare_unresolved \
+  oci-infrastructure-prepare-k3s \
+  720 \
+  claimed \
+  "$settle_authority" \
+  "$settle_request" \
+  "$settle_normalized"
+cancel_before="$(cat "$CANCEL_COUNT_FILE")"
+if STUB_LIVE_MASTER_SHA="$OTHER_SHA" \
+  run_dispatcher "$settle_authority" \
+    "$settle_request" --resume-run 720 >"$WORK/out" 2>"$WORK/err"; then
+  echo "nonterminal claimed run unexpectedly settled across master advancement" >&2
+  exit 1
+fi
+grep -qF "only a terminal claimed run can settle across master advancement" \
+  "$WORK/err"
+jq -e '.state == "claimed"' "$settle_authority/720.json" >/dev/null
+printf 'executed\n' >"$STATE_DIR/720"
+STUB_LIVE_MASTER_SHA="$OTHER_SHA" \
+  run_dispatcher "$settle_authority" \
+    "$settle_request" --resume-run 720 >"$WORK/out"
+grep -qF "dispatch=SETTLED run_id=720 authority_state=issued conclusion=failure" \
+  "$WORK/out"
+jq -e '
+  .state == "issued" and
+  .controlSha == "1111111111111111111111111111111111111111"
+' "$settle_authority/720.json" >/dev/null
+[[ "$(cat "$CANCEL_COUNT_FILE")" = "$cancel_before" ]]
 
 multiline_authority="$WORK/multiline-authority"
 multiline_request="$WORK/multiline-request.json"
