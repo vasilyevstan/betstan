@@ -1827,7 +1827,7 @@ provider = temporary / "transition-provider.py"
 # This provider has exactly one permitted mutation: the dispatcher's existing
 # captured workflow-run command. Every other unexpected call is a test failure.
 provider.write_text(r'''
-import base64, fcntl, hashlib, io, json, os, subprocess, sys, zipfile
+import fcntl, json, os, sys
 from pathlib import Path
 d = Path(os.environ["TRANSITION_CASE"])
 lock = open(d / "provider.lock", "a")
@@ -1866,6 +1866,8 @@ def output(value):
     else:
         print(json.dumps(value, separators=(",", ":")))
 def archive(files):
+    import io
+    import zipfile
     bundle = io.BytesIO()
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as target:
         for name, content in files.items():
@@ -1907,6 +1909,7 @@ if args[0] == "upstream-boundary":
         assert boundary == "dispatch"
     sys.exit()
 if args[0] == "authority-boundary":
+    import subprocess
     assert f.get("boundContext") and args[1] in {"verify", "issue"}
     if args[1] == "issue" and f.get("pauseIssue"):
         print("fixture pause at the issue boundary", file=sys.stderr)
@@ -1991,6 +1994,8 @@ elif endpoint.startswith("contents/"):
     else:
         history = f["historical"]
         if active and mutation in {"historical-guard", "historical-source"}:
+            import base64
+            import hashlib
             source = base64.b64decode(history["content"])
             if mutation == "historical-guard":
                 source = source.replace(b'[ "$SOURCE_SHA" = "$GITHUB_SHA" ]', b"true")
@@ -2087,6 +2092,7 @@ elif endpoint == "actions/artifacts/9045/zip":
         "runtime_mode=oke", "ghcr_build_run_id=42", "",
     ])})
 elif endpoint == "actions/artifacts/9145/zip":
+    import hashlib
     checkpoint = {
         "schemaVersion": "k3s-release-disk-checkpoint.v1",
         "sourceSha": f["master"], "controlSha": f["master"],
@@ -2603,13 +2609,15 @@ print("held_and_expired_bound_successor_prepared_materialization_and_both_resume
 malformed_filters = [f"malformed-{field}-{kind}" for field in ("path", "head_branch")
                      for kind in ("missing", "null")]
 forged_inventory = ["forged-disabled", "forged-unprotected-path", "forged-nonmaster-branch"]
-for mutation in malformed_filters + forged_inventory:
+def check_preparation_mutation(mutation):
     d = setup()
     result = run(d, "--prepare-disabled-ghosts", drift=mutation, ok=False)
     if mutation in forged_inventory:
         assert "observation run detail rejected" in result.stderr, result.stderr
     assert (d / "dispatches").read_text() == "0"
     assert not list((d / "authority").glob("request-*.json")), "malformed PRE created authority"
+parallel_cases(check_preparation_mutation, malformed_filters + forged_inventory)
+
 mutations = (
     "added missing replaced duplicate empty overflow incomplete other "
     "run-id run-workflow run-path event head branch attempt repository url title status conclusion "
@@ -2674,13 +2682,14 @@ for action in ("--prepare-disabled-ghosts", "--dispatch-prepared"):
         (result.stdout, result.stderr) for result in results]
     assert (d / "dispatches").read_text() == ("1" if action == "--dispatch-prepared" else "0")
 
-for capture in ("empty", "multiple", "nonzero"):
+def check_ambiguous_capture(capture):
     d = setup()
     prepare(d)
     run(d, "--dispatch-prepared", state="active", capture=capture, ok=capture == "nonzero")
     for action in ("--discard-prepared", "--dispatch-prepared"):
         run(d, action, state="active" if action == "--dispatch-prepared" else "disabled_manually", ok=False)
     assert (d / "dispatches").read_text() == "1", "ambiguous capture redispatched"
+parallel_cases(check_ambiguous_capture, ("empty", "multiple", "nonzero"))
 
 # Stale-control and expired prepares remain blocking, but clean actual-current
 # master may explicitly discard them after freshly observing disabled state.
@@ -3213,7 +3222,7 @@ def zero_fixture(count=5):
     return d, record, observation
 
 
-for count in (1, 5):
+def check_zero_execution_retirement(count):
     if count == 1:
         original_clock = a.utc_now
         a.utc_now = lambda: original_clock() - a.dt.timedelta(seconds=10)
@@ -3274,6 +3283,7 @@ for count in (1, 5):
         assert fresh["approvals"] and fresh["approvals"] != original["approvals"]
         assert a.load_record(d / "authority", original["runId"]) == retired
         assert capture.read_bytes() == capture_bytes
+parallel_cases(check_zero_execution_retirement, (1, 5))
 
 d, original, observation = zero_fixture()
 bad_observations = []
