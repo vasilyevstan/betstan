@@ -124,6 +124,8 @@ Historical details are retained in
   deploy exact images, and release the database lock before the public fence.
 - Persisted local file seals bind the inode, never `st_dev`: macOS renumbers
   APFS devices on reboot. Fix recurring authority defects; do not bypass them.
+- Recovery lineage must compose: a failure after a resume, of any profile,
+  inherits the original capture root. Test repeated failures, not only one.
 
 ## Infrastructure and evidence
 
