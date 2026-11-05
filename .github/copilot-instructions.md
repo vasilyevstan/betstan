@@ -1,60 +1,23 @@
 # BetStan repository instructions
 
-BetStan is a TypeScript microservices betting platform. Read the current tree
-before acting; do not rely on stale conversation state or branch names.
+TypeScript microservices betting platform. Read the current tree; never trust stale conversation state or branch names.
 
-## Start here
+Policy: [CONTRIBUTING](../CONTRIBUTING.md) · [branch skill](skills/betstan-branch-governance/SKILL.md) · [agents](agents/README.md) · [PR template](pull_request_template.md) · [learnings](../LEARNINGS.md) · [security](../docs/copilot-security-guardrails.md) · [release](../docs/wiki/Release-Orchestration.md)
 
-- Contributor and branch rules: [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
-- Durable engineering lessons: [`../LEARNINGS.md`](../LEARNINGS.md)
-- Conditional agent capabilities: [`agents/README.md`](agents/README.md)
-- Pull-request evidence: [`pull_request_template.md`](pull_request_template.md)
-- Branch procedure: [`skills/betstan-branch-governance/SKILL.md`](skills/betstan-branch-governance/SKILL.md)
-- Security guardrails: [`../docs/copilot-security-guardrails.md`](../docs/copilot-security-guardrails.md)
-- Release orchestration: [`../docs/wiki/Release-Orchestration.md`](../docs/wiki/Release-Orchestration.md)
+## Rules
 
-## Non-negotiable rules
-
-- Never commit or push directly to protected `dev` or `master`.
-- Immediately handle eligible CLI-owned approvals/merges at startup, resume, and checkpoints; never await a personal prompt.
-  Check pending gates first; retain canonical authority, all technical gates, and human-origin approval rules.
-- Use one accountable owner and proportionate verification; independently verify changed trust/state boundaries.
-  Roles are capabilities, not a required agent sequence, model quorum, or review-of-review. Reuse accepted evidence and keep required exact-SHA CI.
-- Record a documentation-impact assessment for every change. Use the
-  public-wiki editor when its expertise is needed; otherwise the owner records
-  exact-diff, path-specific impact evidence.
-  Relevant product, architecture, operations, UI, quality, release, or agent
-  changes update canonical `docs/wiki/` sources before source acceptance.
-- Keep corrections in the originating agent context; do not create duplicate
-  agents or status-only handoffs.
-- Preserve unrelated tracked, staged, and untracked work.
-- Never expose credentials, tokens, private records, or session artifacts.
-- Never mutate production, data, protected environments, or release state
-  outside authorized exact-SHA controls. Existing controls apply until proven cutover.
-- Treat skipped, stale, pending, neutral, branch-name-only, or unrelated checks
-  as non-success.
-- Keep changes backward compatible unless an explicit migration and rollback
-  contract says otherwise.
-- Multiple sessions may contribute to one release. Prove each required feature
-  commit is an ancestor of the exact current `master`; additional protected
-  commits are allowed, while production mutations remain serialized.
+- Never commit or push directly to protected `dev` or `master`; changes reach `dev` by PR, `master` only from up-to-date `dev`.
+- One accountable owner, proportionate verification; independently verify changed trust/state boundaries. No mandatory agent chain or review-of-review. Reuse accepted evidence; targeted checks while correcting, one full validation of the final SHA.
+- Exact-SHA CI is required; skipped, stale, pending, neutral or unrelated checks are not success.
+- Handle eligible CLI-owned approvals promptly via canonical helpers; human-origin work needs approval bound to its exact head SHA.
+- Record documentation impact for every change; update `docs/wiki/` when public behavior or guidance changes.
+- Preserve unrelated work. Never expose credentials, private records or session paths.
+- Never mutate production, data or protected environments outside authorized exact-SHA controls.
+- Stay backward compatible unless an explicit migration and rollback contract says otherwise.
+- Prove required feature commits are ancestors of the exact `master` released; production mutations stay serialized.
 
 ## Pull requests
 
-Every PR uses the repository template and records core evidence. Conditional
-release, data, feature-flag, and rollback fields remain present and say
-`not applicable` when they do not apply.
-
-Choose one public-safe `session:<slug>` label for the bounded development
-session and one stable `feature:<slug>` label for the product or engineering
-feature. Keep the pair on implementation, promotion, and required reconciliation PRs;
-aggregate PRs may carry multiple pairs. After creating each PR, run
-`PR_SESSION_TAG=<slug> PR_FEATURE_TAG=<slug>
-./infra/azure/agents/pr-context-labels-stan.sh <pr>`. Never use a private
-session UUID, local path, credential, user identity, or production identifier.
-These labels are informational only: do not branch checks, approval, merge,
-release, or rollback decisions on their presence or value.
-
-Only Copilot CLI may apply `copilot-cli-managed` to a PR it created and owns.
-That label alone proves neither origin nor ownership and never bypasses technical
-gates. Every other PR requires approval bound to its exact current head SHA.
+- Use the template; conditional fields say `not applicable`.
+- Add public-safe labels: `PR_SESSION_TAG=<slug> PR_FEATURE_TAG=<slug> ./infra/azure/agents/pr-context-labels-stan.sh <pr>`. They are informational only.
+- Only Copilot CLI may add `copilot-cli-managed`, only to a PR it created and owns; the label alone proves nothing and bypasses no gate.

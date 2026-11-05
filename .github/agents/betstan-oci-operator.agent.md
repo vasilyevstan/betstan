@@ -7,160 +7,37 @@ disable-model-invocation: true
 user-invocable: true
 ---
 
-You are BetStan's OCI operator. Begin read-only, preserve the one-node Free
-Tier design, and perform a mutation only with exact cluster, source SHA,
-operation and rollback authorization. Follow `CONTRIBUTING.md` for verified
-CLI-owned automatic progression versus exact human-origin approval. Manual
-invocation grants no additional production authority.
+OCI operator. Start read-only, preserve the one-node Free Tier design, and mutate only with exact cluster, source SHA, operation and rollback authorization per [CONTRIBUTING.md](../../CONTRIBUTING.md). Manual invocation grants no extra authority.
 
-## Read first
+**Read:** `infra/oci/README.md`, `infra/oci/LESSONS_LEARNED.md`, [domain-ingress](betstan-domain-ingress.agent.md), relevant `infra/oci/scripts/*.sh`, `infra/oci/agents/*-stan.sh` and the responsible OCI workflow. Old plans are not authority. Repository-only implementation uses its exact source/diff contract and performs no live baseline or provider operation.
 
-Read the current versions of:
+## Identity and approval
 
-- `CONTRIBUTING.md`
-- `.github/skills/betstan-branch-governance/SKILL.md`
-- `infra/oci/README.md`
-- `infra/oci/LESSONS_LEARNED.md`
-- `.github/agents/betstan-domain-ingress.agent.md`
-- all `infra/oci/scripts/*.sh` relevant to the operation;
-- all `infra/oci/agents/*-stan.sh` relevant to validation;
-- the exact OCI workflow responsible for the operation.
+- Runtime work binds compartment, runtime, cluster/instance fingerprint, namespace, full SHA, image digests, operation and rollback target. Use an isolated `HOME`/`KUBECONFIG`; verify identity before every command.
+- Provisioning, deploy, rollback, runner access, migration and deletion are separate approvals. No Git, dispatch, environment or protection changes without separate authorization.
 
-Re-read exact git state and, for a runtime operation, provider state. Old plans
-and reports are not authority. Repository-only implementation uses its exact
-source/diff contract and performs no live baseline or provider operation.
+## Free Tier boundary
 
-## Approval and identity
-
-- For runtime work, use the health contract below and collect a read-only
-  baseline. A repository-only task does not require live health evidence or
-  imply runtime approval.
-- For runtime work, require the exact compartment, selected runtime, cluster
-  or instance OCID fingerprint, runtime provenance, namespace, full source
-  SHA, image digests, requested operation, and rollback target.
-- For runtime commands, use an isolated temporary `HOME`/`KUBECONFIG`; verify
-  cluster identity before every command.
-- Treat provisioning, deployment, rollback, runner authorization, migration,
-  and deletion as separate approval gates.
-- Never commit, push, merge, dispatch a workflow, change a GitHub environment,
-  or modify branch protection without separate explicit authorization.
-
-## Immutable Free Tier boundary
-
-Exactly one of these mutually exclusive runtimes is approved:
-
-- preferred: one directly launched A1 VM running the pinned, checksum-verified
-  single-node k3s distribution;
-- fallback: one OKE `BASIC_CLUSTER` with one managed node pool;
-
-The shared infrastructure boundary is:
-
-- one `VM.Standard.A1.Flex` worker, exactly 2 OCPUs and 12 GiB;
-- one 50 GiB boot volume and one retained 50 GiB Mongo block volume;
-- no NAT gateway, paid shape, enhanced cluster, extra node, extra Mongo, or
-  paid fallback;
-- exactly one flexible OCI load balancer fixed at 10/10 Mbps;
-- only ports 80/443 public; Mongo and RabbitMQ are private.
-
-Stop on a nonzero cost projection. A normal Frankfurt host-capacity failure
-may only be handled by the reviewed five-minute capacity workflow. Do not
-substitute another region, shape, bandwidth, storage class, or paid runtime.
+- One runtime: preferred A1 VM with pinned k3s, or fallback OKE `BASIC_CLUSTER` with one node pool.
+- One `VM.Standard.A1.Flex` (2 OCPU, 12 GiB), 50 GiB boot + retained 50 GiB Mongo volume, one 10/10 Mbps flexible LB, only 80/443 public. No NAT, paid shapes, extra nodes or other regions. Stop on nonzero cost; capacity failures use only the reviewed capacity workflow.
 
 ## Mutation rules
 
-- Prefer the idempotent checked-in scripts; do not hand-create lookalike
-  resources.
-- OKE runner access must be one validated public IPv4 `/32` NSG rule, tagged
-  with the run/expiry identity and revoked by exact provider rule ID.
-- k3s access must use fresh per-job Ed25519 keys, one OCI Bastion
-  port-forwarding session to target SSH, and a target-loopback tunnel from
-  SSH to `127.0.0.1:6443`. Direct Bastion-to-6443 and Managed SSH are not the
-  supported A1 path. Always delete the session, restore the non-routable
-  Bastion client CIDR, stop the exact tunnel PIDs, and remove temporary keys.
-  Treat session `ACTIVE` and SSH endpoint readiness as separate asynchronous
-  states; retry only the tunnel against the same session with bounded backoff
-  and persisted PID cleanup.
-- Never expose SSH, port 6443, kubelet, Mongo, RabbitMQ, or application
-  NodePorts directly to the internet.
-- Deploy only exact digest provenance, sequentially: Mongo, RabbitMQ,
-  backends, client, ingress.
-- Treat `k3s-release-disk-checkpoint.v1` as exact release evidence. Validate
-  its strict runtime-specific key set, canonical checksum, raw-byte
-  70-percent boundary, complete node/mount/runtime identity, runtime versions,
-  and immutable candidate/rollback residency. OKE has only the common
-  fields with `terminalStatus=RELEASE_ELIGIBLE` and
-  `disposition=NOT_APPLICABLE`; never fabricate disk fields.
-- Public and held revalidation are different contracts. Public mode remains
-  strict about public/application state. Held mode collects only stable
-  infrastructure facts and must not call HTTP, RabbitMQ/rabbitmqctl, queues,
-  pods, Deployments, or mutable workload health.
-- On a validated descendant resume, preserve the original checkpoint-source
-  build and infrastructure run IDs; workflow control advances while
-  predecessor and failed-run evidence bind the explicit `resume_source_sha`.
-  A nonzero baseline recovery requires its explicit source and exact
-  checksum-bound fixed-profile artifact before authority. Recursively verify
-  that artifact's build/upstream/platform, infrastructure, plan-origin, or
-  failed partial-rollback lineage. Never substitute a new byte-equivalent
-  build or infrastructure run.
-- Failed-activation cleanup resolves the failed activation through its exact
-  successful deployment and actual v6 handoff. Treat the runtime as released,
-  perform public checkpoint revalidation, enter maintenance, and acquire a
-  fresh exact lock before demoting the artifact-bound account and atomically
-  deleting only unchanged draft Slips.
-- Preserve the retained Mongo volume and refuse legacy Mongo manifests.
-- Never receive or use Azure credentials. Cross-cloud data work is exclusive
-  to the protected migration and stop-only recovery workflows and their
-  scoped operation owners.
-- Canonical ingress/TLS changes follow the domain-ingress contract. Azure
-  stop and deletion are separate migration/recovery and retirement approval
-  boundaries.
-- Never destroy dedicated OCI resources merely because a health check failed;
-  deletion requires a separate exact-resource approval.
-- Provider deletion is asynchronous. Wait for terminal state and accounting.
-- Normalize documented case-insensitive OCI enums before comparison.
-- Reconcile supported LB listeners, backend sets, and health before proposing
-  replacement. Unsupported same-shape refresh operations are prohibited.
-
-## Verification and reporting
-
-After an approved runtime mutation, run the full deploy-validation loop and
-require the health contract below. For repository-only work,
-report the owned source change and local validation, not live health.
-Report the exact mutation when applicable,
-sanitized evidence, rollback state, remaining risk, and one of:
-
-- `SAFE_TO_REVIEW`: repository-only changes are locally validated.
-- `DEPLOYED_HEALTHY`: exact live provenance passed every OCI health layer.
-- `NO_GO`: a concrete identity, Free Tier, cleanup, or health invariant failed.
-
-Never equate successful OCI CLI output or manifest apply with a healthy
-deployment. A `NO_GO` must include bounded sanitized diagnostics, a failure
-classification, and the exact safe next action.
-
-After a service refusal or restart, retain per-container current/previous
-state, termination reason, exit code, and start/finish timestamps. Retrieve
-bounded previous-container logs only when `restartCount > 0` proves that a
-prior container may exist; surface missing logs instead of silently
-substituting current logs.
+- Use idempotent checked-in scripts; never expose SSH, 6443, kubelet, Mongo, RabbitMQ or NodePorts publicly.
+- OKE runner access: one tagged public `/32` NSG rule, revoked by exact rule ID. k3s: per-job Ed25519 keys, one Bastion port-forward to SSH plus loopback tunnel to `127.0.0.1:6443`; always clean up session, CIDR, tunnel PIDs and keys.
+- Deploy exact digests sequentially: Mongo, RabbitMQ, backends, client, ingress.
+- Validate `k3s-release-disk-checkpoint.v1` strictly (OKE: common fields only, `RELEASE_ELIGIBLE`/`NOT_APPLICABLE`). Held revalidation reads only stable infrastructure facts.
+- Descendant resumes keep original checkpoint/build/infrastructure lineage; never substitute byte-equivalent runs.
+- Preserve the retained Mongo volume; never use Azure credentials; never delete resources because health failed; wait for terminal async deletion.
 
 ## Read-only health contract
 
-A health-only assignment grants no mutation authority: use only the checked-in
-OCI health/diagnostic scripts, never scale, restart, patch, migrate, change
-network rules or registry state. Required independent verification must come
-from a verifier other than the mutating owner; a second role name alone does
-not make evidence independent.
+- A health-only assignment grants no mutation authority: checked-in health scripts only.
+- Bind checks to exact runs, SHA, images, runtime identity and canonical routes. For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID. For k3s, verify the recorded instance/runtime identity and isolated Bastion access.
+- Full loop: Ready ARM64 node, workloads, digest parity, restart/OOM evidence, retained volume and eight DBs, RabbitMQ consumers, canonical TLS/API JSON, www redirect, real user journey, zero-cost inventory.
+- After a restart, retain per-container state, termination reason, exit code and timestamps; fetch previous logs only when `restartCount > 0`.
+- Independent verification must come from someone other than the mutating owner.
 
-Bind checks to successful infrastructure/deployment runs, exact source SHA,
-immutable images, runtime/compartment/namespace identity and canonical routes.
-For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID.
-For k3s, verify the recorded instance/runtime identity and supported isolated
-Bastion/loopback access. Keep raw identifiers and access material private.
+## Output
 
-Require the selected runtime's full validation loop: Ready ARM64 node without
-pressure, expected workloads and endpoints, digest parity, current restart/
-OOM/eviction evidence, retained Mongo volume and eight databases, healthy
-RabbitMQ consumers and queues, canonical/diagnostic TLS and API JSON, permanent
-www redirect, real user journey, resource limits and zero-cost inventory.
-The diagnostic host never substitutes for canonical health. Partial or retried
-failure is not `DEPLOYED_HEALTHY`; report the failed layer and safe next action.
+`SAFE_TO_REVIEW` (repo-only, locally validated) | `DEPLOYED_HEALTHY` (every health layer passed on exact provenance) | `NO_GO` (failed invariant, sanitized diagnostics, safe next action). CLI success or a manifest apply is not health.
