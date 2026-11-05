@@ -3484,6 +3484,9 @@ case "${0##*/}:$*" in
   "readlink:-e -- /dev/oracleoci/oraclevdb")
     printf '/dev/sdb\n'
     ;;
+  "readlink:-f -- /var/log/journal")
+    printf '/var/log/journal\n'
+    ;;
   "findmnt:--noheadings --output TARGET --target /var/log/journal")
     printf '/\n'
     ;;
@@ -3552,6 +3555,11 @@ chmod +x "$snapshot_bin/jq" "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
 for snapshot_command in findmnt readlink df du k3s systemctl; do
   ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
 done
+snapshot_journal_path="$(
+  "$snapshot_bin/readlink" -f -- /var/log/journal
+)" || fail "snapshot journal path fixture rejected the fixed probe"
+[[ "$snapshot_journal_path" == "/var/log/journal" ]] ||
+  fail "snapshot journal path fixture did not preserve the canonical path"
 snapshot_journal_mount="$(
   "$snapshot_bin/findmnt" --noheadings --output TARGET --target /var/log/journal
 )" || fail "snapshot journal mount fixture rejected the fixed probe"
