@@ -5723,11 +5723,19 @@ def command_issue(args):
             if record["state"] != "claimed":
                 fail("only a claimed authority record can be issued")
             validate_run_against_record(run, record)
-            if (
+            active = (
                 run.get("status")
-                not in {"queued", "waiting", "pending", "requested"}
-                or run.get("conclusion") not in {None, ""}
-            ):
+                in {"queued", "waiting", "pending", "requested", "in_progress"}
+                and run.get("conclusion") in {None, ""}
+            )
+            # Ungated runs start or finish before materialization; record the
+            # exercised authority as spent instead of leaving a global claim.
+            terminal = (
+                args.allow_terminal
+                and run.get("status") == "completed"
+                and run.get("conclusion") not in {None, ""}
+            )
+            if not (active or terminal):
                 fail("claimed authority run is not active")
             record["state"] = "issued"
             issued_at = utc_now()
@@ -6811,6 +6819,7 @@ def build_parser():
     issue.add_argument("--workflow-blob-sha", required=True)
     issue.add_argument("--token")
     issue.add_argument("--expected-version", type=int)
+    issue.add_argument("--allow-terminal", action="store_true")
     common_authority_arguments(issue)
     issue.set_defaults(function=command_issue)
 
