@@ -2528,6 +2528,7 @@ for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-d
             "record_summary=" + shlex.quote(json.dumps({**base, "runId": record_id})),
             "authority_run_id=" + shlex.quote(authority_id),
             "RUN_ID=" + shlex.quote(requested_id), "authority_mode=" + shlex.quote(mode),
+            "EXPECTED_OPERATION=" + shlex.quote(operation),
             "run_id=999", body, "revalidate_upstream_bindings approval-3",
         ))
         result = subprocess.run(["bash"], input=setup.encode(), capture_output=True)
@@ -2544,6 +2545,108 @@ for operation in ("oci-live-data-continue-held-handoff", "oci-live-data-resume-d
             assert "--successor-run-id" not in old.stdout.decode().split("\0")
         else:
             assert result.returncode != 0 and not result.stdout
+native_inputs = dict(
+    approved_sha="1" * 40, checkpoint_source_sha="2" * 40, build_run_id="21",
+    infrastructure_run_id="22", disk_checkpoint_run_id="23", data_run_id="901",
+    baseline_recovery_run_id="0", baseline_recovery_source_sha="none",
+    confirmation="DEPLOY OCI EXACT SHA",
+)
+parent_inputs = dict(native_inputs, resume_source_sha="2" * 40,
+                     prerequisite_run_id="24", failed_deploy_run_id="25",
+                     phase="apply-slip-index", confirmation="RESUME APPLIED LIVE DATA EXACT SHA")
+parent_inputs.pop("data_run_id")
+for boundary in ("approval-1", "approval-3"):
+    for recovery in (False, True):
+        resolved = dict(native_inputs)
+        if recovery:
+            resolved.update(baseline_recovery_run_id="20", baseline_recovery_source_sha="2" * 40)
+        base = dict(
+            operation="oci-live-data-resume-deploy", subjectSha="1" * 40,
+            environment="oci-migration", inputs=parent_inputs, runId=901,
+        )
+        setup = "\n".join((
+            "set -euo pipefail", "fail() { echo \"$*\" >&2; exit 1; }",
+            "gh() { printf 'k3s\\n'; }", "repository=example/repo",
+            "BINDING_VALIDATOR=fixture_validator",
+            "fixture_validator() {",
+            "  printf '%s\\0' \"$@\" >&2",
+            "  if [[ \"$1\" == resolve-deploy ]]; then",
+            "    printf '%s\\n' " + shlex.quote(json.dumps(resolved)),
+            "  fi", "}",
+            "POLICY_HELPER=" + shlex.quote(sys.argv[2]),
+            "record_summary=" + shlex.quote(json.dumps(base)),
+            "authority_run_id=901", "EXPECTED_UPSTREAM_RUN_ID=901", "RUN_ID=902",
+            "EXPECTED_OPERATION=oci-production-deploy-automatic",
+            "expected_environment=oci-production", "current_master=" + "1" * 40,
+            "authority_mode=record-upstream", body,
+            "revalidate_upstream_bindings " + boundary,
+        ))
+        result = subprocess.run(["bash"], input=setup.encode(), capture_output=True)
+        assert result.returncode == 0, result.stderr
+        calls = result.stderr.decode().strip("\0").split("\0")
+        split = calls.index("validate-all")
+        resolve_args, validate_args = calls[:split], calls[split:]
+        assert resolve_args[resolve_args.index("--receiver-run-id") + 1] == "902"
+        assert resolve_args[resolve_args.index("--upstream-run-id") + 1] == "901"
+        assert resolve_args[resolve_args.index("--boundary") + 1] == boundary
+        assert json.loads(resolve_args[resolve_args.index("--upstream-inputs") + 1]) == parent_inputs
+        checked_policy = json.loads(validate_args[validate_args.index("--policy-json") + 1])
+        assert checked_policy["operation"] == (
+            "oci-production-deploy-recovered" if recovery else "oci-production-deploy")
+        assert json.loads(validate_args[validate_args.index("--dispatch-inputs") + 1]) == resolved
+        assert "--successor-run-id" not in calls
+        for bad in (
+            setup.replace("authority_mode=record-upstream", "authority_mode=dispatch-record"),
+            setup.replace("authority_run_id=901", "authority_run_id=900"),
+            setup.replace("EXPECTED_UPSTREAM_RUN_ID=901", "EXPECTED_UPSTREAM_RUN_ID=900"),
+            setup.replace("fixture_validator() {", "fixture_validator() { return 1;"),
+        ):
+            rejected = subprocess.run(["bash"], input=bad.encode(), capture_output=True)
+            assert rejected.returncode != 0 and b"validate-all\0" not in rejected.stderr
+import contextlib, copy, importlib.util, io
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location(
+    "native_deploy_authority",
+    pathlib.Path(sys.argv[1]).with_name("copilot_cli_authority_stan.py"),
+)
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+parent_policy = json.loads(subprocess.check_output(
+    [sys.argv[2], "get", "oci-live-data-resume-deploy"], text=True,
+))
+request = dict(
+    schemaVersion=authority.REQUEST_SCHEMA, repository="example/repo",
+    operation=parent_policy["operation"], controlSha="1" * 40,
+    subjectSha="1" * 40, targetSha=None,
+    inputs=dict(parent_inputs, failed_activation_run_id="0", failed_activation_user_id="0"),
+)
+normalized = authority.validate_request_data(request, parent_policy, "example/repo", "1" * 40)
+receipt = authority.build_dispatch_record(
+    normalized, parent_policy, "example/repo", 8, "3" * 40, 901,
+    "https://github.com/example/repo/actions/runs/901",
+)
+receipt.update(state="consumed", approvals=[dict(
+    runId=901, operation=parent_policy["operation"], environmentId=9,
+    gateKey="4" * 64, approvedAt=receipt["createdAt"],
+)])
+with patch.object(authority, "load_json_file", return_value=receipt):
+    loaded = authority.load_record(pathlib.Path("."), "901")
+    assert authority.verify_record(
+        loaded, parent_policy, "example/repo", "1" * 40, 8, "3" * 40,
+    ) == receipt
+    for owner in ("human", "manual", None):
+        invalid = copy.deepcopy(receipt)
+        invalid["authorityOwner"] = owner
+        with patch.object(authority, "load_json_file", return_value=invalid), \
+                contextlib.redirect_stderr(io.StringIO()):
+            try:
+                authority.load_record(pathlib.Path("."), "901")
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("non-CLI parent gained native derived authority")
+print("native_deploy_parent_authority=PASS consumed_cli=true human_and_manual=REJECTED")
+print("native_deploy_approval_binding_route=PASS exact_parent=true both_boundaries=true recovered=true")
 print("held_and_expired_handoff_approval_owned_successor=PASS unrelated_or_unbound=REJECTED")
 PY
 

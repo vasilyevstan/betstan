@@ -296,6 +296,13 @@ jobs:
             run_json="$(
               gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1"
             )"
+            if [ "$workflow_file" = oci-production-deploy.yml ] && [ "$(jq -r .event <<<"$run_json")" = workflow_run ]; then
+              event="$(
+                ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
+                  --repository "$REPOSITORY" --subject-sha "$expected_sha" \
+                  --run-id "$run_id" --conclusion success
+              )" || return 1
+            fi
             jq -e \
               --argjson workflow_id "$workflow_id" \
               --arg workflow_path ".github/workflows/$workflow_file" \

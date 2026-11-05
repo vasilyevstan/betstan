@@ -73,6 +73,316 @@ ensure_historical_reader_blobs() {
   done
 }
 
+PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
+import base64, contextlib, copy, hashlib, importlib.util, io, json, sys, zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("native_data_deploy", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+repository, source, original = "example/repo", "1" * 40, "b2c28bb" + "0" * 33
+workflow = dict(id=8, path=".github/workflows/oci-live-data-rollout.yml")
+parent = dict(
+    id=77, workflow_id=8, path=workflow["path"], event="workflow_dispatch",
+    head_sha=source, head_branch="master", head_repository={"full_name": repository},
+    status="completed", conclusion="success", run_attempt=1,
+    display_title=f"oci-live-data apply-slip-index {source}",
+    created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:01Z",
+)
+values = dict(
+    schema_version="live-betting-v6", source_sha=source, build_run_id="21",
+    infrastructure_run_id="22", checkpoint_source_sha=original,
+    disk_checkpoint_run_id="23", disk_checkpoint_sha256="a" * 64,
+    disk_checkpoint_disposition="READY_NO_RECLAIM", baseline_sha256="b" * 64,
+    baseline_recovery_run_id="0", baseline_recovery_source_sha="none",
+    workflow_run_id="77", workflow_run_attempt="1", phase="apply-slip-index",
+    status="PASS", completed_at="2026-01-01T00:00:00Z",
+    **dict.fromkeys((
+        "backfill_complete", "index_ready", "event_reschedule_complete",
+        "backoffice_pre_september_cleanup_complete", "maintenance_fence_enforced",
+        "writers_quiesced", "runtime_held_for_deploy", "operation_lock_enforced",
+        "operation_lock_handoff",
+    ), "true"),
+)
+checkpoint = dict(
+    contentChecksumSha256="a" * 64, disposition="READY_NO_RECLAIM",
+    sourceSha=original, ghcrBuildRunId="21", infrastructureRunId="22",
+)
+expected = dict(
+    approved_sha=source, build_run_id="21", infrastructure_run_id="22",
+    checkpoint_source_sha=original, disk_checkpoint_run_id="23", data_run_id="77",
+    baseline_recovery_run_id="0", baseline_recovery_source_sha="none",
+    confirmation="DEPLOY OCI EXACT SHA",
+)
+upstream = dict(
+    expected, phase="apply-slip-index", resume_source_sha=original,
+    prerequisite_run_id="24", failed_deploy_run_id="25",
+)
+upstream.pop("data_run_id")
+upstream["confirmation"] = "RESUME APPLIED LIVE DATA EXACT SHA"
+original_upstream = copy.deepcopy(upstream)
+deployment = dict(
+    parent, id=78, workflow_id=9, path=".github/workflows/oci-production-deploy.yml",
+    event="workflow_run", display_title=f"oci-deploy {source} data-77",
+    created_at="2026-01-01T00:00:02Z", updated_at="2026-01-01T00:00:06Z",
+)
+consumed = dict(expected)
+workflow_source = (Path(sys.argv[1]).parents[3] / ".github/workflows/oci-production-deploy.yml").read_bytes()
+admission = dict(
+    name="Validate exact SHA and trusted upstream runs", conclusion="success",
+    started_at="2026-01-01T00:00:03Z", completed_at="2026-01-01T00:00:05Z",
+)
+native_jobs = [
+    dict(id=87, run_id=78, name="resolve", status="completed", conclusion="success",
+         steps=[dict(name="Resolve final data handoff", conclusion="success")]),
+    dict(id=88, run_id=78, name="deploy", status="completed", conclusion="success", steps=[admission]),
+]
+event = dict(action="completed", repository={"full_name": repository}, workflow_run=copy.deepcopy(parent))
+state = dict(master=source, duplicate=False, tamper=False, extra=False, resume=False)
+resume_images = b"original immutable runtime images\n"
+resume = dict(
+    schema_version="live-betting-data-resume-v2", applied_data_run_id="24",
+    applied_source_sha=original, failed_deploy_run_id="25",
+    resume_maintenance_mode="pre-runtime-hold", failed_deploy_job_conclusion="failure",
+    public_validate_job_conclusion="skipped", lock_release_step_conclusion="skipped",
+    fence_release_step_conclusion="skipped", rehold_step_conclusion="skipped",
+    failed_activation_run_id="0", current_source_sha=source, baseline_sha256="b" * 64,
+    runtime_images_sha256=hashlib.sha256(resume_images).hexdigest(),
+    checkpoint_source_sha=original, disk_checkpoint_run_id="23",
+    disk_checkpoint_sha256="a" * 64, disk_checkpoint_disposition="READY_NO_RECLAIM",
+    application_change_scope="github-infra-docs-only", status="PASS",
+)
+
+def archive(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        for path, raw in files.items():
+            bundle.writestr(path, raw)
+    return output.getvalue()
+
+def payloads():
+    raw = "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+    files = {
+        "provenance.env": raw + (b"unbound=content\n" if state["tamper"] else b""),
+        "SHA256SUMS": (hashlib.sha256(raw).hexdigest() + "  provenance.env\n").encode(),
+    }
+    if state["resume"]:
+        files["resume-images.tsv"] = resume_images
+        files["resume-authority.env"] = "".join(
+            f"{key}={value}\n" for key, value in resume.items()
+        ).encode()
+        files["SHA256SUMS"] += b"".join(
+            (hashlib.sha256(files[name]).hexdigest() + f"  {name}\n").encode()
+            for name in ("resume-images.tsv", "resume-authority.env")
+        )
+    if state["extra"]:
+        files["unbound.sh"] = b"must never execute\n"
+    return {77: archive(files), 23: archive({"checkpoint.json": json.dumps(checkpoint).encode()})}
+
+def api(path):
+    if "/contents/.github/workflows/oci-production-deploy.yml?ref=" in path:
+        return dict(type="file", path=".github/workflows/oci-production-deploy.yml",
+                    encoding="base64", content=base64.b64encode(workflow_source).decode(),
+                    sha=hashlib.sha1(f"blob {len(workflow_source)}\0".encode() + workflow_source).hexdigest())
+    if path.endswith("git/ref/heads/master"):
+        return {"object": {"sha": state["master"]}}
+    if path.endswith("workflows/oci-live-data-rollout.yml"):
+        return workflow
+    if path.endswith("workflows/oci-production-deploy.yml"):
+        return dict(id=9, path=deployment["path"])
+    if path.endswith("runs/77") or path.endswith("runs/77/attempts/1"):
+        return parent
+    if path.endswith("runs/78") or path.endswith("runs/78/attempts/1"):
+        return deployment
+    raise AssertionError(path)
+
+def bytes_api(path):
+    if path.endswith("runs/78/attempts/1/logs"):
+        mapping = {
+            "approved_sha": "SOURCE_SHA", "build_run_id": "BUILD_RUN_ID",
+            "infrastructure_run_id": "INFRASTRUCTURE_RUN_ID", "data_run_id": "DATA_RUN_ID",
+            "checkpoint_source_sha": "CHECKPOINT_SOURCE_SHA",
+            "disk_checkpoint_run_id": "DISK_CHECKPOINT_RUN_ID",
+            "baseline_recovery_run_id": "BASELINE_RECOVERY_RUN_ID",
+            "baseline_recovery_source_sha": "BASELINE_RECOVERY_SOURCE_SHA", "confirmation": "CONFIRMATION",
+        }
+        lines = ["##[group]Run set -euo pipefail", "env:"]
+        lines += [f"  {name}: {consumed[key]}" for key, name in mapping.items()]
+        lines += ["  DISPATCH_INPUTS: " + json.dumps(consumed), "##[endgroup]"]
+        return archive({"1_deploy.txt": "".join(
+            "2026-01-01T00:00:04Z " + line + "\n" for line in lines
+        ).encode()})
+    return payloads()[int(path.split("/")[-2])]
+
+def pages(path):
+    run = int(path.split("/runs/")[1].split("/")[0])
+    name = ("oci-live-data-rollout-77-1" if run == 77 else
+            f"oci-release-disk-checkpoint-{original}-23-1")
+    raw = payloads()[run]
+    item = dict(id=run, name=name, expired=False, size_in_bytes=len(raw),
+                digest="sha256:" + hashlib.sha256(raw).hexdigest())
+    rows = [item, item] if state["duplicate"] else [item]
+    return [dict(total_count=len(rows), artifacts=rows)]
+
+def read():
+    return m.resolve_deploy_inputs(
+        repository, source, "77", event=event, upstream_inputs=upstream,
+    )
+
+def reject(action):
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            action()
+        except SystemExit:
+            return
+    raise AssertionError("unsafe native data handoff resolved")
+
+with patch.object(m, "gh_api", side_effect=api), \
+        patch.object(m, "gh_api_pages", side_effect=pages), \
+        patch.object(m, "gh_api_bytes", side_effect=bytes_api):
+    assert read() == expected
+    for key, value in (
+        ("event", "push"), ("conclusion", "failure"), ("status", "in_progress"),
+        ("run_attempt", 2), ("head_branch", "dev"), ("head_sha", original),
+        ("head_repository", {"full_name": "other/repo"}), ("workflow_id", 9),
+        ("path", ".github/workflows/other.yml"),
+    ):
+        saved = copy.deepcopy(parent)
+        parent[key] = value
+        reject(read)
+        parent.clear(); parent.update(saved)
+    for key, value in (
+        ("phase", "dry-run"), ("phase", "apply-backfills"),
+        ("source_sha", original), ("schema_version", "live-betting-v5"),
+        ("build_run_id", "99"), ("baseline_recovery_run_id", "invalid"),
+        ("operation_lock_handoff", "false"), ("runtime_held_for_deploy", "false"),
+        ("writers_quiesced", "false"), ("index_ready", "false"),
+    ):
+        saved = values[key]
+        values[key] = value
+        reject(read)
+        values[key] = saved
+    for key in ("duplicate", "tamper", "extra"):
+        state[key] = True
+        reject(read)
+        state[key] = False
+    state["master"] = original
+    reject(read)
+    state["master"] = source
+    event["workflow_run"]["id"] = 78
+    reject(read)
+    event["workflow_run"]["id"] = 77
+    event["repository"]["full_name"] = "other/repo"
+    reject(read)
+    event["repository"]["full_name"] = repository
+    checkpoint["contentChecksumSha256"] = "c" * 64
+    reject(read)
+    checkpoint["contentChecksumSha256"] = "a" * 64
+    values.update(baseline_recovery_run_id="20", baseline_recovery_source_sha=original)
+    upstream.update(baseline_recovery_run_id="20", baseline_recovery_source_sha=original)
+    assert read() == dict(expected, baseline_recovery_run_id="20", baseline_recovery_source_sha=original)
+    for key in ("baseline_recovery_run_id", "baseline_recovery_source_sha"):
+        values[key] = expected[key]
+        upstream[key] = original_upstream[key]
+    assert upstream == original_upstream
+    assert read() == expected
+    state["resume"] = True
+    assert read() == expected
+    for key, value in (("applied_source_sha", source), ("applied_data_run_id", "26"),
+                       ("failed_deploy_run_id", "27")):
+        saved = resume[key]
+        resume[key] = value
+        reject(read)
+        resume[key] = saved
+    assert read() == expected and upstream == original_upstream
+    with patch.object(m, "jobs_for_run", return_value=native_jobs):
+        def consume():
+            return m.require_fixed_run(
+                repository, "78", "oci-production-deploy.yml", deployment["conclusion"],
+                source, f"oci-deploy {source}", "consumer fixture",
+            )
+        assert consume() == deployment
+        state["master"] = original
+        assert consume() == deployment  # Completed deployments remain usable by later rollback.
+        deployment["conclusion"] = "failure"
+        assert consume() == deployment
+        deployment["conclusion"] = "success"
+        for key, value in (
+            ("display_title", f"oci-deploy {source} data-79"), ("run_attempt", 2),
+            ("head_sha", original), ("created_at", "2026-01-01T00:00:00Z"),
+            ("head_repository", {"full_name": "other/repo"}),
+        ):
+            saved = deployment[key]
+            deployment[key] = value
+            reject(consume)
+            deployment[key] = saved
+        consumed["build_run_id"] = "99"
+        reject(consume)
+        consumed["build_run_id"] = expected["build_run_id"]
+        saved_source = workflow_source
+        workflow_source = workflow_source.replace(b"github.event.workflow_run.id) || ''", b"github.run_id) || ''")
+        reject(consume)
+        workflow_source = saved_source
+        admission["conclusion"] = "failure"
+        reject(consume)
+        admission["conclusion"] = "success"
+        native_jobs[0]["conclusion"] = "failure"
+        reject(consume)
+        native_jobs[0]["conclusion"] = "success"
+        deployment.update(event="workflow_dispatch", display_title=f"oci-deploy {source}")
+        with patch.object(m, "qualify_native_deployment", side_effect=AssertionError("manual requalified")):
+            assert consume() == deployment
+        state["master"] = source
+print("native_deployment_consumers=PASS successful_failed_and_historical=true parent_substitution=REJECTED manual=compatible")
+
+recovery_jobs = [
+    copy.deepcopy(native_jobs[0]),
+    dict(name="deploy", conclusion="failure", steps=[
+        dict(name="Release transferred lock after protected validation", conclusion="skipped"),
+        dict(name="Release live data maintenance fence", conclusion="skipped"),
+        dict(name="Re-enter maintenance after an incomplete deployment", conclusion="success"),
+        dict(name="Write checksum-bound deployment recovery intent", conclusion="success"),
+        dict(name="Finalize deployment recovery authority", conclusion="success"),
+        dict(name="Upload deployment recovery authority", conclusion="success"),
+    ]),
+    dict(name="public-validate", conclusion="skipped", steps=[]),
+]
+with patch.object(m, "jobs_for_run", return_value=recovery_jobs):
+    check = lambda: m.validate_failed_deploy_jobs(
+        repository, "78", "oci-failed-deploy-retained-hold-v1", "native recovery fixture",
+    )
+    assert check() == ("skipped", "skipped", "success")
+    recovery_jobs[0]["conclusion"] = "failure"
+    reject(check)
+    recovery_jobs[0]["conclusion"] = "success"
+    recovery_jobs[1]["steps"][2]["conclusion"] = "failure"
+    reject(check)
+    recovery_jobs[1]["steps"][2]["conclusion"] = "success"
+    recovery_jobs.pop(0)
+    assert check() == ("skipped", "skipped", "success")
+print("native_recovery_job_topology=PASS resolver_and_rehold_fail_closed=true manual=compatible")
+
+receiver = dict(parent, id=78, workflow_id=9, event="workflow_run",
+                path=".github/workflows/oci-production-deploy.yml",
+                display_title=f"oci-deploy {source} data-77",
+                status="waiting", conclusion=None, created_at="2026-01-01T00:00:01Z")
+receiver_workflow = dict(id=9, path=receiver["path"], state="disabled_manually")
+with patch.object(m, "gh_api", side_effect=lambda path:
+                  receiver_workflow if "/workflows/" in path else receiver):
+    assert m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture",
+                                  data_run="77") == receiver
+    reject(lambda: m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture",
+                                          data_run="79"))
+    receiver["run_attempt"] = 2
+    reject(lambda: m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture",
+                                          data_run="77"))
+    receiver.update(run_attempt=1, event="workflow_dispatch", display_title=f"oci-deploy {source}")
+    assert m.receiver_handoff_run(repository, source, "approval-1", "78", "fixture") == receiver
+print("native_final_data_deploy_resolution=PASS exact_tuple=true malformed_and_nonfinal=REJECTED manual=compatible")
+PY
+ok "native final-data resolver preserves exact inputs and rejects invalid upstream evidence"
+
 ensure_historical_reader_blobs
 
 env -u PYTHONDONTWRITEBYTECODE python3 - \
@@ -4319,6 +4629,33 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
             assert m.validate_receiver_handoff_timing(
                 "example/repo", producer_run, source, "dispatch") is None
             closure.assert_not_called()
+        with patch.object(m, "parse_resume_authority", return_value=legacy), \
+                patch.object(m.time, "time", return_value=base + 60):
+            timing = m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "dispatch",
+                require_native_renewal=True,
+            )
+            assert timing["lease_seconds"] == 1800 and timing["deadline"] == deadline
+            assert timing["profile"] == "native-final-data-1800"
+        with patch.object(m, "parse_resume_authority", return_value=legacy), \
+                patch.object(m.time, "time", return_value=deadline):
+            reject(lambda: m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "dispatch",
+                require_native_renewal=True,
+            ))
+        with patch.object(m, "parse_resume_authority", return_value=legacy), \
+                patch.dict(receiver, event="workflow_run", display_title=f"oci-deploy {source} data-{producer_run}"), \
+                patch.object(m.time, "time", return_value=base + 200):
+            timing = m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "approval-1", receiver_run,
+            )
+            assert timing["lease_seconds"] == 1800 and timing["deadline"] == deadline
+        with patch.object(m, "parse_resume_authority", return_value=legacy), \
+                patch.object(m, "native_handoff_renewal", side_effect=SystemExit("missing renewal")):
+            reject(lambda: m.validate_receiver_handoff_timing(
+                "example/repo", producer_run, source, "dispatch",
+                require_native_renewal=True,
+            ))
     with patch.object(m, "parse_resume_authority", side_effect=SystemExit("malformed v3")):
         reject(lambda: m.validate_receiver_handoff_timing(
             "example/repo", producer_run, source, "dispatch"))
@@ -4674,6 +5011,135 @@ assert blob(
 assert blob(
     (root / "infra/azure/agents/copilot_cli_authority_stan.py").read_text()
 ) != m.CURRENT_READER_AUTHORITY_BLOB
+current_workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+legacy_consumer = m.without_native_deployment_consumer(current_workflow, "current native consumer")
+assert "upstream_run_binding_stan.py validate-deployment" not in legacy_consumer
+assert m.current_reader_workflow_v5(current_workflow, "current inverse", inverse=True) == \
+    m.current_reader_workflow_v5(legacy_consumer, "legacy inverse", inverse=True)
+with contextlib.redirect_stderr(io.StringIO()):
+    try:
+        m.without_native_deployment_consumer(
+            current_workflow.replace('--run-id "$run_id" --conclusion "$expected_conclusion"',
+                                     '--run-id 999 --conclusion "$expected_conclusion"'),
+            "substituted native consumer",
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("changed native consumer escaped frozen source qualification")
+serial_workflow = m.without_read_only_preflight(current_workflow, "current preflight")
+assert m.current_reader_preflight_aggregation(
+    serial_workflow, "preflight forward",
+) == current_workflow
+assert m.without_read_only_preflight(serial_workflow, "historical preflight") == serial_workflow
+assert m.current_reader_workflow_v5(current_workflow, "aggregate inverse", inverse=True) == \
+    m.current_reader_workflow_v5(serial_workflow, "serial inverse", inverse=True)
+assert blob(m.without_native_deployment_consumer(serial_workflow, "original serial source")) == \
+    "5de15ca70b0a22efa284611c316d40c89490715e"
+def reject_preflight(candidate, *, inverse=True):
+    for check in (
+        lambda: m.current_reader_preflight_aggregation(
+            candidate, "changed preflight", inverse=inverse,
+        ),
+        *(
+            (lambda: m.current_reader_workflow_v5(
+                candidate, "changed current source", inverse=True,
+            ),)
+            if inverse else ()
+        ),
+    ):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                check()
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("changed preflight escaped frozen source qualification")
+for check in ("baseline", "fence", "images", "lock"):
+    declaration = f"          verify_resume_{check}() {{\n"
+    assert current_workflow.count(declaration) == 1
+    reject_preflight(current_workflow.replace(declaration, declaration + "          return 0\n"))
+for before, after in m.CURRENT_READER_PREFLIGHT_EDITS:
+    assert serial_workflow.count(before) == 1 and serial_workflow.count(after) == 0
+    assert current_workflow.count(before) == 0 and current_workflow.count(after) == 1
+    reject_preflight(current_workflow.replace(after, before))
+for before, after in (
+    ('            ("$check") &', '            if ("$check"); then :; fi &'),
+    ('if wait "$!"; then', 'if true; then'),
+    ("verify_resume_baseline verify_resume_images verify_resume_fence verify_resume_lock)",
+     "verify_resume_images verify_resume_baseline verify_resume_fence verify_resume_lock)"),
+    ("verify_resume_baseline verify_resume_images verify_resume_fence verify_resume_lock)",
+     "verify_resume_baseline verify_resume_fence verify_resume_images verify_resume_lock)"),
+    ("verify_resume_fence verify_resume_lock)", "verify_resume_fence)"),
+    ('PREFLIGHT_PRIOR_STATUS="$preflight_status"', 'PREFLIGHT_PRIOR_STATUS="0"'),
+    ('require(os.environ["PREFLIGHT_PRIOR_STATUS"] in ("0", "1"))',
+     'require(os.environ["PREFLIGHT_PRIOR_STATUS"] in ("0", "1", ""))'),
+    ('\n              if os.environ["PREFLIGHT_PRIOR_STATUS"] == "0":\n',
+     '\n              if True:\n'),
+    ('\n          if os.environ["PREFLIGHT_PRIOR_STATUS"] == "0":\n',
+     '\n          if True:\n'),
+    ('          require_preflight baseline "$BASELINE_OUTCOME" true',
+     '          require_preflight baseline "$BASELINE_OUTCOME" false'),
+    ('          require_preflight resume "$RESUME_OUTCOME" "$RESUME_REQUIRED"',
+     '          require_preflight resume "$RESUME_OUTCOME" false'),
+    ('          require_preflight activation "$ACTIVATION_OUTCOME" "$ACTIVATION_REQUIRED"',
+     '          require_preflight activation "$ACTIVATION_OUTCOME" false'),
+    ('          require_preflight disk "$DISK_OUTCOME" "$DISK_REQUIRED"',
+     '          require_preflight disk "$DISK_OUTCOME" false'),
+    ('          if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then',
+     '          if true; then'),
+    ('          if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then',
+     '          if [ "$RESUME_PREFLIGHT_OUTCOME" != failure ]; then'),
+    ('RESUME_PREFLIGHT_OUTCOME: ${{ steps.resume_preflight.outcome }}',
+     'RESUME_PREFLIGHT_OUTCOME: ${{ steps.resume_preflight.conclusion }}'),
+    *(
+        (f"{name.upper()}_OUTCOME: ${{{{ steps.{name}_preflight.outcome }}}}",
+         f"{name.upper()}_OUTCOME: ${{{{ steps.{name}_preflight.conclusion }}}}")
+        for name in ("resume", "baseline", "activation", "disk")
+    ),
+):
+    assert current_workflow.count(before) == 1
+    reject_preflight(current_workflow.replace(before, after))
+baseline_start = current_workflow.index(
+    "\n      - name: Capture and validate pre-mutation rollback baseline\n")
+baseline_end = current_workflow.index(
+    "\n      - name: Verify reader-qualified released activation state\n")
+baseline_step = current_workflow[baseline_start:baseline_end]
+for before, after in (
+    ("RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}",
+     "RESUME_MAINTENANCE_MODE: pre-runtime-hold"),
+    ("RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance_request.outputs.applied_data_run_id || steps.provenance.outputs.resume_applied_data_run_id }}",
+     "RESOLVED_APPLIED_DATA_RUN_ID: ${{ inputs.prerequisite_run_id }}"),
+    ("RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance_request.outputs.applied_source_sha || steps.provenance.outputs.resume_applied_source_sha }}",
+     "RESOLVED_APPLIED_SOURCE_SHA: ${{ github.sha }}"),
+    ("applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID",
+     "applied_data_run_id=$PREREQUISITE_RUN_ID"),
+    ("applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA", "applied_source_sha=$SOURCE_SHA"),
+    ("resume_schema=live-betting-data-resume-v5", "resume_schema=live-betting-data-resume-v2"),
+    ("held_handoff_evidence_sha256=%s", "unverified_handoff_evidence_sha256=%s"),
+    ("runtime_images_sha256=$(sha256sum \"$resume_images\"",
+     "runtime_images_sha256=$(sha256sum artifacts/oci-live-data-rollout/images.tsv"),
+):
+    assert baseline_step.count(before) == 1
+    reject_preflight(current_workflow.replace(
+        baseline_step, baseline_step.replace(before, after),
+    ))
+held_fence = (
+    '            pre-runtime-hold|retained-hold)\n'
+    '              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held\n'
+    '              ;;\n'
+)
+assert current_workflow.count(held_fence) == 1
+reject_preflight(current_workflow.replace(
+    held_fence, '            pre-runtime-hold|retained-hold) ;;\n',
+))
+reject_preflight(current_workflow + current_workflow)
+reject_preflight(serial_workflow + serial_workflow, inverse=False)
+assert '            previous_holder_run="$PREREQUISITE_RUN_ID"' in serial_workflow
+reject_preflight(serial_workflow.replace(
+    '            previous_holder_run="$PREREQUISITE_RUN_ID"',
+    '            previous_holder_run="$FAILED_DEPLOY_RUN_ID"',
+), inverse=False)
 for profile in (
     m._failed_held_continuation_profile(),
     m._failed_clean_reader_continuation_profile(),
@@ -4718,7 +5184,7 @@ for current, historical, edits in (
         else:
             raise AssertionError("duplicate exact-edit source was accepted")
 PY
-ok "v5 current-reader workflow/authority/verifier pins preserve exact frozen and current bytes"
+ok "v5 frozen pins and reversible current preflight preserve validation bodies, snapshot withholding, order, fence and mutation barrier"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" "$WORK" <<'PY'
 import contextlib, copy, datetime as dt, hashlib, importlib.util, io, json, os, shutil, subprocess, sys
@@ -5699,7 +6165,17 @@ blob = subprocess.check_output([
     "git", "-C", sys.argv[2], "show",
     f"{source}:.github/workflows/oci-production-deploy.yml",
 ])
-names = re.findall(r"(?m)^      - name: (.+)$", blob.decode().split("\n  public-validate:\n")[0])
+deployment_workflow = blob.decode()
+declared_jobs = re.findall(
+    r"(?m)^  ([a-z][a-z-]*):$", deployment_workflow.partition("\njobs:\n")[2],
+)
+assert declared_jobs in (
+    ["deploy", "public-validate"], ["resolve", "deploy", "public-validate"],
+)
+names = re.findall(
+    r"(?m)^      - name: (.+)$",
+    deployment_workflow.partition("\n  deploy:\n")[2].partition("\n  public-validate:\n")[0],
+)
 boundary = names.index("Verify immutable image and infrastructure provenance")
 steps = [{
     "name": name, "number": index + 2, "status": "completed",
@@ -5716,6 +6192,18 @@ original = [
     {"id": 1234, "run_id": 77, "name": "deploy", "status": "completed", "conclusion": "failure", "steps": steps},
     {"id": 1235, "run_id": 77, "name": "public-validate", "status": "completed", "conclusion": "skipped", "steps": []},
 ]
+resolver_names = re.findall(
+    r"(?m)^      - name: (.+)$",
+    deployment_workflow.partition("\n  resolve:\n")[2].partition("\n  deploy:\n")[0],
+)
+resolver_job = {
+    "id": 1233, "run_id": 77, "name": "resolve", "status": "completed", "conclusion": "success",
+    "steps": [{
+        "name": name, "number": index + 1, "status": "completed", "conclusion": "success",
+    } for index, name in enumerate(resolver_names or ["Resolve final data handoff"])],
+}
+if "resolve" in declared_jobs:
+    original.append(resolver_job)
 jobs = copy.deepcopy(original)
 artifacts = []
 m.jobs_for_run = lambda *_: jobs
@@ -5733,6 +6221,12 @@ def reject(call):
             return
     raise AssertionError("invalid pre-runtime evidence accepted")
 assert validate() == ("skipped", "skipped", "skipped")
+if "resolve" in declared_jobs:
+    jobs = [copy.deepcopy(job) for job in original if job["name"] != "resolve"]
+    reject(validate)
+jobs = copy.deepcopy(original) + [copy.deepcopy(resolver_job)]
+reject(validate)
+jobs = copy.deepcopy(original)
 for name in names[boundary + 1:]:
     if name in {"Remove isolated OCI client state", "Upload sanitized live readiness evidence"}:
         continue
@@ -6100,32 +6594,41 @@ current_skipped = held_skipped | {
     "Remove isolated incident OCI client state",
 }
 current_start = m.dt.datetime(2026, 10, 7, 9, 9, tzinfo=m.dt.timezone.utc)
-current_steps = []
-for index, name in enumerate([
-    "Set up job", *current_names, "Post Checkout approved current master commit", "Complete job",
-]):
-    began = current_start + m.dt.timedelta(seconds=2 * index)
-    current_steps.append(dict(
-        name=name, number=index + 1, status="completed",
-        conclusion="skipped" if name in current_skipped else "success",
-        started_at=began.isoformat(), completed_at=(began + m.dt.timedelta(seconds=1)).isoformat(),
-    ))
-current_steps[-2]["number"] = 2 * (len(current_names) + 1)
-current_steps[-1]["number"] = current_steps[-2]["number"] + 1
-current_job = dict(held_original[0], steps=current_steps,
-                  started_at=current_start.isoformat(), completed_at="2026-10-07T09:12:00Z")
+def current_producer_job(workflow):
+    names = re.findall(r"(?m)^      - name: (.+)$", workflow)
+    steps = []
+    for index, name in enumerate([
+        "Set up job", *names, "Post Checkout approved current master commit", "Complete job",
+    ]):
+        began = current_start + m.dt.timedelta(seconds=2 * index)
+        steps.append(dict(
+            name=name, number=index + 1, status="completed",
+            conclusion="skipped" if name in current_skipped else "success",
+            started_at=began.isoformat(), completed_at=(began + m.dt.timedelta(seconds=1)).isoformat(),
+        ))
+    steps[-2]["number"] = 2 * (len(names) + 1)
+    steps[-1]["number"] = steps[-2]["number"] + 1
+    return dict(held_original[0], steps=steps,
+                started_at=current_start.isoformat(), completed_at="2026-10-07T09:12:00Z")
+current_job = current_producer_job(current_workflow)
+current_steps = current_job["steps"]
 current_metadata = dict(held_metadata, updated_at="2026-10-07T09:12:01Z")
 renewal_step = next(step for step in current_steps
                     if step["name"] == "Restore runtime or verify final deploy handoff")
 renewal_epoch = int(m.parse_timestamp(renewal_step["started_at"], "fixture").timestamp())
-def renewal_log(deadline=renewal_epoch + 1800, generation=12):
-    timestamp = renewal_step["started_at"].replace("+00:00", "Z")
+def renewal_log(deadline=None, generation=12, *, job=None):
+    step = next(step for step in (current_job if job is None else job)["steps"]
+                if step["name"] == "Restore runtime or verify final deploy handoff")
+    epoch = int(m.parse_timestamp(step["started_at"], "fixture").timestamp())
+    if deadline is None:
+        deadline = epoch + 1800
+    timestamp = step["started_at"].replace("+00:00", "Z")
     output = [
         "##[group]Run shell",
         "echo shared_mongo_lock=renew status=PASS lease_until_epoch=9999999999 fencing_generation=999",
         "##[endgroup]",
         "live_data_maintenance=verify-held status=PASS http_mutation_fence=true writers_quiesced=true",
-        f"shared_mongo_lock=verify status=PASS lease_until_epoch={renewal_epoch + 14400} fencing_generation=11",
+        f"shared_mongo_lock=verify status=PASS lease_until_epoch={epoch + 14400} fencing_generation=11",
         f"shared_mongo_lock=renew status=PASS lease_until_epoch={deadline} fencing_generation={generation}",
     ]
     return log_archive("\n".join(f"{timestamp} {line}" for line in output).encode(), ("0_rollout.txt",))
@@ -6158,14 +6661,23 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
     modern_workflow = (m.Path(sys.argv[2]) / ".github/workflows/oci-live-data-rollout.yml").read_text()
     assert re.findall(r"(?m)^      - name: (.+)$", current_workflow) == current_names
     v4_profile_workflow = m.current_reader_workflow_v5(
-        current_workflow, "fixture", inverse=True,
+        modern_workflow, "fixture", inverse=True,
     )
     legacy_profile_workflow = v4_profile_workflow.replace(
         m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"').replace(
         "resume_schema=live-betting-data-resume-v4", "resume_schema=live-betting-data-resume-v3")
-    for executed_workflow in (
-        legacy_profile_workflow, v4_profile_workflow, current_workflow,
-    ):
+    for executed_workflow in dict.fromkeys((
+        legacy_profile_workflow, v4_profile_workflow, current_workflow, modern_workflow,
+    )):
+        profile_job = current_producer_job(executed_workflow)
+        profile_renewal = next(step for step in profile_job["steps"]
+                               if step["name"] == "Restore runtime or verify final deploy handoff")
+        profile_epoch = int(m.parse_timestamp(profile_renewal["started_at"], "fixture").timestamp())
+        if [step["name"] for step in profile_job["steps"]] != [
+            step["name"] for step in current_steps
+        ]:
+            with patch.object(m, "current_held_source", return_value=executed_workflow):
+                reject(held_native)
         for continuation in (False, True):
             native = dict(values)
             if continuation:
@@ -6182,17 +6694,19 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
                 "live-betting-data-resume-v5": 7200,
             }[expected_schema]
             with patch.object(m, "current_held_source", return_value=executed_workflow), \
+                    patch.object(m, "jobs_for_run", return_value=[profile_job]), \
                     patch.object(m, "failed_deploy_native_inputs", return_value=native):
                 for observed_duration in (1800, 3600, 7200):
                     with patch.object(m, "gh_api_bytes",
-                                      return_value=renewal_log(renewal_epoch + observed_duration)):
+                                      return_value=renewal_log(
+                                          profile_epoch + observed_duration, job=profile_job)):
                         if observed_duration != duration:
                             reject(held_native)
                         else:
                             observed = held_native()
                             assert observed["_handoff_lease_seconds"] == duration
                             assert observed["_handoff_resume_schema"] == expected_schema
-                            assert observed["_handoff_deadline"] == renewal_epoch + duration
+                            assert observed["_handoff_deadline"] == profile_epoch + duration
     unsupported_workflow = modern_workflow.replace(
         "      - name: Validate dispatch phase and confirmation routing",
         "      - name: Unsupported current reader routing",
@@ -14997,10 +15511,10 @@ canonical_failed_deploy_binding="$(
       select(.input == "failed_deploy_run_id")
     '
 )"
-grep -Fq \
-  'run-name: oci-deploy ${{ inputs.approved_sha }}' \
+grep -Fxq \
+  "run-name: oci-deploy \${{ inputs.approved_sha || github.event.workflow_run.head_sha }}\${{ github.event_name == 'workflow_run' && format(' data-{0}', github.event.workflow_run.id) || '' }}" \
   "$ROOT_DIR/.github/workflows/oci-production-deploy.yml" ||
-  fail "deployment workflow no longer exposes the canonical recovery title"
+  fail "deployment workflow no longer exposes the qualified native/manual recovery title"
 reset_fixtures
 write_profile_run 610 oci-production-deploy.yml \
   "oci-deploy $SUBJECT_SHA" 7610 oci-production-baseline-610-1
@@ -15850,7 +16364,11 @@ blob = subprocess.check_output(["git", "-C", checkout, "show",
     f"{root_source}:.github/workflows/oci-production-deploy.yml"])
 write(f"{prefix}/contents/.github/workflows/oci-production-deploy.yml?ref={root_source}",
     {"sha": hashlib.sha1(f"blob {len(blob)}\0".encode() + blob).hexdigest()})
-names = re.findall(r"(?m)^      - name: (.+)$", blob.decode().split("\n  public-validate:\n")[0])
+workflow = blob.decode()
+names = re.findall(
+    r"(?m)^      - name: (.+)$",
+    workflow.partition("\n  deploy:\n")[2].partition("\n  public-validate:\n")[0],
+)
 boundary = names.index("Verify immutable image and infrastructure provenance")
 steps = [{
     "name": name, "number": index + 2, "status": "completed",
@@ -15863,11 +16381,23 @@ for step in steps:
 steps.insert(0, {"name": "Set up job", "number": 1, "status": "completed", "conclusion": "success"})
 for name in ("Post Checkout approved master commit", "Complete job"):
     steps.append({"name": name, "number": len(steps) + 1, "status": "completed", "conclusion": "success"})
+jobs = [
+    {"id": 61000, "run_id": 610, "name": "deploy", "status": "completed", "conclusion": "failure", "steps": steps},
+    {"id": 61001, "run_id": 610, "name": "public-validate", "status": "completed", "conclusion": "skipped", "steps": []},
+]
+if "\n  resolve:\n" in workflow:
+    resolver_names = re.findall(
+        r"(?m)^      - name: (.+)$",
+        workflow.partition("\n  resolve:\n")[2].partition("\n  deploy:\n")[0],
+    )
+    jobs.insert(0, {
+        "id": 60999, "run_id": 610, "name": "resolve", "status": "completed", "conclusion": "success",
+        "steps": [{"name": name, "number": index + 1, "status": "completed", "conclusion": "success",
+                   "started_at": "2025-12-31T21:24:00Z", "completed_at": "2025-12-31T21:24:30Z"}
+                  for index, name in enumerate(resolver_names)],
+    })
 write(f"{prefix}/actions/runs/610/attempts/1/jobs?per_page=100", {
-    "total_count": 2, "jobs": [
-        {"id": 61000, "run_id": 610, "name": "deploy", "status": "completed", "conclusion": "failure", "steps": steps},
-        {"id": 61001, "run_id": 610, "name": "public-validate", "status": "completed", "conclusion": "skipped", "steps": []},
-    ]})
+    "total_count": len(jobs), "jobs": jobs})
 write(f"{prefix}/actions/runs/43/attempts/1/jobs?per_page=100", {
     "total_count": 1, "jobs": [{"id": 4300, "run_id": 43, "name": "rollout", "steps": [{
         "name": "Validate exact SHA phase and trusted upstream runs", "conclusion": "success",
@@ -15922,6 +16452,14 @@ pre_runtime_cleanup_inputs="$(
 )"
 run_custom_binding "$activation_binding" 623 "$pre_runtime_cleanup_inputs" oke >/dev/null ||
   fail "pre-runtime activation cleanup was rejected: $(cat "$WORK/err.txt")"
+pre_runtime_jobs="$FIXTURE_DIR/$(printf '%s' "repos/$REPO/actions/runs/610/attempts/1/jobs?per_page=100" | tr '/?=&' '____')"
+cp "$pre_runtime_jobs" "$WORK/pre-runtime-jobs.json"
+jq '.jobs |= map(select(.name != "resolve")) | .total_count = (.jobs | length)' \
+  "$WORK/pre-runtime-jobs.json" >"$pre_runtime_jobs"
+if run_custom_binding "$activation_binding" 623 "$pre_runtime_cleanup_inputs" oke >/dev/null; then
+  fail "current pre-runtime cleanup accepted missing source-declared resolver"
+fi
+cp "$WORK/pre-runtime-jobs.json" "$pre_runtime_jobs"
 for mutation in omitted substituted; do
   failed=0
   [ "$mutation" != substituted ] || failed=611
@@ -16751,10 +17289,8 @@ workflow_json = json.loads(subprocess.check_output([
     str(root / ".github/workflows/oci-production-deploy.yml"),
 ], text=True))
 producer_body = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
-                     if step.get("name") == "Verify exact failed-deploy resume state")
-producer_body = producer_body[producer_body.index("mkdir -p artifacts/oci-live-data-rollout/evidence"):
-                              producer_body.index('if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then',
-                                                  producer_body.index("resume_schema="))]
+                     if step.get("name") == "Capture and validate pre-mutation rollback baseline")
+producer_body = producer_body[producer_body.index('if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then'):]
 producer_template = producer_body
 consumer_body = next(step["run"] for step in workflow_json[1]["jobs"]["deploy"]["steps"]
                      if step.get("name") == "Verify immutable image and infrastructure provenance")
@@ -17031,6 +17567,9 @@ print("PASS real expired-resume policy rejects omitted waiting self and accepts 
 
 producer_dir = pathlib.Path(checkout) / "expired-producer"
 producer_dir.mkdir()
+(producer_dir / "artifacts/oci-live-data-rollout").mkdir(parents=True)
+shutil.copytree(before, producer_dir / "artifacts/oci-data-baseline-before")
+shutil.copyfile(images, producer_dir / "artifacts/oci-live-data-rollout/resume-images.tsv")
 expressions = {
     **{f"steps.provenance_request.outputs.{key}": qualification[key] for key in (
         "failed_deploy_job_conclusion", "public_validate_job_conclusion",
@@ -17040,12 +17579,12 @@ expressions = {
 }
 producer_body = re.sub(r"\$\{\{\s*([^{}]+?)\s*\}\}",
                        lambda match: expressions[match.group(1)], producer_body)
-producer_env = dict(os.environ, HELD_HANDOFF_RUN_ID="0",
+producer_env = dict(os.environ, HELD_HANDOFF_RUN_ID="0", RESUME_PREFLIGHT_OUTCOME="success",
     RESOLVED_APPLIED_DATA_RUN_ID=qualification["applied_data_run_id"],
     RESOLVED_APPLIED_SOURCE_SHA=qualification["applied_source_sha"],
     FAILED_DEPLOY_RUN_ID="54", RESUME_MAINTENANCE_MODE="pre-runtime-hold",
-    FAILED_ACTIVATION_RUN_ID="0", SOURCE_SHA=control_source, observed_baseline_sha=fresh_sha,
-    resume_images=str(images), CHECKPOINT_SOURCE_SHA=root_source, DISK_CHECKPOINT_RUN_ID="44")
+    FAILED_ACTIVATION_RUN_ID="0", SOURCE_SHA=control_source,
+    CHECKPOINT_SOURCE_SHA=root_source, DISK_CHECKPOINT_RUN_ID="44")
 result = subprocess.run(["bash", "-euc", producer_body], cwd=producer_dir,
                         env=producer_env, capture_output=True, text=True)
 assert result.returncode == 0, result.stderr
@@ -17322,6 +17861,9 @@ def complete_package(run, directory, metadata):
 native_request = dict(request, approved_sha=native_source)
 native_authority_dir = base / "complete-expired-authority"
 native_authority_dir.mkdir()
+(native_authority_dir / "artifacts/oci-live-data-rollout").mkdir(parents=True)
+shutil.copytree(before, native_authority_dir / "artifacts/oci-data-baseline-before")
+shutil.copyfile(images, native_authority_dir / "artifacts/oci-live-data-rollout/resume-images.tsv")
 body = re.sub(r"\$\{\{\s*([^{}]+?)\s*\}\}", lambda match: expressions[match.group(1)], producer_template)
 result = subprocess.run(["bash", "-euc", body], cwd=native_authority_dir,
     env=dict(producer_env, SOURCE_SHA=native_source), capture_output=True, text=True)
@@ -17435,6 +17977,7 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
             raise AssertionError("CONTINUE entered the direct expired-receiver helper")
     held_writer = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
                        if step.get("name") == "Verify exact failed-deploy resume state")
+    held_writer += "\nRESUME_PREFLIGHT_OUTCOME=success\n" + producer_template
     held_expressions = dict(expressions, **{
         f"steps.provenance_request.outputs.{key}": output_values[key] for key in (
             "failed_deploy_job_conclusion", "public_validate_job_conclusion",
@@ -17443,8 +17986,6 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
                         lambda match: held_expressions[match.group(1)], held_writer)
     (native_authority_dir / "infra").symlink_to(root / "infra", target_is_directory=True)
     shutil.copytree(holder, native_authority_dir / "artifacts/prerequisite")
-    shutil.copytree(before, native_authority_dir / "artifacts/oci-data-baseline-before")
-    shutil.copyfile(images, native_authority_dir / "artifacts/oci-live-data-rollout/resume-images.tsv")
     namespace = env(before, "baseline-provenance.env")["namespace"]
     runtime = {"images": {}, "deployments": {}, "pods": {},
         "fence": 'if ($host = "www.betstan.xyz") {\n  return 308 https://betstan.xyz$request_uri;\n}'

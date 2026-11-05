@@ -5558,7 +5558,7 @@ async function main() {
       receiptSha: "ccd0beaaeb306ef48b86fcb7566dfa8c1e7bd2b1",
     },
   ];
-  const activeLeanDeliveryWorkflowAuthorizations = [
+  const retiredLeanDeliveryWorkflowAuthorizations = [
     {
       id: "lean-delivery-production-build-source-reapply-v1",
       repository: "vasilyevstan/betstan",
@@ -5590,9 +5590,9 @@ async function main() {
   ];
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    activeLeanDeliveryWorkflowAuthorizations,
+    [],
   );
-  for (const authorization of activeLeanDeliveryWorkflowAuthorizations) {
+  for (const authorization of retiredLeanDeliveryWorkflowAuthorizations) {
     assert.deepEqual(
       publishPrPolicy.findWorkflowAuthorization({
         authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
@@ -5609,7 +5609,7 @@ async function main() {
         },
         now: "2026-11-04T22:00:00.000Z",
       }),
-      authorization,
+      null,
     );
     assert.equal(
       publishPrPolicy.findWorkflowAuthorization({
@@ -5773,12 +5773,12 @@ async function main() {
     false,
   );
   assert(
-    publisherSource.includes(
+    !publisherSource.includes(
       'id: "lean-delivery-production-build-source-reapply-v1"',
     ),
   );
   assert(
-    publisherSource.includes(
+    !publisherSource.includes(
       'id: "lean-delivery-production-build-promotion-selector-v3"',
     ),
   );
@@ -5798,7 +5798,7 @@ async function main() {
     ),
   );
   assert(
-    !publisherSource.includes(
+    publisherSource.includes(
       "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
     ),
   );

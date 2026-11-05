@@ -11,6 +11,7 @@ from pathlib import Path
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 POSITIVE_INTEGER = re.compile(r"^[1-9][0-9]*$")
+FILESYSTEM_UUID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 REPOSITORY = "ghcr.io/vasilyevstan/betstan-images"
 REPOSITORY_DIGEST = re.compile(
     rf"{re.escape(REPOSITORY)}@(sha256:[0-9a-f]{{64}})"
@@ -244,7 +245,10 @@ def validate_runtime(runtime, expected_profile=None):
         not isinstance(root, dict)
         or set(root) != {"mount", "df"}
         or not isinstance(mongo, dict)
-        or set(mongo) != {"mount", "separateFromRoot"}
+        or set(mongo) not in (
+            {"mount", "separateFromRoot"},
+            {"mount", "separateFromRoot", "volumeIdSha256"},
+        )
     ):
         fail("runtime mount evidence is malformed")
     for label, mount, target in (
@@ -253,7 +257,10 @@ def validate_runtime(runtime, expected_profile=None):
     ):
         if (
             not isinstance(mount, dict)
-            or set(mount) != {"target", "source", "fstype", "size", "used", "avail"}
+            or set(mount) not in (
+                {"target", "source", "fstype", "size", "used", "avail"},
+                {"target", "source", "fstype", "size", "used", "avail", "uuid"},
+            )
             or mount.get("target") != target
         ):
             fail(f"{label} mount target is invalid")
@@ -263,6 +270,21 @@ def validate_runtime(runtime, expected_profile=None):
         for name in ("size", "used", "avail"):
             if type(mount.get(name)) is not int or mount[name] < 0:
                 fail(f"{label} mount {name} is invalid")
+        if "uuid" in mount and (
+            not isinstance(mount["uuid"], str)
+            or FILESYSTEM_UUID.fullmatch(mount["uuid"]) is None
+        ):
+            fail(f"{label} filesystem UUID is invalid")
+    if ("uuid" in root["mount"]) != ("uuid" in mongo["mount"]):
+        fail("filesystem UUID evidence is incomplete")
+    if "uuid" in root["mount"] and root["mount"]["uuid"] == mongo["mount"]["uuid"]:
+        fail("Mongo and root filesystem UUIDs are not distinct")
+    if "volumeIdSha256" in mongo and (
+        "uuid" not in mongo["mount"]
+        or not isinstance(mongo["volumeIdSha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", mongo["volumeIdSha256"]) is None
+    ):
+        fail("Mongo volume identity is invalid")
     if (
         mongo["separateFromRoot"] is not True
         or root["mount"]["source"] == mongo["mount"]["source"]
@@ -1561,10 +1583,13 @@ def checkpoint_residency(runtime, candidate_images, rollback_images=None):
 REBOOT_VOLATILE_IDENTITY_KEYS = frozenset(
     {"rootMountSourceSha256", "mongoMountSourceSha256"}
 )
+STORAGE_IDENTITY_KEYS = frozenset(
+    {"rootFsUuidSha256", "mongoFsUuidSha256", "mongoVolumeIdSha256"}
+)
 
 
 def checkpoint_stable_identity(runtime, capacity):
-    return {
+    identity = {
         "nodeNameSha256": hashlib.sha256(capacity["nodeName"].encode()).hexdigest(),
         "rootMountSourceSha256": hashlib.sha256(
             runtime["root"]["mount"]["source"].encode()
@@ -1581,6 +1606,14 @@ def checkpoint_stable_identity(runtime, capacity):
         "containerRuntimeVersion": runtime["runtime"]["containerRuntimeVersion"],
         "k3sActive": runtime["runtime"]["k3sActive"],
     }
+    for label in ("root", "mongo"):
+        if "uuid" in runtime[label]["mount"]:
+            identity[f"{label}FsUuidSha256"] = hashlib.sha256(
+                runtime[label]["mount"]["uuid"].encode()
+            ).hexdigest()
+    if "volumeIdSha256" in runtime["mongo"]:
+        identity["mongoVolumeIdSha256"] = runtime["mongo"]["volumeIdSha256"]
+    return identity
 
 
 def checkpoint_root(capacity):
@@ -1690,7 +1723,7 @@ def validate_release_checkpoint(value):
     }
     if (
         not isinstance(identity, dict)
-        or set(identity) != identity_keys
+        or set(identity) not in (identity_keys, identity_keys | STORAGE_IDENTITY_KEYS)
         or not re.fullmatch(r"[0-9a-f]{64}", str(identity["nodeNameSha256"]))
         or not re.fullmatch(
             r"[0-9a-f]{64}", str(identity["rootMountSourceSha256"])
@@ -1720,6 +1753,15 @@ def validate_release_checkpoint(value):
         or identity["rootMountCapacityBytes"] != root["capacityBytes"]
     ):
         fail("release checkpoint stable identity is invalid")
+    if STORAGE_IDENTITY_KEYS <= identity.keys() and (
+        any(
+            not isinstance(identity[key], str)
+            or re.fullmatch(r"[0-9a-f]{64}", identity[key]) is None
+            for key in STORAGE_IDENTITY_KEYS
+        )
+        or identity["rootFsUuidSha256"] == identity["mongoFsUuidSha256"]
+    ):
+        fail("release checkpoint storage identity is invalid")
     candidates = value["candidateResidency"]
     if not isinstance(candidates, list):
         fail("release checkpoint candidate residency is malformed")
@@ -2054,7 +2096,7 @@ def revalidate_release_checkpoint(args):
     differing_identity = sorted(
         key
         for key, sealed in checkpoint["stableIdentity"].items()
-        if key not in REBOOT_VOLATILE_IDENTITY_KEYS and fresh_identity[key] != sealed
+        if key not in REBOOT_VOLATILE_IDENTITY_KEYS and fresh_identity.get(key) != sealed
     )
     if differing_identity:
         fail(

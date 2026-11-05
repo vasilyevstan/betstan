@@ -2444,6 +2444,7 @@ SH
       SOURCE_SHA="$CURRENT_MASTER_SHA" PHASE="$phase" \
       FAILED_DEPLOY_RUN_ID="$failed_deploy" FAILED_ACTIVATION_RUN_ID=0 \
       RELEASED_ACTIVATION_QUALIFICATION=none \
+      RESUME_PREFLIGHT_OUTCOME=skipped \
       BASELINE_RECOVERY_RUN_ID="$recovery" \
       BASELINE_RECOVERY_SOURCE_SHA="$recovery_source" \
       EXPECTED_SOURCE_SHA=stale-source EXPECTED_NAMESPACE=stale-namespace \
@@ -2468,6 +2469,8 @@ SH
       fail "rejected $name exported a successful baseline handoff"
     assert_not_contains "$case_dir/order.log" downstream
   fi
+  [[ ! -e "$case_dir/artifacts/oci-live-data-rollout/evidence/resume-authority.env" ]] ||
+    fail "$name wrote resume authority without a successful resume preflight"
   cmp -s "$baseline/SHA256SUMS" \
     "$case_dir/artifacts/oci-data-baseline-before/SHA256SUMS" ||
     fail "$name replaced the selected baseline"

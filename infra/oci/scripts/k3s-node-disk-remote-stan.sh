@@ -29,7 +29,7 @@ case "$ACTION" in
     required_commands=(findmnt readlink df du k3s sha256sum curl systemctl)
     ;;
   snapshot-held)
-    required_commands=(findmnt df k3s systemctl)
+    required_commands=(findmnt readlink df k3s systemctl)
     ;;
   probe-public-read)
     required_commands=(curl)
@@ -249,24 +249,43 @@ public_read_checks() {
 }
 
 mount_json() {
-  local target="$1"
-  findmnt --json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL \
+  local target="$1" columns=TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL with_uuid=false value
+  if [[ "$ACTION" == "snapshot" || "$ACTION" == "snapshot-held" ]]; then
+    columns+=,UUID
+    with_uuid=true
+  fi
+  value="$(findmnt --json --bytes --output "$columns" \
     --target "$target" |
-    jq -ce --arg target "$target" '
+    jq -ce --arg target "$target" --argjson with_uuid "$with_uuid" '
       .filesystems as $items |
       if ($items | length) == 1 and $items[0].target == $target then
-        $items[0] | {
+        $items[0] |
+        if $with_uuid and
+           ((.uuid | type) != "string" or
+            (.uuid | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$") | not))
+        then error("filesystem UUID is missing or malformed") else . end |
+        {
           target:.target,
           source:.source,
           fstype:.fstype,
           size:(.size | tonumber),
           used:(.used | tonumber),
           avail:(.avail | tonumber)
-        }
+        } + (if $with_uuid then {uuid:.uuid} else {} end)
       else
         error("mount identity is missing or ambiguous")
       end
-    '
+    ')" || return 1
+  if [[ "$with_uuid" == "true" && "$target" == "$MONGO_PATH" ]]; then
+    local mounted attached
+    mounted="$(readlink -e -- "$(jq -er '.source' <<<"$value")")" ||
+      fail "Mongo mounted device cannot be resolved"
+    attached="$(readlink -e -- /dev/oracleoci/oraclevdb)" ||
+      fail "Mongo attachment device cannot be resolved"
+    [[ "$mounted" == "$attached" ]] ||
+      fail "Mongo mount differs from the managed volume attachment"
+  fi
+  printf '%s\n' "$value"
 }
 
 fixed_path_bytes() {

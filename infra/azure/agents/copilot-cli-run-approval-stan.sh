@@ -434,6 +434,44 @@ revalidate_upstream_bindings() {
     esac
   fi
 
+  if [[ "$EXPECTED_OPERATION" = "oci-production-deploy-automatic" ]]; then
+    [[ "$authority_mode" = "record-upstream" &&
+       "$authority_run_id" = "$EXPECTED_UPSTREAM_RUN_ID" &&
+       "$(jq -r '.runId' <<<"$record_summary")" = "$EXPECTED_UPSTREAM_RUN_ID" ]] ||
+      fail "native deploy requires its exact consumed data authority"
+    [[ -n "$boundary" ]] || return 0
+    authoritative_mode="$(
+      gh api "repos/$repository/environments/$expected_environment/variables/OCI_RUNTIME_MODE" \
+        --jq '.value'
+    )"
+    [[ "$authoritative_mode" = "k3s" || "$authoritative_mode" = "oke" ]] ||
+      fail "authoritative runtime mode is unsupported"
+    dispatch_inputs="$(
+      "$BINDING_VALIDATOR" resolve-deploy \
+        --repository "$repository" \
+        --subject-sha "$current_master" \
+        --upstream-run-id "$EXPECTED_UPSTREAM_RUN_ID" \
+        --upstream-inputs "$(jq -c '.inputs' <<<"$record_summary")" \
+        --receiver-run-id "$RUN_ID" \
+        --boundary "$boundary"
+    )" || fail "native final-data handoff no longer authorizes this receiver"
+    operation=oci-production-deploy
+    if [[ "$(jq -r '.baseline_recovery_run_id' <<<"$dispatch_inputs")" != "0" ]]; then
+      operation=oci-production-deploy-recovered
+    fi
+    policy_json="$("$POLICY_HELPER" get "$operation")"
+    BETSTAN_APPROVAL_BYTES_OWNER="$$" BETSTAN_BINDING_COMMAND_OWNER="$$" \
+    BETSTAN_BINDING_BOUNDARY="$boundary" \
+    BETSTAN_BOUND_RECEIVER_RUN_ID="$RUN_ID" "$BINDING_VALIDATOR" validate-all \
+      --repository "$repository" \
+      --policy-json "$policy_json" \
+      --subject-sha "$current_master" \
+      --dispatch-inputs "$dispatch_inputs" \
+      --runtime-mode "$authoritative_mode" ||
+      fail "native deploy upstream prerequisites are no longer valid; approval refused"
+    return 0
+  fi
+
   operation="$(jq -r '.operation // ""' <<<"$record_summary")"
   [[ -n "$operation" ]] ||
     fail "authority record has no operation for binding revalidation"
