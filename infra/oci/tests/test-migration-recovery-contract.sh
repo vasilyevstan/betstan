@@ -913,8 +913,8 @@ if not fail_closed_case < fail_closed_committed < fail_closed_close:
 PY
 ! grep -Eiq 'watchdog|restore_azure|Object Storage|snapshot' "$MIGRATION" ||
   fail "migration can reopen Azure or retain a prohibited recovery copy"
-grep -Fq "journal's original source SHA immutable" \
-  "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+grep -Fq "immutable original journal SHA" \
+  "$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md" ||
   fail "migration recovery agent omits immutable cross-release lineage"
 grep -Fq "descendant hotfix can replace only the active source SHA" \
   "$OCI_DIR/LESSONS_LEARNED.md" ||

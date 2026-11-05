@@ -136,7 +136,7 @@ changed trust/state boundaries, not the existence of prior review tokens.
 
 Before adding process, name its unmet acceptance criterion or evidenced
 blocker. The owner may remove optional duplication directly without a
-PerfettoStan/simplifier continuation round. Keep required current-SHA CI,
+separate simplification or continuation round. Keep required current-SHA CI,
 protected ancestry, origin/ownership approval, immutable deployed identity,
 physical single-writer locks/fences, data integrity, compatible recovery and
 observed health. Existing executable controls remain authoritative until
@@ -158,13 +158,12 @@ smallest appropriate rendered evidence. See
 `docs/wiki/UI-UX-Consistency.md`.
 
 Keep this detail on implementation, promotion, synchronization, and closed
-attempt PRs. Lightweight metadata-only validation describes the staged lean
-path, not this compatibility candidate. Its `production-build.yml` is
-byte-identical to the trusted master workflow and retains `pull_request.edited`
-plus full legacy validation. Current protected workflow triggers remain
-authoritative until tested cutover. Derive the exact head SHA from Git or
-GitHub immediately before preparing the final description, and prefer one
-complete metadata edit over repeated corrections that start duplicate runs.
+attempt PRs. The lean `production-build.yml` validates `opened`, `reopened`
+and `synchronize`, not title/body edits. V4 quality identity excludes metadata;
+legacy markers retain their original freshness rules until replaced by a real
+source transition. Derive the exact head SHA immediately before preparing the
+description. Create the CLI and context labels together when possible; the
+required context-label helper is read-only when they already exist.
 
 Copilot CLI-created pull requests carry the `copilot-cli-managed` label. Only
 Copilot CLI may apply it, and only to a PR that the active CLI workflow created
@@ -493,7 +492,7 @@ run for its PR transition. A workflow-producing pull-request event first
 publishes an unbound pending transition barrier, then binds the exact newly
 registered quality run. Only that transition's completed workflow run may
 publish success. The trusted marker is stored on the exact merge snapshot and
-includes a bounded head/base source fingerprint. The publisher accepts it only from
+binds the exact head/base through native run relations. The publisher accepts it only from
 the GitHub Actions bot with a validated repository `branch-policy` run target,
 and that run must carry the exact PR, head, and base relation. Governance keeps
 `branch-policy.yml` as the sole status-writing workflow and requires every
@@ -503,7 +502,32 @@ different `workflow_run` completion remains pending, and the selected run must
 strictly postdate both the event timestamp and any authorization issuance. A
 delayed run can bind an unbound marker through its exact `workflow_run` or a
 manual trusted refresh, but a manual refresh cannot create a missing marker or
-act as quality evidence. Version 3 quality markers use
+act as quality evidence.
+
+### Metadata-neutral quality transitions
+
+New markers use `v4|<pr>|<action>|<cutoff-ms>|<p|x|runId>`. They bind the
+authenticated transition, exact merge snapshot and successful native run,
+not title, body, labels or mutable `updated_at`. Source, base, merge, workflow,
+attempt, run and authorization drift still fail closed. The opening event may
+precede GitHub's merge calculation; capture and recheck the live unique merge
+rather than treating the event's provisional merge field as tested identity.
+
+Metadata refreshes may complete an existing exact v4 binding without creating
+quality evidence or consuming a new authorization. Missing markers, actual
+failed/cancelled quality runs and conflicting run bindings remain blocking.
+Origin and exact human/CLI approval are checked independently at merge or
+operation time; a label change cannot grant production authority.
+
+The sole publisher keeps its existing serialized group and uses `queue: max`
+with cancellation disabled. This retains up to 100 waiting runs instead of
+replacing the pending opening event with metadata events. Queue overflow still
+cancels excess arrivals; queue order is not proof of event order. Existing
+cutoffs, source checks and trusted refresh rules remain necessary.
+
+### Legacy transition compatibility
+
+Already-emitted version 3 quality markers use
 `v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.
 `u` records only an unconfirmed direct opening-label snapshot mismatch, `p`
 records a confirmed transition without a bound run, a positive run ID records
@@ -562,13 +586,15 @@ and ledger authority: recovered opening-label authority is not durable in
 marker v3, so every publisher able to bind or succeed such a lineage must
 revalidate the ledger; retaining version 3 parsing alone is insufficient, and
 rollback to a publisher lacking ledger authority is prohibited; use a
-reviewed forward correction. Other non-producing metadata does not form marker
-identity.
-The publisher uses the fetched `updated_at` only to recheck the complete PR
-snapshot before and after status publication and replaces any concurrent result
-with pending. Any later edit, synchronization, base advance, or status refresh
-still requires the applicable short-lived authorization and receipt anchor; a
-consumed receipt is never reset or reused.
+reviewed forward correction. For v3, the fetched `updated_at` and label
+fingerprint remain freshness checks around receipt claiming and publication:
+removing then restoring labels cannot revive authority. V4 metadata neutrality
+does not reinterpret or weaken existing v3 evidence.
+
+Rollback must retain readers for every emitted marker version, including v4,
+and the v3 ledger/freshness rules. Conflicting versions at the same cutoff fail
+closed; tombstones remain dominant. Every source transition still needs its
+applicable exact run and authorization; consumed receipts are never reset.
 
 The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
 

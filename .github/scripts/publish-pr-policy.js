@@ -272,10 +272,9 @@ function assertExpectedPull(actual, expected) {
     "headRepository",
     "baseRef",
     "baseSha",
+    "mergeSha",
     "changedFiles",
-    "updatedAt",
     "contentFingerprint",
-    "labelsFingerprint",
   ]) {
     if (expected[key] !== undefined && actual[key] !== expected[key]) {
       throw new Error(
@@ -336,34 +335,6 @@ function isBoundedOpeningCliLabelRace(actual, expected) {
       actual.updatedAt,
       "current pull request updated_at",
     ),
-  );
-}
-
-function isLabelRefreshSnapshot(actual, expected) {
-  for (const key of [
-    "number",
-    "state",
-    "headRef",
-    "headSha",
-    "headRepository",
-    "baseRef",
-    "baseSha",
-    "contentFingerprint",
-  ]) {
-    if (actual[key] !== expected[key]) {
-      return false;
-    }
-  }
-  const actualUpdatedAt = githubTimestampMilliseconds(
-    actual.updatedAt,
-    "current pull request updated_at",
-  );
-  const expectedUpdatedAt = githubTimestampMilliseconds(
-    expected.updatedAt,
-    "label event pull request updated_at",
-  );
-  return (
-    actualUpdatedAt >= expectedUpdatedAt
   );
 }
 
@@ -1838,7 +1809,13 @@ function workflowRunUrl(serverUrl, owner, repo, runId) {
   );
 }
 
-function qualityTransitionDescription(pull, action, timestamp, binding) {
+function qualityTransitionDescription(
+  pull,
+  action,
+  timestamp,
+  binding,
+  version = 4,
+) {
   if (
     !Number.isSafeInteger(pull.number) ||
     pull.number < 1 ||
@@ -1850,7 +1827,10 @@ function qualityTransitionDescription(pull, action, timestamp, binding) {
   let bindingText;
   if (binding === null) {
     bindingText = QUALITY_TRANSITION_PENDING;
-  } else if (binding === QUALITY_TRANSITION_UNCONFIRMED) {
+  } else if (
+    version === 3 &&
+    binding === QUALITY_TRANSITION_UNCONFIRMED
+  ) {
     bindingText = QUALITY_TRANSITION_UNCONFIRMED;
   } else if (binding === QUALITY_TRANSITION_STALE) {
     bindingText = QUALITY_TRANSITION_STALE;
@@ -1860,8 +1840,10 @@ function qualityTransitionDescription(pull, action, timestamp, binding) {
     throw new Error("quality transition marker binding is invalid");
   }
   const description =
-    `v3|${pull.number}|${action}|${transitionAt}|${bindingText}|` +
-    `${pull.contentFingerprint}|${pull.labelsFingerprint}`;
+    version === 3
+      ? `v3|${pull.number}|${action}|${transitionAt}|${bindingText}|` +
+        `${pull.contentFingerprint}|${pull.labelsFingerprint}`
+      : `v4|${pull.number}|${action}|${transitionAt}|${bindingText}`;
   if (
     description.length > MAX_STATUS_DESCRIPTION_LENGTH ||
     Buffer.byteLength(description, "utf8") > MAX_STATUS_DESCRIPTION_LENGTH
@@ -1872,6 +1854,40 @@ function qualityTransitionDescription(pull, action, timestamp, binding) {
 }
 
 function parseQualityTransitionDescription(description, pullNumber) {
+  const currentMatch = description.match(
+    /^v4\|([1-9][0-9]*)\|(edited|opened|reopened|synchronize)\|(0|[1-9][0-9]*)\|(p|x|[1-9][0-9]*)$/,
+  );
+  if (currentMatch) {
+    const markerPullNumber = Number(currentMatch[1]);
+    const transitionAt = Number(currentMatch[3]);
+    const binding = currentMatch[4];
+    const runId =
+      binding === QUALITY_TRANSITION_PENDING ||
+      binding === QUALITY_TRANSITION_STALE
+        ? null
+        : Number(binding);
+    if (
+      !Number.isSafeInteger(markerPullNumber) ||
+      markerPullNumber !== pullNumber ||
+      !Number.isSafeInteger(transitionAt) ||
+      !(runId === null || Number.isSafeInteger(runId))
+    ) {
+      throw new Error(
+        "quality transition marker does not match the pull request",
+      );
+    }
+    return {
+      version: 4,
+      action: currentMatch[2],
+      transitionAt,
+      runId,
+      unconfirmed: false,
+      stale: binding === QUALITY_TRANSITION_STALE,
+      contentFingerprint: null,
+      labelsFingerprint: null,
+    };
+  }
+
   const versionedMatch = description.match(
     /^v(2|3)\|([1-9][0-9]*)\|(edited|opened|reopened|synchronize)\|(0|[1-9][0-9]*)\|(u|p|x|[1-9][0-9]*)\|([0-9a-f]{32})\|([0-9a-f]{32})$/,
   );
@@ -1979,13 +1995,50 @@ function resolveQualityTransition(transitions) {
       (left, right) => right.statusId - left.statusId,
     )[0];
   }
-  const legacy = candidates.filter((candidate) => candidate.version !== 3);
+  const legacy = candidates.filter(
+    (candidate) => candidate.version !== 3 && candidate.version !== 4,
+  );
   if (legacy.length > 0) {
     return legacy.sort(
       (left, right) => right.statusId - left.statusId,
     )[0];
   }
-  for (const field of ["action", "contentFingerprint", "targetUrl"]) {
+  const versions = new Set(candidates.map((candidate) => candidate.version));
+  if (versions.size > 1) {
+    throw new Error("quality transition marker lineage conflicts");
+  }
+  if (versions.has(3)) {
+    return resolveLegacyQualityTransition(candidates);
+  }
+  for (const field of ["action", "targetUrl"]) {
+    if (new Set(candidates.map((candidate) => candidate[field])).size !== 1) {
+      throw new Error("quality transition marker lineage conflicts");
+    }
+  }
+
+  const runIds = new Set(
+    candidates
+      .map((candidate) => candidate.runId)
+      .filter((runId) => runId !== null),
+  );
+  if (runIds.size > 1) {
+    throw new Error("quality transition marker run bindings conflict");
+  }
+
+  const resolved = candidates.sort(
+    (left, right) =>
+      qualityTransitionRank(right) - qualityTransitionRank(left) ||
+      right.statusId - left.statusId,
+  )[0];
+  return resolved;
+}
+
+function resolveLegacyQualityTransition(candidates) {
+  for (const field of [
+    "action",
+    "contentFingerprint",
+    "targetUrl",
+  ]) {
     if (new Set(candidates.map((candidate) => candidate[field])).size !== 1) {
       throw new Error("quality transition marker lineage conflicts");
     }
@@ -2046,7 +2099,6 @@ function resolveQualityTransition(transitions) {
     }
     hasInverseOpeningLabelPredecessor = true;
   }
-
   const resolved = candidates.sort(
     (left, right) =>
       qualityTransitionRank(right) - qualityTransitionRank(left) ||
@@ -2113,6 +2165,7 @@ async function getQualityTransition({
     );
     return {
       ...transition,
+      mergeSha: pull.mergeSha,
       policyRunId,
       targetUrl: marker.target_url,
       statusId: marker.id,
@@ -2204,8 +2257,10 @@ async function getQualityTransition({
             marker.version === candidate.version &&
             marker.action === candidate.action &&
             marker.transitionAt === candidate.transitionAt &&
-            marker.contentFingerprint === candidate.contentFingerprint &&
-            marker.labelsFingerprint === candidate.labelsFingerprint &&
+            (marker.version === 4 ||
+              (marker.contentFingerprint ===
+                candidate.contentFingerprint &&
+                marker.labelsFingerprint === candidate.labelsFingerprint)) &&
             marker.targetUrl === candidate.targetUrl,
         )
         .map(({ statusCreatedAt }) => statusCreatedAt),
@@ -2594,9 +2649,8 @@ async function assertAuthorizedSourceQuality({
   });
   if (
     !transition ||
-    transition.version !== 3 ||
+    (transition.version !== 3 && transition.version !== 4) ||
     transition.stale ||
-    transition.unconfirmed ||
     transition.runId !== integrationReceipt.runId ||
     transition.transitionAt !== integrationReceipt.transitionAt ||
     !transitionMatchesPullIdentity(transition, snapshotPull)
@@ -2604,6 +2658,23 @@ async function assertAuthorizedSourceQuality({
     throw new Error(
       "authorized coverage source transition is incomplete",
     );
+  }
+  if (
+    transition.version === 3 &&
+    requiresOpeningLabelLedgerAuthority(transition, snapshotPull)
+  ) {
+    const ledger = await inspectManagedLabelLedger({
+      github,
+      owner,
+      repo,
+      pull: snapshotPull,
+      transition,
+    });
+    if (ledger.status !== "satisfied") {
+      throw new Error(
+        `authorized coverage source label ledger is ${ledger.status}`,
+      );
+    }
   }
   const [workflowResponse, runResponse] = await Promise.all([
     github.rest.actions.getWorkflow({
@@ -3653,10 +3724,6 @@ async function getCurrentPull(
   repo,
   number,
   expected,
-  {
-    allowLabelRefreshReconciliation = false,
-    allowOpeningLabelSnapshotMismatch = false,
-  } = {},
 ) {
   let current;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
@@ -3672,16 +3739,7 @@ async function getCurrentPull(
     ) {
       throw new Error(`Pull request #${number} changed file count is invalid`);
     }
-    if (
-      !(
-        (allowOpeningLabelSnapshotMismatch &&
-          isOpeningCliLabelRace(current, expected)) ||
-        (allowLabelRefreshReconciliation &&
-          isLabelRefreshSnapshot(current, expected))
-      )
-    ) {
-      assertExpectedPull(current, expected);
-    }
+    assertExpectedPull(current, expected);
 
     if (current.state !== "open") {
       throw new Error(`Pull request #${number} is not open`);
@@ -4158,6 +4216,7 @@ function authorizationClaimEvidence(authorization) {
     authorization.transition.action,
     authorization.transition.transitionAt,
     authorization.transition.runId,
+    authorization.transition.version,
     authorization.transition.contentFingerprint,
     authorization.transition.labelsFingerprint,
     authorization.transition.targetUrl,
@@ -4230,7 +4289,11 @@ function assertWorkflowAuthorizationRunEligibility(
 }
 
 function transitionMatchesPullIdentity(transition, pull) {
+  if (transition.version === 4) {
+    return transition.mergeSha === pull.mergeSha;
+  }
   return (
+    transition.version === 3 &&
     transition.contentFingerprint === pull.contentFingerprint &&
     transition.labelsFingerprint === pull.labelsFingerprint
   );
@@ -4396,12 +4459,14 @@ async function publishQualityTransitionMarker({
   transitionAt,
   binding,
   targetUrl,
+  version = 4,
 }) {
   const description = qualityTransitionDescription(
     pull,
     action,
     transitionAt,
     binding,
+    version,
   );
   for (const target of statusTargets(pull)) {
     await publishStatus(
@@ -4425,7 +4490,6 @@ async function shouldCreateQualityTransition({
   action,
   timestamp,
   serverUrl,
-  hasOpeningSnapshotMismatch,
 }) {
   const transitionAt = transitionTimestampMilliseconds(timestamp);
   const canSupersede =
@@ -4439,16 +4503,7 @@ async function shouldCreateQualityTransition({
     supersedingTransitionAt: canSupersede ? transitionAt : null,
   });
   if (!transition) {
-    return (
-      !hasOpeningSnapshotMismatch ||
-      isWithinOpeningRaceWindow(
-        transitionAt,
-        githubTimestampMilliseconds(
-          pull.updatedAt,
-          "current pull request updated_at",
-        ),
-      )
-    );
+    return true;
   }
   return canSupersede && transition.transitionAt < transitionAt;
 }
@@ -4469,14 +4524,6 @@ async function bindPendingQualityTransition({
   fallbackUrl,
   receiptBudget,
 }) {
-  const labelRefresh =
-    eventAction === "labeled" || eventAction === "unlabeled";
-  if (
-    labelRefresh &&
-    INFORMATIONAL_CONTEXT_LABEL_PATTERN.test(eventLabelName || "")
-  ) {
-    return false;
-  }
   if (candidateRun) {
     assertQualityWorkflowRunCandidate({
       run: candidateRun,
@@ -4492,124 +4539,35 @@ async function bindPendingQualityTransition({
     pull,
     serverUrl,
   });
-  if (!transition || transition.version !== 3 || transition.stale) {
+  if (!transition || transition.stale) {
     return false;
   }
-  const recoverUnconfirmedOpeningLabel =
-    isRecoverableUnconfirmedOpeningLabelLineage(transition, pull) &&
-    eventAction === null;
+  const legacy = transition.version === 3;
+  const labelRefresh =
+    eventAction === "labeled" || eventAction === "unlabeled";
   if (
-    requiresOpeningLabelLedgerAuthority(transition, pull) ||
-    recoverUnconfirmedOpeningLabel
-  ) {
-    const ledger = await inspectManagedLabelLedger({
-      github,
-      owner,
-      repo,
-      pull,
-      transition,
-    });
-    if (ledger.status === "drift") {
-      await publishQualityTransitionMarker({
-        github,
-        owner,
-        repo,
-        pull,
-        action: transition.action,
-        transitionAt: transition.transitionAt,
-        binding: QUALITY_TRANSITION_STALE,
-        targetUrl: transition.targetUrl,
-      });
-      throw new Error("opening managed-label ledger proves drift");
-    }
-    if (ledger.status !== "satisfied") {
-      throw new Error(
-        `opening managed-label ledger is inconclusive: ${ledger.reason}`,
-      );
-    }
-  }
-  if (recoverUnconfirmedOpeningLabel) {
-    await publishQualityTransitionMarker({
-      github,
-      owner,
-      repo,
-      pull,
-      action: transition.action,
-      transitionAt: transition.transitionAt,
-      binding: null,
-      targetUrl: transition.targetUrl,
-    });
-    transition = {
-      ...transition,
-      runId: null,
-      unconfirmed: false,
-    };
-  }
-  if (eventAction === "opened") {
-    if (
-      transition.action === "opened" &&
-      (transition.unconfirmed ||
-        !transitionMatchesPullIdentity(transition, pull)) &&
-      isOpeningCliLabelRace(pull, eventPull) &&
-      transition.transitionAt ===
-        githubTimestampMilliseconds(
-          eventPull.updatedAt,
-          "opened pull request updated_at",
-        ) &&
-      !isBoundedOpeningCliLabelRace(pull, eventPull)
-    ) {
-      await publishQualityTransitionMarker({
-        github,
-        owner,
-        repo,
-        pull,
-        action: transition.action,
-        transitionAt: transition.transitionAt,
-        binding: QUALITY_TRANSITION_STALE,
-        targetUrl: transition.targetUrl,
-      });
-      throw new Error("quality transition lineage is permanently stale");
-    }
-    return false;
-  }
-  if (
+    legacy &&
     labelRefresh &&
-    transitionTimestampMilliseconds(eventPull.updatedAt) <
-      transition.transitionAt
+    INFORMATIONAL_CONTEXT_LABEL_PATTERN.test(eventLabelName || "")
   ) {
     return false;
   }
-  const openingLabelReconciliation =
-    canReconcileOpeningLabelLineage({
-      transition,
-      pull,
-      eventAction,
-      eventLabelName,
-      eventPull,
-    });
-  const directOpeningLabelEvidence =
-    hasDirectOpeningLabelEvidence({
-      transition,
-      pull,
-      eventAction,
-      eventLabelName,
-      eventPull,
-    });
-  const confirmedInverseOpeningLabelReplay =
-    isConfirmedInverseOpeningLabelReplay({
-      transition,
-      pull,
-      eventAction,
-      eventLabelName,
-      eventPull,
-    });
-  if (confirmedInverseOpeningLabelReplay) {
-    return false;
-  }
-  let confirmedDirectOpeningLabel = false;
-  if (transition.unconfirmed) {
-    if (!directOpeningLabelEvidence) {
-      if (labelRefresh) {
+  if (legacy) {
+    const recoverUnconfirmedOpeningLabel =
+      isRecoverableUnconfirmedOpeningLabelLineage(transition, pull) &&
+      eventAction === null;
+    if (
+      requiresOpeningLabelLedgerAuthority(transition, pull) ||
+      recoverUnconfirmedOpeningLabel
+    ) {
+      const ledger = await inspectManagedLabelLedger({
+        github,
+        owner,
+        repo,
+        pull,
+        transition,
+      });
+      if (ledger.status === "drift") {
         await publishQualityTransitionMarker({
           github,
           owner,
@@ -4619,53 +4577,17 @@ async function bindPendingQualityTransition({
           transitionAt: transition.transitionAt,
           binding: QUALITY_TRANSITION_STALE,
           targetUrl: transition.targetUrl,
+          version: 3,
         });
-        throw new Error("quality transition lineage is permanently stale");
+        throw new Error("opening managed-label ledger proves drift");
       }
-      return false;
+      if (ledger.status !== "satisfied") {
+        throw new Error(
+          `opening managed-label ledger is inconclusive: ${ledger.reason}`,
+        );
+      }
     }
-    confirmedDirectOpeningLabel = true;
-    await publishQualityTransitionMarker({
-      github,
-      owner,
-      repo,
-      pull,
-      action: transition.action,
-      transitionAt: transition.transitionAt,
-      binding: null,
-      targetUrl: transition.targetUrl,
-    });
-    transition = {
-      ...transition,
-      runId: null,
-      unconfirmed: false,
-    };
-  }
-  const labelEventProvesDrift =
-    labelRefresh &&
-    !openingLabelReconciliation &&
-    !directOpeningLabelEvidence;
-  if (labelEventProvesDrift) {
-    await publishQualityTransitionMarker({
-      github,
-      owner,
-      repo,
-      pull,
-      action: transition.action,
-      transitionAt: transition.transitionAt,
-      binding: QUALITY_TRANSITION_STALE,
-      targetUrl: transition.targetUrl,
-    });
-    throw new Error("quality transition lineage is permanently stale");
-  }
-  if (
-    isOpeningLabelLineage(transition, pull) &&
-    !openingLabelReconciliation
-  ) {
-    return false;
-  }
-  if (!transitionMatchesPullIdentity(transition, pull)) {
-    if (openingLabelReconciliation) {
+    if (recoverUnconfirmedOpeningLabel) {
       await publishQualityTransitionMarker({
         github,
         owner,
@@ -4673,16 +4595,118 @@ async function bindPendingQualityTransition({
         pull,
         action: transition.action,
         transitionAt: transition.transitionAt,
-        binding: transition.runId,
+        binding: null,
         targetUrl: transition.targetUrl,
+        version: 3,
       });
       transition = {
         ...transition,
-        contentFingerprint: pull.contentFingerprint,
-        labelsFingerprint: pull.labelsFingerprint,
+        runId: null,
         unconfirmed: false,
       };
-    } else {
+    }
+    if (eventAction === "opened") {
+      if (
+        transition.action === "opened" &&
+        (transition.unconfirmed ||
+          !transitionMatchesPullIdentity(transition, pull)) &&
+        isOpeningCliLabelRace(pull, eventPull) &&
+        transition.transitionAt ===
+          githubTimestampMilliseconds(
+            eventPull.updatedAt,
+            "opened pull request updated_at",
+          ) &&
+        !isBoundedOpeningCliLabelRace(pull, eventPull)
+      ) {
+        await publishQualityTransitionMarker({
+          github,
+          owner,
+          repo,
+          pull,
+          action: transition.action,
+          transitionAt: transition.transitionAt,
+          binding: QUALITY_TRANSITION_STALE,
+          targetUrl: transition.targetUrl,
+          version: 3,
+        });
+        throw new Error("quality transition lineage is permanently stale");
+      }
+      return false;
+    }
+    if (
+      labelRefresh &&
+      transitionTimestampMilliseconds(eventPull.updatedAt) <
+        transition.transitionAt
+    ) {
+      return false;
+    }
+    const openingLabelReconciliation = canReconcileOpeningLabelLineage({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    });
+    const directOpeningLabelEvidence = hasDirectOpeningLabelEvidence({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    });
+    const confirmedInverseOpeningLabelReplay =
+      isConfirmedInverseOpeningLabelReplay({
+        transition,
+        pull,
+        eventAction,
+        eventLabelName,
+        eventPull,
+      });
+    if (confirmedInverseOpeningLabelReplay) {
+      return false;
+    }
+    let confirmedDirectOpeningLabel = false;
+    if (transition.unconfirmed) {
+      if (!directOpeningLabelEvidence) {
+        if (labelRefresh) {
+          await publishQualityTransitionMarker({
+            github,
+            owner,
+            repo,
+            pull,
+            action: transition.action,
+            transitionAt: transition.transitionAt,
+            binding: QUALITY_TRANSITION_STALE,
+            targetUrl: transition.targetUrl,
+            version: 3,
+          });
+          throw new Error("quality transition lineage is permanently stale");
+        }
+        return false;
+      }
+      confirmedDirectOpeningLabel = true;
+      await publishQualityTransitionMarker({
+        github,
+        owner,
+        repo,
+        pull,
+        action: transition.action,
+        transitionAt: transition.transitionAt,
+        binding: null,
+        targetUrl: transition.targetUrl,
+        version: 3,
+      });
+      transition = {
+        ...transition,
+        runId: null,
+        unconfirmed: false,
+      };
+    }
+    const labelEventProvesDrift =
+      labelRefresh &&
+      !openingLabelReconciliation &&
+      !directOpeningLabelEvidence;
+    if (labelEventProvesDrift) {
       await publishQualityTransitionMarker({
         github,
         owner,
@@ -4692,18 +4716,61 @@ async function bindPendingQualityTransition({
         transitionAt: transition.transitionAt,
         binding: QUALITY_TRANSITION_STALE,
         targetUrl: transition.targetUrl,
+        version: 3,
       });
       throw new Error("quality transition lineage is permanently stale");
     }
-  }
-  if (
-    directOpeningLabelEvidence &&
-    !confirmedDirectOpeningLabel &&
-    !openingLabelReconciliation
-  ) {
+    if (
+      isOpeningLabelLineage(transition, pull) &&
+      !openingLabelReconciliation
+    ) {
+      return false;
+    }
+    if (!transitionMatchesPullIdentity(transition, pull)) {
+      if (openingLabelReconciliation) {
+        await publishQualityTransitionMarker({
+          github,
+          owner,
+          repo,
+          pull,
+          action: transition.action,
+          transitionAt: transition.transitionAt,
+          binding: transition.runId,
+          targetUrl: transition.targetUrl,
+          version: 3,
+        });
+        transition = {
+          ...transition,
+          contentFingerprint: pull.contentFingerprint,
+          labelsFingerprint: pull.labelsFingerprint,
+          unconfirmed: false,
+        };
+      } else {
+        await publishQualityTransitionMarker({
+          github,
+          owner,
+          repo,
+          pull,
+          action: transition.action,
+          transitionAt: transition.transitionAt,
+          binding: QUALITY_TRANSITION_STALE,
+          targetUrl: transition.targetUrl,
+          version: 3,
+        });
+        throw new Error("quality transition lineage is permanently stale");
+      }
+    }
+    if (
+      directOpeningLabelEvidence &&
+      !confirmedDirectOpeningLabel &&
+      !openingLabelReconciliation
+    ) {
+      return false;
+    }
+  } else if (transition.version !== 4) {
     return false;
   }
-  if (transition.runId !== null) {
+  if (transition.runId !== null || eventAction === "opened") {
     return false;
   }
 
@@ -4765,6 +4832,7 @@ async function bindPendingQualityTransition({
     transitionAt: transition.transitionAt,
     binding: run.id,
     targetUrl: transition.targetUrl,
+    version: transition.version,
   });
   return true;
 }
@@ -4854,7 +4922,7 @@ async function qualityDecision({
       reason: "no workflow-producing pull request transition is recorded",
     };
   }
-  if (transition.version !== 3) {
+  if (transition.version !== 3 && transition.version !== 4) {
     return {
       state: "pending",
       description: `PR #${pull.number} awaits a current quality transition`,
@@ -4870,28 +4938,17 @@ async function qualityDecision({
       reason: "the current quality transition lineage is permanently stale",
     };
   }
-  if (transition.unconfirmed) {
+  if (
+    transition.version === 3 &&
+    (transition.unconfirmed ||
+      transition.contentFingerprint !== pull.contentFingerprint ||
+      transition.labelsFingerprint !== pull.labelsFingerprint)
+  ) {
     return {
       state: "pending",
-      description: `PR #${pull.number} awaits opening label confirmation`,
+      description: `PR #${pull.number} awaits a current quality transition`,
       targetUrl: fallbackUrl,
-      reason: "the opening quality transition has no durable label proof",
-    };
-  }
-  if (transition.contentFingerprint !== pull.contentFingerprint) {
-    return {
-      state: "pending",
-      description: `PR #${pull.number} awaits its current content transition`,
-      targetUrl: fallbackUrl,
-      reason: "the quality transition marker predates current PR content",
-    };
-  }
-  if (transition.labelsFingerprint !== pull.labelsFingerprint) {
-    return {
-      state: "pending",
-      description: `PR #${pull.number} awaits its current label transition`,
-      targetUrl: fallbackUrl,
-      reason: "the quality transition marker predates current PR labels",
+      reason: "legacy quality transition markers cannot produce new success",
     };
   }
   if (transition.runId === null) {
@@ -5105,6 +5162,8 @@ async function qualityDecision({
     authorization: authorization
       ? { ...authorization, run, transition }
       : null,
+    legacyLabelsFingerprint:
+      transition.version === 3 ? transition.labelsFingerprint : null,
     workflowInheritance: trust.inheritance,
   };
 }
@@ -5136,7 +5195,13 @@ function statusTargets(pull) {
     : [pull.mergeSha];
 }
 
-async function assertCurrentPullSnapshot(github, owner, repo, pull) {
+async function assertCurrentPullSnapshot(
+  github,
+  owner,
+  repo,
+  pull,
+  legacyLabelsFingerprint = null,
+) {
   const current = await getCurrentPull(
     github,
     owner,
@@ -5146,6 +5211,13 @@ async function assertCurrentPullSnapshot(github, owner, repo, pull) {
   );
   if (current.mergeSha !== pull.mergeSha) {
     throw new Error(`Pull request #${pull.number} merge snapshot changed`);
+  }
+  if (
+    legacyLabelsFingerprint !== null &&
+    (current.labelsFingerprint !== legacyLabelsFingerprint ||
+      current.updatedAt !== pull.updatedAt)
+  ) {
+    throw new Error(`Pull request #${pull.number} legacy label snapshot changed`);
   }
 }
 
@@ -5184,7 +5256,10 @@ async function invalidatePublishedSnapshot({
 }
 
 function eventPullIdentity(eventPull) {
-  return pullIdentity(eventPull);
+  const identity = pullIdentity(eventPull);
+  // The event can precede GitHub's test-merge calculation.
+  delete identity.mergeSha;
+  return identity;
 }
 
 const FULL_QUALITY_WORKFLOW = "source-quality.yml";
@@ -5560,9 +5635,6 @@ async function publishLegacyPrPolicy({
         candidateRun: null,
         eventAction: action,
         eventLabelName,
-        allowLabelRefreshReconciliation:
-          action === "labeled" || action === "unlabeled",
-        allowOpeningLabelSnapshotMismatch: action === "opened",
         requireFreshRun: QUALITY_TRIGGER_ACTIONS.has(action),
         transitionAction: QUALITY_TRIGGER_ACTIONS.has(action)
           ? action
@@ -5592,8 +5664,6 @@ async function publishLegacyPrPolicy({
       eventPull: null,
       eventAction: null,
       eventLabelName: null,
-      allowLabelRefreshReconciliation: false,
-      allowOpeningLabelSnapshotMismatch: false,
       requireFreshRun: false,
       transitionAction: null,
       transitionTimestamp: null,
@@ -5611,8 +5681,6 @@ async function publishLegacyPrPolicy({
         candidateRun: null,
         eventAction: null,
         eventLabelName: null,
-        allowLabelRefreshReconciliation: false,
-        allowOpeningLabelSnapshotMismatch: false,
         requireFreshRun: false,
         transitionAction: null,
         transitionTimestamp: null,
@@ -5630,12 +5698,6 @@ async function publishLegacyPrPolicy({
       repo,
       item.number,
       item.expected,
-      {
-        allowLabelRefreshReconciliation:
-          item.allowLabelRefreshReconciliation,
-        allowOpeningLabelSnapshotMismatch:
-          item.allowOpeningLabelSnapshotMismatch,
-      },
     );
     assertPublicationSnapshot(pull, expectedPublication);
     const branch = branchDecision(pull, repository);
@@ -5645,12 +5707,6 @@ async function publishLegacyPrPolicy({
     const receiptBudget = createReceiptBudget(receiptIO);
     let transitionBindingError = null;
     let createTransition = Boolean(item.transitionAction);
-    const hasOpeningSnapshotMismatch =
-      item.allowOpeningLabelSnapshotMismatch &&
-      isOpeningCliLabelRace(pull, item.expected);
-    const hasBoundedOpeningSnapshotMismatch =
-      item.allowOpeningLabelSnapshotMismatch &&
-      isBoundedOpeningCliLabelRace(pull, item.expected);
     if (branch.allowed && item.transitionAction) {
       try {
         createTransition = await shouldCreateQualityTransition({
@@ -5661,7 +5717,6 @@ async function publishLegacyPrPolicy({
           action: item.transitionAction,
           timestamp: item.transitionTimestamp,
           serverUrl: context.serverUrl,
-          hasOpeningSnapshotMismatch,
         });
       } catch (error) {
         transitionBindingError = error;
@@ -5750,46 +5805,44 @@ async function publishLegacyPrPolicy({
         pull,
         action: item.transitionAction,
         transitionAt: item.transitionTimestamp,
-        binding: hasBoundedOpeningSnapshotMismatch
-          ? QUALITY_TRANSITION_UNCONFIRMED
-          : null,
+        binding: null,
         targetUrl: policyRunUrl,
       });
-      if (!hasBoundedOpeningSnapshotMismatch) {
-        try {
-          const transitionRun = await findQualityTransitionRun({
+      try {
+        const transitionRun = await findQualityTransitionRun({
+          github,
+          owner,
+          repo,
+          pull,
+          timestamp: item.transitionTimestamp,
+          serverUrl: context.serverUrl,
+          authorization: quality.authorization,
+        });
+        if (transitionRun) {
+          await publishQualityTransitionMarker({
             github,
             owner,
             repo,
             pull,
-            timestamp: item.transitionTimestamp,
-            serverUrl: context.serverUrl,
-            authorization: quality.authorization,
-          });
-          if (transitionRun) {
-            await publishQualityTransitionMarker({
-              github,
-              owner,
-              repo,
-              pull,
-              action: item.transitionAction,
-              transitionAt: item.transitionTimestamp,
-              binding: transitionRun.id,
-              targetUrl: policyRunUrl,
-            });
-          }
-        } catch (error) {
-          quality = {
-            state: "failure",
-            description: `PR #${pull.number} cannot register its quality run`,
+            action: item.transitionAction,
+            transitionAt: item.transitionTimestamp,
+            binding: transitionRun.id,
             targetUrl: policyRunUrl,
-            reason: error.message,
-          };
+          });
         }
+      } catch (error) {
+        quality = {
+          state: "failure",
+          description: `PR #${pull.number} cannot register its quality run`,
+          targetUrl: policyRunUrl,
+          reason: error.message,
+        };
       }
     }
     try {
-      await assertCurrentPullSnapshot(github, owner, repo, pull);
+      await assertCurrentPullSnapshot(
+        github, owner, repo, pull, quality.legacyLabelsFingerprint,
+      );
     } catch (error) {
       await invalidatePublishedSnapshot({
         github,
@@ -5817,7 +5870,9 @@ async function publishLegacyPrPolicy({
     let revalidateClaim;
     let selectorClaim = false;
     const revalidateInheritedWorkflow = async () => {
-      await assertCurrentPullSnapshot(github, owner, repo, pull);
+      await assertCurrentPullSnapshot(
+        github, owner, repo, pull, quality.legacyLabelsFingerprint,
+      );
       const current = await resolveQualityWorkflowTrust({
         github,
         owner,
@@ -5922,7 +5977,9 @@ async function publishLegacyPrPolicy({
               receipt.budget,
             );
           }
-          await assertCurrentPullSnapshot(github, owner, repo, pull);
+          await assertCurrentPullSnapshot(
+            github, owner, repo, pull, quality.legacyLabelsFingerprint,
+          );
           const [currentControlSha, currentBaseSha, currentHeadSha] = await Promise.all([
             getBranchSha(github, owner, repo, "master"),
             getBranchSha(github, owner, repo, pull.baseRef),
@@ -6058,7 +6115,9 @@ async function publishLegacyPrPolicy({
     }
 
     try {
-      await assertCurrentPullSnapshot(github, owner, repo, pull);
+      await assertCurrentPullSnapshot(
+        github, owner, repo, pull, quality.legacyLabelsFingerprint,
+      );
     } catch (error) {
       await invalidatePublishedSnapshot({
         github,

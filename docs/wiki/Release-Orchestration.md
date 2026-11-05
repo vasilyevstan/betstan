@@ -32,10 +32,11 @@ execution or activation evidence.
 [[Quality Gates]] owns these implementation details and remaining proof
 requirements.
 
-The compatibility landing preserved `production-build.yml`
-byte-identical to the trusted-master workflow. The lean workflow remains in
-repository history. The full trusted workflow remains the temporary authority
-while the full replacement is proven.
+The initial compatibility landing retained the old trusted workflow. The
+reviewed lean `production-build.yml` has since passed protected integration
+and promotion. It selects affected PR checks and avoids source validation for
+metadata edits, while the existing exact-status protocol remains authoritative.
+The separate signed full-quality replacement is not activated by this change.
 Existing head/merge-snapshot statuses and first-attempt rules remain required.
 No proposed snapshot proof may replace them before protected enforcement is
 accepted. The staged publisher and merge helper select their protocol from
@@ -191,20 +192,20 @@ source, compatibility, approval, or validation evidence still blocks its
 dependent action. Legacy merge helpers continue to enforce their existing
 presentation checks until a tested replacement is activated.
 
-With the temporary full `production-build` workflow, PR title/body edits can
-trigger that workflow's full validation through `edited`. Avoiding that source
-rerun is behavior of the lean variant retained in `dev` and repository history,
-not the compatible baseline. The trusted publisher's metadata refresh may
-reuse existing exact head/base evidence but still cannot create or recover a
-source-quality transition.
+The lean `production-build` workflow does not validate title/body edits.
+Version-4 markers also exclude mutable metadata from quality identity while
+retaining exact head/base/merge and run binding. Legacy marker authority keeps
+its original freshness and label-ledger checks. Metadata refresh may use
+existing exact evidence, never manufacture a missing source transition.
 
 Context-label setup reads the PR's labels first. If both informational context
 labels are already present, it performs no GitHub mutation. Otherwise it
 ensures and adds only the missing labels in one PR edit. An initial read
 failure performs no blind mutation and retains the caller's warning or
 strict-failure behavior. This prevents avoidable metadata churn; it does not
-change managed-label authority or replace the fresh-transition recovery
-described in [[Quality Gates]].
+change origin approval or replace the trusted transition rules in
+[[Quality Gates]]. The publisher's bounded pending queue prevents ordinary
+metadata bursts from replacing a queued source-transition handler.
 
 ## Verification responsibilities
 
@@ -1727,7 +1728,7 @@ in place and use a reviewed forward correction.
 
 ## Stall and incident handling
 
-The conductor monitors the real blocking object: agent result, process,
+The accountable owner monitors the real blocking object: agent result, process,
 GitHub job, protected approval, handoff, or runtime health signal.
 
 Keep one operation owner and one observer for each owned release chain.
@@ -1742,8 +1743,8 @@ known run. Use event-first observation of terminal data, materialized gates and
 job/approval transitions to reconcile the exact run and its proven downstream
 work, even when the top-level status is unchanged.
 
-- **ACT:** an exact CLI-owned gate is eligible. The conductor immediately
-  routes the authorized orchestrator to the canonical automatic approval path,
+- **ACT:** an exact CLI-owned gate is eligible. Its authorized owner immediately
+  uses the canonical automatic approval path,
   even if a timer also exists; the timer remains effective.
 - **WAIT:** exact evidence proves an already-approved timer or provider wait.
   Retain bounded observation without submitting a duplicate approval.
@@ -1767,8 +1768,8 @@ the 1,800-second handoff.
 - A waiting state is classified immediately rather than left to a watcher.
 - Approval eligibility comes from the machine-readable protected-operation
   policy and exact durable authority, never an agent's remembered workflow
-  category; the conductor routes an eligible CLI-issued gate to the authorized
-  orchestrator in the same checkpoint. The conductor does not submit approval.
+  category; its authorized owner handles an eligible CLI-issued gate in the
+  same checkpoint without a coordinator-to-operator handoff.
 - One missed checkpoint triggers bounded recovery.
 - Two missed checkpoints require a concrete safe action or an explicit
   blocker.
@@ -1780,7 +1781,7 @@ the 1,800-second handoff.
   regression coverage, through the normal branch path.
 
 Routine routing, acknowledgements, timers, and obvious scope corrections stay
-with the conductor. Advisory drift or delay blocks only affected dependants;
+with the accountable owner. Advisory drift or delay blocks only affected dependants;
 it cannot freeze independently authorized eligible approval, safe completion,
 or incident recovery. Required technical proof still gates its operation.
 Use the bounded checkpoints and scoped correction ownership in [[Agents]],
