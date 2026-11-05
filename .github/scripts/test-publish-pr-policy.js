@@ -90,17 +90,25 @@ function permutations(values) {
   );
 }
 
-function transitionDescription({
-  version = 3,
-  number = 63,
-  action = "synchronize",
-  timestamp = PULL_UPDATED_AT,
-  binding = 102,
-  contentFingerprint = PULL_CONTENT_FINGERPRINT,
-  labelsFingerprint = PULL_LABELS_FINGERPRINT,
-} = {}) {
+function transitionDescription(options = {}) {
+  const legacyFields =
+    options.binding === "u" ||
+    Object.prototype.hasOwnProperty.call(options, "contentFingerprint") ||
+    Object.prototype.hasOwnProperty.call(options, "labelsFingerprint");
+  const {
+    version = legacyFields ? 3 : 4,
+    number = 63,
+    action = "synchronize",
+    timestamp = PULL_UPDATED_AT,
+    binding = 102,
+    contentFingerprint = PULL_CONTENT_FINGERPRINT,
+    labelsFingerprint = PULL_LABELS_FINGERPRINT,
+  } = options;
   const cutoff = Date.parse(timestamp);
   const bindingText = binding === null ? "p" : binding;
+  if (version === 4) {
+    return `v4|${number}|${action}|${cutoff}|${bindingText}`;
+  }
   return (
     `v${version}|${number}|${action}|${cutoff}|${bindingText}|` +
     `${contentFingerprint}|${labelsFingerprint}`
@@ -492,7 +500,7 @@ function qualityTransitionStatus(overrides = {}) {
     id: 900,
     context: "trusted-quality-transition/master",
     state: "pending",
-    description: transitionDescription(),
+    description: transitionDescription({ version: 3 }),
     target_url: "https://example.invalid/example/repo/actions/runs/100",
     created_at: TRANSITION_STATUS_CREATED_AT,
     creator: ACTIONS_BOT,
@@ -1679,7 +1687,11 @@ async function testReceiptReadback() {
       const drift = scenarios[0]();
       const currentPull = pull();
       const run = workflowRun();
-      const transitions = [qualityTransitionStatus()];
+      const transitions = [
+        qualityTransitionStatus({
+          description: transitionDescription({ version: 4 }),
+        }),
+      ];
       const branches = { master: BASE_SHA, dev: HEAD_SHA };
       const blobs = {};
       const statuses = [];
@@ -1699,7 +1711,13 @@ async function testReceiptReadback() {
             if (field === "head") currentPull.head.sha = ADVANCED_BASE_SHA;
             if (field === "base") currentPull.base.sha = ADVANCED_BASE_SHA;
             if (field === "merge") currentPull.merge_commit_sha = ADVANCED_BASE_SHA;
-            if (field === "labels") currentPull.labels = [{ name: CLI_MANAGED_LABEL }];
+            if (field === "labels") {
+              currentPull.labels = [{ name: CLI_MANAGED_LABEL }];
+              currentPull.updated_at = timestampAfter(
+                PULL_UPDATED_AT,
+                1000,
+              );
+            }
             if (field === "run") run.conclusion = "failure";
             if (field === "transition") transitions[0].description = transitionDescription({ binding: 103 });
             if (field === "workflow") blobs.master = { ".github/workflows/production-build.yml": CHANGED_BLOB };
@@ -1708,17 +1726,60 @@ async function testReceiptReadback() {
           return data;
         },
       });
-      if (["head", "base", "merge", "labels"].includes(field)) {
+      if (["head", "base", "merge"].includes(field)) {
         await assert.rejects(execution, /changed|snapshot|expected=/);
+      } else if (field === "labels") {
+        assertSuccess(await execution, drift);
       } else {
         assertFailure(await execution);
       }
       assert(changed);
-      assert.equal(drift.ledger.length, phase, `${field} drift at ${phase}`);
-      assert(!statuses.some(
-        ({ context, state }) => context.startsWith("pr-quality-gates/") && state === "success",
-      ));
+      if (field === "labels") {
+        assert(
+          drift.ledger.length >= phase && drift.ledger.length <= phase + 1,
+          `${field} metadata refresh at ${phase}`,
+        );
+      } else {
+        assert.equal(drift.ledger.length, phase, `${field} drift at ${phase}`);
+      }
+      if (field !== "labels") {
+        assert(!statuses.some(
+          ({ context, state }) => context.startsWith("pr-quality-gates/") && state === "success",
+        ));
+      }
     }
+  }
+
+  for (const phase of [1, 2]) {
+    const legacyDrift = scenarios[0]();
+    const currentPull = pull();
+    const statuses = [];
+    let restored = false;
+    await assert.rejects(execute({
+      ...legacyDrift.options,
+      currentPull,
+      statusSink: statuses,
+      statusRead: ({ ref, request, data }) => {
+        if (
+          ref === legacyDrift.anchor &&
+          request &&
+          legacyDrift.ledger.length === phase &&
+          !restored
+        ) {
+          restored = true;
+          currentPull.labels = [{ name: CLI_MANAGED_LABEL }];
+          currentPull.labels = [];
+          currentPull.updated_at = timestampAfter(PULL_UPDATED_AT, 1_000);
+        }
+        return data;
+      },
+    }), /legacy label snapshot changed/);
+    assert(restored);
+    assert.equal(legacyDrift.ledger.length, phase);
+    assert(!statuses.some(
+      (row) => row.context.startsWith("pr-quality-gates/") &&
+        row.state === "success",
+    ));
   }
 
   const changedIntegration = scenarios[2]();
@@ -1846,6 +1907,17 @@ async function main() {
           context.startsWith("pr-quality-gates/") && state === "success",
       ),
       false,
+    );
+  }
+
+  function assertQualitySuccess(result) {
+    const states = result.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state);
+    assert(states.length > 0);
+    assert(
+      states.every((state) => state === "success"),
+      result.messages.join("\n"),
     );
   }
 
@@ -2067,8 +2139,7 @@ async function main() {
     directRaceTransitions[0].description,
     transitionDescription({
       action: "opened",
-      binding: "u",
-      labelsFingerprint: managedLabelsFingerprint,
+      binding: 102,
     }),
   );
   assert(
@@ -2100,10 +2171,81 @@ async function main() {
     contextRaceTransitions[0].description,
     transitionDescription({
       action: "opened",
-      binding: "u",
-      labelsFingerprint: managedLabelsFingerprint,
+      binding: 102,
     }),
   );
+  const queuedOpeningTransitions = [];
+  const queuedOpening = await execute({
+    eventName: "pull_request_target",
+    eventAction: "opened",
+    eventPull: pull({
+      labels: managedLabels,
+      head: featureHead,
+      base: devBase,
+      merge_commit_sha: null,
+    }),
+    currentPull: pull({
+      labels: [...managedLabels, ...contextLabels],
+      head: featureHead,
+      base: devBase,
+      updated_at: timestampAfter(PULL_UPDATED_AT, 17_000),
+    }),
+    listedRuns: [
+      workflowRun({ created_at: timestampAfter(PULL_UPDATED_AT, 1_000) }),
+    ],
+    transitionStatuses: queuedOpeningTransitions,
+  });
+  assertNoQualitySuccess(queuedOpening);
+  assert.equal(
+    queuedOpeningTransitions[0].description,
+    transitionDescription({ action: "opened", binding: 102 }),
+  );
+
+  for (const [version, restoreLabels] of [
+    [3, false], [4, false], [3, true], [4, true],
+  ]) {
+    const publishingPull = pull();
+    const publishedStatuses = [];
+    let changedDuringPublication = false;
+    const publication = execute({
+      currentPull: publishingPull,
+      transitionStatuses: [
+        qualityTransitionStatus({
+          description: transitionDescription({ version }),
+        }),
+      ],
+      statusSink: publishedStatuses,
+      statusWriteResponse: (row) => {
+        if (
+          !changedDuringPublication &&
+          row.context.startsWith("pr-quality-gates/") &&
+          row.state === "success"
+        ) {
+          changedDuringPublication = true;
+          publishingPull.labels = managedLabels;
+          if (restoreLabels) publishingPull.labels = [];
+          publishingPull.updated_at = timestampAfter(PULL_UPDATED_AT, 20_000);
+        }
+        return row;
+      },
+    });
+    if (version === 3) {
+      await assert.rejects(publication, /legacy label snapshot changed/);
+      for (const sha of [HEAD_SHA, MERGE_SHA]) {
+        assert.equal(
+          publishedStatuses.filter(
+            (row) => row.sha === sha &&
+              row.context.startsWith("pr-quality-gates/"),
+          ).at(-1).state,
+          "pending",
+        );
+      }
+    } else {
+      assertQualitySuccess(await publication);
+    }
+    assert(changedDuringPublication);
+  }
+
   const contextOpeningLabelConfirmation = await execute({
     eventName: "pull_request_target",
     eventAction: "labeled",
@@ -2165,12 +2307,7 @@ async function main() {
       .map(({ state }) => state),
     ["success"],
   );
-  assert.equal(cancelledLabelLedgerCalls.length, 1);
-  assert(
-    cancelledLabelTransitions.some(
-      ({ description }) => transitionBinding(description) === "p",
-    ),
-  );
+  assert.equal(cancelledLabelLedgerCalls.length, 0);
   assert(
     cancelledLabelTransitions.some(
       ({ description }) => transitionBinding(description) === "102",
@@ -2181,21 +2318,28 @@ async function main() {
       context: "trusted-quality-transition/dev",
       description: transitionDescription({
         action: "opened",
-        binding: "u",
-        labelsFingerprint: managedLabelsFingerprint,
+        binding: null,
       }),
     }),
   ];
-  const unavailableLedgerRunCalls = [];
-  const unavailableLedgerRecovery = await execute({
+  const metadataNeutralRunCalls = [];
+  const metadataNeutralLedgerCalls = [];
+  const metadataNeutralRecovery = await execute({
     eventName: "workflow_run",
     currentPull: contextRacePull,
     transitionStatuses: unavailableLedgerTransitions,
     issueEventError: new Error("forbidden"),
-    workflowRunListCalls: unavailableLedgerRunCalls,
+    workflowRunListCalls: metadataNeutralRunCalls,
+    issueEventListCalls: metadataNeutralLedgerCalls,
   });
-  assertQualityFailure(unavailableLedgerRecovery);
-  assert.equal(unavailableLedgerRunCalls.length, 0);
+  assert.deepEqual(
+    metadataNeutralRecovery.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success"],
+  );
+  assert(metadataNeutralRunCalls.length > 0);
+  assert.equal(metadataNeutralLedgerCalls.length, 0);
   assert.equal(
     unavailableLedgerTransitions.some(
       ({ description }) => transitionBinding(description) === "x",
@@ -2242,11 +2386,11 @@ async function main() {
     transitionStatuses: directRaceTransitions,
     issueEvents: [],
   });
-  assertNoQualitySuccess(directPreLabelManual);
+  assertQualitySuccess(directPreLabelManual);
   assert.equal(directRaceTransitions.length, directRaceTransitionCount);
   assert.equal(
     transitionBinding(directRaceTransitions[0].description),
-    "u",
+    "102",
   );
 
   const directPreLabelCompletion = await execute({
@@ -2259,7 +2403,7 @@ async function main() {
     transitionStatuses: directRaceTransitions,
     issueEvents: [],
   });
-  assertNoQualitySuccess(directPreLabelCompletion);
+  assertQualitySuccess(directPreLabelCompletion);
   assert.equal(directRaceTransitions.length, directRaceTransitionCount);
 
   const directPreLabelAuthorizationStatuses = [];
@@ -2281,8 +2425,8 @@ async function main() {
     transitionStatuses: directRaceTransitions,
     issueEvents: [],
   });
-  assertNoQualitySuccess(directPreLabelAuthorizedCompletion);
-  assert.equal(directPreLabelAuthorizationStatuses.length, 0);
+  assertQualitySuccess(directPreLabelAuthorizedCompletion);
+  assert(directPreLabelAuthorizationStatuses.length > 0);
   assert.equal(directRaceTransitions.length, directRaceTransitionCount);
 
   const directPreLabelOpenedReplay = await execute({
@@ -2296,7 +2440,7 @@ async function main() {
     transitionStatuses: directRaceTransitions,
     issueEvents: [],
   });
-  assertNoQualitySuccess(directPreLabelOpenedReplay);
+  assertQualitySuccess(directPreLabelOpenedReplay);
   assert.equal(directRaceTransitions.length, directRaceTransitionCount);
 
   const directOpeningLabelConfirmation = await execute({
@@ -2316,17 +2460,10 @@ async function main() {
       .map(({ state }) => state),
     ["success"],
   );
-  assert.equal(
-    directRaceTransitions.length,
-    directRaceTransitionCount + 2,
-  );
+  assert.equal(directRaceTransitions.length, directRaceTransitionCount);
   assert.equal(
     transitionBinding(directRaceTransitions[0].description),
     "102",
-  );
-  assert.equal(
-    transitionBinding(directRaceTransitions[1].description),
-    "p",
   );
   const contextAddedPull = pull({
     updated_at: "2026-09-02T09:00:03.000Z",
@@ -2595,35 +2732,6 @@ async function main() {
       openedEventPull,
       pull({
         updated_at: "2026-09-02T09:00:02.000Z",
-        labels: [...managedLabels, { name: "reviewed" }],
-        head: featureHead,
-        base: devBase,
-      }),
-    ],
-    [
-      "opened",
-      pull({
-        labels: managedLabels,
-        head: featureHead,
-        base: devBase,
-      }),
-      openedRacePull,
-    ],
-    [
-      "opened",
-      openedEventPull,
-      pull({
-        updated_at: "2026-09-02T09:00:02.000Z",
-        labels: [{ name: "copilot-managed" }],
-        head: featureHead,
-        base: devBase,
-      }),
-    ],
-    [
-      "opened",
-      openedEventPull,
-      pull({
-        updated_at: "2026-09-02T09:00:02.000Z",
         labels: managedLabels,
         head: { ...featureHead, sha: "3".repeat(40) },
         base: devBase,
@@ -2652,7 +2760,6 @@ async function main() {
         base: devBase,
       }),
     ],
-    ["edited", openedEventPull, openedRacePull],
   ]) {
     await assert.rejects(
       execute({
@@ -2665,6 +2772,19 @@ async function main() {
       /Pull request changed during policy evaluation/,
     );
   }
+  const editedWithLabelMetadata = await execute({
+    eventName: "pull_request_target",
+    eventAction: "edited",
+    eventPull: openedEventPull,
+    currentPull: openedRacePull,
+    transitionStatuses: [],
+  });
+  assertNoQualitySuccess(editedWithLabelMetadata);
+  assert(
+    editedWithLabelMetadata.statuses
+      .filter(({ context }) => context.startsWith("trusted-quality-transition/"))
+      .every(({ description }) => description.startsWith("v4|")),
+  );
 
   const inverseTransitions = [];
   const initialOpened = await execute({
@@ -2694,9 +2814,9 @@ async function main() {
   assert.equal(
     inverseTransitions[0].description,
     transitionDescription({
+      version: 4,
       action: "opened",
       binding: 102,
-      labelsFingerprint: managedLabelsFingerprint,
     }),
   );
   assert.equal(
@@ -2717,17 +2837,18 @@ async function main() {
     base: devBase,
   });
   const backwardsOpeningTransitions = [];
-  await assert.rejects(
-    execute({
-      eventName: "pull_request_target",
-      eventAction: "opened",
-      eventPull: openedEventPull,
-      currentPull: backwardsOpeningPull,
-      transitionStatuses: backwardsOpeningTransitions,
-    }),
-    /Pull request changed during policy evaluation/,
+  const backwardsOpening = await execute({
+    eventName: "pull_request_target",
+    eventAction: "opened",
+    eventPull: openedEventPull,
+    currentPull: backwardsOpeningPull,
+    transitionStatuses: backwardsOpeningTransitions,
+  });
+  assertNoQualitySuccess(backwardsOpening);
+  assert(
+    backwardsOpeningTransitions[0].description.startsWith("v4|"),
   );
-  assert.equal(backwardsOpeningTransitions.length, 0);
+  assert.equal(backwardsOpeningTransitions.length, 2);
 
   const staleDirectTransitions = [
     qualityTransitionStatus({
@@ -2789,13 +2910,7 @@ async function main() {
     }),
   );
 
-  for (const { offset, reconciles } of [
-    { offset: 0, reconciles: true },
-    { offset: 1, reconciles: true },
-    { offset: 299_999, reconciles: true },
-    { offset: 300_000, reconciles: true },
-    { offset: 300_001, reconciles: false },
-  ]) {
+  for (const offset of [0, 1, 299_999, 300_000, 300_001]) {
     const labelTimestamp = timestampAfter(PULL_UPDATED_AT, offset);
     const boundaryPull = pull({
       updated_at: labelTimestamp,
@@ -2816,16 +2931,9 @@ async function main() {
     });
     assertNoQualitySuccess(openedBoundary);
 
-    if (!reconciles) {
-      assert.equal(boundaryTransitions.length, 0);
-      continue;
-    }
-
     assert(
       boundaryTransitions.some(
-        ({ description }) =>
-          transitionLabelsFingerprint(description) ===
-          managedLabelsFingerprint,
+        ({ description }) => description.startsWith("v4|"),
       ),
     );
     const directBoundaryConfirmation = await execute({
@@ -2941,14 +3049,12 @@ async function main() {
   assertNoQualitySuccess(wholeSecondOpened);
   assert(
     wholeSecondDirectTransitions.some(
-      ({ description }) =>
-        transitionLabelsFingerprint(description) ===
-        managedLabelsFingerprint,
+      ({ description }) => description.startsWith("v4|"),
     ),
   );
   assert.equal(
     transitionBinding(wholeSecondDirectTransitions[0].description),
-    "u",
+    "102",
   );
   const wholeSecondDirectCount = wholeSecondDirectTransitions.length;
   const wholeSecondDirect = await execute({
@@ -2970,7 +3076,7 @@ async function main() {
   assert(wholeSecondDirectStates.every((state) => state === "success"));
   assert.equal(
     wholeSecondDirectTransitions.length,
-    wholeSecondDirectCount + 2,
+    wholeSecondDirectCount,
   );
 
   const wholeSecondInverseTransitions = [
@@ -3866,12 +3972,12 @@ async function main() {
     transitionStatuses: staleOpenedReplayTransitions,
     staleTransitionStatusReads: true,
   });
-  assertQualityFailure(staleOpenedReplay);
+  assertNoQualitySuccess(staleOpenedReplay);
   assert.equal(
     staleOpenedReplayTransitions.filter(
       ({ description }) => transitionBinding(description) === "x",
     ).length,
-    1,
+    0,
   );
 
   const staleUnconfirmedTransitions = [
@@ -3935,12 +4041,12 @@ async function main() {
     transitionStatuses: staleLabelDriftTransitions,
     staleTransitionStatusReads: true,
   });
-  assertQualityFailure(staleLabelDrift);
+  assertNoQualitySuccess(staleLabelDrift);
   assert.equal(
     staleLabelDriftTransitions.filter(
       ({ description }) => transitionBinding(description) === "x",
     ).length,
-    1,
+    0,
   );
   assert.equal(staleLabelDriftReceipts.length, 0);
 
@@ -4146,8 +4252,17 @@ async function main() {
       ],
       transitionStatuses: lateOpenedTransitions,
     });
-    assertNoQualitySuccess(lateOpenedReplay);
-    assert.equal(lateOpenedTransitions.length, 0);
+    if (replay === 0) {
+      assertNoQualitySuccess(lateOpenedReplay);
+      assert.equal(lateOpenedTransitions.length, 2);
+      assert(
+        lateOpenedTransitions.some(
+          ({ description }) => transitionBinding(description) === "102",
+        ),
+      );
+    } else {
+      assertQualitySuccess(lateOpenedReplay);
+    }
   }
 
   const matchingOpenedReplayTransitions = [
@@ -4185,7 +4300,11 @@ async function main() {
       message.includes("no bound quality run yet"),
     ),
   );
-  assert.equal(matchingOpenedReplayTransitions.length, 1);
+  assert.equal(
+    matchingOpenedReplayTransitions.length,
+    1,
+    JSON.stringify(matchingOpenedReplayTransitions),
+  );
   assert.equal(
     transitionBinding(matchingOpenedReplayTransitions[0].description),
     "p",
@@ -4666,7 +4785,6 @@ async function main() {
     transitionDescription({
       action: "reopened",
       timestamp: laterReopenPull.updated_at,
-      labelsFingerprint: managedLabelsFingerprint,
     }),
   );
   const postTombstoneCompletion = await execute({
@@ -4871,7 +4989,7 @@ async function main() {
     transitionStatuses: versionTwoRecoveryTransitions,
   });
   assertNoQualitySuccess(laterVersionThreeTransition);
-  assert.match(versionTwoRecoveryTransitions[0].description, /^v3\|/);
+  assert.match(versionTwoRecoveryTransitions[0].description, /^v4\|/);
   assert.equal(
     transitionBinding(versionTwoRecoveryTransitions[0].description),
     "102",
@@ -5276,8 +5394,8 @@ async function main() {
     Number.MAX_SAFE_INTEGER,
     Number.MAX_SAFE_INTEGER,
   );
-  assert.equal(maxDescription.length, 131);
-  assert.equal(Buffer.byteLength(maxDescription, "utf8"), 131);
+  assert.equal(maxDescription.length, 65);
+  assert.equal(Buffer.byteLength(maxDescription, "utf8"), 65);
   assert.throws(
     () =>
       publishPrPolicy.qualityTransitionDescription(
@@ -7527,8 +7645,8 @@ async function main() {
   );
 
   for (const description of [
-    transitionDescription().replace("|102|", "|z|"),
-    transitionDescription().replace(
+    transitionDescription().replace("|102", "|z"),
+    transitionDescription({ version: 3 }).replace(
       PULL_CONTENT_FINGERPRINT,
       "a".repeat(31),
     ),
@@ -8054,37 +8172,32 @@ async function main() {
     updated_at: "2026-09-02T11:00:00.000Z",
   });
   const prePublicationStatuses = [];
-  await assert.rejects(
-    execute({
-      currentPulls: [pull(), changedDuringPublication],
-      statusSink: prePublicationStatuses,
-    }),
-    /updatedAt/,
-  );
+  const prePublicationMetadataDrift = await execute({
+    currentPulls: [pull(), changedDuringPublication],
+    transitionStatuses: [
+      qualityTransitionStatus({ description: transitionDescription({ version: 4 }) }),
+    ],
+    statusSink: prePublicationStatuses,
+  });
+  assertQualitySuccess(prePublicationMetadataDrift);
   assert.equal(prePublicationStatuses.length, 4);
-  assert(
-    prePublicationStatuses.every(({ state }) => state === "pending"),
-  );
 
   const postPublicationStatuses = [];
-  await assert.rejects(
-    execute({
-      currentPulls: [
-        pull(),
-        pull(),
-        changedDuringPublication,
-      ],
-      statusSink: postPublicationStatuses,
-    }),
-    /updatedAt/,
-  );
+  const postPublicationMetadataDrift = await execute({
+    currentPulls: [pull(), pull(), changedDuringPublication],
+    transitionStatuses: [
+      qualityTransitionStatus({ description: transitionDescription({ version: 4 }) }),
+    ],
+    statusSink: postPublicationStatuses,
+  });
+  assertQualitySuccess(postPublicationMetadataDrift);
   const latestStates = new Map();
   for (const status of postPublicationStatuses) {
     latestStates.set(`${status.sha}:${status.context}`, status.state);
   }
   assert.equal(latestStates.size, 4);
   assert(
-    [...latestStates.values()].every((state) => state === "pending"),
+    [...latestStates.values()].every((state) => state === "success"),
   );
 
   for (const { binding, conclusion } of [
@@ -8101,18 +8214,16 @@ async function main() {
     const movedPull = pull({
       updated_at: timestampAfter(PULL_UPDATED_AT, 60_000),
     });
-    await assert.rejects(
-      execute({
-        eventName: "pull_request_target",
-        eventAction: "synchronize",
-        currentPulls: [pull(), pull(), movedPull],
-        contextRunId: failedPolicyRunId,
-        transitionStatuses: partialMarkers,
-        transitionStatusCreatedAt: timestampAfter(PULL_UPDATED_AT, 4_000),
-        listedRuns: binding === null ? [] : [oldRun],
-      }),
-      /updatedAt/,
-    );
+    const metadataDriftEvent = await execute({
+      eventName: "pull_request_target",
+      eventAction: "synchronize",
+      currentPulls: [pull(), pull(), movedPull],
+      contextRunId: failedPolicyRunId,
+      transitionStatuses: partialMarkers,
+      transitionStatusCreatedAt: timestampAfter(PULL_UPDATED_AT, 4_000),
+      listedRuns: binding === null ? [] : [oldRun],
+    });
+    assertNoQualitySuccess(metadataDriftEvent);
     assert(
       partialMarkers.some(
         ({ description }) =>

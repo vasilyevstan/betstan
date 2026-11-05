@@ -56,13 +56,11 @@ Use `consolidate-production-mongo-stan.sh` for `plan`, `preflight`, `migrate`,
 `cleanup`, `rollback`, and `unlock`. Do not hand-run dump, restore, URI switch,
 legacy manifest application, or resource deletion commands as a substitute.
 
-This agent owns only in-AKS legacy-to-shared Mongo consolidation. The
-cross-cloud Azure-to-OCI exact replacement is owned by
-`.github/agents/betstan-migration-recovery.agent.md` and
-`.github/workflows/oci-migrate.yml`. Do not apply this agent's retained-backup
-or reverse-copy model to that explicitly approved no-backup replacement. That
-replacement must pair its process-local Mongo lock with the journaled
-ingress-nginx HTTP mutation fence until the cutover is committed.
+For in-AKS consolidation, use the retained-backup and journal model below.
+Cross-cloud Azure-to-OCI replacement/recovery uses `.github/workflows/oci-migrate.yml`,
+`.github/workflows/oci-migration-recovery.yml` and the separate contract at the
+end of this file. Never apply consolidation's reverse-copy/retained-backup
+model to an explicitly approved no-backup replacement.
 
 Use:
 
@@ -178,3 +176,41 @@ Return exactly one:
   resources, healthy applications on both public hosts, and healthy queues.
 
 Never use a successful command exit alone as completion evidence.
+
+## Cross-cloud replacement and interrupted recovery
+
+Begin read-only with the exact migration ID, immutable original journal SHA,
+active source, run/attempt, fencing generation, cluster fingerprints, phase,
+destructive boundary, replica baselines and last heartbeat. Read the current
+OCI migration/recovery workflows, `infra/oci/scripts/migrate-from-azure.sh`
+and relevant `infra/oci/LESSONS_LEARNED.md` guidance.
+A run waiting for approval is active, not hung. Takeover requires an inactive
+owner, matching live fingerprints and both journals, compatible phase and an
+atomic fencing-generation increment. A descendant active source does not
+replace the original journal SHA.
+
+No old-OCI backup exists for this replacement. Before target mutation, only
+the recorded baseline may be restored. After drop/restore begins, retain
+ingress/writer/RabbitMQ containment and retry the complete transfer from the
+preserved source, never expose partial data. The checked-in recovery profile
+must prove either the fully unlocked pre-destructive baseline or the retained
+destructive lock/fence and zero-replica state before takeover.
+
+Keep process-local Mongo locking paired with the journaled controller-level
+HTTP mutation fence; a Mongo restart does not prove that lock remains held.
+Follow the exact passive-consumer/timer order and routing-fence protocol;
+never deny RabbitMQ write permission as a substitute. Commit requires final
+data/metadata parity under all fences, then idempotent unlock with HTTP
+unfencing last. After `cutover-committed`, recover forward only: never copy
+stale source data over possible new production writes.
+
+The unattended recovery identity remains stop-only. It may inspect exact
+state, freeze source workloads, cancel only a conclusively stale owner and
+stop/deallocate the exact source cluster. It cannot start/create/resize/delete,
+change DNS or protection, access target data or reopen the target.
+Every external command is bounded; revalidate prerequisites on retry and
+preserve concurrency/fencing. Source deletion requires exact parity and
+observed healthy target evidence through its separately authorized workflow.
+
+Return `RECOVERY_NOT_REQUIRED`, `RECOVERY_APPLIED`, `READY_TO_RETRY` or `NO_GO`
+with the exact phase, proof, remaining fences and smallest authorized action.

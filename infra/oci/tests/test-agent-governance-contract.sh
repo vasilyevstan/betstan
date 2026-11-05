@@ -16,17 +16,13 @@ roles = {
 }
 expected = {
     "architect", "simplifier", "backend-developer", "frontend-developer",
-    "validation-critic", "test-engineer", "final-validator", "conductor",
-    "service-contract-reviewer", "quality-gate-reviewer",
-    "branch-governance-reviewer", "auth-security-reviewer", "ux-ui-expert",
-    "oci-health-reviewer", "deployment-safety",
+    "test-engineer", "service-contract-reviewer",
+    "auth-security-reviewer", "ux-ui-expert", "deployment-safety",
     "oci-operator", "domain-ingress", "mongo-migration",
-    "migration-recovery", "public-wiki-editor",
-    "PerfettoStan",
+    "public-wiki-editor",
 }
 manual_expected = {
-    "oci-operator", "oci-health-reviewer", "domain-ingress",
-    "mongo-migration", "migration-recovery",
+    "oci-operator", "domain-ingress", "mongo-migration",
 }
 if set(roles) != expected:
     raise SystemExit("supported agent inventory changed")
@@ -51,11 +47,16 @@ for role, path in roles.items():
         raise SystemExit("simplifier must remain model-neutral")
 if manual != manual_expected:
     raise SystemExit("manual-invocation restrictions changed")
+if len(roles["deployment-safety"].read_text(encoding="utf-8").splitlines()) > 150:
+    raise SystemExit("deployment safety guidance exceeded the concise role contract")
+if len((root / "LEARNINGS.md").read_text(encoding="utf-8").splitlines()) > 200:
+    raise SystemExit("working learnings exceeded 200 lines; retain history in the wiki")
 
 sources = [
     root / ".github/copilot-instructions.md",
     agents / "README.md",
     root / ".github/skills/betstan-branch-governance/SKILL.md",
+    root / "LEARNINGS.md",
 ]
 for source in sources:
     text = source.read_text(encoding="utf-8")
@@ -102,8 +103,10 @@ require(
     "observed health",
 )
 require(
-    agents / "betstan-conductor.agent.md",
-    "The conductor does not submit the approval",
+    agents / "README.md",
+    "main owner also owns coordination",
+    "one active observer per wait",
+    "thirty minutes",
     "Timeout, runner exit or lease expiry is not proof that a writer stopped",
     "Never edit live authority",
 )
@@ -147,19 +150,31 @@ require(
     agents / "betstan-deployment-safety.agent.md",
     "exact candidate Auth and Client images plus a valid candidate-prefix/baseline-suffix split",
     "do not apply an AKS journal requirement to an OCI release",
+    "compatibility readers and manifest bindings needed by supported old images",
+    "drain durable pending publications before incompatible image rollback",
+    "Keep retained-maintenance version/FCV/digest finalization",
+    "Preserve failed-run locks/fences and use compatible recovery",
+    "complete production inventory",
+    "Only executable classifiers may exclude proven records",
+    "no run-ID exclusion or age-based shortcut",
+    "Unknown dispatch/approval outcomes require the supported resume or reconciliation transition",
+    "canonical automatic approval without a personal prompt",
 )
 require(
     agents / "betstan-oci-operator.agent.md",
     "Repository-only implementation uses its exact source/diff contract and performs no live baseline or provider operation",
 )
 require(
-    agents / "betstan-oci-health-reviewer.agent.md",
+    agents / "betstan-oci-operator.agent.md",
     "For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID",
     "For k3s, verify the recorded instance/runtime identity",
+    "A health-only assignment grants no mutation authority",
 )
 require(
     agents / "betstan-mongo-migration.agent.md",
     "Require exact in-AKS source/target server-version and FCV compatibility",
+    "The unattended recovery identity remains stop-only",
+    "After `cutover-committed`, recover forward only",
 )
 PY
 

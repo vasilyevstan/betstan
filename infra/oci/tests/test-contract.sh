@@ -739,54 +739,24 @@ for lesson in \
       fail "OCI lessons omit required recovery guidance: $lesson"
 done
 for agent in \
-    betstan-migration-recovery \
+    betstan-mongo-migration \
     betstan-domain-ingress; do
     agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
     [[ -f "$agent_file" ]] || fail "required recovery agent is missing: $agent"
     grep -Fq "infra/oci/LESSONS_LEARNED.md" "$agent_file" ||
       fail "recovery agent does not read OCI lessons: $agent"
 done
-for agent in betstan-oci-health-reviewer betstan-oci-operator; do
+for agent in betstan-oci-operator; do
   agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
   [[ -f "$agent_file" ]] || fail "required runtime agent is missing: $agent"
   grep -Fq 'restartCount > 0' "$agent_file" &&
     grep -Fq 'termination reason, exit code' "$agent_file" ||
     fail "runtime agent omits restart-bound termination evidence: $agent"
 done
-conductor_agent="$ROOT_DIR/.github/agents/betstan-conductor.agent.md"
 agent_readme="$ROOT_DIR/.github/agents/README.md"
-perfetto_agent="$ROOT_DIR/.github/agents/PerfettoStan.agent.md"
-[[ -f "$conductor_agent" ]] || fail "required conductor agent is missing"
-grep -Fq 'name: betstan-conductor' "$conductor_agent" ||
-  fail "conductor agent frontmatter has the wrong name"
-grep -Fq 'tools: [read, search, execute, edit, web]' "$conductor_agent" ||
-  fail "conductor agent lacks governed self-blocker correction authority"
-# Routing and independent-verification policy belong to the existing
-# test-agent-governance-contract.sh suite. These are retained operational
-# guidance contracts, not proof that a runtime operation is safe.
-conductor_agent_flat="$(tr '\n' ' ' <"$conductor_agent" | tr -s '[:space:]' ' ')"
-for conductor_contract in \
-    'inspect the exact underlying jobs and `pending_deployments`' \
-    'canonical helpers to the authorized owner' \
-    'Human-origin work retains its exact approval requirement' \
-    'An explicit pause blocks new mutations' \
-    'Use event notifications with bounded checkpoints, not tight polling' \
-    'Use exact known PIDs or shell IDs' \
-    'Do not replace work until the original side effects are known and concurrent mutations are excluded' \
-    'A first-attempt-only failed run cannot become valid by rerunning' \
-    'Missing evidence never restarts the clock' \
-    'Treat this as an active incident, not a completed release' \
-    'Preserve lock-before-fence release ordering and data integrity' \
-    'Verify both the false rejection and the genuine unsafe case' \
-    'Completion requires the scoped terminal evidence and known effects'; do
-  grep -Fq "$conductor_contract" <<<"$conductor_agent_flat" ||
-    fail "conductor omits retained operational guidance: $conductor_contract"
-done
 agent_readme_flat="$(tr '\n' ' ' <"$agent_readme")"
-perfetto_agent_flat="$(tr '\n' ' ' <"$perfetto_agent")"
-grep -Fq 'Return `FLOW_STOP_OPTIMIZE` when optional process expansion lacks one of those proofs' \
-    <<<"$perfetto_agent_flat" ||
-  fail "PerfettoStan does not have evidence-bound process-stop authority"
+# Consolidated role and owner safeguards are enforced by
+# test-agent-governance-contract.sh, not duplicated historical agent prose.
 ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
 ux_wiki="$ROOT_DIR/docs/wiki/UI-UX-Consistency.md"
 ux_home="$ROOT_DIR/docs/wiki/Home.md"
@@ -794,9 +764,7 @@ repository_readme="$ROOT_DIR/README.md"
 ux_release_wiki="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
 ux_backend_agent="$ROOT_DIR/.github/agents/betstan-backend-developer.agent.md"
 ux_frontend_agent="$ROOT_DIR/.github/agents/betstan-frontend-developer.agent.md"
-ux_critic_agent="$ROOT_DIR/.github/agents/betstan-validation-critic.agent.md"
 ux_test_agent="$ROOT_DIR/.github/agents/betstan-test-engineer.agent.md"
-ux_final_agent="$ROOT_DIR/.github/agents/betstan-final-validator.agent.md"
 public_wiki_agent="$ROOT_DIR/.github/agents/betstan-public-wiki-editor.agent.md"
 while IFS='|' read -r wiki_file wiki_link; do
   [[ -f "$ROOT_DIR/docs/wiki/$wiki_file" ]] ||
@@ -905,7 +873,7 @@ grep -Fq 'byte-identical publication' <<<"$public_wiki_agent_flat" ||
 grep -Fq 'Additional protected commits are allowed' \
     "$ROOT_DIR/CONTRIBUTING.md" ||
   fail "contribution policy still assumes session-exclusive releases"
-grep -Fq 'Multiple sessions may merge compatible reviewed work independently' \
+grep -Fq 'prove every required feature commit is in the exact' \
     "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
   fail "deployment safety does not support aggregate concurrent-session releases"
 grep -Fq 'tools: [read, search]' "$ux_agent" ||
@@ -963,12 +931,8 @@ frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
 grep -Fq 'Return evidence directly to the accountable owner' \
     <<<"$frontend_agent_flat" ||
   fail "frontend developer omits returning implementation evidence"
-critic_agent_flat="$(tr '\n' ' ' <"$ux_critic_agent")"
-grep -Fq 'verify source-bound consistency evidence' <<<"$critic_agent_flat" ||
-  fail "validation critic omits source-bound UI consistency evidence"
-grep -Eq 'obsolete authorization expectation performs a real[[:space:]]+mutation' \
-    <<<"$critic_agent_flat" ||
-  fail "validation critic can miss side-effecting stale authorization probes"
+grep -Fq 'an obsolete negative mutation probe must not create' "$ux_test_agent" ||
+  fail "test engineer can miss side-effecting stale authorization probes"
 grep -Fq 'Do not add or require a screenshot/image-diff matrix' "$ux_test_agent" ||
   fail "test engineer turns user-facing work into a blanket visual-test gate"
 test_agent_flat="$(tr '\n' ' ' <"$ux_test_agent")"
@@ -979,14 +943,9 @@ grep -Eq 'prove a[[:space:]]+restart replay clears it' <<<"$test_agent_flat" ||
   fail "test engineer omits pending-publication recovery coverage"
 grep -Fq 'stable-odds material transition whose' "$ux_test_agent" ||
   fail "test engineer omits unchanged-price quote-boundary coverage"
-grep -Fq 'changed `quoteValidUntil` under an unchanged' "$ux_critic_agent" ||
-  fail "validation critic omits quote-authority collision detection"
-grep -Fq 'Repeated `STALE_QUOTE` failures require a bounded authority diagnosis' \
-    <<<"$conductor_agent_flat" ||
-  fail "conductor can misclassify repeated stale quotes as transient retries"
-grep -Fq 'verify relevant source-bound consistency evidence' "$ux_final_agent" ||
-  fail "final validator omits source-bound UI consistency evidence"
-grep -Fq '### Product-wide UI/UX consistency' "$ROOT_DIR/LEARNINGS.md" ||
+grep -Fq 'Do not add retries to disguise stale authority' "$ROOT_DIR/LEARNINGS.md" ||
+  fail "working guidance can disguise stale quote authority with retries"
+grep -Fq '## UI, timelines and access' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the product-wide UI/UX consistency contract"
 for ux_reinforced_check in \
     'Cross-card baseline drift' \
@@ -1014,19 +973,6 @@ grep -Fq 'For live-history and presentation-order changes, prove producer-attest
 grep -Fq 'For semantic-control and layout changes, prove accessible names remain' \
     "$ux_test_agent" ||
   fail "test engineer omits semantic-control/computed-geometry coverage requirements"
-for critic_reinforced_check in \
-    'False `Full timeline` completeness claims' \
-    'Exact linked-incident deduplication' \
-    'Equal-sequence monotonic history merges' \
-    'Terminal result/`FULL_TIME` interleavings' \
-    'Fail-dark terminal placeholders' \
-    'Unresolved-auth retained `OFFLINE` data' \
-    'Presentation ordering that changes selection identity' \
-    'Access-proxy false positives' \
-    'Cross-card computed-geometry regressions'; do
-  grep -Fq "$critic_reinforced_check" "$ux_critic_agent" ||
-    fail "validation critic omits reinforced finding: $critic_reinforced_check"
-done
 grep -Fq 'When output changes public presentation ordering or exposes a' \
     "$ux_backend_agent" ||
   fail "backend developer omits public-ordering/completeness handoff evidence"
@@ -1040,7 +986,7 @@ grep -Fq 'including one with pending `ONLINE` intent, remains `OFFLINE`' \
 grep -Fq 'exact-ID-preservation evidence' \
     "$ux_frontend_agent" ||
   fail "frontend developer omits semantic-control-label/exact-ID handoff evidence"
-grep -Fq '### Live timeline completeness and market alignment' "$ROOT_DIR/LEARNINGS.md" ||
+grep -Fq 'Claim complete history only with valid cumulative producer evidence' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the live timeline completeness and market alignment contract"
 grep -Fq 'One quote identity must map to' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits one-expiry-per-quote identity"
@@ -1050,8 +996,6 @@ grep -Fq 'material validity-window advance receives a new quote version' \
 grep -Fq 'owns exactly one validity window' \
     "$ROOT_DIR/docs/wiki/Live-Betting-Production.md" ||
   fail "live-betting wiki omits quote validity identity"
-grep -Fq 'Superseded narrow-live-card rule' "$ROOT_DIR/LEARNINGS.md" ||
-  fail "durable learning does not supersede the earlier narrow-live-card rule"
 grep -Fq 'cross-card baseline drift: a sibling' "$ux_wiki" ||
   fail "UI/UX consistency wiki omits the cross-card baseline drift example"
 grep -Fq 'phantom sparse-grid tracks' "$ux_wiki" ||
@@ -1077,21 +1021,17 @@ grep -Fq '"GITHUB_RUN_ID=777"' <<<"$ghcr_fixture_head" ||
   fail "GHCR contract fixture does not isolate the run ID"
 grep -Fq '"GITHUB_RUN_ATTEMPT=1"' <<<"$ghcr_fixture_head" ||
   fail "GHCR contract fixture inherits ambient workflow rerun metadata"
-grep -Fq "A run waiting for environment approval is active, not hung" \
-    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+grep -Fq "A run waiting for approval is active, not hung" \
+    "$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"
-grep -Fq "After \`cutover-committed\`, never retry from Azure" \
-    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+grep -Fq "After \`cutover-committed\`, recover forward only" \
+    "$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md" ||
     fail "migration recovery agent can roll back a committed cutover"
-grep -Fq "controller-level HTTP mutation fence" \
-    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+mongo_agent_flat="$(tr '\n' ' ' <"$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md")"
+grep -Fq "controller-level HTTP mutation fence" <<<"$mongo_agent_flat" ||
     fail "migration recovery agent does not preserve the restart-safe HTTP fence"
-grep -Fq "remove the exact 17 application bindings" \
-    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+grep -Fq "routing-fence protocol" <<<"$mongo_agent_flat" ||
     fail "migration recovery agent does not require the RabbitMQ routing fence"
-grep -Fq "one bounded in-pod deletion loop" \
-    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
-    fail "migration recovery agent permits per-binding Bastion round trips"
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
     fail "domain ingress agent lacks the canonical host"
@@ -1914,26 +1854,6 @@ grep -Fq 'These labels are discoverability metadata only' \
     "$ROOT_DIR/CONTRIBUTING.md" ||
   fail "contribution policy can treat PR context labels as authority"
 
-deployment_safety_agent_flat="$(tr '\n' ' ' <"$deployment_safety_agent")"
-grep -Fq 'image-only rollback reuses the current Deployment manifest' \
-    <<<"$deployment_safety_agent_flat" ||
-  fail "deployment safety agent can remove fallback-required environment bindings"
-grep -Fq 'pending-publication markers are drained' \
-    <<<"$deployment_safety_agent_flat" ||
-  fail "deployment safety agent can strand durable publications during rollback"
-grep -Fq 'establish the reviewed HTTP write fence' \
-    <<<"$deployment_safety_agent_flat" ||
-  fail "deployment safety agent omits the durable-publication mutation fence"
-grep -Fq 'exact target-source evidence' \
-    <<<"$deployment_safety_agent_flat" ||
-  fail "deployment safety agent can infer replay compatibility without exact target source"
-grep -Fq 'Keep the fence active after any partial image mutation' \
-    <<<"$deployment_safety_agent_flat" ||
-  fail "deployment safety agent can reopen writes after a partial rollback"
-grep -Fq 'partial-rollback recovery operator to re-establish then release' \
-    <<<"$deployment_safety_agent_flat" ||
-  fail "deployment safety agent omits the terminating owner for a rollback fence"
-
 [[ "$(git -C "$ROOT_DIR" ls-tree HEAD common | awk '{print $1}')" = "040000" ]] ||
   fail "common source is not a normal tracked directory"
 if [[ -f "$ROOT_DIR/.gitmodules" ]] &&
@@ -1949,112 +1869,14 @@ grep -Fq 'npm versions are immutable' "$common_readme" ||
 grep -Fq 'Do not use `npm install --no-save <tarball>`' "$common_readme" ||
   fail "common guide omits lock-exact tarball validation"
 
-grep -Fq 'read every cited path from that same tree' "$deployment_safety_agent"
-grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
-grep -Fq 'dispatch URL proves event acceptance, not job materialization' \
-  "$deployment_safety_agent"
-grep -Fq 'hard per-attempt' "$deployment_safety_agent" ||
-  fail "deployment safety omits bounded external tool installation"
-grep -Fq 'Do not invent a workflow-wide' "$deployment_safety_agent" &&
-  grep -Fq '`ghcr-package-validate` must use the checked-in automatic approver' \
-    "$deployment_safety_agent" ||
-  fail "deployment safety can invent a human-only exception for CLI package validation"
-grep -Fq 'Never wait for a personal prompt when verified CLI ownership and technical gates allow automatic progression' \
-    <<<"$conductor_agent_flat" ||
-  fail "conductor can poll an eligible CLI-owned approval as human-only"
 grep -Fq 'Approval eligibility comes from the machine-readable protected-operation' \
   "$ROOT_DIR/docs/wiki/Release-Orchestration.md" ||
   fail "release wiki omits machine-readable approval authority"
 grep -Fq '### Approval policy outranks agent memory' \
   "$ROOT_DIR/docs/wiki/Engineering-Learnings.md" ||
   fail "engineering learnings omit approval-classification drift"
-grep -Fq 'separate compatibility baseline release first' "$deployment_safety_agent" &&
-  grep -Fq 'Compatibility-first producer changes' "$ux_release_wiki" ||
+grep -Fq 'Compatibility-first producer changes' "$ux_release_wiki" ||
   fail "release guidance omits compatibility-first additive producer rollout"
-grep -Fq 'different authority root to disguise the same request' \
-  "$deployment_safety_agent" ||
-  fail "deployment safety permits replay through an alternate authority root"
-grep -Fq 'through the checked-in bounded supersession or unmaterialized classifier' \
-  "$deployment_safety_agent" ||
-  fail "deployment safety omits bounded provider-ghost classification"
-grep -Fq 'retirement, rejecting-state cancellation and supersession must pass the checked-in exact proofs' \
-  <<<"$conductor_agent_flat" ||
-  fail "conductor omits exact proofs for provider-ghost recovery"
-for recovery_contract in \
-    'reason=unmaterialized' \
-    'same repository regardless of control SHA' \
-    'never reset master to the poisoned SHA' \
-    'A cancellation `409` is corroborative journal evidence only' \
-    'retire-unmaterialized-claim'; do
-  grep -Fq "$recovery_contract" "$deployment_safety_agent" ||
-    fail "deployment safety omits unmaterialized recovery contract: $recovery_contract"
-done
-for prospective_contract in \
-    'Only `pr-merge-safety-stan.sh` may request the prospective-master bootstrap' \
-    'same-repository `dev` -> `master` PR whose base SHA' \
-    'normal dispatch or approval remains bound to actual master and blocking' \
-    'It never uses `EXCLUDE_RUN_ID` or generic disabled classification' \
-    'claimed/inflight authority fence remains unresolved'; do
-  grep -Fq "$prospective_contract" "$deployment_safety_agent" ||
-    fail "deployment safety omits prospective-master bootstrap contract: $prospective_contract"
-done
-for compare_contract in \
-    'Capacity is the only active supersession exception' \
-    'stale live-data and activation runs always remain production fences' \
-    'no artifacts, and the exact later' \
-    'Fetch Compare evidence with `--paginate` and a compact SHA-only projection' \
-    'complete unique ordered commit list to end at the requested head' \
-    'c6c113b49a36518b7b106aa1406998a4abca10a0' \
-    'complete nonterminal production-run inventory'; do
-  grep -Fq "$compare_contract" "$deployment_safety_agent" ||
-    fail "deployment safety omits compact Compare recovery contract: $compare_contract"
-done
-for recovery_contract in \
-    'A jobless queue, run age, exit or timeout alone cannot authorize retirement or replacement' \
-    'A prospective SHA or `EXCLUDE_RUN_ID` is not new authority' \
-    'A merged correction is not proof the operation recovered; observe its terminal effects'; do
-  grep -Fq "$recovery_contract" <<<"$conductor_agent_flat" ||
-    fail "conductor omits retained recovery guidance: $recovery_contract"
-done
-for recovery_contract in \
-    'Promotion cannot silently clear the fence' \
-    'retire-unmaterialized-claim' \
-    'never reset master to the poisoned SHA' \
-    'zero exact count/list jobs and artifacts' \
-    'zero approvals and pending deployments'; do
-  grep -Fq "$recovery_contract" "$ROOT_DIR/LEARNINGS.md" ||
-    fail "learnings omit unmaterialized recovery contract: $recovery_contract"
-done
-for self_blocker_learning in \
-    'not automatically an external safety wait' \
-    'branch -> `dev` -> `master`' \
-    'post-promotion exact-SHA revalidation before automatic resumption' \
-    'Never weaken a gate to make progress or edit live authority state ad hoc'; do
-  grep -Fq "$self_blocker_learning" "$ROOT_DIR/LEARNINGS.md" ||
-    fail "learnings omit governed self-blocker recovery: $self_blocker_learning"
-done
-for prospective_learning in \
-    'A current-master ghost can block the guard promotion' \
-    'exclusivity must independently prove an OPEN CLI-managed' \
-    'allowlisted queued unmaterialized ghost, never for normal dispatch' \
-    'approval, another active run, or the repository-global claimed/inflight' \
-    '`EXCLUDE_RUN_ID` and generic disabled handling cannot'; do
-  grep -Fq "$prospective_learning" "$ROOT_DIR/LEARNINGS.md" ||
-    fail "learnings omit prospective-master bootstrap: $prospective_learning"
-done
-grep -Fq 'GitHub compare responses do not expose `head_commit`' \
-  "$ROOT_DIR/LEARNINGS.md" ||
-  fail "learnings omit GitHub compare head binding"
-for compare_learning in \
-    'Raw paginated Compare responses can exceed the private evidence-size bound' \
-    'SHA-only projection' \
-    'c6c113b49a36518b7b106aa1406998a4abca10a0' \
-    'Keep active supersession capacity-only' \
-    'Active live-data and activation records remain blockers' \
-    'reconcile the entire nonterminal run inventory'; do
-  grep -Fq "$compare_learning" "$ROOT_DIR/LEARNINGS.md" ||
-    fail "learnings omit compact Compare recovery guidance: $compare_learning"
-done
 grep -Fq 'classify-unmaterialized-run' "$run_exclusivity_script" ||
   fail "production exclusivity does not invoke unmaterialized classification"
 grep -Fq 'retire-unmaterialized-claim' "$authority_helper" ||
@@ -2505,14 +2327,6 @@ for reschedule_failure_contract in \
   grep -Fq "$reschedule_failure_contract" "$data_runner" ||
     fail "live-data rollout omits reschedule failure contract: $reschedule_failure_contract"
 done
-grep -Fq \
-  'when a protected Job intentionally exits nonzero after emitting a structured' \
-  "$deployment_safety_agent" ||
-  fail "deployment safety does not require sanitized structured blocker evidence"
-grep -Fq \
-  'Pod and Job status are eventually consistent' \
-  "$deployment_safety_agent" ||
-  fail "deployment safety does not account for terminal pod-status convergence"
 data_evidence_gate="$(
   sed -n \
     '/- name: Require executed data-step evidence/,/- name: Upload exact sanitized data evidence/p' \

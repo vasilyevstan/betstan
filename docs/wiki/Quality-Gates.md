@@ -30,7 +30,7 @@ changed boundary; the author cannot supply that independent evidence.
 
 Specialists are capabilities selected for an evidenced gap, not a compulsory
 conveyor. There is no mandatory model quorum, unanimous synthesis,
-review-of-review, two-phase UX handoff, or PerfettoStan continuation. Every
+review-of-review, two-phase UX handoff, or separate process continuation. Every
 change still records documentation impact, and user-facing changes retain
 consistency and appropriate rendered evidence. [[Agents]] explains ownership,
 conditional routing, and reuse of accepted evidence.
@@ -246,24 +246,16 @@ dispatch fixtures use at most four isolated processes; mocked clocks, output
 capture and fixture state are not shared between cases. Both fresh checkpoints
 and the existing same-fixture concurrency tests remain covered.
 
-The protected compatibility `production-build` uses the full
-trusted-master workflow, not lean path selection. It runs coverage for all ten
-application packages, the Client production build, Auth container smoke,
-runtime-script validation, and the deployment-safety contracts. Within those
-contracts, the heavy suites select themselves as described above. Its PR triggers include `edited`, so title/body edits
-can start full `production-build` validation. Usable quality evidence still
-follows the existing publisher marker and receipt rules; metadata edits cannot
-create or recover a trusted source-quality transition. An edit-triggered
-replacement run therefore cannot replace the original bound run. Verify
-trigger and publisher behavior together before cancelling validation, and
-verify a supported new transition's binding before waiting for expensive CI.
+The protected lean `production-build` selects PR coverage, Auth smoke and
+runtime/deployment checks by changed paths. It starts source validation only
+for opening, reopening and synchronization, not title/body edits. Master pushes
+retain the full outer validation path; nested heavy suites still select their
+actual inputs. Image publication follows successful required validation.
 
-The lean variant retained in `dev` and repository history selects coverage,
-Auth smoke, and runtime/deployment checks by changed paths and avoids source
-validation on title/body edits. That reduced-scope behavior and its selected
-deployment-safety 45-minute ceiling are staged/historical, not the compatible
-full workflow. Existing publisher markers remain authoritative until protected
-cutover; neither workflow source nor local preparation proves runtime health.
+Selection and parallelism are not timing acceptance by themselves. Measure the
+complete required check set, including OCI validation, rather than only its
+fastest aggregate. A cancelled or unbound run is not reusable quality evidence.
+Neither workflow source nor a green build proves restored runtime health.
 
 ### Actions runtime and compatible pins
 
@@ -292,13 +284,34 @@ be activated solely to demonstrate the upgrade. Corrections and reverts
 retain the same protected review and one-use rules. See
 [[Release Orchestration]].
 
-### Quality-transition recovery
+### Metadata-neutral quality transitions
+
+New version-4 markers bind the PR, source transition cutoff, exact merge
+snapshot and trusted quality run. Native evidence supplies the exact head,
+base, workflow and attempt. Title, body, labels and mutable update timestamps
+are not v4 quality identity. Opening events can precede test-merge calculation;
+the publisher captures and rechecks GitHub's live unique merge instead.
+
+The policy publisher retains its serialized writer group and enables
+[GitHub's bounded pending queue](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+Up to 100 policy runs can wait without newer metadata events replacing the
+pending opening handler. Overflow still cancels excess arrivals, and queue
+arrival order is not event chronology. Cutoff and current-source validation
+therefore remain mandatory.
+
+Cancelled non-producing metadata handlers supply no quality evidence and need
+not be rerun. Completion or trusted refresh can bind an existing exact pending
+marker without regenerating the merge ref. Missing markers, failed required
+quality runs, source drift and conflicting bindings still fail closed.
+Metadata changes never grant origin or production approval.
+
+### Quality-transition recovery and legacy compatibility
 
 A trusted policy publisher can leave a pending or bound transition before
 its run fails. A genuine, strictly later `synchronize` or `reopened` event may
 establish a fresh transition. Metadata-only `edited` events may refresh branch
-policy from existing exact head/base evidence but cannot create, bind, recover,
-or consume a source-quality transition. A completed older policy
+policy from existing exact source evidence but cannot create a fresh source
+transition or consume authorization. A completed older policy
 run with `failure`, `cancelled`, or `timed_out` contributes only historical
 ordering at a strictly lower cutoff, never current quality or approval
 authority. Every marker still passes structural and completed-origin checks
@@ -311,13 +324,16 @@ replayed `opened`, a label event, or a manual refresh cannot create a
 superseding transition. Current or higher-cutoff failed origins,
 non-completed runs, and unknown, neutral, or skipped results remain unusable.
 
-Credential boundaries, trusted status-source checks, and both exact
-head/merge-snapshot targets remain unchanged, as do v3 marker encoding, ledger
-enforcement, revocation tombstones, legacy fail-closed handling, fingerprints,
-one-use receipts, and concurrent snapshot rechecks. Recovery is not a
-provenance bypass. Any rollback must retain both v3 parsing and ledger
-authority; preserving the encoding alone is insufficient. Use a reviewed
-forward correction when that compatibility floor cannot be retained.
+Credential boundaries, trusted status sources, exact snapshot targets and
+one-use receipts remain unchanged. Existing v3 markers retain their parsing,
+label-ledger authority, revocation tombstones and label/timestamp freshness:
+removing then restoring a label during receipt claiming or publication cannot
+restore authority. V4 does not reinterpret legacy evidence. Conflicting marker
+versions at one cutoff fail closed, and tombstones remain dominant.
+
+Recovery is not a provenance bypass. Rollback must retain v4 readers and all
+required v3 ledger/freshness semantics; encoding compatibility alone is
+insufficient. Use a reviewed forward correction when that floor cannot be kept.
 Metadata sequencing remains governed by [[Release Orchestration]].
 
 ### Retired inactive coverage-review path
