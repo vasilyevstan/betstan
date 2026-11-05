@@ -460,9 +460,248 @@ async function collectManifest(options, source, git = readGit) {
   };
 }
 
+const DISPATCH_WORKFLOW = ".github/workflows/oci-validate.yml";
+const DISPATCH_CONTROL_PATHS = Object.freeze([
+  ".github/scripts/source-quality.js", ".github/scripts/consume-source-quality.js",
+  ".github/scripts/quality-attestation.js", ".github/scripts/pr-source-snapshot.js",
+  ".github/scripts/source-input-selection.js",
+  "infra/ci/suite_gate.py", "infra/oci/tests/run-contracts.sh",
+  "infra/azure/agents/test-deployment-safety-ci-stan.sh",
+]);
+const DISPATCH_JOB = "oci-full-contracts (dispatch)";
+// These are optional proof-eligibility approvals, not publisher/workflow grants.
+// Caller adoption is separate and requires an observed ordinary-PR certificate.
+const DISPATCH_CALLER_BLOBS = Object.freeze({
+  ".github/workflows/oci-validate.yml": [
+    "0795b8a7efb191d4dae78850844e0612d4f41d56",
+    "7bbe29e2bebd4b2054c27824c07d63dc33d366ca",
+  ],
+  ".github/workflows/production-build.yml": ["8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"],
+});
+const DISPATCH_TOOLS = Object.freeze([
+  "bash", "python3", "ruby", "git", "gh", "node", "jq", "curl", "tar", "zip", "unzip",
+  "date", "timeout", "flock", "find", "grep", "sed", "awk", "sha256sum", "base64",
+]);
+
+function captureDispatchProfile(env = process.env, execute = execFileSync) {
+  if (process.platform !== "linux" || process.arch !== "x64" || env.ImageOS !== "ubuntu24" ||
+    !/^\d{8}\.\d+\.\d+$/.test(env.ImageVersion ?? "")) {
+    return { supported: false, reason: "Unsupported dispatch worker/image; ordinary execution required" };
+  }
+  const hashes = [];
+  let probe = "worker";
+  try {
+    for (const tool of DISPATCH_TOOLS) {
+      probe = tool;
+      const file = execute("bash", ["--noprofile", "--norc", "-c", 'command -v -- "$1"', "probe", tool], {
+        encoding: "utf8", timeout: 10_000, env: { ...env, BASH_ENV: "/dev/null" },
+      }).trim();
+      if (!file.startsWith("/")) throw new Error(`Dispatch profile probe did not resolve ${tool}`);
+      hashes.push([tool, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")]);
+    }
+    probe = "dpkg-query";
+    const packages = execute("dpkg-query", ["-W", "-f=${binary:Package}=${Version}\\n"], {
+      encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024, env,
+    }).trim().split("\n").sort();
+    return {
+      supported: true, profile: "github-hosted-ubuntu24-dispatch-v1",
+      imageVersion: env.ImageVersion, kernel: os.release(),
+      nodeVersion: process.version,
+      nodeSha256: crypto.createHash("sha256").update(fs.readFileSync(process.execPath)).digest("hex"),
+      locale: { LANG: env.LANG ?? "", LC_ALL: env.LC_ALL ?? "", TZ: env.TZ ?? "" },
+      toolsSha256: digest(hashes), packagesSha256: digest(packages),
+    };
+  } catch (error) {
+    if (!["ENOENT", "EACCES", "ETIMEDOUT"].includes(error?.code) && !Number.isInteger(error?.status)) throw error;
+    return { supported: false, reason: `Dispatch profile probe ${probe} failed (${error.code ?? error.status}); ordinary execution required` };
+  }
+}
+
+function assertDispatchProfile(profile) {
+  if (profile?.supported === false && typeof profile.reason === "string" && profile.reason.length <= 512) {
+    throw new QualityEvidenceError(profile.reason);
+  }
+  if (!profile || profile.supported !== true ||
+    profile.profile !== "github-hosted-ubuntu24-dispatch-v1" ||
+    !/^\d{8}\.\d+\.\d+$/.test(profile.imageVersion ?? "") ||
+    !/^[A-Za-z0-9._+-]{1,128}$/.test(profile.kernel ?? "") ||
+    !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(profile.nodeVersion ?? "") ||
+    !["nodeSha256", "toolsSha256", "packagesSha256"].every((key) => /^[0-9a-f]{64}$/.test(profile[key] ?? "")) ||
+    !profile.locale || !["LANG", "LC_ALL", "TZ"].every((key) => typeof profile.locale[key] === "string")) {
+    throw new QualityEvidenceError("Unsupported or incomplete native dispatch execution profile");
+  }
+}
+
+async function dispatchCommit(github, repo, sha) {
+  if (!/^[0-9a-f]{40}$/.test(sha ?? "")) throw new QualityEvidenceError("Dispatch commit is not immutable");
+  const { data: commit } = await github.rest.git.getCommit({ ...repo, commit_sha: sha });
+  if (commit?.sha !== sha || !/^[0-9a-f]{40}$/.test(commit.tree?.sha ?? "") ||
+    !Array.isArray(commit.parents) || commit.parents.some((parent) => !/^[0-9a-f]{40}$/.test(parent.sha ?? ""))) {
+    throw new QualityEvidenceError("Native dispatch Git object is incomplete");
+  }
+  return { sha, treeSha: commit.tree.sha, parents: commit.parents.map((parent) => parent.sha) };
+}
+
+async function dispatchControl(github, repo, sha) {
+  const commit = await dispatchCommit(github, repo, sha);
+  const { data: tree } = await github.rest.git.getTree({ ...repo, tree_sha: commit.treeSha, recursive: "1" });
+  if (tree?.sha !== commit.treeSha || tree.truncated !== false || !Array.isArray(tree.tree)) {
+    throw new QualityEvidenceError("Dispatch control inventory is incomplete");
+  }
+  const paths = [...DISPATCH_CONTROL_PATHS, ...Object.keys(DISPATCH_CALLER_BLOBS)];
+  const records = tree.tree.filter((entry) => paths.includes(entry.path)).map((entry) => {
+    if (entry.type !== "blob" || !["100644", "100755"].includes(entry.mode) || !/^[0-9a-f]{40}$/.test(entry.sha)) {
+      throw new QualityEvidenceError("Unsupported dispatch executable control");
+    }
+    return { path: entry.path, mode: entry.mode, sha: entry.sha };
+  }).sort((a, b) => a.path.localeCompare(b.path));
+  if (records.length !== paths.length || new Set(records.map((record) => record.path)).size !== paths.length) {
+    throw new QualityEvidenceError("Missing or duplicate dispatch executable control");
+  }
+  return { commit, records };
+}
+
+async function captureNativeDispatchSource(options, git = readGit) {
+  const { github, context, attempt } = options;
+  const repository = `${context.repo.owner}/${context.repo.repo}`;
+  const pr = context.eventName === "pull_request";
+  const workflowPath = pr ? DISPATCH_WORKFLOW : ".github/workflows/production-build.yml";
+  if (attempt !== 1 || !Number.isSafeInteger(context.runId) || context.runId < 1 ||
+    (!pr && (context.eventName !== "push" || context.ref !== "refs/heads/master")) ||
+    git(["rev-parse", "HEAD"]).trim() !== context.sha) {
+    throw new QualityEvidenceError("Native dispatch requires an exact first-attempt PR or master checkout");
+  }
+  const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId });
+  if (run?.id !== context.runId || run.run_attempt !== 1 || run.path !== workflowPath ||
+    run.event !== context.eventName || run.repository?.full_name !== repository ||
+    !Number.isSafeInteger(run.repository?.id) || run.repository.id < 1 ||
+    !Number.isSafeInteger(run.workflow_id) || run.workflow_id < 1) {
+    throw new QualityEvidenceError("Native dispatch caller/run identity mismatch");
+  }
+  const commit = await dispatchCommit(github, context.repo, context.sha);
+  let snapshot;
+  if (pr) {
+    const number = context.payload.pull_request?.number;
+    if (!Number.isSafeInteger(number) || number < 1 || context.ref !== `refs/pull/${number}/merge`) {
+      throw new QualityEvidenceError("Native dispatch caller is not the PR merge ref");
+    }
+    const { data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: number });
+    snapshot = sourceSnapshot(pull);
+    if (snapshot.number !== number || snapshot.repository !== repository || !["dev", "master"].includes(snapshot.baseRef) ||
+      snapshot.mergeSha !== context.sha || run.head_sha !== snapshot.headSha ||
+      !isDeepStrictEqual(commit.parents, [snapshot.baseSha, snapshot.headSha]) ||
+      !nativeDispatchAssociationsMatch(run.pull_requests, snapshot, run.repository.id)) {
+      throw new QualityEvidenceError("Native PR head/base/merge snapshot changed or is incomplete");
+    }
+  } else {
+    const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: "master" });
+    if (branch?.protected !== true || branch.commit?.sha !== context.sha || run.head_sha !== context.sha) {
+      throw new QualityEvidenceError("Native dispatch push is not exact current protected master");
+    }
+  }
+  return {
+    repository, repositoryId: run.repository.id, runId: run.id, attempt: 1,
+    workflowId: run.workflow_id, workflowPath, event: run.event, ref: context.ref,
+    headSha: run.head_sha, commit, ...(snapshot ? { snapshot } : {}),
+  };
+}
+
+// Actions can erase PR associations after integration. These optional hints
+// must not contradict the live capture or the certificate/immutable Git proof.
+function nativeDispatchAssociationsMatch(associations, snapshot, repositoryId) {
+  if (associations == null) return true;
+  const compatible = (value, expected) => value == null || value === expected;
+  return Array.isArray(associations) && associations.every((entry) =>
+    entry?.number === snapshot.number && ["head", "base"].every((side) =>
+      entry[side] == null || (typeof entry[side] === "object" &&
+        compatible(entry[side].sha, snapshot[`${side}Sha`]) &&
+        compatible(entry[side].ref, snapshot[`${side}Ref`]) &&
+        compatible(entry[side].repo?.id, repositoryId) &&
+        compatible(entry[side].repo?.full_name, snapshot.repository))));
+}
+
+function assertDispatchJobs(jobs, source, published = true) {
+  const success = ["oci-scope", "oci-workflow-syntax", "oci-validate",
+    ...["core", "live", "provenance", "rollback", "governance", "dispatch"].map((shard) => `oci-full-contracts (${shard})`)];
+  const names = [...success, "oci-focused-contracts", "oci-dispatch-original"];
+  if (!Array.isArray(jobs) || jobs.length !== names.length || jobs.some((job) => !job || typeof job !== "object") ||
+    new Set(jobs.map((job) => job.name)).size !== names.length ||
+    new Set(jobs.map((job) => job.id)).size !== names.length ||
+    jobs.some((job) => !names.includes(job.name) || !Number.isSafeInteger(job.id) || job.id < 1 ||
+      job.run_id !== source.runId || job.run_attempt !== 1 || job.head_sha !== source.headSha ||
+      (job.name !== "oci-dispatch-original" &&
+        (job.status !== "completed" || job.conclusion !== (success.includes(job.name) ? "success" : "skipped"))))) {
+    throw new QualityEvidenceError("Native dispatch job inventory is incomplete, retried or unsuccessful");
+  }
+  const worker = jobs.find((job) => job.name === DISPATCH_JOB);
+  const step = (job, name, conclusion) => {
+    const matches = Array.isArray(job.steps) ? job.steps.filter((item) => item?.name === name) : [];
+    if (matches?.length !== 1 || matches[0].status !== "completed" || matches[0].conclusion !== conclusion) {
+      throw new QualityEvidenceError(`Native dispatch step did not actually ${conclusion}: ${name}`);
+    }
+    return matches[0];
+  };
+  const capture = step(worker, "Capture dispatch worker before candidate tests", "success");
+  const execute = step(worker, "Execute original dispatch assertions", "success");
+  step(worker, "Record selected-out dispatch", "skipped");
+  step(worker, "Record authenticated dispatch reuse", "skipped");
+  if (!(capture.number < execute.number) || !Number.isFinite(Date.parse(capture.completed_at)) ||
+    !Number.isFinite(Date.parse(execute.started_at)) || Date.parse(capture.completed_at) > Date.parse(execute.started_at)) {
+    throw new QualityEvidenceError("Dispatch worker facts were not captured before candidate execution");
+  }
+  const signer = jobs.find((job) => job.name === "oci-dispatch-original");
+  if (published) {
+    if (signer.status !== "completed" || signer.conclusion !== "success") {
+      throw new QualityEvidenceError("Native original publication did not complete successfully");
+    }
+    for (const name of ["Reconstruct original from native jobs", "Attest dispatch original",
+      "Upload dispatch original", "Confirm original publication"]) step(signer, name, "success");
+  } else if (signer.status !== "in_progress" || signer.conclusion != null) {
+    throw new QualityEvidenceError("Native original signer is not the current in-progress job");
+  }
+  return { jobId: worker.id, kind: "EXECUTED" };
+}
+
+async function collectNativeDispatchOriginal(options, worker, { git, observationOnly = true } = {}) {
+  const source = await captureNativeDispatchSource(options, git);
+  if (!observationOnly) {
+    // This module and its policy reader are loaded from the protected copy.
+    // Candidate control is inspected as immutable data, never required/executed.
+    const { nativeDispatchPolicy } = require("./consume-source-quality.js");
+    const policy = await nativeDispatchPolicy(options);
+    const actual = await dispatchControl(options.github, options.context.repo, source.commit.sha);
+    if (!isDeepStrictEqual(policy.records, actual.records.filter((row) => DISPATCH_CONTROL_PATHS.includes(row.path))) ||
+      actual.records.find((row) => row.path === DISPATCH_WORKFLOW).sha !== policy.callers[DISPATCH_WORKFLOW].at(-1)) {
+      throw new QualityEvidenceError("Unapproved candidate control cannot produce a native dispatch original");
+    }
+  }
+  if (source.event !== "pull_request" || !worker || worker.selected !== true ||
+    (!observationOnly && worker.controlApproved !== true) ||
+    !isDeepStrictEqual(worker.source, source)) {
+    throw new QualityEvidenceError("Dispatch original does not bind the pre-test execution worker");
+  }
+  assertDispatchProfile(worker.profile);
+  const jobs = await options.github.paginate(options.github.rest.actions.listJobsForWorkflowRun, {
+    ...options.context.repo, run_id: source.runId, filter: "all", per_page: 100,
+  });
+  const execution = assertDispatchJobs(jobs, source, false);
+  if (!isDeepStrictEqual(source, await captureNativeDispatchSource(options, git))) {
+    throw new QualityEvidenceError("Native dispatch source changed during collection");
+  }
+  return {
+    schemaVersion: 1, purpose: observationOnly ? "native-dispatch-observation" : "native-dispatch-original",
+    suiteId: "cli-dispatch",
+    source, profile: worker.profile, execution,
+  };
+}
+
 module.exports = {
   captureSource, captureFullSource, captureCurrentSelection, resolveHistoricalController, collectManifest,
   captureExecutionProfiles,
   planFullQuality,
   collectFullManifest,
+  DISPATCH_WORKFLOW, DISPATCH_CONTROL_PATHS, DISPATCH_JOB, DISPATCH_CALLER_BLOBS,
+  captureDispatchProfile, assertDispatchProfile, dispatchCommit, dispatchControl,
+  captureNativeDispatchSource, assertDispatchJobs, collectNativeDispatchOriginal,
+  nativeDispatchAssociationsMatch,
 };

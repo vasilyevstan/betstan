@@ -268,6 +268,79 @@ complete required check set, including OCI validation, rather than only its
 fastest aggregate. A cancelled or unbound run is not reusable quality evidence.
 Neither workflow source nor a green build proves restored runtime health.
 
+### Staged native dispatch originals
+
+Preparation only: dispatch reuse is inactive and the protected production caller remains unchanged.
+
+The bounded native-original candidate covers only CLI dispatch contracts, not
+rollback, provenance, application packages, Docker builds, or the deferred
+full-quality workflow. Its first stage keeps OCI consumption disabled and
+leaves the pinned production caller unchanged. Its already-required OCI run
+attempts optional publication of `native-dispatch-observation` under a
+`dispatch-observation-*` artifact name. Empirical ordinary-PR inline certificate
+and execution-profile qualification are required before preparation merges and
+before adoption. Observational
+capture/signing executes candidate control; these artifacts remain ineligible
+for reuse even after that control becomes protected. Observational mode always
+executes the dispatch assertions: execution decisions close before separate
+candidate observation capture, whose outputs cannot select out or reuse tests.
+There is no seeding workflow.
+
+The isolated scope job captures the current PR head/base/merge snapshot.
+Before candidate assertions, the dispatch worker captures its hosted Ubuntu 24
+image version, kernel, action-host Node digest, tool digests, installed-package
+inventory digest and locale. Unknown profiles and failed external probes have
+explicit reasons; programming errors are not silently converted to profiles.
+Selected dispatch assertions run through the existing runner with
+`BETSTAN_CI_FULL=1`, including nested selection. In adoption, a clean inline signer reconstructs
+actual execution from native first-attempt jobs and steps, not a candidate
+success manifest. In adoption, the signer loads only a separately copied
+protected helper, then verifies candidate control as immutable data before
+constructing an original. Unknown/mismatched control cannot load a candidate
+helper under signing authority. Selected-out and reused jobs cannot publish originals.
+
+Publication is optional: its job has `continue-on-error: true`, is outside the
+required aggregate, and reports `PUBLISHED` only after successful raw collect,
+attest and upload outcomes. Otherwise it reports `UNAVAILABLE`. Successful
+computation without a published proof remains valid computation, not reuse
+authority. A verifier requires native successful publication as well as a
+valid attestation.
+
+The adoption reader executes from protected control before candidate tests.
+For master pushes, it is copied from the platform push-before commit, bound to
+the current protected master, native push run and immutable first-parent
+relationship, before checking out the new source. A changed candidate helper
+cannot approve itself; helper/control mismatch requires ordinary computation.
+It independently retrieves certified OCI workflow and helper/runner/selector
+objects and compares them with protected approval. Candidate test inputs may
+differ from protected infrastructure. Reuse instead requires identical
+**complete tested Git trees**, matching resolved execution profiles and approved
+control, with fresh current-source checks around acceptance. Unapproved
+candidate control cannot execute ahead of the protected reader or seed an
+adoption original. Missing, malformed, expired, failed, retried, selected-out,
+self, substituted or copy-chain evidence leaves ordinary computation selected.
+Promotion and master refer directly to the original execution, never claim an
+old computation ran at the new SHA, and retain existing required native checks.
+
+Optional native-proof control approval is distinct from the mandatory one-use
+production-caller authorization; it is not a global OCI publisher pin or a
+bootstrap receipt. Publisher identity, ownership, freshness, serialization and
+consumed-declaration rules remain unchanged.
+
+Ordinary-PR inline certificate and execution-profile qualification remain
+mandatory both before preparation merges and before adoption.
+The provisional supported identity is an inline signer in `oci-validate.yml`
+whose certified caller, signer and source digests identify the merge commit;
+Actions REST `head_sha` identifies the feature head and is checked separately
+against the merge parents. Actions may return no PR associations after a run
+integrates: capture uses the platform PR context and live snapshot; historical
+verification uses the certified pull ref/run invocation and immutable merge
+parents, never a moving merge ref. Nonempty optional associations must not
+contradict these identities. This metadata compatibility does not qualify old
+unsigned runs. A different native certificate shape is an explicit
+miss, not permission to substitute a moving ref or REST head. Synthetic tests
+do not establish this identity or native timing acceptance.
+
 ### Actions runtime and compatible pins
 
 JavaScript actions use an action-host Node runtime, separate from the Node

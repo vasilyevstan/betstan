@@ -6,7 +6,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { execFileSync } = require("node:child_process");
-const { verifyQualityManifest, verifyHistoricalQualityManifest, readQualityArtifact } = require("./quality-attestation.js");
+const {
+  verifyQualityManifest, verifyHistoricalQualityManifest, readQualityArtifact, verifyNativeDispatchManifest,
+} = require("./quality-attestation.js");
 const { QualityEvidenceError } = require("./pr-source-snapshot.js");
 
 function fixture() {
@@ -248,6 +250,48 @@ function testArtifactDownload() {
     assert.equal(fs.existsSync(path.dirname(filename)), false);
   }
 }
+
+function testNativeDispatchCertificate() {
+  function nativeFixture() {
+    const value = fixture();
+    value.input.expected.attempt = 1;
+    value.input.expected.event = "pull_request";
+    value.input.expected.validator = { workflowPath: ".github/workflows/oci-validate.yml" };
+    const uri = "https://github.com/example/repo/.github/workflows/oci-validate.yml@refs/pull/63/merge";
+    Object.assign(value.certificate, {
+      subjectAlternativeName: uri, buildSignerURI: uri, buildConfigURI: uri,
+      sourceRepositoryRef: "refs/pull/63/merge", buildTrigger: "pull_request",
+      runInvocationURI: "https://github.com/example/repo/actions/runs/102/attempts/1",
+    });
+    return value;
+  }
+  const valid = nativeFixture();
+  const verified = verifyNativeDispatchManifest(valid.input, () => JSON.stringify([valid.result]));
+  assert.equal(verified.sourceSha, valid.certificate.sourceRepositoryDigest);
+  assert.equal(verified.callerSha, verified.sourceSha);
+  assert.equal(verified.signerSha, verified.sourceSha);
+  assert.throws(() => verifyNativeDispatchManifest(valid.input, () => { throw new TypeError("native verifier bug"); }), TypeError);
+  assert.throws(() => verifyQualityManifest(valid.input, () => JSON.stringify([valid.result])));
+  for (const mutate of [
+    (value) => { value.certificate.buildSignerURI = value.certificate.buildSignerURI.replace("oci-validate", "reusable-signer"); },
+    (value) => { value.certificate.buildConfigDigest = "2".repeat(40); },
+    (value) => { value.certificate.sourceRepositoryDigest = "2".repeat(40); },
+    (value) => { value.certificate.sourceRepositoryRef = "refs/heads/dev"; },
+    (value) => { value.certificate.runnerEnvironment = "self-hosted"; },
+    (value) => { value.certificate.runInvocationURI += "/other"; },
+    (value) => { value.input.expected.attempt = 2; },
+    (value) => { value.input.expected.validator.workflowPath = ".github/workflows/source-quality.yml"; },
+    (value) => { value.input.expected.event = "pull_request_target"; },
+    (value) => { value.result.verificationResult.statement.subject[0].digest.sha256 = "0".repeat(64); },
+  ]) {
+    const invalid = nativeFixture();
+    mutate(invalid);
+    assert.throws(() => verifyNativeDispatchManifest(invalid.input, () => JSON.stringify([invalid.result])));
+  }
+  assert.throws(() => verifyNativeDispatchManifest(fixture().input, () => JSON.stringify([fixture().result])));
+  console.log("native_dispatch_certificate_shape_tests=PASS (synthetic; not native qualification)");
+}
+testNativeDispatchCertificate();
 
 if (require.main === module) {
   testHistoricalQualityAttestation().catch((error) => {
