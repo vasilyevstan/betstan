@@ -5588,7 +5588,7 @@ async function main() {
       receiptSha: "a1b9ec456eb2241f85294f0d3963d5fdfaebe827",
     },
   ];
-  const nativeDispatchWorkflowAuthorizations = [
+  const retiredNativeDispatchWorkflowAuthorizations = [
     {
       id: "native-dispatch-production-build-source-20261105-v1",
       repository: "vasilyevstan/betstan",
@@ -5618,16 +5618,19 @@ async function main() {
       receiptSha: "d007b67d1206034b61ccb6cc7063d9ac3f00bacb",
     },
   ];
-  assert.deepEqual(publishPrPolicy.trustedWorkflowBlobAuthorizations, nativeDispatchWorkflowAuthorizations);
-  for (const authorization of nativeDispatchWorkflowAuthorizations) {
+  assert.deepEqual(publishPrPolicy.trustedWorkflowBlobAuthorizations, []);
+  for (const authorization of retiredNativeDispatchWorkflowAuthorizations) {
     const lookup = {
-      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+      authorizations: retiredNativeDispatchWorkflowAuthorizations,
       repository: authorization.repository, workflowPath: authorization.workflowPath,
       trustedBlob: authorization.trustedBlob, authorizedBlob: authorization.authorizedBlob,
       pull: { number: 999, state: "open", headRepository: authorization.headRepository,
         headRef: authorization.headRef, baseRef: authorization.baseRef },
       now: "2026-11-05T11:33:00.000Z",
     };
+    assert.equal(publishPrPolicy.findWorkflowAuthorization({
+      ...lookup, authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+    }), null, "adoption must retain no live production-caller authorization");
     assert.deepEqual(publishPrPolicy.findWorkflowAuthorization(lookup), authorization);
     for (const mismatch of [
       { authorizedBlob: "0".repeat(40) }, { trustedBlob: "0".repeat(40) },

@@ -32,25 +32,26 @@ execution or activation evidence.
 [[Quality Gates]] owns these implementation details and remaining proof
 requirements.
 
-The dispatch-only native-original candidate has a separate, two-stage rollout:
+The dispatch-only native-original path has a separate, two-stage rollout.
+Preparation is protected; the adoption candidate enables the guarded reader and
+optional original producer, without establishing successful reuse or timing
+acceptance.
 
-Preparation only: dispatch reuse is inactive and the protected production caller remains unchanged.
-
-1. Protect the compatible helpers, optional OCI producer with consumption
-   **disabled**, and workflow-contract fixtures accepting both the existing
-   production caller and the exact proposed caller. Keep the existing
-   production workflow bytes. This preparation includes canonical one-use
+1. Preparation protected the compatible helpers, optional OCI producer with
+   consumption **disabled**, and workflow-contract fixtures accepting both the
+   existing production caller and the exact proposed caller. It retained the
+   existing production workflow bytes and registered canonical one-use
    declarations for `ci/native-dispatch-adoption` → `dev` and `dev` → `master`,
    binding the exact future production caller with separate IDs and the
-   current protected-master receipt anchor. The ordinary preparation PR run
-   attempts optional observational publication. Empirical ordinary-PR inline
-   certificate and execution-profile qualification are required
-   **before merging preparation and before adoption**. Neither observations nor unsigned historical
+   protected-master receipt anchor. Empirical ordinary-PR inline certificate
+   and execution-profile qualification is a prerequisite to adoption, not proof
+   of eligible-original publication or enabled-reader behavior. Neither
+   observations nor unsigned historical
    successes can become approved originals retroactively.
-2. Only after that qualification, adopt the exact approved OCI consumption
-   variant and production caller on the declared adoption branch. Remove the
-   declarations and update their configuration fixture in that candidate before
-   its first required run; the protected preparation publisher retains the
+2. The adoption candidate uses the exact approved OCI consumption variant and
+   production caller on the declared adoption branch. Candidate declarations
+   and their configuration fixture entries are removed before its first required
+   run; the protected preparation publisher retains the
    declarations while both authorized PRs validate. Keep proof helpers and the wrapper
    unchanged so the publisher's wrapper-equality check remains meaningful.
    Include required declaration cleanup in the final tested tree: any later
@@ -73,8 +74,9 @@ head/merge freshness and production serialization remain unchanged. Adoption
 must use the existing one-use bootstrap and consumed-declaration cleanup.
 No third authorization-preparation promotion is needed. The disabled
 `source-quality.yml` and its `pull_request_target` path remain
-disabled. Native ordinary-PR identity, optional-publication failure behavior,
-promotion/master reuse and timing targets still need real-run evidence;
+disabled. First eligible original publication, enabled-reader missing-proof and
+optional-publication failure behavior, and direct promotion/master reuse still
+require real-run acceptance. Overall flow and timing acceptance remain incomplete;
 local proof fixtures do not authorize deployment or restoration.
 
 The initial compatibility landing retained the old trusted workflow. The
