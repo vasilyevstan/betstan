@@ -242,12 +242,100 @@ jobs:
     if: needs.change-scope.outputs.deployment_safety != 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
 
     steps:
+      - name: Bind previous protected dispatch control
+        id: dispatch-control
+        if: github.event_name == 'push'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const before = context.payload.before;
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            const unavailable = () => core.warning('Previous protected dispatch control unavailable; ordinary computation required');
+            if (context.eventName !== 'push' || context.ref !== 'refs/heads/master' ||
+                context.payload.ref !== context.ref || context.payload.after !== context.sha ||
+                context.payload.forced !== false || context.payload.deleted !== false ||
+                context.payload.repository?.full_name !== repository ||
+                Number(process.env.GITHUB_RUN_ATTEMPT) !== 1 ||
+                !/^[0-9a-f]{40}$/.test(before ?? '') || /^0+$/.test(before)) {
+              unavailable();
+              return;
+            }
+            try {
+              const [{ data: branch }, { data: commit }, { data: run }] = await Promise.all([
+                github.rest.repos.getBranch({ ...context.repo, branch: 'master' }),
+                github.rest.git.getCommit({ ...context.repo, commit_sha: context.sha }),
+                github.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId }),
+              ]);
+              if (branch.protected !== true || branch.commit?.sha !== context.sha ||
+                  commit.sha !== context.sha || commit.parents?.[0]?.sha !== before ||
+                  run.id !== context.runId || run.run_attempt !== 1 || run.event !== 'push' ||
+                  run.path !== '.github/workflows/production-build.yml' || run.head_sha !== context.sha ||
+                  run.repository?.full_name !== repository ||
+                  run.repository?.id !== context.payload.repository.id) {
+                unavailable();
+                return;
+              }
+              core.setOutput('sha', before);
+            } catch (error) {
+              if (![403, 404, 410, 429, 500, 502, 503, 504].includes(error?.status)) throw error;
+              unavailable();
+            }
+
+      - name: Checkout previous protected dispatch control
+        id: dispatch-control-checkout
+        if: steps.dispatch-control.outputs.sha != ''
+        continue-on-error: true
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ steps.dispatch-control.outputs.sha }}
+          persist-credentials: false
+
+      - name: Preserve previous protected dispatch control
+        id: dispatch-control-copy
+        if: steps.dispatch-control-checkout.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir "$RUNNER_TEMP/dispatch-control"
+          cp .github/scripts/{source-quality,consume-source-quality,quality-attestation,pr-source-snapshot,source-input-selection}.js \
+            "$RUNNER_TEMP/dispatch-control/"
+
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      - name: Verify direct native dispatch original
+        id: dispatch-original
+        if: github.event_name == 'push' && steps.dispatch-control-copy.outcome == 'success'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const prefix = `${process.env.RUNNER_TEMP}/dispatch-control`;
+            const { captureDispatchProfile } = require(`${prefix}/source-quality.js`);
+            const { selectNativeDispatchOriginal } = require(`${prefix}/consume-source-quality.js`);
+            if (typeof captureDispatchProfile !== 'function' || typeof selectNativeDispatchOriginal !== 'function') {
+              core.warning('Previous protected dispatch profile unavailable; ordinary computation required');
+              return;
+            }
+            const result = await selectNativeDispatchOriginal({
+              github, context, attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            }, captureDispatchProfile());
+            core.info(JSON.stringify(result));
+            core.setOutput('kind', result.kind);
+
+      - name: Report unavailable protected dispatch control
+        if: github.event_name == 'push' && steps.dispatch-control-copy.outcome != 'success'
+        run: echo 'dispatch_original=UNAVAILABLE (previous protected control unavailable; ordinary computation required)'
+
       - name: Validate deployment safety workflow contract
+        env:
+          BETSTAN_NATIVE_DISPATCH_REUSED: ${{ steps.dispatch-original.outputs.kind == 'REUSED' && '1' || '0' }}
         run: |
           bash -n infra/azure/agents/test-deployment-safety-ci-stan.sh
           ./infra/azure/agents/test-deployment-safety-ci-stan.sh
