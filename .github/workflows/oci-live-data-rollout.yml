@@ -1378,8 +1378,6 @@ jobs:
                   -n "oci-live-data-rollout-${previous_holder_run}-1" -D "$prior_dir"
                 [ -z "$(find "$prior_dir" -type l -print -quit)" ]
                 (cd "$prior_dir" && sha256sum --quiet --check SHA256SUMS)
-                # Bind the holder to the resolved original root; the prerequisite
-                # may itself be a resume of that root.
                 for entry in schema_version=live-betting-data-resume-v2 \
                   "applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID" \
                   "applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA" \
