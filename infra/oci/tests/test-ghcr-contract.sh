@@ -890,29 +890,73 @@ grep -Fq 'types: [opened, synchronize, reopened]' \
   fail "OCI pull-request validation reruns on metadata edits"
 ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" <<'RUBY'
 workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
-jobs = workflow.fetch("jobs")
-scope = jobs.fetch("scope")
-abort "oci-validate scope output is missing" unless
-  scope.dig("outputs", "mode") == "${{ steps.scope.outputs.mode }}"
-full = jobs.fetch("full-contracts")
-abort "OCI full contracts require a bounded 40-minute shard limit" unless
-  full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 40
-abort "OCI full contracts must retain every shard result" unless
-  full.dig("strategy", "fail-fast") == false
-shards = full.dig("strategy", "matrix", "shard")
-abort "OCI full contract shards are incomplete" unless
-  shards == %w[core live provenance rollback governance dispatch]
-aggregate = jobs.fetch("offline-contract")
-abort "required OCI aggregate check changed identity" unless
-  aggregate["name"] == "oci-validate"
-abort "required OCI aggregate must run after skipped or failed shards" unless
-  aggregate["if"] == "always()"
-required_needs = %w[scope syntax focused-contracts full-contracts]
-abort "required OCI aggregate dependencies are incomplete" unless
-  aggregate["needs"] == required_needs
-aggregate_steps = aggregate.fetch("steps").map { |step| step["name"] }.compact
-abort "required OCI aggregate step is missing" unless
-  aggregate_steps.include?("Aggregate OCI validation")
+def validate_full_contracts(workflow)
+  jobs = workflow.fetch("jobs")
+  scope = jobs.fetch("scope")
+  raise "oci-validate scope output is missing" unless
+    scope.dig("outputs", "mode") == "${{ steps.scope.outputs.mode }}"
+  full = jobs.fetch("full-contracts")
+  raise "OCI full contracts require a bounded 40-minute shard limit" unless
+    full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 40
+  raise "OCI full contracts must retain every shard result" unless
+    full.dig("strategy", "fail-fast") == false
+  raise "OCI full contract shards are incomplete" unless
+    full.dig("strategy", "matrix", "shard") == %w[core live provenance rollback governance]
+  dispatch = jobs["dispatch-contracts"]
+  raise "OCI full dispatch job is missing" unless dispatch.is_a?(Hash)
+  raise "OCI full dispatch job must remain mandatory" unless
+    dispatch["name"] == "oci-full-contracts (dispatch)" &&
+    Array(dispatch["needs"]) == ["scope"] &&
+    dispatch["if"] == "needs.scope.outputs.mode == 'full'" &&
+    dispatch["timeout-minutes"] == 40 &&
+    [nil, false].include?(dispatch["continue-on-error"])
+  execute = Array(dispatch["steps"]).find { |step| step["id"] == "execute" }
+  raise "OCI full dispatch assertions have no execution owner" unless
+    execute && execute["run"] == "./infra/oci/tests/run-contracts.sh" &&
+    execute.dig("env", "BETSTAN_CONTRACT_SHARD") == "dispatch" &&
+    execute.dig("env", "BETSTAN_CI_FULL") == "1" &&
+    [nil, false].include?(execute["continue-on-error"])
+  aggregate = jobs.fetch("offline-contract")
+  raise "required OCI aggregate check changed identity" unless
+    aggregate["name"] == "oci-validate"
+  raise "required OCI aggregate must run after skipped or failed shards" unless
+    aggregate["if"] == "always()"
+  required_needs = %w[scope syntax focused-contracts full-contracts dispatch-contracts]
+  raise "required OCI aggregate dependencies are incomplete" unless
+    aggregate["needs"] == required_needs
+  aggregate_step = aggregate.fetch("steps").find { |step| step["name"] == "Aggregate OCI validation" }
+  raise "required OCI aggregate step is missing" unless aggregate_step
+  raise "required OCI aggregate does not bind the dispatch result" unless
+    aggregate_step.dig("env", "DISPATCH_RESULT") == "${{ needs.dispatch-contracts.result }}"
+end
+
+validate_full_contracts(workflow)
+mutations = [
+  ["missing dispatch", "OCI full dispatch job is missing",
+   ->(jobs) { jobs.delete("dispatch-contracts") }],
+  ["missing matrix suite", "OCI full contract shards are incomplete",
+   ->(jobs) { jobs["full-contracts"]["strategy"]["matrix"]["shard"].delete("provenance") }],
+  ["optional dispatch", "OCI full dispatch job must remain mandatory",
+   ->(jobs) { jobs["dispatch-contracts"]["continue-on-error"] = true }],
+  ["wrong execution owner", "OCI full dispatch assertions have no execution owner",
+   ->(jobs) { jobs["dispatch-contracts"]["steps"].find { |step| step["id"] == "execute" }["env"]["BETSTAN_CONTRACT_SHARD"] = "core" }],
+  ["missing aggregate dependency", "required OCI aggregate dependencies are incomplete",
+   ->(jobs) { jobs["offline-contract"]["needs"].delete("dispatch-contracts") }],
+  ["forged dispatch success", "required OCI aggregate does not bind the dispatch result",
+   ->(jobs) { jobs["offline-contract"]["steps"].find { |step| step["name"] == "Aggregate OCI validation" }["env"]["DISPATCH_RESULT"] = "success" }],
+]
+mutations.each do |name, expected, mutate|
+  changed = Marshal.load(Marshal.dump(workflow))
+  mutate.call(changed.fetch("jobs"))
+  begin
+    validate_full_contracts(changed)
+  rescue RuntimeError => error
+    abort "#{name} failed for the wrong reason: #{error.message}" unless error.message == expected
+    next
+  end
+  abort "OCI full-contract guard accepts #{name}"
+end
+puts "oci_full_contract_ownership=PASS mutations=#{mutations.length}"
 RUBY
 aggregate_script="$WORK_DIR/aggregate-oci-validation.sh"
 ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" >"$aggregate_script" <<'RUBY'
@@ -928,12 +972,14 @@ assert_oci_aggregate_passes() {
   local syntax="$2"
   local focused="$3"
   local full="$4"
+  local dispatch="$5"
   env \
     MODE="$mode" \
     SCOPE_RESULT=success \
     SYNTAX_RESULT="$syntax" \
     FOCUSED_RESULT="$focused" \
     FULL_RESULT="$full" \
+    DISPATCH_RESULT="$dispatch" \
     bash "$aggregate_script" >/dev/null ||
     fail "OCI aggregate rejects valid $mode results"
 }
@@ -943,21 +989,28 @@ assert_oci_aggregate_fails() {
   local syntax="$3"
   local focused="$4"
   local full="$5"
+  local dispatch="$6"
   if env \
     MODE="$mode" \
     SCOPE_RESULT="$scope" \
     SYNTAX_RESULT="$syntax" \
     FOCUSED_RESULT="$focused" \
     FULL_RESULT="$full" \
+    DISPATCH_RESULT="$dispatch" \
     bash "$aggregate_script" >/dev/null 2>&1; then
     fail "OCI aggregate accepts invalid $mode results"
   fi
 }
-assert_oci_aggregate_passes none skipped skipped skipped
-assert_oci_aggregate_passes focused success success skipped
-assert_oci_aggregate_passes full success skipped success
-assert_oci_aggregate_fails full success success skipped failure
-assert_oci_aggregate_fails full failure success skipped success
+assert_oci_aggregate_passes none skipped skipped skipped skipped
+assert_oci_aggregate_passes focused success success skipped skipped
+assert_oci_aggregate_passes full success skipped success success
+assert_oci_aggregate_fails full success success skipped failure success
+assert_oci_aggregate_fails full failure success skipped success success
+for dispatch_result in failure cancelled skipped neutral ""; do
+  assert_oci_aggregate_fails full success success skipped success "$dispatch_result"
+done
+assert_oci_aggregate_fails none success skipped skipped skipped success
+assert_oci_aggregate_fails focused success success success skipped success
 selector_script="$WORK_DIR/select-oci-scope.sh"
 ruby -ryaml - "$ROOT_DIR/.github/workflows/oci-validate.yml" >"$selector_script" <<'RUBY'
 workflow = YAML.load_stream(File.read(ARGV.fetch(0))).first
