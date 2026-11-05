@@ -773,6 +773,34 @@ async function testNativeDispatchOriginals() {
   assert.equal(jobs["dispatch-original"].steps.find((step) => step.id === "attest").if, "steps.collect.outcome == 'success'");
   assert.ok(!jobs["offline-contract"].needs.includes("dispatch-original"));
   assert.ok(jobs["dispatch-original"].needs.includes("offline-contract"));
+  const publisherCondition = jobs["dispatch-original"].if;
+  assert.match(publisherCondition, /^\$\{\{\s*!cancelled\(\)/,
+    "publication needs an explicit status function, not implicit success() across skipped ancestors");
+  // This checks the actual predicate, not GitHub's scheduler or implicit success().
+  const publisherAllowed = new Function("needs", "cancelled", `return (${publisherCondition.slice(3, -2)
+    .replaceAll("needs.offline-contract", "needs['offline-contract']")
+    .replaceAll("needs.dispatch-contracts", "needs['dispatch-contracts']")});`);
+  const fullGraph = {
+    scope: { result: "success" }, syntax: { result: "success" },
+    "focused-contracts": { result: "skipped" }, "full-contracts": { result: "success" },
+    "dispatch-contracts": { result: "success", outputs: { execution_kind: "EXECUTED" } },
+    "offline-contract": { result: "success" },
+  };
+  const publisherNeeds = Object.fromEntries(jobs["dispatch-original"].needs.map((id) => [id, fullGraph[id]]));
+  assert.ok(jobs["offline-contract"].needs.includes("focused-contracts"));
+  assert.equal(publisherAllowed(publisherNeeds, () => false), true,
+    "the full graph with its intentionally skipped focused ancestor remains eligible");
+  assert.equal(publisherAllowed(publisherNeeds, () => true), false, "workflow cancellation stops publication");
+  for (const result of ["failure", "cancelled", "skipped", ""]) {
+    const needs = structuredClone(publisherNeeds);
+    needs["offline-contract"].result = result;
+    assert.equal(publisherAllowed(needs, () => false), false, `aggregate ${result} cannot publish`);
+  }
+  for (const kind of ["REUSED", "SELECTED_OUT", "UNAVAILABLE", ""]) {
+    const needs = structuredClone(publisherNeeds);
+    needs["dispatch-contracts"].outputs.execution_kind = kind;
+    assert.equal(publisherAllowed(needs, () => false), false, `${kind} is not executed original evidence`);
+  }
   assert.deepEqual(jobs["dispatch-original"].permissions,
     { contents: "read", actions: "read", attestations: "write", "id-token": "write" });
   assert.deepEqual(jobs["dispatch-contracts"].permissions, { contents: "read", actions: "read", attestations: "read" });

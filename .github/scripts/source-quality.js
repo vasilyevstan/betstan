@@ -473,8 +473,8 @@ const DISPATCH_JOB = "oci-full-contracts (dispatch)";
 // Caller adoption is separate and requires an observed ordinary-PR certificate.
 const DISPATCH_CALLER_BLOBS = Object.freeze({
   ".github/workflows/oci-validate.yml": [
-    "a9412b0b48395ab546d395b07dde06fff2b63244",
-    "4e743c8ba49e7af72912b00dbd79d887f46c0bb4",
+    "0795b8a7efb191d4dae78850844e0612d4f41d56",
+    "7bbe29e2bebd4b2054c27824c07d63dc33d366ca",
   ],
   ".github/workflows/production-build.yml": ["8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"],
 });

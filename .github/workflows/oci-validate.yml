@@ -343,7 +343,7 @@ jobs:
   dispatch-original:
     name: oci-dispatch-original
     needs: [scope, dispatch-contracts, offline-contract]
-    if: needs.offline-contract.result == 'success' && needs.dispatch-contracts.outputs.execution_kind == 'EXECUTED'
+    if: ${{ !cancelled() && needs.offline-contract.result == 'success' && needs.dispatch-contracts.outputs.execution_kind == 'EXECUTED' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Optional publication cannot turn successful computation into a failed run.
