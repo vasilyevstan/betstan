@@ -46,24 +46,23 @@ cloud access or a live baseline.
 |---|---|
 | Service boundaries, dependencies, unresolved design | `betstan-architect` |
 | Unnecessary abstractions or scope | `betstan-simplifier` |
-| Process friction and a smaller continuation | `PerfettoStan` |
-| Parallel/external work needing observation or recovery | `betstan-conductor` |
 | Backend and `common/**` implementation | `betstan-backend-developer` |
 | Client implementation | `betstan-frontend-developer` |
-| Concrete correctness or concurrency review | `betstan-validation-critic` |
-| Focused executable verification | `betstan-test-engineer` |
-| Aggregate acceptance evidence with unresolved cross-domain risk | `betstan-final-validator` |
+| Concrete correctness, concurrency and focused executable verification | `betstan-test-engineer` |
 | UI consistency, accessibility, responsive or interaction risk | `betstan-ux-ui-expert` |
 | Public documentation and publication evidence | `betstan-public-wiki-editor` |
 | Shared contracts and mixed versions | `betstan-service-contract-reviewer` |
-| CI trust, coverage, reproducibility | `betstan-quality-gate-reviewer` |
-| Protected ancestry and approval policy | `betstan-branch-governance-reviewer` |
 | Auth, session, identity and authorization | `betstan-auth-security-reviewer` |
-| Deployment and rollback evidence | `betstan-deployment-safety` |
-| OCI runtime operations | `betstan-oci-operator` |
-| Independent OCI runtime health | `betstan-oci-health-reviewer` |
+| CI trust, coverage, protected ancestry, release and rollback | `betstan-deployment-safety` |
+| OCI runtime operations and read-only health | `betstan-oci-operator` |
 | Ingress and TLS | `betstan-domain-ingress` |
-| Mongo migration and recovery | `betstan-mongo-migration`, `betstan-migration-recovery` |
+| Shared-Mongo and cross-cloud migration/recovery | `betstan-mongo-migration` |
+
+The retained catalog has thirteen roles, including the optional model-neutral
+simplifier. There are no default specialist invocations. The main owner also
+owns coordination, process simplification and final acceptance reconciliation;
+those responsibilities do not require separate conductor or validator agents.
+OCI operator, domain/ingress and Mongo migration remain manual-only.
 
 Application developers edit only their assigned source/test/config paths and
 do not perform Git or deployment actions. Infrastructure and public-wiki
@@ -108,8 +107,8 @@ validators, not this document, determine which CI evidence can be reused.
 
 ## Coordination without a conveyor
 
-A single synchronous task stays with its owner. Use a conductor only when
-parallel, asynchronous, external, or mutating work needs a dedicated observer.
+A task stays with its accountable owner, including observation of parallel,
+asynchronous, external or mutating work. Use one active observer per wait.
 Use one concise current-state record, not a second ledger. Record the exact
 run/process reference, owner, bounded objective, dependencies, last real
 milestone, next checkpoint, stop condition and recovery action for active work.
@@ -123,10 +122,14 @@ Do not infer progress or completion from a watcher, top-level status, elapsed
 time, or tool-call count. After fifteen minutes without decisive progress,
 report the concrete blocker, collected evidence and smallest safe next action;
 continue authorized monitoring without unrelated make-work.
+If no required CI check has succeeded for thirty minutes, inspect the exact
+remaining jobs and report the execution/provider/gate blocker. That checkpoint
+does not authorize cancellation, a replacement writer or a new agent.
 
 Never replace an operation until its side effects are known and overlapping
-writers are excluded. Timeout, runner exit, or expired lease is not proof that
-a physical writer stopped. Retained locks/fences require the exact compatible
+writers are excluded. Timeout, runner exit or lease expiry is not proof that
+a writer stopped. Never edit live authority, consumed receipts or operational
+locks ad hoc. Retained locks/fences require the exact compatible
 recovery path. Current source acceptance is not runtime health evidence.
 Respect an explicit pause and retain containment and observation.
 
@@ -134,8 +137,8 @@ When an actual transfer is needed, send the existing result directly to the
 next owner with scope, source identity, evidence, unresolved findings and the
 next action. Corrections stay in the same task; neither an acknowledgement
 agent nor a recursive approval round is required. A process simplification
-recommendation may be applied directly by the owner; it does not require a
-PerfettoStan-to-simplifier-to-PerfettoStan continuation.
+recommendation may be applied directly by the owner without a separate
+continuation or acknowledgement review.
 
 ## Canonical policy sources
 
@@ -157,16 +160,14 @@ the bounded result, not a prescribed next agent or release permission:
 
 | Role | Results |
 |---|---|
-| Conductor | `ORCHESTRATION_HEALTHY`, `ATTENTION_REQUIRED`, `BLOCKED`, `ORCHESTRATION_COMPLETE` |
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
 | UX expert | `UX_SPEC_READY`, `UX_REVIEW_PASSED`, `UX_CHANGES_REQUIRED`, `UX_CLARIFICATION_NEEDED` |
 | Implementation | `IMPLEMENTED_LOCAL`, `BLOCKED` |
 | Wiki editor | `WIKI_UPDATE_READY`, `WIKI_NO_PUBLIC_CHANGE`, `WIKI_BLOCKED` |
 | Simplifier | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND`, `BLOCKED` |
 | Optional synthesis | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED`, `SIMPLIFICATION_INCOMPLETE` |
-| Critic | `DESIGN_REVIEW_PASSED`, `APPROVE_SLICE`, `CHANGES_REQUIRED` |
-| Test engineer | `SUPPORTING_EVIDENCE_READY`, `TESTS_GREEN`, `TESTS_FAILED`, `BLOCKED` |
-| Final validator | `READY_FOR_RELEASE_REVIEW`, `NO_GO` |
+| Test engineer | `SUPPORTING_EVIDENCE_READY`, `TESTS_GREEN`, `TESTS_FAILED`, `APPROVE_SLICE`, `CHANGES_REQUIRED`, `BLOCKED` |
+| Deployment safety | `SAFE_TO_REVIEW`, `SAFE_TO_MERGE_DEV`, `SAFE_TO_PROMOTE`, `DEPLOYED_HEALTHY`, `NO_GO` |
 
 Never turn absence of an optional role's token into a blocking gate. Preserve
 actual unresolved correctness, authorization, data, provenance and runtime

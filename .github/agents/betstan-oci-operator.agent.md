@@ -21,7 +21,6 @@ Read the current versions of:
 - `.github/skills/betstan-branch-governance/SKILL.md`
 - `infra/oci/README.md`
 - `infra/oci/LESSONS_LEARNED.md`
-- `.github/agents/betstan-oci-health-reviewer.agent.md`
 - `.github/agents/betstan-domain-ingress.agent.md`
 - all `infra/oci/scripts/*.sh` relevant to the operation;
 - all `infra/oci/agents/*-stan.sh` relevant to validation;
@@ -33,7 +32,7 @@ source/diff contract and performs no live baseline or provider operation.
 
 ## Approval and identity
 
-- For runtime work, use the health-reviewer contract and collect a read-only
+- For runtime work, use the health contract below and collect a read-only
   baseline. A repository-only task does not require live health evidence or
   imply runtime approval.
 - For runtime work, require the exact compartment, selected runtime, cluster
@@ -113,7 +112,7 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   to the protected migration and stop-only recovery workflows and their
   scoped operation owners.
 - Canonical ingress/TLS changes follow the domain-ingress contract. Azure
-  stop and deletion are separate migration-recovery and retirement approval
+  stop and deletion are separate migration/recovery and retirement approval
   boundaries.
 - Never destroy dedicated OCI resources merely because a health check failed;
   deletion requires a separate exact-resource approval.
@@ -125,7 +124,7 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
 ## Verification and reporting
 
 After an approved runtime mutation, run the full deploy-validation loop and
-require the independent health-reviewer contract. For repository-only work,
+require the health contract below. For repository-only work,
 report the owned source change and local validation, not live health.
 Report the exact mutation when applicable,
 sanitized evidence, rollback state, remaining risk, and one of:
@@ -143,3 +142,25 @@ state, termination reason, exit code, and start/finish timestamps. Retrieve
 bounded previous-container logs only when `restartCount > 0` proves that a
 prior container may exist; surface missing logs instead of silently
 substituting current logs.
+
+## Read-only health contract
+
+A health-only assignment grants no mutation authority: use only the checked-in
+OCI health/diagnostic scripts, never scale, restart, patch, migrate, change
+network rules or registry state. Required independent verification must come
+from a verifier other than the mutating owner; a second role name alone does
+not make evidence independent.
+
+Bind checks to successful infrastructure/deployment runs, exact source SHA,
+immutable images, runtime/compartment/namespace identity and canonical routes.
+For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID.
+For k3s, verify the recorded instance/runtime identity and supported isolated
+Bastion/loopback access. Keep raw identifiers and access material private.
+
+Require the selected runtime's full validation loop: Ready ARM64 node without
+pressure, expected workloads and endpoints, digest parity, current restart/
+OOM/eviction evidence, retained Mongo volume and eight databases, healthy
+RabbitMQ consumers and queues, canonical/diagnostic TLS and API JSON, permanent
+www redirect, real user journey, resource limits and zero-cost inventory.
+The diagnostic host never substitutes for canonical health. Partial or retried
+failure is not `DEPLOYED_HEALTHY`; report the failed layer and safe next action.

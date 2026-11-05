@@ -22,6 +22,7 @@ permissions: {}
 concurrency:
   group: trusted-branch-policy-publisher-${{ github.event.workflow_run.pull_requests[0].number && format('source-quality PR {0}', github.event.workflow_run.pull_requests[0].number) || github.event.workflow_run.display_title || format('source-quality PR {0}', github.event.pull_request.number || inputs.pr_number) }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   publish-current-pr-snapshot:

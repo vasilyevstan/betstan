@@ -34,13 +34,11 @@ this skill is its procedure, not another approval hierarchy.
   workflow inventory, data, flags, rollback and remaining work. Conditional
   fields stay present as `not applicable` when appropriate.
 - Title/body presentation and public-safe session/feature labels are
-  informational. Actual missing evidence remains blocking. The candidate merge
-  helper no longer rejects title wording, but not-yet-replaced protected
-  revisions retain their executable checks. The trusted-master-identical
-  `production-build.yml` still runs full legacy validation on
-  `pull_request.edited`; lightweight metadata-only validation is staged, not
-  active for this compatibility path. Actual protected triggers govern until
-  tested cutover; no remote cutover is implied.
+  informational. Actual missing evidence remains blocking. The lean
+  `production-build.yml` validates source transitions, not title/body edits.
+  V4 quality markers exclude metadata; legacy markers retain their original
+  freshness rules. Read the live protected publisher before relying on a
+  newly merged protocol. No documentation edit activates it.
 - No agent verdict bypasses immutable deployed identity, physical
   single-writer locks/fences, data integrity, compatible recovery or observed
   health. Explicit pauses still apply to otherwise automatic progression.

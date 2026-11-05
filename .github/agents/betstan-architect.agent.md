@@ -66,8 +66,7 @@ Never rely on a prior conversation, stale plan, or branch name as current truth.
 Defer:
 
 - service compatibility to `betstan-service-contract-reviewer`;
-- CI, coverage, and delivery gates to `betstan-quality-gate-reviewer`;
-- branch policy to `betstan-branch-governance-reviewer`;
+- CI, coverage, delivery gates and branch policy to `betstan-deployment-safety`;
 - auth vulnerabilities to `betstan-auth-security-reviewer`;
 - Mongo migration to `betstan-mongo-migration`;
 - deployment and rollback authority to `betstan-deployment-safety`;

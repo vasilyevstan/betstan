@@ -248,6 +248,15 @@ Dir[File.join(directory, "*.{yml,yaml}")].sort.each do |path|
   workflow = YAML.safe_load(File.read(path), aliases: false)
   next unless workflow.is_a?(Hash)
 
+  if File.basename(path) == "branch-policy.yml"
+    concurrency = workflow["concurrency"]
+    unless concurrency.is_a?(Hash) &&
+        concurrency["group"].is_a?(String) && !concurrency["group"].empty? &&
+        concurrency["cancel-in-progress"] == false && concurrency["queue"] == "max"
+      abort "branch-policy must serialize publishers without replacing pending transitions"
+    end
+  end
+
   workflow_permissions = workflow["permissions"]
   permission_sets = [workflow_permissions]
   jobs = workflow["jobs"]
@@ -299,7 +308,7 @@ require_literal "$policy_script" "pull.mergeSha" "unique PR merge snapshot statu
 require_literal "$policy_script" "? [pull.headSha, pull.mergeSha]" "promotion head and merge statuses"
 require_literal "$policy_script" "invalidatePublishedSnapshot" "stale-status invalidation"
 snapshot_check_count="$(
-  grep -Fc "await assertCurrentPullSnapshot(github, owner, repo, pull)" \
+  grep -Fc "await assertCurrentPullSnapshot(" \
     "$policy_script"
 )"
 [[ "$snapshot_check_count" -ge 2 ]] ||
