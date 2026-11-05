@@ -5086,13 +5086,44 @@ for before, after in (
      '          require_preflight activation "$ACTIVATION_OUTCOME" false'),
     ('          require_preflight disk "$DISK_OUTCOME" "$DISK_REQUIRED"',
      '          require_preflight disk "$DISK_OUTCOME" false'),
+    ('          if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then',
+     '          if true; then'),
+    ('          if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then',
+     '          if [ "$RESUME_PREFLIGHT_OUTCOME" != failure ]; then'),
+    ('RESUME_PREFLIGHT_OUTCOME: ${{ steps.resume_preflight.outcome }}',
+     'RESUME_PREFLIGHT_OUTCOME: ${{ steps.resume_preflight.conclusion }}'),
     *(
-        (f"steps.{name}_preflight.outcome", f"steps.{name}_preflight.conclusion")
+        (f"{name.upper()}_OUTCOME: ${{{{ steps.{name}_preflight.outcome }}}}",
+         f"{name.upper()}_OUTCOME: ${{{{ steps.{name}_preflight.conclusion }}}}")
         for name in ("resume", "baseline", "activation", "disk")
     ),
 ):
     assert current_workflow.count(before) == 1
     reject_preflight(current_workflow.replace(before, after))
+baseline_start = current_workflow.index(
+    "\n      - name: Capture and validate pre-mutation rollback baseline\n")
+baseline_end = current_workflow.index(
+    "\n      - name: Verify reader-qualified released activation state\n")
+baseline_step = current_workflow[baseline_start:baseline_end]
+for before, after in (
+    ("RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}",
+     "RESUME_MAINTENANCE_MODE: pre-runtime-hold"),
+    ("RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance_request.outputs.applied_data_run_id || steps.provenance.outputs.resume_applied_data_run_id }}",
+     "RESOLVED_APPLIED_DATA_RUN_ID: ${{ inputs.prerequisite_run_id }}"),
+    ("RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance_request.outputs.applied_source_sha || steps.provenance.outputs.resume_applied_source_sha }}",
+     "RESOLVED_APPLIED_SOURCE_SHA: ${{ github.sha }}"),
+    ("applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID",
+     "applied_data_run_id=$PREREQUISITE_RUN_ID"),
+    ("applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA", "applied_source_sha=$SOURCE_SHA"),
+    ("resume_schema=live-betting-data-resume-v5", "resume_schema=live-betting-data-resume-v2"),
+    ("held_handoff_evidence_sha256=%s", "unverified_handoff_evidence_sha256=%s"),
+    ("runtime_images_sha256=$(sha256sum \"$resume_images\"",
+     "runtime_images_sha256=$(sha256sum artifacts/oci-live-data-rollout/images.tsv"),
+):
+    assert baseline_step.count(before) == 1
+    reject_preflight(current_workflow.replace(
+        baseline_step, baseline_step.replace(before, after),
+    ))
 held_fence = (
     '            pre-runtime-hold|retained-hold)\n'
     '              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held\n'
@@ -6134,7 +6165,17 @@ blob = subprocess.check_output([
     "git", "-C", sys.argv[2], "show",
     f"{source}:.github/workflows/oci-production-deploy.yml",
 ])
-names = re.findall(r"(?m)^      - name: (.+)$", blob.decode().split("\n  public-validate:\n")[0])
+deployment_workflow = blob.decode()
+declared_jobs = re.findall(
+    r"(?m)^  ([a-z][a-z-]*):$", deployment_workflow.partition("\njobs:\n")[2],
+)
+assert declared_jobs in (
+    ["deploy", "public-validate"], ["resolve", "deploy", "public-validate"],
+)
+names = re.findall(
+    r"(?m)^      - name: (.+)$",
+    deployment_workflow.partition("\n  deploy:\n")[2].partition("\n  public-validate:\n")[0],
+)
 boundary = names.index("Verify immutable image and infrastructure provenance")
 steps = [{
     "name": name, "number": index + 2, "status": "completed",
@@ -6151,6 +6192,18 @@ original = [
     {"id": 1234, "run_id": 77, "name": "deploy", "status": "completed", "conclusion": "failure", "steps": steps},
     {"id": 1235, "run_id": 77, "name": "public-validate", "status": "completed", "conclusion": "skipped", "steps": []},
 ]
+resolver_names = re.findall(
+    r"(?m)^      - name: (.+)$",
+    deployment_workflow.partition("\n  resolve:\n")[2].partition("\n  deploy:\n")[0],
+)
+resolver_job = {
+    "id": 1233, "run_id": 77, "name": "resolve", "status": "completed", "conclusion": "success",
+    "steps": [{
+        "name": name, "number": index + 1, "status": "completed", "conclusion": "success",
+    } for index, name in enumerate(resolver_names or ["Resolve final data handoff"])],
+}
+if "resolve" in declared_jobs:
+    original.append(resolver_job)
 jobs = copy.deepcopy(original)
 artifacts = []
 m.jobs_for_run = lambda *_: jobs
@@ -6168,6 +6221,12 @@ def reject(call):
             return
     raise AssertionError("invalid pre-runtime evidence accepted")
 assert validate() == ("skipped", "skipped", "skipped")
+if "resolve" in declared_jobs:
+    jobs = [copy.deepcopy(job) for job in original if job["name"] != "resolve"]
+    reject(validate)
+jobs = copy.deepcopy(original) + [copy.deepcopy(resolver_job)]
+reject(validate)
+jobs = copy.deepcopy(original)
 for name in names[boundary + 1:]:
     if name in {"Remove isolated OCI client state", "Upload sanitized live readiness evidence"}:
         continue
@@ -6535,32 +6594,41 @@ current_skipped = held_skipped | {
     "Remove isolated incident OCI client state",
 }
 current_start = m.dt.datetime(2026, 10, 7, 9, 9, tzinfo=m.dt.timezone.utc)
-current_steps = []
-for index, name in enumerate([
-    "Set up job", *current_names, "Post Checkout approved current master commit", "Complete job",
-]):
-    began = current_start + m.dt.timedelta(seconds=2 * index)
-    current_steps.append(dict(
-        name=name, number=index + 1, status="completed",
-        conclusion="skipped" if name in current_skipped else "success",
-        started_at=began.isoformat(), completed_at=(began + m.dt.timedelta(seconds=1)).isoformat(),
-    ))
-current_steps[-2]["number"] = 2 * (len(current_names) + 1)
-current_steps[-1]["number"] = current_steps[-2]["number"] + 1
-current_job = dict(held_original[0], steps=current_steps,
-                  started_at=current_start.isoformat(), completed_at="2026-10-07T09:12:00Z")
+def current_producer_job(workflow):
+    names = re.findall(r"(?m)^      - name: (.+)$", workflow)
+    steps = []
+    for index, name in enumerate([
+        "Set up job", *names, "Post Checkout approved current master commit", "Complete job",
+    ]):
+        began = current_start + m.dt.timedelta(seconds=2 * index)
+        steps.append(dict(
+            name=name, number=index + 1, status="completed",
+            conclusion="skipped" if name in current_skipped else "success",
+            started_at=began.isoformat(), completed_at=(began + m.dt.timedelta(seconds=1)).isoformat(),
+        ))
+    steps[-2]["number"] = 2 * (len(names) + 1)
+    steps[-1]["number"] = steps[-2]["number"] + 1
+    return dict(held_original[0], steps=steps,
+                started_at=current_start.isoformat(), completed_at="2026-10-07T09:12:00Z")
+current_job = current_producer_job(current_workflow)
+current_steps = current_job["steps"]
 current_metadata = dict(held_metadata, updated_at="2026-10-07T09:12:01Z")
 renewal_step = next(step for step in current_steps
                     if step["name"] == "Restore runtime or verify final deploy handoff")
 renewal_epoch = int(m.parse_timestamp(renewal_step["started_at"], "fixture").timestamp())
-def renewal_log(deadline=renewal_epoch + 1800, generation=12):
-    timestamp = renewal_step["started_at"].replace("+00:00", "Z")
+def renewal_log(deadline=None, generation=12, *, job=None):
+    step = next(step for step in (current_job if job is None else job)["steps"]
+                if step["name"] == "Restore runtime or verify final deploy handoff")
+    epoch = int(m.parse_timestamp(step["started_at"], "fixture").timestamp())
+    if deadline is None:
+        deadline = epoch + 1800
+    timestamp = step["started_at"].replace("+00:00", "Z")
     output = [
         "##[group]Run shell",
         "echo shared_mongo_lock=renew status=PASS lease_until_epoch=9999999999 fencing_generation=999",
         "##[endgroup]",
         "live_data_maintenance=verify-held status=PASS http_mutation_fence=true writers_quiesced=true",
-        f"shared_mongo_lock=verify status=PASS lease_until_epoch={renewal_epoch + 14400} fencing_generation=11",
+        f"shared_mongo_lock=verify status=PASS lease_until_epoch={epoch + 14400} fencing_generation=11",
         f"shared_mongo_lock=renew status=PASS lease_until_epoch={deadline} fencing_generation={generation}",
     ]
     return log_archive("\n".join(f"{timestamp} {line}" for line in output).encode(), ("0_rollout.txt",))
@@ -6593,14 +6661,23 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
     modern_workflow = (m.Path(sys.argv[2]) / ".github/workflows/oci-live-data-rollout.yml").read_text()
     assert re.findall(r"(?m)^      - name: (.+)$", current_workflow) == current_names
     v4_profile_workflow = m.current_reader_workflow_v5(
-        current_workflow, "fixture", inverse=True,
+        modern_workflow, "fixture", inverse=True,
     )
     legacy_profile_workflow = v4_profile_workflow.replace(
         m.HANDOFF_V4_LEASE_EXPRESSION, '"1800"').replace(
         "resume_schema=live-betting-data-resume-v4", "resume_schema=live-betting-data-resume-v3")
-    for executed_workflow in (
-        legacy_profile_workflow, v4_profile_workflow, current_workflow,
-    ):
+    for executed_workflow in dict.fromkeys((
+        legacy_profile_workflow, v4_profile_workflow, current_workflow, modern_workflow,
+    )):
+        profile_job = current_producer_job(executed_workflow)
+        profile_renewal = next(step for step in profile_job["steps"]
+                               if step["name"] == "Restore runtime or verify final deploy handoff")
+        profile_epoch = int(m.parse_timestamp(profile_renewal["started_at"], "fixture").timestamp())
+        if [step["name"] for step in profile_job["steps"]] != [
+            step["name"] for step in current_steps
+        ]:
+            with patch.object(m, "current_held_source", return_value=executed_workflow):
+                reject(held_native)
         for continuation in (False, True):
             native = dict(values)
             if continuation:
@@ -6617,17 +6694,19 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
                 "live-betting-data-resume-v5": 7200,
             }[expected_schema]
             with patch.object(m, "current_held_source", return_value=executed_workflow), \
+                    patch.object(m, "jobs_for_run", return_value=[profile_job]), \
                     patch.object(m, "failed_deploy_native_inputs", return_value=native):
                 for observed_duration in (1800, 3600, 7200):
                     with patch.object(m, "gh_api_bytes",
-                                      return_value=renewal_log(renewal_epoch + observed_duration)):
+                                      return_value=renewal_log(
+                                          profile_epoch + observed_duration, job=profile_job)):
                         if observed_duration != duration:
                             reject(held_native)
                         else:
                             observed = held_native()
                             assert observed["_handoff_lease_seconds"] == duration
                             assert observed["_handoff_resume_schema"] == expected_schema
-                            assert observed["_handoff_deadline"] == renewal_epoch + duration
+                            assert observed["_handoff_deadline"] == profile_epoch + duration
     unsupported_workflow = modern_workflow.replace(
         "      - name: Validate dispatch phase and confirmation routing",
         "      - name: Unsupported current reader routing",
@@ -17210,10 +17289,8 @@ workflow_json = json.loads(subprocess.check_output([
     str(root / ".github/workflows/oci-production-deploy.yml"),
 ], text=True))
 producer_body = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
-                     if step.get("name") == "Verify exact failed-deploy resume state")
-producer_body = producer_body[producer_body.index("mkdir -p artifacts/oci-live-data-rollout/evidence"):
-                              producer_body.index('if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then',
-                                                  producer_body.index("resume_schema="))]
+                     if step.get("name") == "Capture and validate pre-mutation rollback baseline")
+producer_body = producer_body[producer_body.index('if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then'):]
 producer_template = producer_body
 consumer_body = next(step["run"] for step in workflow_json[1]["jobs"]["deploy"]["steps"]
                      if step.get("name") == "Verify immutable image and infrastructure provenance")
@@ -17490,6 +17567,9 @@ print("PASS real expired-resume policy rejects omitted waiting self and accepts 
 
 producer_dir = pathlib.Path(checkout) / "expired-producer"
 producer_dir.mkdir()
+(producer_dir / "artifacts/oci-live-data-rollout").mkdir(parents=True)
+shutil.copytree(before, producer_dir / "artifacts/oci-data-baseline-before")
+shutil.copyfile(images, producer_dir / "artifacts/oci-live-data-rollout/resume-images.tsv")
 expressions = {
     **{f"steps.provenance_request.outputs.{key}": qualification[key] for key in (
         "failed_deploy_job_conclusion", "public_validate_job_conclusion",
@@ -17499,12 +17579,12 @@ expressions = {
 }
 producer_body = re.sub(r"\$\{\{\s*([^{}]+?)\s*\}\}",
                        lambda match: expressions[match.group(1)], producer_body)
-producer_env = dict(os.environ, HELD_HANDOFF_RUN_ID="0",
+producer_env = dict(os.environ, HELD_HANDOFF_RUN_ID="0", RESUME_PREFLIGHT_OUTCOME="success",
     RESOLVED_APPLIED_DATA_RUN_ID=qualification["applied_data_run_id"],
     RESOLVED_APPLIED_SOURCE_SHA=qualification["applied_source_sha"],
     FAILED_DEPLOY_RUN_ID="54", RESUME_MAINTENANCE_MODE="pre-runtime-hold",
-    FAILED_ACTIVATION_RUN_ID="0", SOURCE_SHA=control_source, observed_baseline_sha=fresh_sha,
-    resume_images=str(images), CHECKPOINT_SOURCE_SHA=root_source, DISK_CHECKPOINT_RUN_ID="44")
+    FAILED_ACTIVATION_RUN_ID="0", SOURCE_SHA=control_source,
+    CHECKPOINT_SOURCE_SHA=root_source, DISK_CHECKPOINT_RUN_ID="44")
 result = subprocess.run(["bash", "-euc", producer_body], cwd=producer_dir,
                         env=producer_env, capture_output=True, text=True)
 assert result.returncode == 0, result.stderr
@@ -17781,6 +17861,9 @@ def complete_package(run, directory, metadata):
 native_request = dict(request, approved_sha=native_source)
 native_authority_dir = base / "complete-expired-authority"
 native_authority_dir.mkdir()
+(native_authority_dir / "artifacts/oci-live-data-rollout").mkdir(parents=True)
+shutil.copytree(before, native_authority_dir / "artifacts/oci-data-baseline-before")
+shutil.copyfile(images, native_authority_dir / "artifacts/oci-live-data-rollout/resume-images.tsv")
 body = re.sub(r"\$\{\{\s*([^{}]+?)\s*\}\}", lambda match: expressions[match.group(1)], producer_template)
 result = subprocess.run(["bash", "-euc", body], cwd=native_authority_dir,
     env=dict(producer_env, SOURCE_SHA=native_source), capture_output=True, text=True)
@@ -17894,6 +17977,7 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
             raise AssertionError("CONTINUE entered the direct expired-receiver helper")
     held_writer = next(step["run"] for step in workflow_json[0]["jobs"]["rollout"]["steps"]
                        if step.get("name") == "Verify exact failed-deploy resume state")
+    held_writer += "\nRESUME_PREFLIGHT_OUTCOME=success\n" + producer_template
     held_expressions = dict(expressions, **{
         f"steps.provenance_request.outputs.{key}": output_values[key] for key in (
             "failed_deploy_job_conclusion", "public_validate_job_conclusion",
@@ -17902,8 +17986,6 @@ with patch.object(complete_reader, "held_handoff_authority") as private_authorit
                         lambda match: held_expressions[match.group(1)], held_writer)
     (native_authority_dir / "infra").symlink_to(root / "infra", target_is_directory=True)
     shutil.copytree(holder, native_authority_dir / "artifacts/prerequisite")
-    shutil.copytree(before, native_authority_dir / "artifacts/oci-data-baseline-before")
-    shutil.copyfile(images, native_authority_dir / "artifacts/oci-live-data-rollout/resume-images.tsv")
     namespace = env(before, "baseline-provenance.env")["namespace"]
     runtime = {"images": {}, "deployments": {}, "pods": {},
         "fence": 'if ($host = "www.betstan.xyz") {\n  return 308 https://betstan.xyz$request_uri;\n}'

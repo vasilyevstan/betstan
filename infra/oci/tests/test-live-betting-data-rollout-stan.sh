@@ -22,6 +22,7 @@ DISK_CHECKPOINT_SHA256=ccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 DISK_CHECKPOINT_DISPOSITION=READY_NO_RECLAIM
 export FAILED_ACTIVATION_RUN_ID=0 FAILED_ACTIVATION_USER_ID=0
 export RELEASED_ACTIVATION_QUALIFICATION=none
+export RESUME_PREFLIGHT_OUTCOME=skipped
 
 "$ROOT_DIR/infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh" >/dev/null
 
@@ -49,10 +50,14 @@ ruby -ryaml -rjson - "$WORKFLOW" >"$work_dir/preflight-steps.json" <<'RUBY'
 puts JSON.generate(YAML.load_file(ARGV[0]).fetch("jobs").fetch("rollout").fetch("steps"))
 RUBY
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$work_dir" <<'PY'
-import json, os, subprocess, sys, tempfile
+import hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 work = Path(sys.argv[1])
 steps = json.loads((work / "preflight-steps.json").read_text())
+for step in steps:
+    assert len(step.get("run", "")) <= 21000, (
+        step.get("name"), "exceeds GitHub Actions' native run-script limit",
+    )
 barrier_name = "Require complete read-only preflight before lock mutation"
 barrier = next(step for step in steps if step["name"] == barrier_name)
 resume = next(step for step in steps if step.get("id") == "resume_preflight")
@@ -110,6 +115,34 @@ for changes, passed in cases:
         assert (root / "mutation").exists() == passed
         if changes.get("BASELINE_OUTCOME") == "failure":
             assert all(f"preflight {name}:" in result.stderr for name in ("resume", "baseline", "disk"))
+baseline = next(step for step in steps if step.get("id") == "baseline_preflight")
+assert baseline["env"]["RESUME_PREFLIGHT_OUTCOME"] == "${{ steps.resume_preflight.outcome }}"
+writer = baseline["run"][baseline["run"].index('if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then'):]
+writer = re.sub(r"\$\{\{[^}]+\}\}", "fixture", writer)
+for outcome in ("success", "failure", "skipped", "cancelled", ""):
+    with tempfile.TemporaryDirectory(dir=work) as directory:
+        root = Path(directory)
+        data = root / "artifacts/oci-live-data-rollout"
+        before = root / "artifacts/oci-data-baseline-before"
+        data.mkdir(parents=True); before.mkdir(parents=True)
+        (data / "resume-images.tsv").write_text("authenticated image fixture\n")
+        (before / "SHA256SUMS").write_text("authenticated baseline fixture\n")
+        env = dict(os.environ, RESUME_PREFLIGHT_OUTCOME=outcome, HELD_HANDOFF_RUN_ID="0",
+                   RESOLVED_APPLIED_DATA_RUN_ID="42", RESOLVED_APPLIED_SOURCE_SHA="1" * 40,
+                   SOURCE_SHA="2" * 40, FAILED_DEPLOY_RUN_ID="54", FAILED_ACTIVATION_RUN_ID="0",
+                   RESUME_MAINTENANCE_MODE="pre-runtime-hold",
+                   CHECKPOINT_SOURCE_SHA="3" * 40, DISK_CHECKPOINT_RUN_ID="44")
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", writer],
+                                cwd=root, env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        authority = data / "evidence/resume-authority.env"
+        assert authority.exists() == (outcome == "success")
+        if authority.exists():
+            values = dict(line.split("=", 1) for line in authority.read_text().splitlines())
+            assert values["applied_source_sha"] == "1" * 40
+            assert values["current_source_sha"] == "2" * 40
+            assert values["checkpoint_source_sha"] == "3" * 40
+            assert values["baseline_sha256"] == hashlib.sha256((before / "SHA256SUMS").read_bytes()).hexdigest()
 print("PASS read-only preflight reports every failed group and blocks authority/mutation")
 PY
 
@@ -645,7 +678,8 @@ puts JSON.generate(selected)
 RUBY
 ruby -ryaml -rjson - "$WORKFLOW" >"$work_dir/expired-consumer.json" <<'RUBY'
 steps = YAML.load_file(ARGV.fetch(0)).fetch("jobs").fetch("rollout").fetch("steps")
-names = ["Verify exact failed-deploy resume state", "Acquire database operation lock"]
+names = ["Verify exact failed-deploy resume state", "Acquire database operation lock",
+         "Capture and validate pre-mutation rollback baseline"]
 puts JSON.generate(names.to_h { |name| [name, steps.find { |step| step["name"] == name }.fetch("run")] })
 RUBY
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$work_dir" "$ROOT_DIR" <<'PY'
@@ -755,7 +789,10 @@ def substitute(body):
                   lambda match: outputs[match[1]], body)
 physical, acquire = [substitute(bodies[name]) for name in (
     "Verify exact failed-deploy resume state", "Acquire database operation lock")]
+baseline_body = substitute(bodies["Capture and validate pre-mutation rollback baseline"])
+physical += "\n" + baseline_body[baseline_body.index('if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then'):]
 base = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+    RESUME_PREFLIGHT_OUTCOME="success",
     EXPIRED_ROOT=str(root), RUNNER_TEMP=str(root), OCI_K8S_NAMESPACE="betstan-oci",
     NO_TAKEOVER_HANDOFF_QUALIFICATION="expired-own-handoff", RESUME_MAINTENANCE_MODE="pre-runtime-hold",
     BASELINE_CAPTURE_RUN_ID="53", BASELINE_CAPTURE_SOURCE_SHA="1" * 40,
@@ -3333,9 +3370,10 @@ authority.update(
     held_handoff_evidence_sha256="d" * 64,
 )
 text = Path(workflow).read_text()
-step = text[text.index("- name: Verify exact failed-deploy resume state"):
-            text.index("- name: Capture and validate pre-mutation rollback baseline")]
-body = textwrap.dedent(step[step.index("          mkdir -p artifacts/oci-live-data-rollout/evidence"):])
+step = text[text.index("- name: Capture and validate pre-mutation rollback baseline"):
+            text.index("- name: Verify reader-qualified released activation state")]
+body = textwrap.dedent(step.split("        run: |\n", 1)[1])
+body = body[body.index("  mkdir -p artifacts/oci-live-data-rollout/evidence"):].rstrip().removesuffix("fi")
 body = re.sub(r"\$\{\{ steps\.[a-z0-9_]+\.outputs\.([a-z0-9_]+) \}\}",
               lambda match: authority[match[1]], body)
 environment = dict(os.environ, RUNNER_TEMP=str(output.parent), SOURCE_SHA=source,
@@ -3652,10 +3690,9 @@ from pathlib import Path
 workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
 step = workflow[
     workflow.index("- name: Verify exact failed-deploy resume state"):
-    workflow.index("- name: Capture and validate pre-mutation rollback baseline")
+    workflow.index("      - name: Capture and validate pre-mutation rollback baseline")
 ]
 body = step.split("        run: |\n", 1)[1]
-body = body[:body.index("          mkdir -p artifacts/oci-live-data-rollout/evidence")]
 lines = []
 for line in body.splitlines():
     if line:

@@ -5676,6 +5676,43 @@ CURRENT_READER_PREFLIGHT_EDITS = (
 
           mkdir -p artifacts/oci-live-data-rollout/evidence
           resume_schema=live-betting-data-resume-v2
+          [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5
+          cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
+          schema_version=$resume_schema
+          applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
+          applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA
+          failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
+          failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}
+          public_validate_job_conclusion=${{ steps.provenance_request.outputs.public_validate_job_conclusion }}
+          lock_release_step_conclusion=${{ steps.provenance_request.outputs.lock_release_step_conclusion }}
+          fence_release_step_conclusion=${{ steps.provenance_request.outputs.fence_release_step_conclusion }}
+          rehold_step_conclusion=${{ steps.provenance_request.outputs.rehold_step_conclusion }}
+          failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
+          current_source_sha=$SOURCE_SHA
+          baseline_sha256=$observed_baseline_sha
+          runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
+          checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
+          disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+          disk_checkpoint_sha256=${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
+          disk_checkpoint_disposition=${{ steps.provenance.outputs.disk_checkpoint_disposition }}
+          application_change_scope=github-infra-docs-only
+          status=PASS
+          EOF
+          if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+            held_evidence_sha="$(
+              jq -er '.held_handoff_run_id.held_handoff_evidence_sha256 |
+                select(type == "string" and test("^[0-9a-f]{64}$"))' \
+                "$RUNNER_TEMP/live-data-upstream-result.json"
+            )"
+            {
+              printf 'held_handoff_run_id=%s\n' "$HELD_HANDOFF_RUN_ID"
+              printf 'held_handoff_source_sha=%s\n' "$HELD_HANDOFF_SOURCE_SHA"
+              printf 'held_handoff_evidence_sha256=%s\n' "$held_evidence_sha"
+            } >>artifacts/oci-live-data-rollout/evidence/resume-authority.env
+          fi
+
+      - name: Capture and validate pre-mutation rollback baseline
 """,
         r"""          PY
           fi
@@ -5696,9 +5733,7 @@ CURRENT_READER_PREFLIGHT_EDITS = (
           done
           [ "$preflight_status" = 0 ] || exit 1
 
-          observed_baseline_sha="$(sha256sum "$baseline_dir/SHA256SUMS" | awk '{print $1}')"
-          mkdir -p artifacts/oci-live-data-rollout/evidence
-          resume_schema=live-betting-data-resume-v2
+      - name: Capture and validate pre-mutation rollback baseline
 """,
     ),
     (
@@ -5707,6 +5742,73 @@ CURRENT_READER_PREFLIGHT_EDITS = (
         "      - name: Capture and validate pre-mutation rollback baseline\n"
         "        id: baseline_preflight\n        continue-on-error: true\n"
         "        if: inputs.phase != 'incident-restore'\n",
+    ),
+    (
+        r"""          RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
+        run: |
+""",
+        r"""          RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
+          RESUME_PREFLIGHT_OUTCOME: ${{ steps.resume_preflight.outcome }}
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
+          RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance_request.outputs.applied_data_run_id || steps.provenance.outputs.resume_applied_data_run_id }}
+          RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance_request.outputs.applied_source_sha || steps.provenance.outputs.resume_applied_source_sha }}
+        run: |
+""",
+    ),
+    (
+        r"""          printf 'BASELINE_SHA256=%s\n' \
+            "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
+            >> "$GITHUB_ENV"
+
+      - name: Verify reader-qualified released activation state
+""",
+        r"""          printf 'BASELINE_SHA256=%s\n' \
+            "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
+            >> "$GITHUB_ENV"
+          if [ "$RESUME_PREFLIGHT_OUTCOME" = success ]; then
+            resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
+            observed_baseline_sha="$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')"
+            mkdir -p artifacts/oci-live-data-rollout/evidence
+            resume_schema=live-betting-data-resume-v2
+            [ "$HELD_HANDOFF_RUN_ID" = "0" ] || resume_schema=live-betting-data-resume-v5
+            cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
+          schema_version=$resume_schema
+          applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID
+          applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA
+          failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
+          failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}
+          public_validate_job_conclusion=${{ steps.provenance_request.outputs.public_validate_job_conclusion }}
+          lock_release_step_conclusion=${{ steps.provenance_request.outputs.lock_release_step_conclusion }}
+          fence_release_step_conclusion=${{ steps.provenance_request.outputs.fence_release_step_conclusion }}
+          rehold_step_conclusion=${{ steps.provenance_request.outputs.rehold_step_conclusion }}
+          failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
+          current_source_sha=$SOURCE_SHA
+          baseline_sha256=$observed_baseline_sha
+          runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
+          checkpoint_source_sha=$CHECKPOINT_SOURCE_SHA
+          disk_checkpoint_run_id=$DISK_CHECKPOINT_RUN_ID
+          disk_checkpoint_sha256=${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
+          disk_checkpoint_disposition=${{ steps.provenance.outputs.disk_checkpoint_disposition }}
+          application_change_scope=github-infra-docs-only
+          status=PASS
+          EOF
+            if [ "$HELD_HANDOFF_RUN_ID" != "0" ]; then
+              held_evidence_sha="$(
+                jq -er '.held_handoff_run_id.held_handoff_evidence_sha256 |
+                  select(type == "string" and test("^[0-9a-f]{64}$"))' \
+                  "$RUNNER_TEMP/live-data-upstream-result.json"
+              )"
+              {
+                printf 'held_handoff_run_id=%s\n' "$HELD_HANDOFF_RUN_ID"
+                printf 'held_handoff_source_sha=%s\n' "$HELD_HANDOFF_SOURCE_SHA"
+                printf 'held_handoff_evidence_sha256=%s\n' "$held_evidence_sha"
+              } >>artifacts/oci-live-data-rollout/evidence/resume-authority.env
+            fi
+          fi
+
+      - name: Verify reader-qualified released activation state
+""",
     ),
     (
         "      - name: Verify reader-qualified released activation state\n        if: >-\n",
@@ -5761,7 +5863,7 @@ CURRENT_READER_PREFLIGHT_EDITS = (
 )
 CURRENT_READER_PREFLIGHT_REGION_SHA256 = (
     "990404ff986071acece98d6453a15461d31a332364d607a5d5e23413e9008de4",
-    "86828a0e31965e880a7de7b525d567d92d1fecca9305e9cab810b536e4386668",
+    "943ea1a36c85827d0860c163cda1adb68bf4bfc3cb849fe729b8919f903487a4",
 )
 
 

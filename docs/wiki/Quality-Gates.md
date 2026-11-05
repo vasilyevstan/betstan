@@ -48,6 +48,11 @@ GitHub accepts every candidate workflow. The workflow guard rejects `runner`
 expressions in job-level environment values; runner-dependent values belong
 in step environments.
 
+The live-data contract also checks the native 21,000-character limit for each
+workflow shell body. Syntax-only lint does not enforce that platform limit.
+Keep large checks in bounded existing steps without weakening their outcome
+barrier or evidence requirements.
+
 ## Compatibility-stage delivery redesign
 
 Repository policy consolidation does not replace executable controls or

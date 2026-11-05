@@ -325,6 +325,8 @@ inputs, including historical deployments after protected source advances.
 **Aggregated read-only preflight.** Failed-deploy resumes collect independent
 baseline, fence, runtime-image and inherited-lock failures before producing
 resume authority. Held-state fencing is checked after the image checks.
+The existing baseline step writes resume authority only after the resume
+preflight succeeds and baseline validation completes.
 The existing baseline, released-activation and disk-checkpoint checks also
 finish before one outcome barrier permits database lock mutation. An applicable
 failed, cancelled, missing or skipped check cannot pass that barrier; only
