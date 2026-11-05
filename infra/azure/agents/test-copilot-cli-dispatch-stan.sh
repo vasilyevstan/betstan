@@ -3926,6 +3926,20 @@ calls = [json.loads(line) for line in (d / "preflight-provider-calls").read_text
 assert all(call[0] in {"api", "repo"} for call in calls)
 assert all(not set(call).intersection({"--method", "-X", "-f", "-F", "--input"}) for call in calls)
 assert a.retired_bound_intent(d / "authority", old_intent)
+# A macOS reboot renumbers the APFS device; the same inode must stay valid,
+# while a replaced capture (new inode) must still fail closed.
+real_file_identity = a.file_identity
+for shift, field, accepted in ((1, "device", True), (1, "inode", False)):
+    def shifted_identity(path, shift=shift, field=field):
+        return {**real_file_identity(path), field: real_file_identity(path)[field] + shift}
+    a.file_identity = shifted_identity
+    try:
+        assert a.retired_bound_intent(d / "authority", old_intent) is accepted
+    except SystemExit as error:
+        assert not accepted and "generation was replaced" in str(error), error
+    finally:
+        a.file_identity = real_file_identity
+print("capture_identity_survives_device_renumbering=PASS", flush=True)
 run(d, "--retire-preflight-read-only-failure", ok=False)
 
 # Execute the byte-identical historical v1-v4 loader, pinned independently of
