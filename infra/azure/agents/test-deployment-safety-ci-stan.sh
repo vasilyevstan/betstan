@@ -743,7 +743,19 @@ fi
 
 "$PR_MERGE_SAFETY_TEST"
 "$PROTECTED_OPERATION_POLICY_TEST"
-contract_suites=("$CLI_DISPATCH_TEST" "$RUN_APPROVAL_TEST" "$RUN_EXCLUSIVITY_TEST")
+contract_suites=("$RUN_APPROVAL_TEST" "$RUN_EXCLUSIVITY_TEST")
+case "${BETSTAN_NATIVE_DISPATCH_REUSED:-0}" in
+  0) contract_suites=("$CLI_DISPATCH_TEST" "${contract_suites[@]}") ;;
+  1)
+    if [[ "${GITHUB_ACTIONS:-}" != true || "${GITHUB_EVENT_NAME:-}" != push ||
+          "${GITHUB_REF:-}" != refs/heads/master ]]; then
+      echo "native dispatch reuse is only owned by the verified master caller" >&2
+      exit 1
+    fi
+    echo "dispatch=REUSED (verified direct original; remaining contracts execute normally)"
+    ;;
+  *) echo "invalid native dispatch ownership result" >&2; exit 1 ;;
+esac
 # The full OCI scope owns these suites in its live/provenance shards. A caller
 # may delegate them only when its aggregate requires those shard results.
 # Standalone production-build callers continue to execute both.
@@ -784,6 +796,7 @@ oci_deploy_script = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 
 trusted_build_workflow_blob = "1e3118276cc4746e824303245339c25de4411c15"
 lean_build_workflow_blob = "7f036e038c780d929417ea7e9f6227bdf9d5fb89"
+native_dispatch_build_workflow_blob = "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"
 trusted_build_restoration = build_workflow_blob == trusted_build_workflow_blob
 
 expected_azure_order = [
@@ -818,6 +831,8 @@ approved_action_refs = {
     "docker/build-push-action": "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
     "actions/upload-artifact": "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
 }
+if build_workflow_blob == native_dispatch_build_workflow_blob:
+    approved_action_refs["actions/github-script"] = "ed597411d8f924073f98dfc5c65a23a2325f34cd"
 full_sha_pattern = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -828,6 +843,7 @@ def fail(message: str) -> None:
 if build_workflow_blob not in (
     trusted_build_workflow_blob,
     lean_build_workflow_blob,
+    native_dispatch_build_workflow_blob,
 ):
     fail(
         "production-build.yml is neither the trusted restoration nor "

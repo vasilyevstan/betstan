@@ -32,6 +32,51 @@ execution or activation evidence.
 [[Quality Gates]] owns these implementation details and remaining proof
 requirements.
 
+The dispatch-only native-original candidate has a separate, two-stage rollout:
+
+Preparation only: dispatch reuse is inactive and the protected production caller remains unchanged.
+
+1. Protect the compatible helpers, optional OCI producer with consumption
+   **disabled**, and workflow-contract fixtures accepting both the existing
+   production caller and the exact proposed caller. Keep the existing
+   production workflow bytes. This preparation includes canonical one-use
+   declarations for `ci/native-dispatch-adoption` → `dev` and `dev` → `master`,
+   binding the exact future production caller with separate IDs and the
+   current protected-master receipt anchor. The ordinary preparation PR run
+   attempts optional observational publication. Empirical ordinary-PR inline
+   certificate and execution-profile qualification are required
+   **before merging preparation and before adoption**. Neither observations nor unsigned historical
+   successes can become approved originals retroactively.
+2. Only after that qualification, adopt the exact approved OCI consumption
+   variant and production caller on the declared adoption branch. Remove the
+   declarations and update their configuration fixture in that candidate before
+   its first required run; the protected preparation publisher retains the
+   declarations while both authorized PRs validate. Keep proof helpers and the wrapper
+   unchanged so the publisher's wrapper-equality check remains meaningful.
+   Include required declaration cleanup in the final tested tree: any later
+   source change needs its own normal native execution, not a proof-tree waiver.
+   The first required changed-infrastructure run executes assertions and
+   attempts optional original publication before those input bytes are protected.
+   A same-complete-tree promotion and subsequent master build may reuse that
+   original directly only after successful publication and authenticated
+   control, runtime and source verification. Missing or unusable proof runs
+   ordinary assertions. Master preserves its reader from the validated platform
+   push-before protected commit before checking out new source; candidate
+   helper/control changes require ordinary computation. Master delegates only the
+   authenticated dispatch child; the other safety and affected Azure contracts
+   retain their existing owners.
+
+Optional native-proof control approvals are separate from the mandatory one-use
+production-caller authorizations. Neither introduces a global OCI publisher pin
+or fabricates a bootstrap receipt. Current publisher v3/v4 identity, ownership,
+head/merge freshness and production serialization remain unchanged. Adoption
+must use the existing one-use bootstrap and consumed-declaration cleanup.
+No third authorization-preparation promotion is needed. The disabled
+`source-quality.yml` and its `pull_request_target` path remain
+disabled. Native ordinary-PR identity, optional-publication failure behavior,
+promotion/master reuse and timing targets still need real-run evidence;
+local proof fixtures do not authorize deployment or restoration.
+
 The initial compatibility landing retained the old trusted workflow. The
 reviewed lean `production-build.yml` has since passed protected integration
 and promotion. It selects affected PR checks and avoids source validation for

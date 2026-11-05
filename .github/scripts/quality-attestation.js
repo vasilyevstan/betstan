@@ -14,16 +14,18 @@ function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
-function readQualityAttestation({ content, expected }, execute, discoverController) {
+function readQualityAttestation({ content, expected }, execute, discoverController, nativeDispatch = false) {
   if (
     typeof content !== "string" || Buffer.byteLength(content) > MAX_MANIFEST_BYTES ||
     !expected || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(expected.repository) ||
     !Number.isSafeInteger(expected.repositoryId) || expected.repositoryId < 1 ||
     !Number.isSafeInteger(expected.runId) || expected.runId < 1 ||
     !Number.isSafeInteger(expected.attempt) || expected.attempt < 1 ||
-    !QUALITY_EVENTS.includes(expected.event) ||
+    !(nativeDispatch ? expected.event === "pull_request" : QUALITY_EVENTS.includes(expected.event)) ||
     !expected.validator ||
     !/^\.github\/workflows\/[A-Za-z0-9_-]+\.ya?ml$/.test(expected.validator.workflowPath) ||
+    (nativeDispatch && expected.validator.workflowPath !== ".github/workflows/oci-validate.yml") ||
+    (nativeDispatch && expected.attempt !== 1) ||
     (!discoverController && (
       !/^[0-9a-f]{40}$/.test(expected.validator.executingCommitSha) ||
       !["refs/heads/dev", "refs/heads/master"].includes(expected.validator.executingRef)
@@ -61,6 +63,8 @@ function readQualityAttestation({ content, expected }, execute, discoverControll
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
+      if (nativeDispatch && !Number.isInteger(error?.status) &&
+        !["ENOENT", "EACCES", "ETIMEDOUT", "ENOBUFS"].includes(error?.code)) throw error;
       throw new QualityEvidenceError("Native quality attestation verification failed", { cause: error });
     }
     if (sha256(fs.readFileSync(filename)) !== contentSha256) {
@@ -81,9 +85,12 @@ function readQualityAttestation({ content, expected }, execute, discoverControll
       const sourceRef = discoverController
         ? certificate?.sourceRepositoryRef : expected.validator.executingRef;
       const signerURI = `${repositoryURI}/${expected.validator.workflowPath}@${sourceRef}`;
+      const supportedRef = nativeDispatch
+        ? /^refs\/pull\/[1-9][0-9]*\/merge$/.test(sourceRef ?? "")
+        : ["refs/heads/dev", "refs/heads/master"].includes(sourceRef);
       return certificate &&
         typeof controlSha === "string" && /^[0-9a-f]{40}$/.test(controlSha) &&
-        ["refs/heads/dev", "refs/heads/master"].includes(sourceRef) &&
+        supportedRef &&
         certificate.issuer === "https://token.actions.githubusercontent.com" &&
         certificate.subjectAlternativeName === signerURI &&
         certificate.buildSignerURI === signerURI &&
@@ -125,11 +132,23 @@ function readQualityAttestation({ content, expected }, execute, discoverControll
       controlSha: certificate.buildSignerDigest,
       sourceRef: certificate.sourceRepositoryRef,
       workflowPath: expected.validator.workflowPath,
+      ...(nativeDispatch ? {
+        signerSha: certificate.buildSignerDigest,
+        callerSha: certificate.buildConfigDigest,
+        sourceSha: certificate.sourceRepositoryDigest,
+      } : {}),
     });
   } finally {
     fs.rmSync(filename, { force: true });
     fs.rmdirSync(directory);
   }
+}
+
+// Provisional inline-PR identity shape. In particular, none of these certified
+// commits is replaced with Actions REST head_sha (the feature head for a PR).
+// Native identity bring-up must verify this shape before caller adoption.
+function verifyNativeDispatchManifest(input, execute = execFileSync) {
+  return readQualityAttestation(input, execute, true, true);
 }
 
 function verifyQualityManifest(input, execute = execFileSync) {
@@ -175,4 +194,6 @@ function readQualityArtifact({ repository, artifactId }, execute = execFileSync)
   }
 }
 
-module.exports = { verifyQualityManifest, verifyHistoricalQualityManifest, readQualityArtifact };
+module.exports = {
+  verifyQualityManifest, verifyHistoricalQualityManifest, readQualityArtifact, verifyNativeDispatchManifest,
+};

@@ -5588,10 +5588,59 @@ async function main() {
       receiptSha: "a1b9ec456eb2241f85294f0d3963d5fdfaebe827",
     },
   ];
-  assert.deepEqual(
-    publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    [],
-  );
+  const nativeDispatchWorkflowAuthorizations = [
+    {
+      id: "native-dispatch-production-build-source-20261105-v1",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
+      authorizedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
+      pullNumber: null,
+      headRef: "ci/native-dispatch-adoption",
+      baseRef: "dev",
+      issuedAt: "2026-11-05T11:32:54.000Z",
+      expiresAt: "2026-11-11T11:32:54.000Z",
+      receiptSha: "d007b67d1206034b61ccb6cc7063d9ac3f00bacb",
+    },
+    {
+      id: "native-dispatch-production-build-promotion-20261105-v1",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
+      authorizedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
+      pullNumber: null,
+      headRef: "dev",
+      baseRef: "master",
+      issuedAt: "2026-11-05T11:32:54.000Z",
+      expiresAt: "2026-11-11T11:32:54.000Z",
+      receiptSha: "d007b67d1206034b61ccb6cc7063d9ac3f00bacb",
+    },
+  ];
+  assert.deepEqual(publishPrPolicy.trustedWorkflowBlobAuthorizations, nativeDispatchWorkflowAuthorizations);
+  for (const authorization of nativeDispatchWorkflowAuthorizations) {
+    const lookup = {
+      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+      repository: authorization.repository, workflowPath: authorization.workflowPath,
+      trustedBlob: authorization.trustedBlob, authorizedBlob: authorization.authorizedBlob,
+      pull: { number: 999, state: "open", headRepository: authorization.headRepository,
+        headRef: authorization.headRef, baseRef: authorization.baseRef },
+      now: "2026-11-05T11:33:00.000Z",
+    };
+    assert.deepEqual(publishPrPolicy.findWorkflowAuthorization(lookup), authorization);
+    for (const mismatch of [
+      { authorizedBlob: "0".repeat(40) }, { trustedBlob: "0".repeat(40) },
+      { repository: "another/repository" },
+      { pull: { ...lookup.pull, state: "closed" } },
+      { pull: { ...lookup.pull, headRepository: "another/repository" } },
+      { pull: { ...lookup.pull, headRef: `${authorization.headRef}-other` } },
+      { pull: { ...lookup.pull, baseRef: authorization.baseRef === "dev" ? "master" : "dev" } },
+    ]) assert.equal(publishPrPolicy.findWorkflowAuthorization({ ...lookup, ...mismatch }), null);
+    for (const now of ["2026-11-05T11:32:53.999Z", authorization.expiresAt]) {
+      assert.throws(() => publishPrPolicy.findWorkflowAuthorization({ ...lookup, now }), /stale or expired/);
+    }
+  }
   for (const authorization of retiredLeanDeliveryWorkflowAuthorizations) {
     assert.deepEqual(
       publishPrPolicy.findWorkflowAuthorization({
@@ -5607,7 +5656,7 @@ async function main() {
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: "2026-11-04T22:00:00.000Z",
+        now: "2026-11-05T11:33:00.000Z",
       }),
       null,
     );
@@ -5625,7 +5674,7 @@ async function main() {
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: "2026-11-04T22:00:00.000Z",
+        now: "2026-11-05T11:33:00.000Z",
       }),
       null,
     );
@@ -5644,7 +5693,7 @@ async function main() {
         headRef: "ci/lean-production-build-blob",
         baseRef: "dev",
       },
-      now: "2026-11-04T22:00:00.000Z",
+      now: "2026-11-05T11:33:00.000Z",
     }),
     null,
   );
@@ -5726,7 +5775,7 @@ async function main() {
           headRef: retired.headRef,
           baseRef: retired.baseRef,
         },
-        now: "2026-11-04T22:00:00.000Z",
+        now: "2026-11-05T11:33:00.000Z",
       }),
       null,
     );
@@ -5795,11 +5844,6 @@ async function main() {
   assert(
     !publisherSource.includes(
       'id: "lean-delivery-production-build-promotion-selector-v2"',
-    ),
-  );
-  assert(
-    publisherSource.includes(
-      "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
     ),
   );
   assert.deepEqual(
