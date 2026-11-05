@@ -970,6 +970,11 @@ When a repository rule itself causes a proven false block, fix that exact rule
 and add a regression test. Do not bypass the gate, broaden authority, or
 misclassify a real production risk as policy friction.
 
+Example: deploy health once required an absolute zero restart count, so pods
+that restarted during an earlier node reboot failed every later deploy forever.
+Health now counts a restart only when its last termination is recent; missing
+or malformed termination evidence still counts, and crash loops still fail.
+
 ### Keep registry identity and recovery provenance truthful
 
 Historical OCI/GHCR migration lessons:

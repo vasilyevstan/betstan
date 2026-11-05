@@ -284,10 +284,31 @@ PY
 pods="$(
   python3 - "$pods_json" "$IMAGE_PROVENANCE_FILE" <<'PY'
 import csv
+import datetime
 import json
+import os
 import sys
+import time
 
 pods = json.load(open(sys.argv[1], encoding="utf-8"))
+restart_window_seconds = int(os.environ.get("OCI_HEALTH_RESTART_WINDOW_SECONDS", "3600"))
+if restart_window_seconds < 1:
+    raise SystemExit("OCI_HEALTH_RESTART_WINDOW_SECONDS must be positive")
+
+
+def recent_termination(status):
+    # Restarts finished before the window (for example a past node reboot) are
+    # history, not current instability; unparseable evidence still counts.
+    finished = (status.get("lastState", {}).get("terminated") or {}).get("finishedAt")
+    try:
+        finished_at = datetime.datetime.strptime(
+            finished, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return True
+    return time.time() - finished_at <= restart_window_seconds
+
+
 expected = {
     "gaming-auth-mongo": {
         "sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3",
@@ -329,7 +350,7 @@ for pod in pods.get("items", []):
         terminated = status.get("lastState", {}).get("terminated", {}).get("reason")
         if waiting:
             reasons.append(waiting)
-        if terminated:
+        if terminated and recent_termination(status):
             reasons.append(terminated)
         digests = expected.get(status.get("name"), set())
         if not any(
@@ -346,7 +367,11 @@ for pod in pods.get("items", []):
         "ready": not missing_statuses and bool(statuses) and all(item.get("ready") for item in statuses),
         "architecture": "arm64",
         "digest_match": digest_match,
-        "restarts": sum(int(item.get("restartCount", 0)) for item in statuses),
+        "restarts": sum(
+            int(item.get("restartCount", 0))
+            for item in statuses
+            if recent_termination(item)
+        ),
         "last_reason": ",".join(reasons),
     })
 for name in sorted(set(expected) - observed):
