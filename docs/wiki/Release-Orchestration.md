@@ -674,7 +674,7 @@ complete predecessor-v6, deployment, build, infrastructure, checkpoint, and
 activation tuples must resolve without substitution. Post-runtime retained-hold
 deployment recovery uses the checksum-sealed intent written before lock renewal
 plus the post-rehold failure lineage.
-For released-runtime recovery after an authenticated
+For released-runtime or repeated retained-hold recovery after an authenticated
 `live-betting-data-resume-v2` retained-hold data resume, baseline capture identity
 follows the validated original applied-data root unless full native validation
 authenticates a capture inherited from a qualified expired-handoff ancestor;
