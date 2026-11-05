@@ -270,17 +270,16 @@ Neither workflow source nor a green build proves restored runtime health.
 
 ### Staged native dispatch originals
 
-Preparation only: dispatch reuse is inactive and the protected production caller remains unchanged.
+The adoption candidate enables the guarded dispatch reader and optional original
+producer. Missing or incompatible proof selects ordinary computation; source
+enablement alone is not empirical reuse or timing acceptance.
 
 The bounded native-original candidate covers only CLI dispatch contracts, not
 rollback, provenance, application packages, Docker builds, or the deferred
-full-quality workflow. Its first stage keeps OCI consumption disabled and
-leaves the pinned production caller unchanged. Its already-required OCI run
-attempts optional publication of `native-dispatch-observation` under a
-`dispatch-observation-*` artifact name. Empirical ordinary-PR inline certificate
-and execution-profile qualification are required before preparation merges and
-before adoption. Observational
-capture/signing executes candidate control; these artifacts remain ineligible
+full-quality workflow. Preparation protected the compatible helpers without
+enabling reuse. Its optional `native-dispatch-observation` manifests use
+`dispatch-observation-*` artifact names. Observational capture/signing executes
+candidate control; these artifacts remain permanently ineligible
 for reuse even after that control becomes protected. Observational mode always
 executes the dispatch assertions: execution decisions close before separate
 candidate observation capture, whose outputs cannot select out or reuse tests.
@@ -327,9 +326,9 @@ production-caller authorization; it is not a global OCI publisher pin or a
 bootstrap receipt. Publisher identity, ownership, freshness, serialization and
 consumed-declaration rules remain unchanged.
 
-Ordinary-PR inline certificate and execution-profile qualification remain
-mandatory both before preparation merges and before adoption.
-The provisional supported identity is an inline signer in `oci-validate.yml`
+Native reuse requires the qualified ordinary-PR inline certificate identity
+and a matching complete execution profile.
+The supported identity is an inline signer in `oci-validate.yml`
 whose certified caller, signer and source digests identify the merge commit;
 Actions REST `head_sha` identifies the feature head and is checked separately
 against the merge parents. Actions may return no PR associations after a run
@@ -340,6 +339,10 @@ contradict these identities. This metadata compatibility does not qualify old
 unsigned runs. A different native certificate shape is an explicit
 miss, not permission to substitute a moving ref or REST head. Synthetic tests
 do not establish this identity or native timing acceptance.
+
+First eligible original publication, enabled-reader behavior when proof is
+unavailable, and direct promotion/master reuse still require real-run acceptance.
+Overall flow and timing acceptance remain incomplete.
 
 ### Actions runtime and compatible pins
 

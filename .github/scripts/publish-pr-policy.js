@@ -141,36 +141,7 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 
 // Exact workflow authorizations are added only in a separately promoted,
 // short-lived policy change and removed immediately after their intended PR.
-const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
-  {
-    id: "native-dispatch-production-build-source-20261105-v1",
-    repository: "vasilyevstan/betstan",
-    headRepository: "vasilyevstan/betstan",
-    workflowPath: ".github/workflows/production-build.yml",
-    trustedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-    authorizedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
-    pullNumber: null,
-    headRef: "ci/native-dispatch-adoption",
-    baseRef: "dev",
-    issuedAt: "2026-11-05T11:32:54.000Z",
-    expiresAt: "2026-11-11T11:32:54.000Z",
-    receiptSha: "d007b67d1206034b61ccb6cc7063d9ac3f00bacb",
-  },
-  {
-    id: "native-dispatch-production-build-promotion-20261105-v1",
-    repository: "vasilyevstan/betstan",
-    headRepository: "vasilyevstan/betstan",
-    workflowPath: ".github/workflows/production-build.yml",
-    trustedBlob: "7f036e038c780d929417ea7e9f6227bdf9d5fb89",
-    authorizedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
-    pullNumber: null,
-    headRef: "dev",
-    baseRef: "master",
-    issuedAt: "2026-11-05T11:32:54.000Z",
-    expiresAt: "2026-11-11T11:32:54.000Z",
-    receiptSha: "d007b67d1206034b61ccb6cc7063d9ac3f00bacb",
-  },
-]);
+const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS = Object.freeze(
   JSON.parse(TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON),

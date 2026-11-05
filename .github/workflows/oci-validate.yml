@@ -12,7 +12,7 @@ permissions:
 
 env:
   # Observation only. Freeze an adoption variant after ordinary-PR identity qualification.
-  NATIVE_DISPATCH_REUSE: 'disabled'
+  NATIVE_DISPATCH_REUSE: 'enabled'
 
 jobs:
   scope:
