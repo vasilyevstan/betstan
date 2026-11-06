@@ -1116,7 +1116,9 @@ reject. A stage that ran past its allowance is tolerated: it only consumes
 physical lease time, an overrunning current phase counts zero unused
 allocation, and the remaining time must still exceed the unfinished-path bound
 plus reserve. Legacy actual renewal still requires whole renewal-to-renewal
-time within 1,200 seconds. No approval-ordinal tail credits apply.
+time within 1,200 seconds. A deployment chained from a legacy data run (no or
+v2 resume authority) reports the `native-final-data-1800` profile and renews
+under that same legacy 1,800/1,200 contract. No approval-ordinal tail credits apply.
 Completed admission is checked and removed when receiver creation is
 authenticated. Before native job start, elapsed pre-start time consumes the
 approval allocation while the full future queue allowance remains reserved;
