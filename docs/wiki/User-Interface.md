@@ -21,6 +21,10 @@ regions:
 | Center stage | Events, authentication, My Bets, Backoffice, or Telemetry route |
 | Right sidebar | Independent live and pre-match slips |
 
+The main region receives skip-link focus without drawing a full-height frame
+around the page. Keyboard focus indicators on interactive controls and the
+short blue/red card borders remain visible.
+
 Only the Statistics and slips regions are sticky in this three-region desk.
 At 1399 pixels and below, the center task occupies the first full row and both
 supporting regions follow it without sticky positioning. The supporting
