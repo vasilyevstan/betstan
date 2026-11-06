@@ -197,7 +197,8 @@ def validate(snapshot):
         "Mongo does not contain exactly the nine logical database names",
     )
 
-    services = snapshot.get("services", [])
+    # cert-manager creates short-lived HTTP-01 solver Services during certificate renewal.
+    services = [item for item in snapshot.get("services", []) if item.get("acme_http01_solver") is not True]
     service_names = {item.get("name") for item in services}
     require(service_names == EXPECTED_SERVICES, "service-set", "expected service set is incomplete or unexpected")
     for service in services:

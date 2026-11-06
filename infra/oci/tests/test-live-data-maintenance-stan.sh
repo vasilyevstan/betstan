@@ -352,13 +352,29 @@ assert_replicas() {
 run_maintenance fence-writes
 grep -Fq 'request_method' "$stub_state/server-snippet" ||
   fail "fence-only maintenance did not install the HTTP write fence"
+grep -Fq 'acme-challenge' "$stub_state/server-snippet" ||
+  fail "fence did not migrate the legacy www redirect to the ACME-safe snippet"
 assert_replicas 1
 run_maintenance fence-writes
 run_maintenance release
 if grep -Fq 'request_method' "$stub_state/server-snippet"; then
   fail "fence-only maintenance release retained the HTTP write fence"
 fi
+grep -Fq 'acme-challenge' "$stub_state/server-snippet" ||
+  fail "fence release dropped the ACME-safe www redirect"
 assert_replicas 1
+cat >"$stub_state/server-snippet" <<'EOF'
+if ($host = "www.betstan.xyz") {
+  return 308 https://betstan.xyz$request_uri;
+}
+if ($request_method !~ ^(GET|HEAD|OPTIONS)$) {
+  return 503;
+}
+EOF
+run_maintenance fence-writes
+grep -Fq 'acme-challenge' "$stub_state/server-snippet" ||
+  fail "an already fenced legacy snippet was not migrated to the ACME-safe snippet"
+run_maintenance release
 
 printf '2\n' >"$stub_state/unstable/event"
 : >"$stub_state/kubectl.log"

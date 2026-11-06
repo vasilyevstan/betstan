@@ -2,7 +2,14 @@ controller:
   replicaCount: 1
   config:
     server-snippet: |
+      set $betstan_www_redirect "";
       if ($host = "www.betstan.xyz") {
+        set $betstan_www_redirect "1";
+      }
+      if ($uri ~ ^/\.well-known/acme-challenge/) {
+        set $betstan_www_redirect "";
+      }
+      if ($betstan_www_redirect) {
         return 308 https://betstan.xyz$request_uri;
       }
   image:
