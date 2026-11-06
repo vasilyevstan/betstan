@@ -46,7 +46,24 @@ fail() {
 [[ "$(grep -Fc '/variables/OCI_RUNTIME_MODE' "$WORKFLOW")" == "0" ]] ||
   fail "data workflow must not call the OCI_RUNTIME_MODE environment endpoint"
 
-ruby -ryaml -rjson - "$WORKFLOW" >"$work_dir/preflight-steps.json" <<'RUBY'
+ruby -ryaml -rjson - "$WORKFLOW" "$DEPLOY_WORKFLOW" >"$work_dir/preflight-steps.json" <<'RUBY'
+checkpoint_auth = {
+  "OCI_CLI_USER" => "${{ vars.OCI_CI_USER_OCID }}",
+  "OCI_CLI_TENANCY" => "${{ vars.OCI_TENANCY_OCID }}",
+  "OCI_CLI_FINGERPRINT" => "${{ vars.OCI_CI_KEY_FINGERPRINT }}",
+  "OCI_CLI_KEY_CONTENT" => "${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}",
+  "OCI_CLI_REGION" => "${{ vars.OCI_REGION }}",
+}
+ARGV.each do |path|
+  YAML.load_file(path).fetch("jobs").each_value do |job|
+    job.fetch("steps").each do |step|
+      next unless step.fetch("run", "").include?("k3s-node-disk-recovery-stan.sh")
+      checkpoint_auth.each do |key, value|
+        abort "#{step.fetch('name')}: missing step-scoped #{key}" unless step.fetch("env", {})[key] == value
+      end
+    end
+  end
+end
 puts JSON.generate(YAML.load_file(ARGV[0]).fetch("jobs").fetch("rollout").fetch("steps"))
 RUBY
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$work_dir" <<'PY'

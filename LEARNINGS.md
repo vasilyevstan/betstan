@@ -63,6 +63,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 ## Infrastructure
 
 - Read failures mean unknown, not absent. Keep AKS, OKE and k3s prerequisites separate.
+- Bind cloud-read credentials on every calling Actions step; earlier step-scoped credentials do not persist.
 - Shared-Mongo backup recovery differs from no-backup cross-cloud replacement; after cutover, recover forward.
 - Bound external reads; poll terminal conditions; cleanup must not erase failure evidence.
 - Verify API shapes, restart history and canonical routes; billing closure and deletion need terminal evidence.
