@@ -1063,12 +1063,12 @@ This does not revive or extend the old producer's lease. Artifact upload,
 dispatch and approval cannot reset the new deadline either. The separate
 10,800-second retained/deployment operation duration is not a handoff extension.
 
-The receiving deployment for a fresh continuation handoff enforces
-source-defined stage ceilings and a strictly shrinking remaining-path budget
-against that handoff's authentic native deadline. Before starting a timed
+The receiving deployment for a fresh continuation handoff budgets unfinished
+work with source-defined stage allowances against that handoff's authentic
+native deadline. Before starting a timed
 handoff, require supported whole renewal-to-renewal timing under the selected
 profile. Legacy v2/v3 retains its literal 1,200-second execution, 600-second
-reserve and 1,800-second lease, including its existing stage arithmetic.
+reserve and 1,800-second lease.
 
 The `live-betting-data-resume-v4` profile retains exactly the v3 keys and its
 original contract. Historical v2, v3 and v4 evidence is never reinterpreted,
@@ -1111,14 +1111,16 @@ The bound shrinks only as this fresh receiving path advances; it is not an
 admission deadline for the expired producer used as retained evidence.
 For v4 and v5, that bound is the unused authenticated current-phase allocation
 plus the full allowances for every future phase. Unknown or inconsistent phase
-evidence, invalid chronology, completed-stage overruns, exhausted current-phase
-allocations while work remains, and reserve equality reject. No
-approval-ordinal tail credits apply.
+evidence, invalid (negative or non-finite) chronology and reserve equality
+reject. A stage that ran past its allowance is tolerated: it only consumes
+physical lease time, an overrunning current phase counts zero unused
+allocation, and the remaining time must still exceed the unfinished-path bound
+plus reserve. Legacy actual renewal still requires whole renewal-to-renewal
+time within 1,200 seconds. No approval-ordinal tail credits apply.
 Completed admission is checked and removed when receiver creation is
 authenticated. Before native job start, elapsed pre-start time consumes the
 approval allocation while the full future queue allowance remains reserved;
-these are not one combined allocation. Completed pre-start time must also fit
-the selected profile's approval ceiling. Native validation retains its unused
+these are not one combined allocation. Native validation retains its unused
 profile allocation plus the selected startup/snapshot and renewal allocations.
 Startup progress may use only existing authenticated job observations,
 retaining the unused selected startup/snapshot allocation plus renewal; no new
