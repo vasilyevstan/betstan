@@ -1580,6 +1580,8 @@ for ingress_values in \
     fail "ingress-nginx lacks the exact www redirect host guard"
   grep -Fq 'return 308 https://betstan.xyz$request_uri;' "$ingress_values" ||
     fail "ingress-nginx does not preserve the www request URI in its HTTPS redirect"
+  grep -Fq 'if ($uri ~ ^/\.well-known/acme-challenge/) {' "$ingress_values" ||
+    fail "ingress-nginx www redirect blocks ACME HTTP-01 certificate renewal"
 done
 mongo_target_digest=sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3
 for mongo_target_file in \

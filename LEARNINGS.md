@@ -58,6 +58,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - Data handoff is not completion: validate the same run's handoff, deploy exact images, release the DB lock before the public fence.
 - File seals bind inode, never `st_dev` (macOS renumbers APFS devices).
 - Removing environment reviewers changes timing; test ungated, terminal and chained paths.
+- Every authority profile a validator can emit needs an end-to-end chained fixture; an unhandled arm fails the restore late.
 
 ## Infrastructure
 
@@ -65,3 +66,4 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - Shared-Mongo backup recovery differs from no-backup cross-cloud replacement; after cutover, recover forward.
 - Bound external reads; poll terminal conditions; cleanup must not erase failure evidence.
 - Verify API shapes, restart history and canonical routes; billing closure and deletion need terminal evidence.
+- Host-wide redirects must exempt `/.well-known/acme-challenge/`; prove certificate renewal, not just first issuance.

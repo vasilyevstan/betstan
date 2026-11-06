@@ -234,6 +234,27 @@ jq '.rabbitmq.queue_count=23 | .rabbitmq.expected_queue_count=23' \
 OCI_HEALTH_FIXTURE_FILE="$WORK_DIR/historical-queue-baseline.json" \
   "$HEALTH" | grep -qx DEPLOYED_HEALTHY
 
+jq '.services += [{"name":"cm-acme-http-solver-jt4k7","type":"NodePort","ready_endpoints":true,"acme_http01_solver":true}]' \
+  "$HEALTHY" > "$WORK_DIR/acme-solver-service.json"
+OCI_HEALTH_FIXTURE_FILE="$WORK_DIR/acme-solver-service.json" \
+  "$HEALTH" | grep -qx DEPLOYED_HEALTHY
+
+sed -n '/^service_health="\$($/,/^PY$/p' "$HEALTH" | sed '1,2d;$d' > "$WORK_DIR/service-health.py"
+cat > "$WORK_DIR/collector-services.json" <<'JSON'
+{"items":[
+  {"metadata":{"name":"cm-acme-http-solver-jt4k7","labels":{"acme.cert-manager.io/http01-solver":"true"}},"spec":{"type":"NodePort"}},
+  {"metadata":{"name":"gaming-bet-srv","labels":{"acme.cert-manager.io/http01-solver":"true"}},"spec":{"type":"ClusterIP"}},
+  {"metadata":{"name":"cm-acme-http-solver-unlabeled"},"spec":{"type":"NodePort"}}
+]}
+JSON
+printf '{"items":[]}\n' > "$WORK_DIR/collector-slices.json"
+python3 "$WORK_DIR/service-health.py" "$WORK_DIR/collector-services.json" "$WORK_DIR/collector-slices.json" |
+  jq -e '[.[] | {(.name): .acme_http01_solver}] | add ==
+    {"cm-acme-http-solver-jt4k7": true, "gaming-bet-srv": false, "cm-acme-http-solver-unlabeled": false}' >/dev/null || {
+  echo "collector flagged ACME solver services incorrectly" >&2
+  exit 1
+}
+
 run_failure() {
   local name="$1"
   local filter="$2"
@@ -261,6 +282,9 @@ run_failure wrong-architecture '.node.architecture="amd64"' wrong-architecture
 run_failure missing-workload 'del(.workloads[0])' workload-set
 run_failure platform-digest '.platform_workloads[0].image="mutable"' platform-digest
 run_failure empty-endpoint '.services[0].ready_endpoints=false' empty-endpoint
+run_failure unflagged-extra-service '.services += [{"name":"cm-acme-http-solver-jt4k7","type":"NodePort","ready_endpoints":true}]' service-set
+run_failure flagged-app-service-removed '.services[0].acme_http01_solver=true' service-set
+run_failure public-app-service '.services[0].type="NodePort"' public-data-service
 run_failure extra-mongo '.mongo.statefulset_count=2' extra-mongo
 run_failure wrong-pvc-identity '.mongo.pvc_inventory[0].name="gaming-bet-mongo-data"' mongo-pvc-topology
 run_failure extra-legacy-pvc '.mongo.pvc_inventory += [{"name":"gaming-bet-mongo-data-gaming-bet-mongo-depl-0","phase":"Bound"}]' mongo-pvc-topology

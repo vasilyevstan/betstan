@@ -52,13 +52,24 @@ MONGO_REVIEWED_ARM64_MANIFEST=sha256:21ca0269db1ebbd1c59f5cbc04928d7e3f6ab6186d7
 MONGO_REVIEWED_TARGET_IMAGE="docker.io/library/mongo@$MONGO_REVIEWED_INDEX_DIGEST"
 INGRESS_CONTROLLER_NAMESPACE="ingress-nginx"
 INGRESS_CONTROLLER_CONFIGMAP="ingress-nginx-controller"
-INGRESS_BASE_SERVER_SNIPPET="if (\$host = \"www.betstan.xyz\") {
+INGRESS_BASE_SERVER_SNIPPET='set $betstan_www_redirect "";
+if ($host = "www.betstan.xyz") {
+  set $betstan_www_redirect "1";
+}
+if ($uri ~ ^/\.well-known/acme-challenge/) {
+  set $betstan_www_redirect "";
+}
+if ($betstan_www_redirect) {
+  return 308 https://betstan.xyz$request_uri;
+}'
+INGRESS_LEGACY_BASE_SERVER_SNIPPET="if (\$host = \"www.betstan.xyz\") {
   return 308 https://betstan.xyz\$request_uri;
 }"
 INGRESS_HTTP_WRITE_FENCE_DIRECTIVE="if (\$request_method !~ ^(GET|HEAD|OPTIONS)\$) {
   return 503;
 }"
 INGRESS_FENCED_SERVER_SNIPPET="${INGRESS_BASE_SERVER_SNIPPET}"$'\n'"${INGRESS_HTTP_WRITE_FENCE_DIRECTIVE}"
+INGRESS_LEGACY_FENCED_SERVER_SNIPPET="${INGRESS_LEGACY_BASE_SERVER_SNIPPET}"$'\n'"${INGRESS_HTTP_WRITE_FENCE_DIRECTIVE}"
 
 APP_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip client)
 BACKEND_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip)
@@ -1383,10 +1394,10 @@ http_write_fence_config_status() {
     -n "$INGRESS_CONTROLLER_NAMESPACE" \
     -o jsonpath='{.data.server-snippet}')"
   case "$snippet" in
-    "$INGRESS_BASE_SERVER_SNIPPET")
+    "$INGRESS_BASE_SERVER_SNIPPET"|"$INGRESS_LEGACY_BASE_SERVER_SNIPPET")
       printf false
       ;;
-    "$INGRESS_FENCED_SERVER_SNIPPET")
+    "$INGRESS_FENCED_SERVER_SNIPPET"|"$INGRESS_LEGACY_FENCED_SERVER_SNIPPET")
       printf true
       ;;
     *)
@@ -1402,12 +1413,16 @@ set_http_write_fence_config() {
   [[ "$expected" == "true" || "$expected" == "false" ]] ||
     migration_die "HTTP write fence state must be true or false"
   current="$(http_write_fence_config_status)"
-  [[ "$current" == "$expected" ]] && return 0
   if [[ "$expected" == "true" ]]; then
     desired="$INGRESS_FENCED_SERVER_SNIPPET"
   else
     desired="$INGRESS_BASE_SERVER_SNIPPET"
   fi
+  [[ "$current" == "$expected" &&
+     "$(kube_capture oci ingress-config-read 30 2 \
+       get configmap "$INGRESS_CONTROLLER_CONFIGMAP" \
+       -n "$INGRESS_CONTROLLER_NAMESPACE" \
+       -o jsonpath='{.data.server-snippet}')" == "$desired" ]] && return 0
   patch="$(migration_raw ingress-config-patch 30 1 \
     jq -cn --arg snippet "$desired" \
       '{data:{"server-snippet":$snippet}}')"
