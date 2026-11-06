@@ -6164,15 +6164,15 @@ def handoff_remaining_guard_staged(
         fail("staged handoff timing profile, phase or physical deadline is unsupported")
     if not isinstance(elapsed, dict) or set(elapsed) != set(completed[:completed.index(phase) + 1]):
         fail("staged handoff timing has incomplete or inconsistent authenticated phase evidence")
+    # Stage ceilings only budget unfinished work; an overrun of a finished or
+    # current stage is safe while the physical lease deadline covers the rest.
     for stage, duration in elapsed.items():
         if (
             type(duration) not in (int, float) or not math.isfinite(duration)
-            or duration < 0 or duration > stages[stage]
+            or duration < 0
         ):
-            fail(f"receiver handoff {stage} elapsed stage exceeds its strict source ceiling")
-    residual = stages[phase] - elapsed[phase]
-    if residual <= 0:
-        fail("v4 handoff current allocation is exhausted while work remains")
+            fail(f"receiver handoff {stage} elapsed stage chronology is invalid")
+    residual = max(stages[phase] - elapsed[phase], 0)
     tail = residual + sum(stages[stage] for stage in futures[phase])
     if deadline - now <= tail + HANDOFF_RESERVE_SECONDS:
         fail("authentic physical handoff deadline cannot cover the unfinished path plus reserve")
@@ -6480,13 +6480,11 @@ def validate_receiver_handoff_timing(
         elapsed["native-validation"] = now - started
     else:
         elapsed["receiver-renewal"] = now - verify_started
+    # Stage ceilings only budget unfinished work; the physical lease deadline
+    # and whole-path ceiling below decide safety, not per-stage overruns.
     for stage, duration in elapsed.items():
-        ceiling = (
-            HANDOFF_STAGE_CEILINGS["queue"] + HANDOFF_STAGE_CEILINGS["approval"]
-            if stage == "queue-and-approval" else HANDOFF_STAGE_CEILINGS[stage]
-        )
-        if duration < 0 or duration > ceiling:
-            fail(f"receiver handoff {stage} elapsed stage exceeds its strict source ceiling")
+        if duration < 0:
+            fail(f"receiver handoff {stage} elapsed stage chronology is invalid")
     tail = handoff_remaining_guard(deadline, now, boundary)
     if now - renewal > 1200:
         fail("receiver handoff whole renewal-to-renewal ceiling was exhausted")

@@ -385,20 +385,18 @@ for profile, limits in staged_profiles.items():
             ["bash"], input=verify, cwd=root, env=env,
             text=True, capture_output=True, timeout=30,
         )
-        if mode in {
-            "completed-prestart-overrun", "completed-startup-overrun",
-        }:
-            assert checked.returncode != 0, (
-                profile, mode, checked.stdout, checked.stderr,
-            )
-            assert not (root / "events").exists(), (profile, mode)
-            continue
+        # Completed-stage overruns are tolerated while the physical lease,
+        # reserve and whole-path budget still hold.
+        success = mode in {
+            "success", "completed-prestart-overrun",
+            "completed-startup-overrun",
+        }
         assert checked.returncode == 0, (profile, mode, checked.stderr)
         result = subprocess.run(
             ["bash"], input=renew, cwd=root, env=env,
             text=True, capture_output=True, timeout=30,
         )
-        assert (result.returncode == 0) == (mode == "success"), (
+        assert (result.returncode == 0) == success, (
             profile, mode, result.stdout, result.stderr,
         )
         assert (root / "events").read_text().splitlines() == [
@@ -406,7 +404,7 @@ for profile, limits in staged_profiles.items():
         ]
         assert (
             "handoff_receiver_renewal=PASS" in result.stdout
-        ) == (mode == "success")
+        ) == success
         if mode == "phase-exhausted-after-physical-renewal":
             assert (
                 "exhausted its authenticated v4 phase or reserve"

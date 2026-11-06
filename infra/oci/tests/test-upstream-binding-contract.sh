@@ -4728,6 +4728,21 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
         receiver.clear(); receiver.update(saved_receiver)
         workflow.clear(); workflow.update(saved_workflow)
     with patch.object(m.time, "time", return_value=base + 371):
+        assert m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, "receiver-renewal", receiver_run,
+        )["unfinished_seconds"] == tails["receiver-renewal"]
+    # A slow Bastion open overran the old 240s startup-snapshot stage ceiling.
+    saved_job = copy.deepcopy(job)
+    job["steps"][1]["started_at"] = stamp(538)
+    with patch.object(m.time, "time", return_value=base + 542):
+        assert m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, "startup-snapshot", receiver_run,
+        )["stage_elapsed_seconds"]["startup-snapshot"] == 338
+    job.clear(); job.update(saved_job)
+    with patch.object(m.time, "time", return_value=deadline - 721):
+        m.validate_receiver_handoff_timing(
+            "example/repo", producer_run, source, "receiver-renewal", receiver_run)
+    with patch.object(m.time, "time", return_value=deadline - 720):
         reject(lambda: m.validate_receiver_handoff_timing(
             "example/repo", producer_run, source, "receiver-renewal", receiver_run))
     with patch.object(m.time, "time", side_effect=[base + 60, deadline]):
@@ -4805,11 +4820,17 @@ for phase, tail in tails.items():
     equality = now + tail + 600
     reject(lambda: m.handoff_remaining_guard_v4(equality, now, phase, selected))
     assert m.handoff_remaining_guard_v4(equality + 1, now, phase, selected) == tail
-    for spent in (-1, stages[phase], stages[phase] + 0.1, float("nan"), float("inf"), True):
+    for spent in (-1, float("nan"), float("inf"), True):
         reject(lambda: m.handoff_remaining_guard_v4(
             deadline, now, phase, dict(selected, **{phase: spent})))
-    reject(lambda: m.handoff_remaining_guard_v4(
-        deadline, now, phase, dict(selected, packaging=121)))
+    for spent in (stages[phase], stages[phase] + 0.1, stages[phase] * 3):
+        overrun = dict(selected, **{phase: spent})
+        futures_tail = tail - (stages[phase] - selected[phase])
+        assert m.handoff_remaining_guard_v4(deadline, now, phase, overrun) == futures_tail
+        reject(lambda: m.handoff_remaining_guard_v4(
+            now + futures_tail + 600, now, phase, overrun))
+    assert m.handoff_remaining_guard_v4(
+        deadline, now, phase, dict(selected, packaging=121)) == tail
     reject(lambda: m.handoff_remaining_guard_v4(
         deadline, now, phase, {key: value for key, value in selected.items() if key != "packaging"}))
 for phase in ("approval-1", "caller-zero-tail", None, []):
@@ -4858,12 +4879,18 @@ for phase, tail in v5_tails.items():
     assert m.handoff_remaining_guard_v5(
         equality + 1, now, phase, selected,
     ) == tail
-    for spent in (
-        -1, v5_stages[phase], v5_stages[phase] + 0.1,
-        float("nan"), float("inf"), True,
-    ):
+    for spent in (-1, float("nan"), float("inf"), True):
         reject(lambda: m.handoff_remaining_guard_v5(
             v5_deadline, now, phase, dict(selected, **{phase: spent}),
+        ))
+    for spent in (v5_stages[phase], v5_stages[phase] + 0.1, v5_stages[phase] * 3):
+        overrun = dict(selected, **{phase: spent})
+        futures_tail = tail - (v5_stages[phase] - selected[phase])
+        assert m.handoff_remaining_guard_v5(
+            v5_deadline, now, phase, overrun,
+        ) == futures_tail
+        reject(lambda: m.handoff_remaining_guard_v5(
+            now + futures_tail + 600, now, phase, overrun,
         ))
 for changed in (
     dict(v5_stages, packaging=0),
@@ -4935,7 +4962,8 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
         assert result["stage_elapsed_seconds"]["admission"] == 250
         assert result["stage_elapsed_seconds"]["approval"] == 600
         jobs.assert_called_once_with("example/repo", producer_run, "receiver handoff timing")
-    reject(lambda: read("approval-3", 1485))
+    assert read("approval-3", 1485)["unfinished_seconds"] == 1080
+    reject(lambda: read("approval-3", 1920))
     reject(lambda: read("native-validation", 1200))
     receiver["status"] = "in_progress"
     jobs.reset_mock()
@@ -4943,13 +4971,14 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
     jobs.assert_called_once_with("example/repo", producer_run, "receiver handoff timing")
     result = read("native-validation", 1200)
     assert result["phase"] == "native-validation" and result["unfinished_seconds"] == 760
-    reject(lambda: read("native-validation", 1480))
+    assert read("native-validation", 1480)["unfinished_seconds"] == 480
+    reject(lambda: read("native-validation", 2520))
     with patch.dict(job, started_at=stamp(1485)), \
             patch.dict(validation, started_at=stamp(1485)):
         assert read("native-validation", 1486)["stage_elapsed_seconds"]["approval"] == 1200
     with patch.dict(job, started_at=stamp(1485.1)), \
             patch.dict(validation, started_at=stamp(1485.1)):
-        reject(lambda: read("native-validation", 1486))
+        assert read("native-validation", 1486)["phase"] == "native-validation"
     validation.update(status="completed", conclusion="success", completed_at=stamp(1300))
     jobs.reset_mock()
     result = read("native-validation", 1400)
@@ -4960,11 +4989,10 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
     assert result["phase"] == "receiver-renewal" and result["unfinished_seconds"] == 80
     assert result["renewal_stage_deadline"] == base + 1620
     assert read("receiver-renewal", 1540)["unfinished_seconds"] == 80
-    reject(lambda: read("receiver-renewal", 1620))
+    assert read("receiver-renewal", 1620)["unfinished_seconds"] == 0
+    reject(lambda: read("receiver-renewal", 3000))
     original_job = copy.deepcopy(job)
     for mutate in (
-        lambda: validation.update(completed_at=stamp(1481)),
-        lambda: handoff.update(started_at=stamp(1661)),
         lambda: handoff.update(status="completed", conclusion="failure"),
         lambda: handoff.update(completed_at=stamp(1530)),
         lambda: job.update(started_at=stamp(1486)),
@@ -4975,7 +5003,7 @@ with patch.object(m, "require_fixed_run", return_value=producer), \
         reject(lambda: read("receiver-renewal", 1700))
         job.clear(); job.update(copy.deepcopy(original_job))
         validation, handoff = job["steps"]
-    for key, value in (("run_attempt", 2), ("head_sha", "2" * 40), ("created_at", stamp(636))):
+    for key, value in (("run_attempt", 2), ("head_sha", "2" * 40), ("created_at", stamp(1001))):
         with patch.dict(receiver, {key: value}):
             reject(lambda: read("receiver-renewal", 1540))
     with patch.object(m, "current_held_source", return_value=legacy_workflow):
@@ -5048,7 +5076,8 @@ with patch.object(m, "require_fixed_run", return_value=v5_producer), \
         assert result["unfinished_seconds"] == 4000
         assert result["stage_elapsed_seconds"]["admission"] == 900
         assert result["stage_elapsed_seconds"]["approval"] == 800
-    reject(lambda: read_v5("approval-3", 3400))
+    assert read_v5("approval-3", 3400)["unfinished_seconds"] == 2400
+    reject(lambda: read_v5("approval-3", 4200))
     v5_receiver["status"] = "in_progress"
     result = read_v5("native-validation", 2700)
     assert result["phase"] == "native-validation"
@@ -5060,7 +5089,7 @@ with patch.object(m, "require_fixed_run", return_value=v5_producer), \
         )["stage_elapsed_seconds"]["approval"] == 2400
     with patch.dict(v5_job, started_at=stamp(3400.1)), \
             patch.dict(v5_validation, started_at=stamp(3400.1)):
-        reject(lambda: read_v5("native-validation", 3401))
+        assert read_v5("native-validation", 3401)["phase"] == "native-validation"
     v5_validation.update(
         status="completed", conclusion="success", completed_at=stamp(3300),
     )
@@ -5072,7 +5101,8 @@ with patch.object(m, "require_fixed_run", return_value=v5_producer), \
     assert result["phase"] == "receiver-renewal"
     assert result["unfinished_seconds"] == 200
     assert result["renewal_stage_deadline"] == base + 4000
-    reject(lambda: read_v5("receiver-renewal", 4000))
+    assert read_v5("receiver-renewal", 4000)["unfinished_seconds"] == 0
+    reject(lambda: read_v5("receiver-renewal", 6600))
     with patch.dict(v5_receiver, created_at=stamp(99)):
         reject(lambda: read_v5("receiver-renewal", 3800))
     with patch.dict(v5_validation, completed_at=stamp(2499)):
@@ -5085,7 +5115,7 @@ with patch.object(m, "require_fixed_run", return_value=v5_producer), \
                       return_value={"schema_version": "live-betting-data-resume-v4"}):
         reject(lambda: read_v5("dispatch", 1000, ""))
 PY
-ok "v4/v5 source-bound profiles, staged residuals, native renewal, strict chronology, equality and reserve exhaustion"
+ok "v4/v5 source-bound profiles, tolerated stage overruns, native renewal, strict chronology, deadline equality and reserve exhaustion"
 
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$VALIDATOR" <<'PY'
 import contextlib
