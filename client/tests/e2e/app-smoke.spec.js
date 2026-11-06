@@ -600,6 +600,41 @@ test('Match Desk shell keeps semantic order and switches exactly at 1400px', asy
   expect(at.overflow).toBeLessThanOrEqual(1);
 });
 
+test('skip navigation focuses main without a full-height frame and preserves card and control cues', async ({ page }, testInfo) => {
+  await installFakeEventSource(page);
+  await installAppApiMocks(page, createLiveBettingMockState());
+  for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }]) {
+    for (const theme of ['dark', 'light']) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/?ui=v2&theme=${theme}`);
+      await expect(page.locator('.event-card').first()).toBeVisible();
+      const main = page.getByRole('main');
+      const before = await main.boundingBox();
+      await page.getByRole('link', { name: 'Skip to main content' }).focus();
+      await page.keyboard.press('Enter');
+      await expect(main).toBeFocused();
+      expect(await main.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe('none');
+      const after = await main.boundingBox();
+      expect(after.width).toBe(before.width);
+      expect(after.height).toBe(before.height);
+      const rails = await page.locator('.slip-board').evaluateAll((boards) => boards.map((board) => {
+        const style = getComputedStyle(board);
+        return { width: style.borderInlineStartWidth, color: style.borderInlineStartColor };
+      }));
+      expect(rails).toHaveLength(2);
+      expect(rails.every(({ width }) => width === '3px')).toBe(true);
+      expect(rails[0].color).not.toBe(rails[1].color);
+      await page.screenshot({ path: testInfo.outputPath(`main-focus-${viewport.width}-${theme}.png`) });
+      await page.keyboard.press('Tab');
+      const controlFocus = await page.evaluate(() => {
+        const style = getComputedStyle(document.activeElement);
+        return { style: style.outlineStyle, width: style.outlineWidth };
+      });
+      expect(controlFocus).toEqual({ style: 'solid', width: '3px' });
+    }
+  }
+});
+
 test('Events and wildcard routes expose one logical route heading', async ({ page }) => {
   await prepareShell(page);
 
