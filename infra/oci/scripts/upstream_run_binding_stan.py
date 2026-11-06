@@ -5912,7 +5912,43 @@ def current_reader_preflight_aggregation(workflow, label, *, inverse=False):
     return result
 
 
+CHECKPOINT_READ_AUTH_EDITS = tuple(
+    (header + following, header + """\
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+""" + following)
+    for header, following in (
+        ("""
+      - name: Revalidate exact release disk checkpoint before lock mutation
+        id: disk_preflight
+        continue-on-error: true
+        if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+""", "          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}\n"),
+        ("""
+      - name: Acquire database operation lock
+        if: inputs.phase != 'incident-restore'
+        id: operation_lock
+        env:
+""", "          GH_TOKEN: ${{ github.token }}\n"),
+    )
+)
+
+
+def without_checkpoint_read_auth(workflow, label):
+    """Normalize only the complete reviewed credential addition for historical comparison."""
+    if not any(after in workflow for _, after in CHECKPOINT_READ_AUTH_EDITS):
+        return workflow
+    return exact_current_reader_edits(
+        workflow, CHECKPOINT_READ_AUTH_EDITS, label, inverse=True,
+    )
+
+
 def without_read_only_preflight(workflow, label):
+    workflow = without_checkpoint_read_auth(workflow, label)
     markers = (
         "id: resume_preflight", "id: baseline_preflight",
         "id: activation_preflight", "id: disk_preflight",
