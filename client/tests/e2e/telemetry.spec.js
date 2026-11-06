@@ -137,10 +137,8 @@ const expectRequiredLabelsNotClipped = async (page) => {
     '.telemetry-metric .telemetry-notice[role="status"]',
     '.telemetry-metric__date',
     '.telemetry-metric__value',
-    '.navbar-collapse.show .nav-icon-link__label',
-    '.navbar-collapse.show .nav-picture-button__label',
-    '.navbar-expand-lg .nav-icon-link__label',
-    '.navbar-expand-lg .nav-picture-button__label',
+    '.app-nav-link__label:not(.visually-hidden)',
+    '.user-chip__name',
   ].join(',')).evaluateAll((elements) => {
     const epsilon = 0.75;
     return elements.flatMap((element, index) => {
@@ -188,6 +186,7 @@ const expectRequiredLabelsNotClipped = async (page) => {
 };
 
 const expectNavigationFits = async (page, checkAllLinks = false) => {
+  await openCollapsedNavigation(page);
   const navbar = page.locator('.app-navbar');
   const backoffice = page.getByRole('link', { name: 'Backoffice', exact: true });
   const telemetry = page.getByRole('link', { name: 'Telemetry', exact: true });
@@ -196,8 +195,8 @@ const expectNavigationFits = async (page, checkAllLinks = false) => {
 
   const failures = await page.locator(
     checkAllLinks
-      ? '.navbar-nav .nav-item > a'
-      : '.navbar-nav .nav-item > a[title="Backoffice"], .navbar-nav .nav-item > a[title="Telemetry"]'
+      ? '.app-navbar a:visible, .app-navbar button:visible'
+      : '.navbar-nav .nav-item > a[title="Backoffice"]:visible, .navbar-nav .nav-item > a[title="Telemetry"]:visible'
   ).evaluateAll((links) => {
     const navbarRect = links[0]?.closest('.app-navbar')?.getBoundingClientRect();
     const boxes = links.map((link, index) => {
@@ -252,6 +251,10 @@ const getContrastEvidence = (page) => page.evaluate(() => {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'transparent') {
       return [0, 0, 0, 0];
+    }
+
+    if (/^#[0-9a-f]{6}$/.test(normalized)) {
+      return [...[1, 3, 5].map((start) => parseInt(normalized.slice(start, start + 2), 16)), 1];
     }
 
     if (normalized.startsWith('color(srgb')) {
@@ -332,6 +335,7 @@ const getContrastEvidence = (page) => page.evaluate(() => {
   const refreshStyle = getComputedStyle(refresh);
   const focusBackground = effectiveBackground(refresh.parentElement);
   const outline = parseColor(refreshStyle.outlineColor);
+  const tokens = getComputedStyle(document.documentElement);
 
   return {
     focus: {
@@ -343,6 +347,14 @@ const getContrastEvidence = (page) => page.evaluate(() => {
     neutralBars: [...document.querySelectorAll('.telemetry-metric__bar')].every((bar) => (
       getComputedStyle(bar).fill === getComputedStyle(bar).color
     )),
+    accent: parseColor(tokens.getPropertyValue('--accent')),
+    positive: parseColor(tokens.getPropertyValue('--positive')),
+    healthyBorders: [...document.querySelectorAll('.telemetry-health__item:has(.telemetry-health__status--healthy)')]
+      .map((item) => parseColor(getComputedStyle(item).borderInlineStartColor)),
+    healthyIndicators: [...document.querySelectorAll('.telemetry-health__status--healthy .telemetry-health__indicator')]
+      .map((indicator) => parseColor(getComputedStyle(indicator).backgroundColor)),
+    successBorders: [...document.querySelectorAll('.telemetry-notice--success')]
+      .map((notice) => parseColor(getComputedStyle(notice).borderColor)),
     indicators: ratiosFor(
       '.telemetry-health__indicator',
       'backgroundColor',
@@ -923,8 +935,9 @@ const expectStableCardStates = async (page, state, label, ordinaryDesktop = fals
 
 const openCollapsedNavigation = async (page) => {
   const toggler = page.getByRole('button', { name: 'Toggle navigation' });
-  if (await toggler.isVisible()) {
+  if (await toggler.isVisible() && await toggler.getAttribute('aria-expanded') === 'false') {
     await toggler.click();
+    await expect(toggler).toHaveAttribute('aria-expanded', 'true');
     await expect(page.locator('#betstan-navbar')).toHaveClass(/show/);
   }
 };
@@ -940,6 +953,12 @@ const expectContrast = async (page) => {
   expect(Math.min(...evidence.statusText)).toBeGreaterThanOrEqual(4.5);
   expect(evidence.indicators).toHaveLength(10);
   expect(Math.min(...evidence.indicators)).toBeGreaterThanOrEqual(3);
+  expect(evidence.accent[2]).toBeGreaterThan(evidence.accent[1]);
+  expect(evidence.accent[2]).toBeGreaterThan(evidence.accent[0]);
+  expect(evidence.healthyBorders).toHaveLength(4);
+  expect(evidence.healthyIndicators).toHaveLength(4);
+  evidence.healthyBorders.forEach((border) => expect(border).toEqual(evidence.accent));
+  evidence.healthyIndicators.forEach((indicator) => expect(indicator).toEqual(evidence.positive));
   expect(evidence.graphs).toHaveLength(112);
   expect(Math.min(...evidence.graphs)).toBeGreaterThanOrEqual(3);
   expect(evidence.focus.width).toBe('3px');
@@ -987,6 +1006,10 @@ const expectRefreshFocusAfterSuccessAndFailure = async (page, state) => {
   await refresh.click();
   await expect(page.getByRole('status')).toHaveText('Telemetry refreshed.');
   await expect(refresh).toBeFocused();
+  const { successBorders } = await getContrastEvidence(page);
+  expect(successBorders).toHaveLength(1);
+  expect(successBorders[0][2]).toBeGreaterThan(successBorders[0][1]);
+  expect(successBorders[0][2]).toBeGreaterThan(successBorders[0][0]);
 
   state.telemetrySummary = {};
   await refresh.click();
@@ -1150,6 +1173,7 @@ test('authenticated expanded navbar fits at 1000px', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
   await expect(page.locator('.app-navbar__content')).toBeVisible();
   await expect(page.getByText('telemetry-user', { exact: true })).toBeVisible();
+  expect((await page.locator('.app-navbar').boundingBox()).height).toBeLessThanOrEqual(72);
   await expectNavigationFits(page, true);
   await expectRequiredLabelsNotClipped(page);
   await expectNoScrollOverflow(page.locator('html'), 'authenticated 1000px document');

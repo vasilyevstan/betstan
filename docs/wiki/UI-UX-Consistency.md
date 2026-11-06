@@ -105,13 +105,18 @@ The shared shell adds durable review rules:
 - **One visual world:** Standard, Compact, and Spacious change density and
   composition only. They share one brand, semantic role system, and state
   grammar across routes and themes, with a blue operational/action accent.
-  The established header wordmark and route-icon composition remain shared.
+  The pre-redesign compact header wordmark and route-icon composition remain
+  shared, with visible Backoffice/Telemetry labels and accessible icon-only
+  theme/authentication controls. Below 992 CSS pixels, navigation is collapsed
+  behind its keyboard-operable toggle; verify both sides of that breakpoint.
   All three `ui` URLs remain supported without rendering a Layout label or
   density selector in the DOM.
 - **Purposeful decoration and graph exception:** Backoffice task panels retain
   normal keylines and intentional peer/shared-column alignment without
   decorative left accent or information rails. Explicit Recorded/Online cues
-  and unrelated domain-state rails remain. Telemetry daily and hourly bars
+  and unrelated domain-state rails remain. Online, healthy-service and success
+  borders use the blue accent rather than green; healthy status dots and text,
+  warning and error semantics are unchanged. Telemetry daily and hourly bars
   use the neutral primary-text role (`--text-main`), near-white on dark and
   dark ink on light, rather than the blue action accent; activity counts are
   not action or status emphasis. This does not change their exact values,
