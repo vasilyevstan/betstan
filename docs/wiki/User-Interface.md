@@ -44,15 +44,17 @@ Primary routes are:
 | `/login` | Login |
 | `/logout` | Session logout |
 
-The header uses one theme-appropriate wordmark and the established route-icon
-composition across all density profiles. It keeps visibly labelled **Events**,
-**Backoffice**, **Telemetry**, authentication, and **Theme** choices discoverable.
-Signed-in users also receive **My bets**. Backoffice and Telemetry remain
-visibly labelled and usable for anonymous visitors as well as signed-in users.
+The header restores the compact, pre-redesign icon composition across all
+density profiles. The theme-appropriate wordmark returns to Events.
+**Backoffice** and **Telemetry** retain visible labels for anonymous and signed-in
+visitors; theme and authentication icons retain accessible names and tooltips.
+Signed-in users also receive **My bets**. Below 992 CSS pixels, **Toggle navigation**
+opens the collapsed menu. Escape and route-link activation close it; Escape
+returns focus to the toggle. Theme changes keep the menu open.
 Header links preserve the current query parameters; theme changes retain the
 active route. Authentication-aware navigation, current-route marking, and
-accessibility cues remain intact. The
-browser tab uses a dedicated 48 x 48 square SVG emblem derived from the
+accessibility cues remain intact. The browser tab uses a dedicated 48 x 48
+square SVG emblem derived from the
 existing header wordmark, while install and touch icons remain unchanged.
 
 My Bets opens with **All statuses**, **All types**, **All dates**, and

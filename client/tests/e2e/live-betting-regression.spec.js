@@ -1371,6 +1371,11 @@ for (const uiVariant of UI_VARIANTS) {
       await liveFeed.waitForSource();
       await liveFeed.openAll();
 
+      const navigationToggle = page.getByRole('button', { name: 'Toggle navigation' });
+      if (await navigationToggle.isVisible()) {
+        await navigationToggle.click();
+        await expect(navigationToggle).toHaveAttribute('aria-expanded', 'true');
+      }
       const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
       const backofficeLabel = backofficeLink.locator('.app-nav-link__label');
       await expect(backofficeLink).toBeVisible();
@@ -1386,6 +1391,10 @@ for (const uiVariant of UI_VARIANTS) {
       expect(navigationMetrics.height).toBeGreaterThan(8);
 
       await backofficeLink.click();
+      if (await navigationToggle.isVisible()) {
+        await expect(navigationToggle).toHaveAttribute('aria-expanded', 'false');
+        await expect(page.locator('#betstan-navbar')).toBeHidden();
+      }
       await expect(page).toHaveURL(
         new RegExp(`/backoffice\\?ui=${uiVariant}&theme=${theme}$`)
       );
@@ -1419,10 +1428,19 @@ for (const uiVariant of UI_VARIANTS) {
       await liveFeed.waitForSource();
       await liveFeed.openAll();
 
+      const navigationToggle = page.getByRole('button', { name: 'Toggle navigation' });
+      if (await navigationToggle.isVisible()) {
+        await navigationToggle.click();
+        await expect(navigationToggle).toHaveAttribute('aria-expanded', 'true');
+      }
       const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
       await expect(backofficeLink).toBeVisible();
       await expect(backofficeLink).toContainText('Backoffice');
       await backofficeLink.click();
+      if (await navigationToggle.isVisible()) {
+        await expect(navigationToggle).toHaveAttribute('aria-expanded', 'false');
+        await expect(page.locator('#betstan-navbar')).toBeHidden();
+      }
       await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
       await expect(page.getByText('Create new event')).toBeVisible();
       await expect(page.getByRole('article', { name: 'Northport - Lakewood', exact: true })).toBeVisible();

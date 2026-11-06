@@ -35,6 +35,13 @@ test('approved blue header and plain Backoffice tasks retain representative geom
       await expect(page.getByText('Showing 5 of 5 events')).toBeVisible();
       const header = page.getByRole('navigation', { name: 'Primary navigation' });
       await expect(header.getByRole('group', { name: 'Layout' })).toHaveCount(0);
+      const toggle = header.getByRole('button', { name: 'Toggle navigation' });
+      if (viewport.width < 992) {
+        await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect((await header.boundingBox()).height).toBeLessThanOrEqual(72);
+        await toggle.click();
+        await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      }
       const inspect = () => header.evaluate((navigation) => {
         const canvas = document.createElement('canvas');
         canvas.width = canvas.height = 1;
@@ -65,13 +72,14 @@ test('approved blue header and plain Backoffice tasks retain representative geom
           const r = element.getBoundingClientRect();
           return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
         };
-        const controls = [...navigation.querySelectorAll('a')].map(box);
+        const visible = (element) => element.getClientRects().length > 0;
+        const controls = [...navigation.querySelectorAll('a, button')].filter(visible).map(box);
         const frame = box(navigation);
         const overlaps = controls.flatMap((a, i) => controls.slice(i + 1).filter((b) => (
           a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
         )));
-        const text = [...navigation.querySelectorAll('.app-nav-link__label, .presentation-option, .presentation-control__label, .user-chip__name, .user-chip__avatar')];
-        const accent = parse(getComputedStyle(document.documentElement).getPropertyValue('--info'));
+        const text = [...navigation.querySelectorAll('.app-nav-link__label:not(.visually-hidden), .user-chip__name, .user-chip__avatar')].filter(visible);
+        const accent = parse(getComputedStyle(document.documentElement).getPropertyValue('--accent'));
         const current = navigation.querySelector('[aria-current="page"]');
         const theme = navigation.querySelector('.presentation-option--active');
         const focused = navigation.querySelector(':focus-visible');
@@ -82,9 +90,14 @@ test('approved blue header and plain Backoffice tasks retain representative geom
           textContrast: Math.min(...text.map((element) => contrast(parse(getComputedStyle(element).color), background(element)))),
           accentContrast: contrast(accent, background(navigation)),
           currentContrast: contrast(parse(getComputedStyle(current).borderColor), background(current)),
-          selectedContrast: contrast(accent, background(theme)),
+          selectedContrast: contrast(parse(getComputedStyle(theme).color), background(theme)),
           focusContrast: focused ? contrast(parse(getComputedStyle(focused).outlineColor), background(focused.parentElement)) : null,
           focusWidth: focused ? getComputedStyle(focused).outlineWidth : null,
+          accent,
+          onlineBorders: [...document.querySelectorAll('.backoffice-state--online')].map((element) => ({
+            color: parse(getComputedStyle(element).borderInlineStartColor),
+            width: getComputedStyle(element).borderInlineStartWidth,
+          })),
           taskBorders: [...document.querySelectorAll('.backoffice-task')].map((task) => getComputedStyle(task).borderInlineStartWidth),
           taskColumnDeltas: [...document.querySelectorAll('.backoffice-event__controls')].map((group) => {
             const [a, b] = [...group.querySelectorAll('.backoffice-task')].map(box);
@@ -93,6 +106,7 @@ test('approved blue header and plain Backoffice tasks retain representative geom
         };
       });
       const dark = header.getByRole('link', { name: 'Dark', exact: true });
+      await page.keyboard.press('Tab');
       await dark.focus();
       const normal = await inspect();
       expect(normal.collisions).toBe(0);
@@ -104,6 +118,13 @@ test('approved blue header and plain Backoffice tasks retain representative geom
         expect(normal[key], key).toBeGreaterThanOrEqual(3);
       }
       expect(normal.focusWidth).toBe('3px');
+      expect(normal.accent[2]).toBeGreaterThan(normal.accent[1]);
+      expect(normal.accent[2]).toBeGreaterThan(normal.accent[0]);
+      expect(normal.onlineBorders.length).toBeGreaterThan(0);
+      for (const border of normal.onlineBorders) {
+        expect(border.color).toEqual(normal.accent);
+        expect(border.width).toBe('3px');
+      }
       expect(normal.taskBorders.every((width) => width === '1px')).toBe(true);
       expect(Math.max(...normal.taskColumnDeltas)).toBeLessThanOrEqual(0.75);
       if (!state.currentUser) {
@@ -120,12 +141,79 @@ test('approved blue header and plain Backoffice tasks retain representative geom
       await page.evaluate(() => window.scrollTo(0, 0));
       await header.getByRole('link', { name: theme === 'dark' ? 'Light' : 'Dark', exact: true }).click();
       await expect(page.locator('.app-shell')).toHaveClass(new RegExp(`ui-variant-${ui} ui-theme-${theme === 'dark' ? 'light' : 'dark'}`));
+      if (viewport.width < 992) await expect(toggle).toHaveAttribute('aria-expanded', 'true');
       expect(new URL(page.url()).searchParams.get('acceptanceEventIds')).toBe('event-1,event-2');
       expect(new URL(page.url()).searchParams.get('review')).toBe('header');
     }
   }
   console.log(`Approved header evidence: ${JSON.stringify(evidence)}`);
   await testInfo.attach('approved-header-measurements', { body: JSON.stringify(evidence, null, 2), contentType: 'application/json' });
+});
+
+test('compact header collapses below 992px with keyboard-safe disclosure in every density', async ({ page }) => {
+  const state = await prepareShell(page);
+  for (const ui of ['v1', 'v2', 'v3']) {
+    for (const currentUser of [null, { email: 'long-display-name@example.com', role: 'USER' }]) {
+      state.currentUser = currentUser;
+      const theme = currentUser ? 'light' : 'dark';
+      await page.setViewportSize({ width: 991, height: 1000 });
+      await page.goto(`/?ui=${ui}&theme=${theme}`);
+      await expect(page.getByRole('heading', { name: 'Events', exact: true })).toBeVisible();
+      const header = page.getByRole('navigation', { name: 'Primary navigation' });
+      const toggle = header.getByRole('button', { name: 'Toggle navigation' });
+      const menu = header.locator('#betstan-navbar');
+      if (currentUser) await expect(header.getByText('long-display-nam')).toBeHidden();
+      await expect(toggle).toBeVisible();
+      await expect(toggle).toHaveAttribute('aria-controls', 'betstan-navbar');
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      await expect(menu).toBeHidden();
+      const collapsedHeight = (await header.boundingBox()).height;
+      expect(collapsedHeight).toBeLessThanOrEqual(72);
+
+      await header.getByRole('link', { name: 'BetStan home' }).focus();
+      await page.keyboard.press('Tab');
+      await expect(toggle).toBeFocused();
+      // display:none must also exclude every collapsed link from programmatic focus.
+      expect(await menu.locator('a').evaluateAll((links) => links.every((link) => {
+        link.focus();
+        return document.activeElement !== link;
+      }))).toBe(true);
+      await page.keyboard.press('Tab');
+      expect(await menu.evaluate((element) => element.contains(document.activeElement))).toBe(false);
+      await toggle.focus();
+      await toggle.press('Enter');
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      await expect(menu).toBeVisible();
+      const backoffice = header.getByRole('link', { name: 'Backoffice', exact: true });
+      await backoffice.focus();
+      await backoffice.press('Escape');
+      await expect(menu).toBeHidden();
+      await expect(toggle).toBeFocused();
+      expect((await header.boundingBox()).height).toBe(collapsedHeight);
+
+      await toggle.press('Space');
+      await expect(menu).toBeVisible();
+      await backoffice.press('Enter');
+      await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${ui}&theme=${theme}$`));
+      await expect(menu).toBeHidden();
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      await expect(toggle).toBeFocused();
+
+      await page.setViewportSize({ width: 992, height: 1000 });
+      await expect(toggle).toBeHidden();
+      await expect(menu).toBeVisible();
+      await expect(backoffice).toBeVisible();
+      await expect(header.getByRole('link', { name: currentUser ? 'My bets' : 'Log in' })).toBeVisible();
+      if (currentUser) await expect(header.getByText('long-display-nam')).toBeVisible();
+      expect((await header.boundingBox()).height).toBeLessThanOrEqual(72);
+      for (const width of [991, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        await expect(toggle).toBeVisible();
+        await expect(menu).toBeHidden();
+        expect((await header.boundingBox()).height).toBeLessThanOrEqual(72);
+      }
+    }
+  }
 });
 
 test('browser favicon serves and decodes the standalone BetStan mark', async ({ page }) => {
@@ -311,7 +399,6 @@ test('expanded mobile navigation scrolls away without hiding labelled controls o
     'BetStan home',
     'Dark',
     'Light',
-    'Events',
     'Backoffice',
     'Telemetry',
     'Create account',
@@ -327,6 +414,10 @@ test('expanded mobile navigation scrolls away without hiding labelled controls o
     await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
     const header = page.locator('.app-navbar');
     await expect(header).toBeVisible();
+    const toggle = header.getByRole('button', { name: 'Toggle navigation' });
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
 
     const initial = await header.evaluate((navigation) => {
       const bounds = (element) => {
@@ -348,7 +439,8 @@ test('expanded mobile navigation scrolls away without hiding labelled controls o
           || element.querySelector('img')?.alt
           || '';
       };
-      const controls = Array.from(navigation.querySelectorAll('a')).map((element) => ({
+      const controls = Array.from(navigation.querySelectorAll('a, button'))
+        .filter((element) => element.getClientRects().length > 0).map((element) => ({
         ...bounds(element),
         name: controlName(element),
       }));
@@ -374,7 +466,9 @@ test('expanded mobile navigation scrolls away without hiding labelled controls o
     expect(initial.position).toBe('static');
     expect(initial.documentOverflow).toBeLessThanOrEqual(1);
     expect(initial.overflowingContainers).toEqual([]);
-    expect(initial.controls.map(({ name }) => name)).toEqual(expectedNavigationLabels);
+    expect(initial.controls.map(({ name }) => name)).toEqual([
+      expectedNavigationLabels[0], 'Toggle navigation', ...expectedNavigationLabels.slice(1),
+    ]);
     expect(initial.controls.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
     expect(initial.controls.every(({ left, right }) => left >= -1 && right <= 391)).toBe(true);
 
@@ -459,7 +553,8 @@ test('Match Desk shell keeps semantic order and switches exactly at 1400px', asy
     { waitUntil: 'domcontentloaded' }
   );
   await expect(page.getByRole('heading', { name: 'Events', level: 1 })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Events' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'BetStan home' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: 'Events' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Backoffice' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Telemetry' })).toBeVisible();
   await expect(page.getByRole('group', { name: 'Layout', exact: true })).toHaveCount(0);
@@ -469,7 +564,7 @@ test('Match Desk shell keeps semantic order and switches exactly at 1400px', asy
     '/?ui=v2&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained'
   );
   const navigationTargets = page.locator(
-    '.app-nav-link, .presentation-option, .app-navbar__auth-link'
+    '.app-nav-link:visible, .presentation-option:visible, .app-navbar__auth-link:visible'
   );
   for (const target of await navigationTargets.all()) {
     const bounds = await target.boundingBox();
@@ -623,7 +718,7 @@ test('reduced motion removes effective motion while focus and state cues remain'
   };
 
   await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
-  await expectMotionlessFocus(page.getByRole('link', { name: 'Events' }));
+  await expectMotionlessFocus(page.getByRole('link', { name: 'Backoffice', exact: true }));
   const selectedBettingControl = page.getByRole('button', {
     name: state.fixtures.preMatchSelectionLabel,
   });
