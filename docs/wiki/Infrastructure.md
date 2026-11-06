@@ -349,7 +349,8 @@ malformed or duplicate headers and empty output.
 ## Networking
 
 - The canonical hostname serves the application over HTTPS.
-- `www` redirects to the canonical host while preserving the request path.
+- `www` redirects to the canonical host while preserving the request path;
+  ACME HTTP-01 challenge paths stay on `www` so its certificate can renew.
 - A diagnostic hostname is used for infrastructure validation, not product
   identity.
 - Ingress routes Auth, Event, Slip, Bet, Backoffice, and the public
@@ -366,6 +367,8 @@ Deployment health is broader than "pods are running." The release checks:
 - workload readiness and restart changes;
 - exact live image digests;
 - canonical, redirect, and diagnostic host behavior;
+- the exact application Service set, ignoring only transient cert-manager
+  HTTP-01 solver Services;
 - TLS and ingress routing;
 - expected JSON response shapes;
 - SSE connectivity;

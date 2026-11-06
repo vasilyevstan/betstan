@@ -23,13 +23,25 @@ INGRESS_CONFIGMAP="${INGRESS_CONFIGMAP:-ingress-nginx-controller}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-60}"
 WAIT_SECONDS="${WAIT_SECONDS:-2}"
 
-BASE_SERVER_SNIPPET='if ($host = "www.betstan.xyz") {
+# ACME HTTP-01 paths stay on www so cert-manager can renew the canonical certificate.
+BASE_SERVER_SNIPPET='set $betstan_www_redirect "";
+if ($host = "www.betstan.xyz") {
+  set $betstan_www_redirect "1";
+}
+if ($uri ~ ^/\.well-known/acme-challenge/) {
+  set $betstan_www_redirect "";
+}
+if ($betstan_www_redirect) {
+  return 308 https://betstan.xyz$request_uri;
+}'
+LEGACY_BASE_SERVER_SNIPPET='if ($host = "www.betstan.xyz") {
   return 308 https://betstan.xyz$request_uri;
 }'
 WRITE_FENCE_DIRECTIVE='if ($request_method !~ ^(GET|HEAD|OPTIONS)$) {
   return 503;
 }'
 FENCED_SERVER_SNIPPET="${BASE_SERVER_SNIPPET}"$'\n'"${WRITE_FENCE_DIRECTIVE}"
+LEGACY_FENCED_SERVER_SNIPPET="${LEGACY_BASE_SERVER_SNIPPET}"$'\n'"${WRITE_FENCE_DIRECTIVE}"
 
 writer_services=(backoffice bet event moderation resulting slip gamemaster)
 all_services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
@@ -67,18 +79,20 @@ deployment_name() {
   printf 'gaming-%s-depl' "$1"
 }
 
+current_server_snippet() {
+  kubectl get configmap "$INGRESS_CONFIGMAP" \
+    -n "$INGRESS_NAMESPACE" \
+    -o jsonpath='{.data.server-snippet}'
+}
+
 fence_config_status() {
   local snippet
-  snippet="$(
-    kubectl get configmap "$INGRESS_CONFIGMAP" \
-      -n "$INGRESS_NAMESPACE" \
-      -o jsonpath='{.data.server-snippet}'
-  )"
+  snippet="$(current_server_snippet)"
   case "$snippet" in
-    "$BASE_SERVER_SNIPPET")
+    "$BASE_SERVER_SNIPPET"|"$LEGACY_BASE_SERVER_SNIPPET")
       printf false
       ;;
-    "$FENCED_SERVER_SNIPPET")
+    "$FENCED_SERVER_SNIPPET"|"$LEGACY_FENCED_SERVER_SNIPPET")
       printf true
       ;;
     *)
@@ -89,15 +103,15 @@ fence_config_status() {
 
 set_fence_config() {
   local expected="$1"
-  local current desired patch
-  current="$(fence_config_status)" ||
+  local desired patch
+  fence_config_status >/dev/null ||
     fail "ingress server-snippet differs from the reviewed baseline and fence"
-  [[ "$current" == "$expected" ]] && return 0
   if [[ "$expected" == "true" ]]; then
     desired="$FENCED_SERVER_SNIPPET"
   else
     desired="$BASE_SERVER_SNIPPET"
   fi
+  [[ "$(current_server_snippet)" == "$desired" ]] && return 0
   patch="$(jq -cn --arg snippet "$desired" '{data:{"server-snippet":$snippet}}')"
   kubectl patch configmap "$INGRESS_CONFIGMAP" \
     -n "$INGRESS_NAMESPACE" \

@@ -410,6 +410,10 @@ print(json.dumps([
         "name": item.get("metadata", {}).get("name"),
         "type": item.get("spec", {}).get("type", "ClusterIP"),
         "ready_endpoints": ready.get(item.get("metadata", {}).get("name"), False),
+        "acme_http01_solver": (
+            item.get("metadata", {}).get("labels", {}).get("acme.cert-manager.io/http01-solver") == "true"
+            and str(item.get("metadata", {}).get("name", "")).startswith("cm-acme-http-solver-")
+        ),
     }
     for item in services.get("items", [])
 ]))
