@@ -295,12 +295,23 @@ body {
 
 .app-navbar > .container-fluid {
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: 0 0.75rem;
 }
 
 .app-navbar .navbar-brand {
   min-width: var(--control-target);
   min-height: var(--control-target);
+}
+
+.app-navbar .navbar-toggler {
+  min-width: var(--control-target);
+  min-height: var(--control-target);
+  border-color: var(--border-control);
+  color: var(--text-main);
+}
+
+.app-navbar .navbar-toggler:focus {
+  box-shadow: none;
 }
 
 .brand-wordmark {
@@ -321,18 +332,21 @@ body {
   height: 1.2rem;
 }
 
-.navbar-dark .nav-icon,
-.navbar-light .app-nav-link--primary .nav-icon {
+.navbar-dark .nav-icon {
   filter: brightness(0) invert(1);
 }
 
-.navbar-dark .app-nav-link--primary .nav-icon {
+.navbar-dark .presentation-option--active .nav-icon {
   filter: none;
+}
+
+.navbar-light .presentation-option--active .nav-icon {
+  filter: brightness(0) invert(1);
 }
 
 .app-navbar__content {
   display: flex;
-  flex: 1 1 40rem;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   align-items: center;
   min-width: 0;
@@ -350,23 +364,9 @@ body {
 }
 
 .presentation-control {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-control);
-  background: var(--surface-soft);
-}
-
-.presentation-control__label {
-  padding-inline: 0.6rem;
-  color: var(--text-subtle);
-  font-size: var(--font-size-meta);
-  font-weight: 750;
-  letter-spacing: 0.08em;
-  line-height: var(--line-height-compact);
-  text-transform: uppercase;
-  white-space: nowrap;
 }
 
 .presentation-control__options {
@@ -381,8 +381,9 @@ body {
   gap: 0.4rem;
   min-width: var(--control-target);
   min-height: var(--control-target);
-  padding: 0.45rem 0.65rem;
-  border-inline-start: 1px solid var(--border-subtle);
+  padding: 0.45rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
   color: var(--text-main);
   font-size: var(--font-size-action);
   font-weight: 650;
@@ -401,9 +402,9 @@ body {
 }
 
 .presentation-option--active {
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface-soft));
-  box-shadow: inset 0 -3px var(--accent);
-  color: var(--text-main);
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .app-navbar__links {
@@ -457,24 +458,13 @@ body {
   box-shadow: inset 3px 0 var(--accent);
 }
 
-.app-nav-link--primary {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-contrast);
-}
-
-.app-nav-link--primary:hover {
-  border-color: var(--text-main);
-  background: var(--accent);
-  color: var(--accent-contrast);
-}
-
 .navbar-meta:empty {
   display: none;
 }
 
 @media (max-width: 991.98px) {
   .app-navbar__content {
+    flex-basis: 100%;
     padding-block: 0.75rem 0.25rem;
   }
 
@@ -483,27 +473,17 @@ body {
     justify-content: flex-start;
   }
 
-  .presentation-control {
-    flex: 1 1 20rem;
-    flex-wrap: wrap;
-  }
-
-  .presentation-control__label {
-    min-width: 4.5rem;
-  }
-
-  .presentation-control__options {
-    flex: 1 1 auto;
-  }
-
-  .presentation-option {
-    flex: 1 1 auto;
-  }
-
   .app-navbar__links {
     flex: 1 1 100%;
     align-items: stretch;
     justify-content: flex-start;
+  }
+}
+
+@media (min-width: 992px) {
+  .app-navbar > .container-fluid,
+  .app-navbar__content {
+    flex-wrap: nowrap;
   }
 }
 
@@ -515,16 +495,6 @@ body {
 
   .app-shell__main {
     scroll-margin-top: 1rem;
-  }
-}
-
-@media (max-width: 575.98px) {
-  .app-navbar__links .nav-item {
-    flex: 1 1 calc(33.333% - 0.25rem);
-  }
-
-  .app-nav-link {
-    width: 100%;
   }
 }
 
@@ -574,7 +544,7 @@ body {
 }
 
 .alert-success {
-  border-color: var(--positive);
+  border-color: var(--accent);
   border-inline-start-width: 3px;
 }
 
@@ -1823,7 +1793,7 @@ body {
 }
 
 .backoffice-state--online {
-  border-inline-start: 3px solid var(--positive);
+  border-inline-start: 3px solid var(--accent);
 }
 
 .backoffice-event__controls {
@@ -2887,7 +2857,7 @@ body {
 }
 
 .telemetry-notice--success {
-  border-color: color-mix(in srgb, var(--positive) 42%, var(--border-subtle));
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-subtle));
   background: color-mix(in srgb, var(--positive) 12%, var(--surface-soft));
   color: var(--text-main);
 }
@@ -2921,7 +2891,7 @@ body {
 }
 
 .telemetry-health__item:has(.telemetry-health__status--healthy) {
-  border-inline-start-color: var(--positive);
+  border-inline-start-color: var(--accent);
 }
 
 .telemetry-health__item:has(.telemetry-health__status--degraded) {
