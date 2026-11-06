@@ -186,16 +186,21 @@ if os.environ.get("RECEIVER_TEST_FIXTURE"):
     require_fixed_run = lambda *a, **k: {"updated_at": _stamp(_fixture["packaged"])}
     parse_live_v6_artifact = lambda *a, **k: (
         {"source_sha": "2" * 40, "workflow_run_id": "77"}, None, {})
-    parse_resume_authority = lambda *a, **k: {"schema_version": _fixture["profile"]}
+    parse_resume_authority = lambda *a, **k: (
+        None if _fixture["profile"] == "native-final-data-1800"
+        else {"schema_version": _fixture["profile"]})
     native_handoff_renewal = lambda *a, **k: (_fixture["deadline"], 11)
     def gh_api(path):
         if "/workflows/" in path:
             return {"id": 8, "path": ".github/workflows/oci-production-deploy.yml",
                     "state": _fixture["workflow_state"]}
+        chained = _fixture["profile"] == "native-final-data-1800"
         return {"id": 78, "workflow_id": 8, "path": ".github/workflows/oci-production-deploy.yml",
                 "head_sha": "2" * 40, "head_branch": "master", "run_attempt": _fixture["attempt"],
-                "event": "workflow_dispatch", "head_repository": {"full_name": "example/repo"},
-                "display_title": "oci-deploy " + "2" * 40, "status": "in_progress",
+                "event": "workflow_run" if chained else "workflow_dispatch",
+                "head_repository": {"full_name": "example/repo"},
+                "display_title": "oci-deploy " + "2" * 40 + (" data-77" if chained else ""),
+                "status": "in_progress",
                 "conclusion": None, "created_at": _stamp(_fixture["created"])}
     def jobs_for_run(repository, run, label):
         if run == "77":
@@ -315,6 +320,30 @@ for mode in (
     else:
         assert "handoff_receiver_renewal=PASS" not in result.stdout
 print("real_yaml_receiver_timing_native_recheck_and_exact_renewal=PASS cases=13 no_acquire_fallback=true")
+# A chained (workflow_run) receiver of a legacy producer reports the
+# native-final-data-1800 profile and must renew under the 1800/1200 contract.
+native_cases = 0
+for mode in ("success", "late-after-physical-renewal", "wrong-generation"):
+    native_cases += 1
+    current = dict(state, mode=mode, profile="native-final-data-1800",
+                   workflow_state="active", posted_at=now,
+                   old_producer_deadline=now - 86400)
+    if mode == "late-after-physical-renewal":
+        current["after"] = current["deadline"] - 600
+    for name in ("events", "renewed", "lock.json"):
+        (root / name).unlink(missing_ok=True)
+    (root / "state.json").write_text(json.dumps(current))
+    checked = subprocess.run(["bash"], input=verify, cwd=root, env=env,
+                             text=True, capture_output=True, timeout=30)
+    assert checked.returncode == 0, (mode, checked.stderr)
+    assert '"profile": "native-final-data-1800"' in checked.stdout, checked.stdout
+    result = subprocess.run(["bash"], input=renew, cwd=root, env=env,
+                            text=True, capture_output=True, timeout=30)
+    assert (result.returncode == 0) == (mode == "success"), (
+        mode, result.stdout, result.stderr)
+    assert (root / "events").read_text().splitlines() == ["verify", "renew"]
+    assert ("handoff_receiver_renewal=PASS" in result.stdout) == (mode == "success")
+print(f"real_yaml_chained_native_final_data_renewal=PASS cases={native_cases}")
 staged_profiles = {
     "live-betting-data-resume-v4": {
         "lease": 3600, "approval": 1200, "startup": 360, "renewal": 120,
@@ -5653,6 +5682,9 @@ for literal in (
 
 for literal in (
     "live-betting-data-resume-v3)\n"
+    "              expected_handoff_lease_seconds=1800\n"
+    "              expected_handoff_execution_seconds=1200",
+    "native-final-data-1800)\n"
     "              expected_handoff_lease_seconds=1800\n"
     "              expected_handoff_execution_seconds=1200",
     "live-betting-data-resume-v4)\n"
