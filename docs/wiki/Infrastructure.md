@@ -300,6 +300,13 @@ repository-fixed arguments and the authoritative protected-environment runtime
 mode. A later public or held revalidation must reproduce the bound identity,
 filesystem capacity, mount, candidate, and rollback state before release
 mutation; the checkpoint is not a durable waiver for changed runtime state.
+Each checkpoint revalidation step explicitly binds the existing OCI CLI
+identity, signing-key secret, and region for its cloud volume-attachment read.
+Credentials from earlier identity or access steps do not carry into later
+steps; these bindings stay step-scoped, not job-wide.
+Historical data-workflow comparison recognizes only this complete, exact
+credential addition; existing preflight-body pins and historical identities
+remain unchanged.
 Kernel block-device names such as `/dev/sdX` are not persistent across node
 reboots, so revalidation does not compare the sealed root/Mongo mount-source
 hashes. It still requires the same node, filesystem types and capacities,
