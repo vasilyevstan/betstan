@@ -218,11 +218,6 @@ body {
   scroll-margin-top: 12rem;
 }
 
-.app-shell__main:focus {
-  outline: 3px solid var(--focus-ring);
-  outline-offset: 4px;
-}
-
 .app-shell__sidebar {
   min-width: 0;
 }
@@ -502,6 +497,10 @@ body {
   outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
   box-shadow: none;
+}
+
+.app-shell__main:focus {
+  outline: none;
 }
 
 .card {
