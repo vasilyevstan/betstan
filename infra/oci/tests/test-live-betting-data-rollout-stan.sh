@@ -3991,10 +3991,12 @@ chmod +x "$resume_fixture/bin/gh"
 cp "$resume_fixture/lock.json" "$resume_fixture/root-lock.json"
 write_prior_resume() {
   local conclusion="$1" failed_deploy="$2" written_offset="$3" held_handoff="${4:-0}"
-  python3 - "$resume_fixture" "$conclusion" "$failed_deploy" "$written_offset" "$held_handoff" <<'PY'
+  local applied_run="${5:-4007}"
+  python3 - "$resume_fixture" "$conclusion" "$failed_deploy" "$written_offset" "$held_handoff" \
+    "$applied_run" <<'PY'
 import hashlib, json, sys, time
 from pathlib import Path
-root, conclusion, failed_deploy, written_offset, held_handoff = sys.argv[1:]
+root, conclusion, failed_deploy, written_offset, held_handoff, applied_run = sys.argv[1:]
 root = Path(root)
 now = int(time.time())
 started, finished = now - 20000, now - 19000
@@ -4007,7 +4009,7 @@ iso = lambda epoch: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 artifact = root / "prior-resume-artifact"
 files = {
     "resume-authority.env": "\n".join([
-        "schema_version=live-betting-data-resume-v2", "applied_data_run_id=4007",
+        "schema_version=live-betting-data-resume-v2", "applied_data_run_id=" + applied_run,
         "applied_source_sha=" + "1" * 40, "failed_deploy_run_id=" + failed_deploy,
         "resume_maintenance_mode=retained-hold", "current_source_sha=" + "3" * 40,
         "status=PASS"] + ([f"held_handoff_run_id={held_handoff}"] if held_handoff != "0" else [])) + "\n",
@@ -4044,9 +4046,15 @@ import json, sys
 data = json.load(open(sys.argv[1]))["data"]
 assert data["holder"] == "live-data-4010-1" and data["source-sha"] == "3" * 40
 PY
-for prior_case in "success 4009 400" "success 4011 0" "failure 4009 0" "success 4009 0 4008"; do
-  read -r prior_conclusion prior_failed prior_offset prior_held <<<"$prior_case"
-  write_prior_resume "$prior_conclusion" "$prior_failed" "$prior_offset" "${prior_held:-0}"
+write_prior_resume success 4009 0
+RESUME_PREREQUISITE_RUN_ID=4008 RESUME_PREREQUISITE_SOURCE_SHA="$(printf '%040d' 2)" \
+  run_prior_resume_fixture >/dev/null ||
+  fail "retained-hold resume rejected a prior same-root holder behind a chained prerequisite"
+for prior_case in "success 4009 400" "success 4011 0" "failure 4009 0" "success 4009 0 4008" \
+  "success 4009 0 0 4006"; do
+  read -r prior_conclusion prior_failed prior_offset prior_held prior_applied <<<"$prior_case"
+  write_prior_resume "$prior_conclusion" "$prior_failed" "$prior_offset" "${prior_held:-0}" \
+    "${prior_applied:-4007}"
   if run_prior_resume_fixture >"$resume_fixture/prior-resume.out" 2>&1; then
     fail "retained-hold resume accepted prior holder case: $prior_case"
   fi

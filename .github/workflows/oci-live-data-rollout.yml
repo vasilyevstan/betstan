@@ -1379,7 +1379,8 @@ jobs:
                 [ -z "$(find "$prior_dir" -type l -print -quit)" ]
                 (cd "$prior_dir" && sha256sum --quiet --check SHA256SUMS)
                 for entry in schema_version=live-betting-data-resume-v2 \
-                  "applied_data_run_id=$PREREQUISITE_RUN_ID" "applied_source_sha=$RESUME_SOURCE_SHA" \
+                  "applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID" \
+                  "applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA" \
                   "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID" resume_maintenance_mode=retained-hold \
                   "current_source_sha=$previous_holder_source" status=PASS; do
                   [ "$(grep -c -x -F "$entry" "$prior_dir/resume-authority.env")" = 1 ]

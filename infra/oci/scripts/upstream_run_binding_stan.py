@@ -5572,6 +5572,12 @@ def without_native_deployment_consumer(workflow, label):
 
 CURRENT_READER_PREFLIGHT_EDITS = (
     (
+        '                  "applied_data_run_id=$PREREQUISITE_RUN_ID" '
+        '"applied_source_sha=$RESUME_SOURCE_SHA" \\\n',
+        '                  "applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID" \\\n'
+        '                  "applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA" \\\n',
+    ),
+    (
         "      - name: Verify exact failed-deploy resume state\n        if: >-\n",
         "      - name: Verify exact failed-deploy resume state\n"
         "        id: resume_preflight\n        continue-on-error: true\n        if: >-\n",
@@ -5879,7 +5885,7 @@ CURRENT_READER_PREFLIGHT_EDITS = (
 )
 CURRENT_READER_PREFLIGHT_REGION_SHA256 = (
     "990404ff986071acece98d6453a15461d31a332364d607a5d5e23413e9008de4",
-    "943ea1a36c85827d0860c163cda1adb68bf4bfc3cb849fe729b8919f903487a4",
+    "737783f0624a1ce13ce1fe4ca4ed51f3e340e9bfeee6574374a45522d4217c90",
 )
 
 
