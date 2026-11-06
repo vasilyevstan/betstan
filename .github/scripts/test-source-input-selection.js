@@ -1,7 +1,86 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const { PACKAGES, selectSourceInputs } = require("./source-input-selection.js");
+
+const ROOT = path.resolve(__dirname, "../..");
+
+function repositoryWorkflow(name) {
+  return JSON.parse(execFileSync("ruby", [
+    "-rjson", "-ryaml", "-e", "puts JSON.generate(YAML.load_file(ARGV[0]))",
+    path.join(ROOT, ".github/workflows", name),
+  ], { encoding: "utf8" }));
+}
+
+function runScopeSelector(workflow, paths) {
+  const step = workflow.jobs["change-scope"]?.steps.find((item) => item.id === "scope") ??
+    workflow.jobs.scope.steps.find((item) => item.id === "scope");
+  const source = /^python3 - <<'PY'\n([\s\S]*)\nPY\n?$/.exec(step.run)?.[1];
+  assert.ok(source, "exercise the actual workflow selector");
+  const result = execFileSync("python3", ["-c", `
+import contextlib
+import io
+import json
+import os
+from unittest.mock import mock_open, patch
+
+source, paths = json.loads(${JSON.stringify(JSON.stringify([source, paths]))})
+os.environ.update(GITHUB_EVENT_NAME="pull_request", BASE_SHA="base", HEAD_SHA="head",
+                  GITHUB_OUTPUT="test-output")
+output = mock_open()
+with patch("subprocess.check_output", return_value="\\n".join(paths)) as diff, \\
+     patch("builtins.open", output), contextlib.redirect_stdout(io.StringIO()):
+    exec(source, {})
+diff.assert_called_once_with(
+    ["git", "diff", "--no-renames", "--name-only", "base", "head"], text=True)
+values = "".join(call.args[0] for call in output().write.call_args_list)
+print(json.dumps(dict(line.split("=", 1) for line in values.splitlines())))
+`], { encoding: "utf8" });
+  return JSON.parse(result);
+}
+
+function testServiceFeedback() {
+  const feedback = repositoryWorkflow("service-tests.yml");
+  const production = repositoryWorkflow("production-build.yml");
+  const services = PACKAGES.filter((name) => !["client", "common", "telemetry"].includes(name));
+  const trigger = (feedback.on ?? feedback.true).pull_request;
+  assert.equal(trigger.branches, undefined, "retain feedback outside protected PR bases");
+  for (const service of services) {
+    assert.ok(trigger.paths.includes(`${service}/**`));
+    assert.equal(fs.existsSync(path.join(ROOT, `.github/workflows/tests-${service}.yaml`)), false);
+    const changed = [`${service}/src/route.ts`];
+    assert.deepEqual(JSON.parse(runScopeSelector(feedback, changed).matrix).service, [service]);
+    assert.ok(JSON.parse(runScopeSelector(production, changed).coverage_matrix).service.includes(service));
+  }
+  const changed = ["bet/src/deleted.ts", "auth/src/renamed.ts", "docs/wiki/Agents.md"];
+  assert.deepEqual(JSON.parse(runScopeSelector(feedback, changed).matrix).service, ["auth", "bet"]);
+  for (const shared of ["common/src/index.ts", "betstan-common-1.0.55.tgz"]) {
+    assert.deepEqual(JSON.parse(runScopeSelector(feedback, [shared]).matrix).service, services);
+    const covered = JSON.parse(runScopeSelector(production, [shared]).coverage_matrix).service;
+    for (const service of services) assert.ok(covered.includes(service));
+  }
+  const unaffected = runScopeSelector(feedback, ["client/src/App.js", "docs/wiki/Agents.md"]);
+  assert.equal(unaffected.has_tests, "false");
+  const allowed = new Function("github", `return (${feedback.jobs.scope.if});`);
+  for (const base of ["dev", "master", "feature/preview"]) {
+    assert.equal(allowed({ event: { pull_request: { base: { ref: base } } } }),
+      base !== "dev" && base !== "master");
+  }
+  assert.deepEqual(feedback.permissions, { contents: "read" });
+  assert.equal(feedback.jobs.tests.needs, "scope");
+  assert.equal(feedback.jobs.tests.if, "needs.scope.outputs.has_tests == 'true'");
+  assert.equal(feedback.jobs.tests.steps.find((step) => step.uses?.startsWith("actions/setup-node@"))
+    .with["node-version"], "20.19.5");
+  assert.deepEqual(feedback.jobs.tests.steps.filter((step) => step.run).map((step) => step.run),
+    ["npm ci", "npm run test:ci"]);
+  for (const job of Object.values(feedback.jobs)) {
+    assert.equal(job.environment, undefined);
+    assert.equal(job.permissions, undefined);
+  }
+}
 
 function fixture() {
   const paths = [
@@ -135,6 +214,7 @@ function testSourceInputSelection() {
     mutate(invalid);
     assert.throws(() => selectSourceInputs(invalid));
   }
+  testServiceFeedback();
   console.log("source_input_selection_tests=PASS");
 }
 

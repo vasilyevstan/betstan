@@ -6,7 +6,7 @@ OPERATOR="$ROOT_DIR/infra/azure/agents/consolidate-production-mongo-stan.sh"
 LOCK_SCRIPT="$ROOT_DIR/infra/azure/agents/shared-mongo-operation-lock-stan.sh"
 ROLLBACK_READINESS="$ROOT_DIR/infra/azure/agents/rollback-readiness-stan.sh"
 SIGNATURE_SCRIPT="$ROOT_DIR/infra/azure/agents/mongo-database-signature-stan.js"
-MIGRATION_AGENT="$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md"
+MIGRATION_AGENT="$ROOT_DIR/archive/azure/github-agents/betstan-mongo-migration.md"
 MONGO_TEST_IMAGE="${MONGO_TEST_IMAGE:-docker.io/library/mongo@sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3}"
 SKIP_DOCKER="${SKIP_DOCKER:-0}"
 
@@ -70,6 +70,15 @@ for required_reference in \
   'MIGRATION_COMPLETE'; do
   grep -Fq "$required_reference" "$MIGRATION_AGENT" ||
     fail "migration agent is missing required reference: $required_reference"
+done
+for required_reference in \
+  'archive/azure/github-agents/betstan-mongo-migration.md' \
+  'consolidate-production-mongo-stan.sh' \
+  'shared-mongo-operation-lock-stan.sh' \
+  'shared-mongo-topology-guard-stan.sh' \
+  'rollback-readiness-stan.sh'; do
+  grep -Fq "$required_reference" "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
+    fail "active deployment-safety routing is missing migration reference: $required_reference"
 done
 
 retired_paths=(
