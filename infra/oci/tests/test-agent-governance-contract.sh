@@ -15,15 +15,12 @@ roles = {
     for path in agents.glob("*.agent.md")
 }
 expected = {
-    "architect", "simplifier", "backend-developer", "frontend-developer",
-    "test-engineer", "service-contract-reviewer",
-    "auth-security-reviewer", "ux-ui-expert", "deployment-safety",
-    "oci-operator", "domain-ingress", "mongo-migration",
-    "public-wiki-editor",
+    "delivery-coordinator", "backend-developer", "frontend-developer",
+    "test-engineer", "auth-security-reviewer", "ux-ui-expert",
+    "deployment-safety", "oci-operator", "public-wiki-editor",
 }
-manual_expected = {
-    "oci-operator", "domain-ingress", "mongo-migration",
-}
+manual_expected = {"oci-operator"}
+archived_migration = root / "archive/azure/github-agents/betstan-mongo-migration.md"
 if set(roles) != expected:
     raise SystemExit("supported agent inventory changed")
 
@@ -43,8 +40,12 @@ for role, path in roles.items():
         r"^tools:\s*\[read,\s*search\]\s*$", frontmatter, re.M
     ):
         raise SystemExit("UX gained execution or editing authority")
-    if role == "simplifier" and re.search(r"^model:", frontmatter, re.M):
-        raise SystemExit("simplifier must remain model-neutral")
+    if role == "delivery-coordinator" and re.search(r"^model:", frontmatter, re.M):
+        raise SystemExit("coordinator must remain model-neutral")
+    if role in {"test-engineer", "auth-security-reviewer", "ux-ui-expert"} and re.search(
+        r"^tools:.*\bedit\b", frontmatter, re.M
+    ):
+        raise SystemExit(f"{role}: read-only verifier gained editing authority")
 if manual != manual_expected:
     raise SystemExit("manual-invocation restrictions changed")
 if len(roles["deployment-safety"].read_text(encoding="utf-8").splitlines()) > 150:
@@ -137,9 +138,27 @@ require(
 # Domain safeguards survive routing consolidation; their executable tests
 # remain with the package, authorization, migration and release implementations.
 require(
-    agents / "betstan-service-contract-reviewer.agent.md",
+    agents / "betstan-test-engineer.agent.md",
     "state both versions and never substitute one for the other",
     "a shared contract requires every genuine consumer",
+    "mixed-version/rollback matrix",
+    "one exact pin across all eight consumers",
+)
+require(
+    agents / "betstan-delivery-coordinator.agent.md",
+    "you **are** the one accountable owner, not a supervisor",
+    "A missing user-supplied SHA does not block local work",
+    "verified exact identities are required before any protected merge, dispatch, approval or mutation",
+    "Non-author verification is required at changed trust/state boundaries",
+    "No default specialist pass elsewhere",
+    "name the current failure path",
+    "do not remove protections to simplify",
+    "no quorum, veto or protection removal by vote",
+    "source candidate and each service's installed `@betstan/common` pin are separate authorities",
+    "immutable ingress time",
+    "Report a definitive job or shard failure as a blocker as soon as it is known",
+    "cancelled, skipped or stale results are never success",
+    "An agent token never authorizes a merge, release or production mutation",
 )
 require(
     agents / "betstan-test-engineer.agent.md",
@@ -171,10 +190,31 @@ require(
     "A health-only assignment grants no mutation authority",
 )
 require(
-    agents / "betstan-mongo-migration.agent.md",
+    archived_migration,
+    "disable-model-invocation: true",
     "Require exact in-AKS source/target server-version and FCV compatibility",
     "The unattended recovery identity remains stop-only",
     "After `cutover-committed`, recover forward only",
+)
+require(
+    agents / "betstan-deployment-safety.agent.md",
+    "archive/azure/github-agents/betstan-mongo-migration.md",
+    "A disabled workflow is not proof that its recovery obligation retired",
+    "any read error is unknown and `NO_GO`",
+    "immutable original journal SHA",
+    "A run waiting for approval is active, not hung",
+    "controller-level HTTP mutation fence",
+    "routing-fence protocol",
+    "After `cutover-committed`, recover forward only",
+    "The unattended recovery identity remains stop-only",
+)
+require(
+    agents / "betstan-oci-operator.agent.md",
+    "`https://betstan.xyz` is canonical",
+    "never satisfies canonical health",
+    "never use registrar credentials",
+    "never overlaps two paid LBs",
+    "CLI automatic approval never waives resource scope, DNS ownership or TLS checks",
 )
 PY
 

@@ -738,14 +738,18 @@ for lesson in \
     grep -Fq "$lesson" "$lessons" ||
       fail "OCI lessons omit required recovery guidance: $lesson"
 done
-for agent in \
-    betstan-mongo-migration \
-    betstan-domain-ingress; do
-    agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
-    [[ -f "$agent_file" ]] || fail "required recovery agent is missing: $agent"
+archived_migration_agent="$ROOT_DIR/archive/azure/github-agents/betstan-mongo-migration.md"
+for agent_file in \
+    "$archived_migration_agent" \
+    "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" \
+    "$ROOT_DIR/.github/agents/betstan-oci-operator.agent.md"; do
+    [[ -f "$agent_file" ]] || fail "required recovery guidance is missing: $agent_file"
     grep -Fq "infra/oci/LESSONS_LEARNED.md" "$agent_file" ||
-      fail "recovery agent does not read OCI lessons: $agent"
+      fail "recovery guidance does not read OCI lessons: $agent_file"
 done
+grep -Fq "archive/azure/github-agents/betstan-mongo-migration.md" \
+    "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
+  fail "deployment safety does not route to the archived migration procedure"
 for agent in betstan-oci-operator; do
   agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
   [[ -f "$agent_file" ]] || fail "required runtime agent is missing: $agent"
@@ -1021,20 +1025,22 @@ grep -Fq '"GITHUB_RUN_ID=777"' <<<"$ghcr_fixture_head" ||
   fail "GHCR contract fixture does not isolate the run ID"
 grep -Fq '"GITHUB_RUN_ATTEMPT=1"' <<<"$ghcr_fixture_head" ||
   fail "GHCR contract fixture inherits ambient workflow rerun metadata"
-grep -Fq "A run waiting for approval is active, not hung" \
-    "$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md" ||
-    fail "migration recovery agent can misclassify approval waits"
-grep -Fq "After \`cutover-committed\`, recover forward only" \
-    "$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md" ||
-    fail "migration recovery agent can roll back a committed cutover"
-mongo_agent_flat="$(tr '\n' ' ' <"$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md")"
-grep -Fq "controller-level HTTP mutation fence" <<<"$mongo_agent_flat" ||
-    fail "migration recovery agent does not preserve the restart-safe HTTP fence"
-grep -Fq "routing-fence protocol" <<<"$mongo_agent_flat" ||
-    fail "migration recovery agent does not require the RabbitMQ routing fence"
+for migration_guidance in \
+    "$archived_migration_agent" \
+    "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md"; do
+  grep -Fq "A run waiting for approval is active, not hung" "$migration_guidance" ||
+      fail "migration recovery guidance can misclassify approval waits: $migration_guidance"
+  grep -Fq "After \`cutover-committed\`, recover forward only" "$migration_guidance" ||
+      fail "migration recovery guidance can roll back a committed cutover: $migration_guidance"
+  mongo_agent_flat="$(tr '\n' ' ' <"$migration_guidance")"
+  grep -Fq "controller-level HTTP mutation fence" <<<"$mongo_agent_flat" ||
+      fail "migration recovery guidance does not preserve the restart-safe HTTP fence: $migration_guidance"
+  grep -Fq "routing-fence protocol" <<<"$mongo_agent_flat" ||
+      fail "migration recovery guidance does not require the RabbitMQ routing fence: $migration_guidance"
+done
 grep -Fq "https://betstan.xyz" \
-    "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
-    fail "domain ingress agent lacks the canonical host"
+    "$ROOT_DIR/.github/agents/betstan-oci-operator.agent.md" ||
+    fail "OCI operator routing guidance lacks the canonical host"
 migration_success_contract="$OCI_DIR/scripts/migration-success-contract.sh"
 [[ -x "$migration_success_contract" ]] ||
   fail "shared migration-success contract is missing or not executable"

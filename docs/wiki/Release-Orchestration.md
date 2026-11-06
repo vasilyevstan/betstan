@@ -11,98 +11,36 @@ image tag, a stale branch name, or an unverified workflow rerun.
 
 ## Delivery redesign: compatibility stage
 
-The delivery redesign is implemented only in part. Consolidated repository
-policy uses accountable ownership, proportionate verification, conditional
-specialists, and reuse of applicable evidence. Current executable checks,
-trusted workflow identities, protected `dev`-to-`master` ancestry, and
-origin-bound approval remain authoritative until their replacements are
-proven and activated. Editing policy does not reload a running session.
+The delivery redesign is implemented only in part. [[Quality Gates]] is its
+single current-state home: the legacy `branch-policy`/`production-build`
+protocol is live and enforced, the signed full-quality protocol and
+`source-quality.yml` `pull_request_target` path are disabled, and the
+dispatch-only native-original adoption sequence and its remaining real-run
+acceptance are recorded there.
 
-The compatible publisher correction changes receipt IO accounting, not receipt
-identity, expiry, or consumed authority. The inactive coverage-review path is
-being retired with temporary legacy readers retained. The protected
-three-job shadow workflow established trusted source capture, unprivileged
-exact-merge source-policy checks, and an isolated native-signed aggregate.
-Real BetStan signature verification passed against independently accepted
-default-master control. This is source-policy evidence, not full quality.
-The next cohesive candidate integrates complete selection, authenticated
-direct-original reuse, isolated full signing, metadata-independent publication
-and native merge verification. Its local regressions are not protected
-execution or activation evidence.
-[[Quality Gates]] owns these implementation details and remaining proof
-requirements.
+Release consequences:
 
-The dispatch-only native-original path has a separate, two-stage rollout.
-Preparation is protected; the adoption candidate enables the guarded reader and
-optional original producer, without establishing successful reuse or timing
-acceptance.
-
-1. Preparation protected the compatible helpers, optional OCI producer with
-   consumption **disabled**, and workflow-contract fixtures accepting both the
-   existing production caller and the exact proposed caller. It retained the
-   existing production workflow bytes and registered canonical one-use
-   declarations for `ci/native-dispatch-adoption` → `dev` and `dev` → `master`,
-   binding the exact future production caller with separate IDs and the
-   protected-master receipt anchor. Empirical ordinary-PR inline certificate
-   and execution-profile qualification is a prerequisite to adoption, not proof
-   of eligible-original publication or enabled-reader behavior. Neither
-   observations nor unsigned historical
-   successes can become approved originals retroactively.
-2. The adoption candidate uses the exact approved OCI consumption variant and
-   production caller on the declared adoption branch. Candidate declarations
-   and their configuration fixture entries are removed before its first required
-   run; the protected preparation publisher retains the
-   declarations while both authorized PRs validate. Keep proof helpers and the wrapper
-   unchanged so the publisher's wrapper-equality check remains meaningful.
-   Include required declaration cleanup in the final tested tree: any later
-   source change needs its own normal native execution, not a proof-tree waiver.
-   The first required changed-infrastructure run executes assertions and
-   attempts optional original publication before those input bytes are protected.
-   A same-complete-tree promotion and subsequent master build may reuse that
-   original directly only after successful publication and authenticated
-   control, runtime and source verification. Missing or unusable proof runs
-   ordinary assertions. Master preserves its reader from the validated platform
-   push-before protected commit before checking out new source; candidate
-   helper/control changes require ordinary computation. Master delegates only the
-   authenticated dispatch child; the other safety and affected Azure contracts
-   retain their existing owners.
-
-Optional native-proof control approvals are separate from the mandatory one-use
-production-caller authorizations. Neither introduces a global OCI publisher pin
-or fabricates a bootstrap receipt. Current publisher v3/v4 identity, ownership,
-head/merge freshness and production serialization remain unchanged. Adoption
-must use the existing one-use bootstrap and consumed-declaration cleanup.
-No third authorization-preparation promotion is needed. The disabled
-`source-quality.yml` and its `pull_request_target` path remain
-disabled. First eligible original publication, enabled-reader missing-proof and
-optional-publication failure behavior, and direct promotion/master reuse still
-require real-run acceptance. Overall flow and timing acceptance remain incomplete;
-local proof fixtures do not authorize deployment or restoration.
-
-The initial compatibility landing retained the old trusted workflow. The
-reviewed lean `production-build.yml` has since passed protected integration
-and promotion. It selects affected PR checks and avoids source validation for
-metadata edits, while the existing exact-status protocol remains authoritative.
-The separate signed full-quality replacement is not activated by this change.
-Existing head/merge-snapshot statuses and first-attempt rules remain required.
-No proposed snapshot proof may replace them before protected enforcement is
-accepted. The staged publisher and merge helper select their protocol from
-native required checks: legacy settings retain legacy publication and
-production-build completion handling together. Enforcing the new full-quality
-context prevents legacy-proof fallback.
-Replacement enforcement must precede removal of old producers/checks; default
-master remains the privileged verifier source. CLI-origin automatic progression
-and human-origin exact approval are unchanged.
-
-Rollback must retain readers for all emitted evidence and preserve
-spent receipts; use a reviewed forward correction when an older controller
-cannot interpret that state. Never enable competing writers or release a
-physical hold on the strength of a timeout.
-
-This implementation stage does not establish service or live-betting health,
-resume paused recovery, or claim code promotion, production dispatch, or
-cutover. Runtime claims require separate observed evidence. Public wiki
-publication also waits for accepted merged source.
+- Current executable checks, trusted workflow identities, protected
+  `dev`-to-`master` ancestry and origin-bound approval stay authoritative until
+  replacements are proven and activated; editing policy does not reload a
+  running session. Replacement enforcement precedes removal of old producers or
+  checks, and default `master` remains the privileged verifier source.
+- Existing head/merge-snapshot statuses, first-attempt rules, publisher v3/v4
+  identity, ownership, freshness and production serialization are unchanged; no
+  proposed snapshot proof replaces them before protected enforcement. The
+  compatible publisher correction changes receipt IO accounting, not receipt
+  identity, expiry or consumed authority.
+- Rollback must retain readers for all emitted evidence and preserve spent
+  receipts; use a reviewed forward correction when an older controller cannot
+  interpret that state. Never enable competing writers or release a physical
+  hold on the strength of a timeout. See
+  [CONTRIBUTING.md](https://github.com/vasilyevstan/betstan/blob/master/CONTRIBUTING.md)
+  for the canonical marker, receipt and ancestry rules.
+- None of this establishes service or live-betting health, resumes paused
+  recovery, or claims promotion, production dispatch or cutover; runtime claims
+  need separate observed evidence. Local proof fixtures do not authorize
+  deployment or restoration, and public wiki publication waits for accepted
+  merged source.
 
 ## Branch flow
 
@@ -147,26 +85,15 @@ production promotions keep their separate authorization requirements.
 
 ### Concurrent feature delivery
 
-Several development sessions may prepare and merge compatible features at the
-same time. A production promotion may therefore contain more than one reviewed
-feature. The release contract is inclusion-based rather than
-session-exclusive:
-
-1. each session records the protected commit or commits required for its
-   outcome;
-2. the release selects the exact current `master` SHA;
-3. every required commit must be an ancestor of that SHA;
-4. the complete aggregate SHA receives fresh build, data, rollback, and
-   acceptance evidence.
-
-Additional protected commits are not a reason to reset `master`, discard
-another session's work, or deploy an older candidate. If `master` advances
-during a release chain, the older chain is superseded and the new current
-candidate is used when it still contains all required commits.
-
-Development, review, and branch integration can remain concurrent. Production
-dispatches, data changes, deployments, activation, rollback, and recovery stay
-serialized so two sessions cannot mutate the live system at the same time.
+Releases are inclusion-based, not session-exclusive; the canonical rule is
+[CONTRIBUTING.md](https://github.com/vasilyevstan/betstan/blob/master/CONTRIBUTING.md#concurrent-feature-delivery).
+Each session records its required protected commits; the release selects the
+exact current `master` SHA, every required commit must be its ancestor, and the
+aggregate receives fresh build, data, rollback and acceptance evidence. A
+newer `master` that still contains every required commit supersedes an older
+chain; never reset `master`, discard another session's work or deploy an older
+candidate. Review and integration may be concurrent; production mutations stay
+serialized.
 
 On resume after another session's release, reconcile current protected
 `master`, the actual deployed generation, and the exact retained artifacts

@@ -7,7 +7,7 @@ Policy: [CONTRIBUTING](../CONTRIBUTING.md) · [branch skill](skills/betstan-bran
 ## Rules
 
 - Never commit or push directly to protected `dev` or `master`; changes reach `dev` by PR, `master` only from up-to-date `dev`.
-- One accountable owner, proportionate verification; independently verify changed trust/state boundaries. No mandatory agent chain or review-of-review. Reuse accepted evidence; targeted checks while correcting, one full validation of the final SHA.
+- One accountable owner (optionally [`betstan-delivery-coordinator`](agents/betstan-delivery-coordinator.agent.md)), proportionate verification; independently verify changed trust/state boundaries. No mandatory agent chain or review-of-review. Reuse accepted evidence; targeted checks while correcting, one full validation of the final SHA.
 - Exact-SHA CI is required; skipped, stale, pending, neutral or unrelated checks are not success.
 - Handle eligible CLI-owned approvals promptly via canonical helpers; human-origin work needs approval bound to its exact head SHA.
 - Record documentation impact for every change; update `docs/wiki/` when public behavior or guidance changes.

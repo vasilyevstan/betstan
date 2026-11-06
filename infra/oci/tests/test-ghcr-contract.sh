@@ -898,8 +898,8 @@ def validate_full_contracts(workflow)
   full = jobs.fetch("full-contracts")
   raise "OCI full contracts require a bounded 40-minute shard limit" unless
     full["timeout-minutes"].is_a?(Integer) && full["timeout-minutes"] == 40
-  raise "OCI full contracts must retain every shard result" unless
-    full.dig("strategy", "fail-fast") == false
+  raise "OCI offline matrix must fail fast on definitive failure" unless
+    full.dig("strategy", "fail-fast") == true
   raise "OCI full contract shards are incomplete" unless
     full.dig("strategy", "matrix", "shard") == %w[core live provenance rollback governance]
   dispatch = jobs["dispatch-contracts"]
@@ -932,6 +932,8 @@ end
 
 validate_full_contracts(workflow)
 mutations = [
+  ["disabled offline fail-fast", "OCI offline matrix must fail fast on definitive failure",
+   ->(jobs) { jobs["full-contracts"]["strategy"]["fail-fast"] = false }],
   ["missing dispatch", "OCI full dispatch job is missing",
    ->(jobs) { jobs.delete("dispatch-contracts") }],
   ["missing matrix suite", "OCI full contract shards are incomplete",
@@ -1004,10 +1006,10 @@ assert_oci_aggregate_fails() {
 assert_oci_aggregate_passes none skipped skipped skipped skipped
 assert_oci_aggregate_passes focused success success skipped skipped
 assert_oci_aggregate_passes full success skipped success success
-assert_oci_aggregate_fails full success success skipped failure success
 assert_oci_aggregate_fails full failure success skipped success success
-for dispatch_result in failure cancelled skipped neutral ""; do
-  assert_oci_aggregate_fails full success success skipped success "$dispatch_result"
+for invalid_result in failure cancelled skipped neutral ""; do
+  assert_oci_aggregate_fails full success success skipped "$invalid_result" success
+  assert_oci_aggregate_fails full success success skipped success "$invalid_result"
 done
 assert_oci_aggregate_fails none success skipped skipped skipped success
 assert_oci_aggregate_fails focused success success success skipped success

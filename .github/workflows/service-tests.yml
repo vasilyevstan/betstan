@@ -1,0 +1,98 @@
+name: service-tests
+
+on:
+  pull_request:
+    paths:
+      - "auth/**"
+      - "backoffice/**"
+      - "bet/**"
+      - "event/**"
+      - "gamemaster/**"
+      - "moderation/**"
+      - "resulting/**"
+      - "slip/**"
+      - "common/**"
+      - "betstan-common-*"
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    # Protected-branch PRs already run these tests in production-build's coverage gate.
+    if: github.event.pull_request.base.ref != 'dev' && github.event.pull_request.base.ref != 'master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.scope.outputs.matrix }}
+      has_tests: ${{ steps.scope.outputs.has_tests }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select affected service feedback
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          services = [
+              "auth", "backoffice", "bet", "event", "gamemaster",
+              "moderation", "resulting", "slip",
+          ]
+          paths = subprocess.check_output(
+              [
+                  "git", "diff", "--no-renames", "--name-only",
+                  os.environ["BASE_SHA"], os.environ["HEAD_SHA"],
+              ],
+              text=True,
+          ).splitlines()
+          shared = any(
+              path.startswith(("common/", "betstan-common-"))
+              for path in paths
+          )
+          selected = [
+              service for service in services
+              if shared or any(path.startswith(service + "/") for path in paths)
+          ]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(
+                  "matrix=" + json.dumps({"service": selected or ["none"]}) + "\n"
+              )
+              output.write(f"has_tests={str(bool(selected)).lower()}\n")
+          PY
+
+  tests:
+    name: service-tests (${{ matrix.service }})
+    needs: scope
+    if: needs.scope.outputs.has_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "20.19.5"
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+      - name: Install locked dependencies
+        working-directory: ./${{ matrix.service }}
+        run: npm ci
+      - name: Run service tests
+        working-directory: ./${{ matrix.service }}
+        env:
+          CI: "true"
+          MONGOMS_DOWNLOAD_DIR: ${{ runner.temp }}/mongodb-binaries
+        run: npm run test:ci

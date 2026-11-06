@@ -4,7 +4,7 @@ Roles are optional capabilities, not a mandatory sequence or approval hierarchy.
 
 ## Ownership and verification
 
-- Every task has one accountable owner for scope, implementation, evidence and the next action. The main owner also owns coordination, simplification and final acceptance; no conductor or validator agent is needed.
+- Every task has one accountable owner for scope, implementation, evidence and the next action. The main owner also owns coordination, simplification and final acceptance. `betstan-delivery-coordinator` can act as that owner; it is never an extra supervisor, conductor or validator layer.
 - Ordinary reversible changes use the smallest relevant existing checks during correction, then one full validation of the final SHA.
 - Changes to trust or state boundaries require independent verification (authorization, CI trust, release authority, writer ownership, data integrity, migration, recovery). The verifier must not be the author.
 - Required exact-SHA CI and runtime checks always apply; local results do not replace them.
@@ -14,19 +14,17 @@ Roles are optional capabilities, not a mandatory sequence or approval hierarchy.
 
 | Need | Role |
 |---|---|
-| Service boundaries, unresolved design | `betstan-architect` |
-| Unnecessary scope or abstractions | `betstan-simplifier` |
+| Optional single owner for a delivery: scope, design/simplification checks, delegation, waits, outcome | `betstan-delivery-coordinator` |
 | Backend and `common/**` | `betstan-backend-developer` |
 | Client | `betstan-frontend-developer` |
-| Correctness, concurrency, focused tests | `betstan-test-engineer` |
+| Correctness, concurrency, focused tests, shared contracts and mixed versions | `betstan-test-engineer` |
 | UI consistency, accessibility, interaction | `betstan-ux-ui-expert` |
 | Public docs and publication evidence | `betstan-public-wiki-editor` |
-| Shared contracts, mixed versions | `betstan-service-contract-reviewer` |
 | Auth, session, authorization | `betstan-auth-security-reviewer` |
-| CI trust, ancestry, release, rollback | `betstan-deployment-safety` |
-| OCI runtime and read-only health (manual) | `betstan-oci-operator` |
-| Ingress and TLS (manual) | `betstan-domain-ingress` |
-| Shared-Mongo and cross-cloud migration (manual) | `betstan-mongo-migration` |
+| CI trust, ancestry, release, rollback, shared-Mongo and historical migration recovery | `betstan-deployment-safety` |
+| OCI runtime, ingress/DNS/TLS and read-only health (manual) | `betstan-oci-operator` |
+
+Consolidated roles: architect and simplifier checks live in the coordinator; service-contract review in the test engineer; domain ingress in the OCI operator. The manual shared-Mongo migration role is archived verbatim in [`archive/azure/github-agents/`](../../archive/azure/github-agents/betstan-mongo-migration.md); its active recovery obligations live in deployment safety. Any accountable owner, with or without the coordinator, keeps the rules above.
 
 Preserve each role's tools and manual-invocation flag. Developers edit only their assigned paths and never perform Git or deploy actions; requesting an opinion grants no permissions. Agents never expand their own authority.
 
@@ -42,10 +40,10 @@ Record documentation impact per [CONTRIBUTING.md](../../CONTRIBUTING.md#public-d
 
 ## Waits and operations
 
-- Use one active observer per wait and one concise state record. Inspect exact jobs and pending gates at startup, resume and checkpoints; route eligible CLI-owned approvals through canonical helpers. An approved wait timer is not missing consent.
+- Use one active observer per wait and one concise state record. Inspect exact jobs and pending gates at startup, resume and checkpoints; route eligible CLI-owned approvals through canonical helpers. Respect environment reviewers or timers only where actually configured; an approved timer is not missing consent.
 - After fifteen minutes without decisive progress, report blocker, evidence and smallest next action. If no required check has succeeded for thirty minutes, inspect remaining jobs and report the blocker; neither authorizes cancellation or a new agent.
 - Timeout, runner exit or lease expiry is not proof that a writer stopped. Never edit live authority, consumed receipts or locks ad hoc; use the exact recovery path. Respect explicit pauses.
 
 ## Result tokens
 
-Architect `ARCHITECTURE_READY`/`ARCHITECTURE_CHANGES_REQUIRED`/`DECISION_REQUIRED`; UX `UX_SPEC_READY`/`UX_REVIEW_PASSED`/`UX_CHANGES_REQUIRED`/`UX_CLARIFICATION_NEEDED`; developers `IMPLEMENTED_LOCAL`/`BLOCKED`; wiki `WIKI_UPDATE_READY`/`WIKI_NO_PUBLIC_CHANGE`/`WIKI_BLOCKED`; simplifier `SIMPLIFICATION_*`/`NO_SIMPLIFICATION_FOUND`; test `SUPPORTING_EVIDENCE_READY`/`TESTS_GREEN`/`TESTS_FAILED`/`APPROVE_SLICE`/`CHANGES_REQUIRED`; deployment `SAFE_TO_REVIEW`/`SAFE_TO_MERGE_DEV`/`SAFE_TO_PROMOTE`/`DEPLOYED_HEALTHY`/`NO_GO`. Absence of an optional token never blocks; real failures always do.
+Coordinator `DELIVERED`/`BLOCKED`/`DECISION_REQUIRED`; UX `UX_SPEC_READY`/`UX_REVIEW_PASSED`/`UX_CHANGES_REQUIRED`/`UX_CLARIFICATION_NEEDED`; developers `IMPLEMENTED_LOCAL`/`BLOCKED`; wiki `WIKI_UPDATE_READY`/`WIKI_NO_PUBLIC_CHANGE`/`WIKI_BLOCKED`; test `SUPPORTING_EVIDENCE_READY`/`TESTS_GREEN`/`TESTS_FAILED`/`APPROVE_SLICE`/`CHANGES_REQUIRED`/`SAFE_TO_IMPLEMENT`/`SAFE_TO_REVIEW`/`NO_GO`; auth `GO`/`CONDITIONAL_GO`/`NO_GO`; deployment `SAFE_TO_REVIEW`/`SAFE_TO_MERGE_DEV`/`SAFE_TO_PROMOTE`/`DEPLOYED_HEALTHY`/`NO_GO`; OCI `SAFE_TO_REVIEW`/`CANONICAL_HEALTHY`/`DEPLOYED_HEALTHY`/`NO_GO`. Absence of an optional token never blocks; real failures always do.

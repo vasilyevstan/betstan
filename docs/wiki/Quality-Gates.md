@@ -55,21 +55,29 @@ barrier or evidence requirements.
 
 ## Compatibility-stage delivery redesign
 
-Repository policy consolidation does not replace executable controls or
-reload a running agent session. The current trusted publisher, required
-checks, workflow identities, event-transition rules, and first-attempt
-contracts remain authoritative until a proven protected cutover.
+This is the single current-state home for the delivery redesign;
+[[Release Orchestration]] links here. Policy text never replaces executable controls or
+reloads a running session. The trusted publisher, required checks, workflow
+identities, event-transition rules and first-attempt contracts stay
+authoritative until a proven protected cutover. Origin, receipt, marker,
+forward-reader and ancestry rules are canonical in
+[`CONTRIBUTING.md`](https://github.com/vasilyevstan/betstan/blob/master/CONTRIBUTING.md).
 
-The pre-cutover protected publisher remains `branch-policy`, consuming `production-build`
-quality results. Its base-scoped `branch-policy/<base>` and
-`pr-quality-gates/<base>` statuses still bind both the PR head and current
-merge snapshot. The separate required `oci-validate` aggregate is unchanged.
+**Current state.** The legacy protocol is live and enforced:
+`branch-policy` is the sole status writer, consuming `production-build`
+results, and its base-scoped `branch-policy/<base>` and
+`pr-quality-gates/<base>` statuses bind both the PR head and the current merge
+snapshot. The separate required `oci-validate` aggregate is unchanged. The
+full-quality (version-2) protocol is implemented but **disabled**: the
+`pull_request_target` path of `.github/workflows/source-quality.yml` stays
+disabled, source-quality completion is inert under legacy protection, and a
+source-quality run is never reinterpreted as production-build evidence.
 
-The protected proof established so far is **non-authoritative shadow evidence**,
-not full release authority. That producer landed through protected integration and promotion.
-`.github/workflows/source-quality.yml` (`source-quality-shadow`) and
-`.github/scripts/source-quality.js` define three
-isolated jobs:
+### Source-policy shadow proof
+
+`.github/workflows/source-quality.yml` (historically `source-quality-shadow`) and
+`.github/scripts/source-quality.js` landed through protected integration and
+promotion as **non-authoritative shadow evidence** with three isolated jobs:
 
 | Job | Staged responsibility |
 |---|---|
@@ -77,131 +85,89 @@ isolated jobs:
 | Source-policy checks | An unprivileged exact-merge checkout runs source-policy regressions only, not the full CI scope |
 | Signed aggregate | Isolated control code constructs one manifest from trusted capture outputs and native job/attempt records, then natively signs and uploads those exact bytes |
 
-Only the aggregate receives attestation-signing permissions; candidate code
-does not execute in that context. The workflow has no status-writing or
-deployment permissions and no production environments. It cannot satisfy the
-existing required checks. Its `workflow_dispatch` is a read-only source-proof
-refresh, not production recovery.
+Only the aggregate can sign attestations, and candidate code never runs there.
+The workflow has no status-writing or deployment permissions or production
+environments, so it cannot satisfy required checks; its `workflow_dispatch` is
+a read-only source-proof refresh, not production recovery.
 
-For `pull_request_target`, native REST `run.head_sha` and `job.head_sha`
-identify the event PR head, not the protected control commit or tested merge.
-The proof model keeps native event identity, certificate/control identity, and
-the actual tested merge separate. Valid protected control can capture a fresh
-current merge after the PR base advances; its control commit need not equal
-the current PR base. The captured merge still binds its exact head/base
-parents and tree.
+- **Identity.** For `pull_request_target`, native REST `run.head_sha` and
+  `job.head_sha` identify the event PR head, not the protected control commit
+  or tested merge. Event identity, certificate/control identity and the tested
+  merge stay separate. Protected control may capture a fresh merge after the
+  base advances (its commit need not equal the PR base); the merge still binds
+  its exact head/base parents and tree.
+- **Evaluation.** `.github/scripts/pr-source-snapshot.js` judges source
+  identity independently of title, body, labels and edit history, and rejects
+  missing or mismatched selected evidence; it accepts explicit no-work proof or
+  input-equivalent reuse only with original authenticated provenance.
+- **Verification.** `.github/scripts/quality-attestation.js` natively verifies
+  the exact manifest bytes and the OIDC certificate's repository, workflow,
+  control commit/ref, event, run and attempt. Candidate-supplied claims are not
+  certificate authority.
+- **Consumption.** `.github/scripts/consume-source-quality.js` composes the
+  verifier and evaluator without publishing. Its caller supplies an
+  independently trusted signer checkout, never a signer copied from the
+  manifest. Artifact identity, repository, run, attempt-specific name and
+  expiry must match; selected jobs are rebuilt from all native attempts, a
+  newer failed execution wins, older test attempts survive only when capture is
+  not newer, and a final read rejects concurrent change. Its success is
+  non-authoritative.
 
-`.github/scripts/pr-source-snapshot.js` evaluates source identity independently
-of title, body, labels, and edit history. Its candidate evaluator rejects
-missing or mismatched selected evidence and can validate explicit no-work
-proof or input-equivalent reuse with original authenticated provenance. The
-shadow producer selects source-policy regressions only; it does not yet
-implement the complete dependency-aware selector, full CI scope, or automatic
-evidence reuse.
+Observed protected evidence: source-policy proofs were verified end-to-end
+against real artifact/job records, exact protected Git inputs and the current
+merge snapshot. The accepted signer was the default-master commit/ref, not the
+PR's `dev` base; an independently expected `dev` signer was rejected. This is
+not full quality or production readiness.
 
-`.github/scripts/quality-attestation.js` uses native GitHub CLI verification of
-the exact manifest bytes and checks GitHub OIDC certificate repository,
-workflow, control commit/ref, event, run, and attempt identity.
-Candidate-supplied claims are not certificate authority.
+### Staged full-quality integration (disabled)
 
-`.github/scripts/consume-source-quality.js` composes that verifier with the
-current source evaluator without publishing any status. Its caller supplies
-an independently trusted signer checkout and the downloaded manifest bytes,
-not an expected signer copied from the manifest. Native artifact identity,
-repository, run, attempt-specific name and expiry must match. The consumer
-reconstructs selected jobs from all native attempts, rejects a newer failed
-execution, and preserves older test attempts only when source capture is not
-newer. A final source/execution read rejects concurrent changes. This helper's successful result explicitly remains non-authoritative.
-The separate full-quality candidate described below composes it with bounded
-artifact discovery and a trusted publisher; that candidate is not activated.
+The candidate adds a shared selector, complete base and merge Git-tree capture
+and version-2 manifests:
 
-The local compatible implementation adds a shared selector, complete base and
-merge Git-tree capture, and version-2 full-quality manifests. Each selected
-suite has either its actual native execution or a direct reference to an
-authenticated original execution; reused results never become current-run
-jobs and cannot form provenance chains. Historical authentication does not
-re-read a closed PR's current tips. The native certificate's controller must
-be an eligible protected ancestor with the same independently approved
-producer closure, not merely a signer named by the artifact.
-Native PR association lists may disappear after merge. Missing or empty lists
-do not invalidate an authenticated historical proof; contradictory nonempty
-lists are rejected. Signed source, immutable merge, controller and native
-execution bindings remain mandatory.
+- Each selected suite has its actual native execution or a direct reference to
+  an authenticated original; reused results never become current-run jobs or
+  provenance chains. Historical authentication does not re-read a closed PR's
+  tips. The certificate controller must be an eligible protected ancestor with
+  the same independently approved producer closure, not merely a signer named
+  by the artifact. Missing or empty PR association lists after merge do not
+  invalidate a historical proof; contradictory nonempty lists are rejected.
+- Reuse discovery is bounded. Missing, expired, incompatible or invalid
+  evidence is an explicit miss that selects fresh execution; implementation
+  errors are never swallowed as misses. Aggregation re-authenticates
+  originals, rebuilds coverage and rechecks current source. Whole-tree contract
+  fingerprints stay conservative and non-reusable.
+- Selection separates ordinary package edits from unrelated deployment
+  contracts, while real cross-boundary readers (listener inventories, specified
+  UI assertions, Auth startup ordering, infrastructure and control inputs)
+  still select their owners. Unknown paths select full scope; unsupported Git
+  modes and incomplete trees fail closed.
+- `branch-policy` stays the sole status writer. In full-quality mode the
+  default-master checkout reconciles an open PR after source-quality
+  completion, metadata refresh or read-only dispatch, under one per-PR writer
+  group; candidate code never runs with the status-writing token. Version-2
+  full coverage is required (a version-1 shadow cannot substitute), the newest
+  failed execution cannot fall back to older success, and source, master policy
+  and execution identity are rechecked around publication; drift invalidates
+  statuses.
+- Candidate statuses are `source-quality-v2/<base>` on head and merge, with
+  temporary `pr-quality-gates/<base>` aliases; success URLs bind run and
+  attempt. Metadata-only edits do not change test identity or grant approval.
 
-Reuse discovery is bounded. Missing, expired, incompatible or invalid evidence
-is an explicit reuse miss and leaves fresh execution selected; implementation
-errors are not swallowed as cache misses. Aggregation authenticates original
-references again, reconstructs complete coverage and rechecks current source.
-Whole-tree contract fingerprints remain conservative and non-reusable.
-Selection dependencies are bounded independently of those fingerprints.
-The candidate now separates ordinary package edits from unrelated deployment
-contracts. Actual cross-boundary readers still select their owners: listener
-inventories, specified UI assertions, Auth startup ordering, infrastructure
-and control inputs. Unknown paths select the conservative full scope; unsupported
-Git modes and incomplete trees fail closed.
-These local contracts do not establish protected cutover or measured speed
-acceptance.
+The publisher and merge helper select their protocol from native protected
+required checks, never from an artifact's claimed purpose or a caller flag.
+Legacy enforcement keeps legacy publication and production-build completion
+together. Once the new context is enforced, a clean current-master verifier
+independently authenticates the full proof with the publisher's consumer, and
+missing proof, protection-read failure, stale attempt, source drift or invalid
+publisher provenance cannot fall back to legacy validation.
 
-### Staged full-quality integration
-
-The candidate retains `branch-policy` as the sole status writer. Native
-protected required checks select its protocol. While legacy checks remain
-enforced, it preserves legacy publication and production-build completion
-handling; source-quality completion is inert. The new protocol activates only
-when its scoped full-quality and branch-policy contexts are enforced, with no
-legacy-proof fallback.
-
-In full-quality mode, the default-master checkout reconciles an open PR after
-source-quality completion, metadata refresh, or explicit read-only dispatch. All three paths
-share a per-PR writer group, including manually dispatched source runs without
-native PR associations. Candidate code never executes with the publisher's
-status-writing token.
-
-The `source-quality` candidate separates trusted selection, unprivileged
-selected suites, and isolated signing. The publisher requires version-2 full
-coverage; a successful version-1 source-policy shadow cannot substitute.
-Native run/attempt identity and artifact inventory are bounded and checked
-independently. The newest failed execution cannot fall back to older success.
-Source, master policy, and execution identity are rechecked around publication;
-drift invalidates the statuses instead of preserving success.
-
-Candidate statuses are `source-quality-v2/<base>` on both head and merge,
-alongside temporary `pr-quality-gates/<base>` compatibility aliases.
-Successful quality URLs bind both the native run and attempt. Metadata-only
-edits do not change test identity; they never grant approval.
-
-The publisher and merge helper select their verification protocol from native protected-branch
-required checks, not an artifact's claimed purpose or a caller flag. Once the
-new context is enforced, it requires a clean current-master verifier checkout
-and independently authenticates the full proof using the same consumer as the
-publisher. Missing proof, protection-read failure, stale attempt, source drift,
-or invalid publisher provenance cannot fall back to legacy validation.
-Legacy publication and its reader remain paired for branches still enforcing
-the old protocol, including the current generic dev check names. Compatibility
-does not reinterpret a source-quality run as production-build evidence.
-
-Activation requires proving this complete stack on protected source and adding
-the new enforced context before retiring old checks or producers. Local
-publisher and merge-verifier regressions establish neither activation nor
-production health. Existing CLI-origin ownership/automatic approval and
-human-origin exact approval remain separate and unchanged.
-
-Protected BetStan execution and native signature verification have now been
-exercised end-to-end for source-policy proofs. The consumer checked actual
-GitHub artifact/job records, exact protected Git inputs and the current merge
-snapshot. The observed signer used the accepted default-master commit/ref,
-not the PR's dev base; an independently expected dev signer was rejected.
-This establishes the non-authoritative proof contract only. Full-suite
-selection/reuse and publisher integration have local implementations, but
-independent new-boundary review, protected execution, cutover and performance
-acceptance remain unfinished; source-policy proof is not full quality or
-production readiness.
-
-Test-content changes reduce repeated fixture setup and duplicate assertion
-execution while retaining all 35 OCI suites. Local fixture timings are
-development evidence, not matched GitHub performance acceptance. Further
-retirement and integrated validation remain; the redesign's half-baseline
-wall-time and runner-consumption target has not been demonstrated.
+Activation requires proving this stack on protected source and enforcing the
+new context **before** retiring old checks or producers. Local regressions and
+fixture timings establish neither activation, production health nor the
+redesign's half-baseline wall-time and runner-consumption target, which has
+not been demonstrated. Test-content changes kept all 35 OCI suites while
+reducing repeated setup. CLI-origin automatic progression and human-origin
+exact approval are unchanged.
 
 ## Pull-request CI
 
@@ -231,7 +197,12 @@ aggregate remains the required check and succeeds only when the scope,
 workflow-syntax, and selected contract jobs all succeed. Unaffected changes use
 an explicit no-OCI-impact sentinel without downloading actionlint. Each full
 shard has a 40-minute limit; timeout, shard failure, or partial completion is
-not passing evidence. The complete local runner remains available in
+not passing evidence. The full shard matrix is fail-fast: the first shard
+failure cancels its siblings, so the failure is reported without waiting for
+unrelated long shards, and a cancelled or skipped required shard also rejects
+the aggregate. A failed run therefore carries diagnostics only for the shards
+that finished; use the existing local runner when full failure diagnostics are needed.
+Reruns never become first-attempt native-original proof. The complete local runner remains available in
 deterministic serial order.
 
 Heavy contract suites select themselves through `infra/ci/suite_gate.py`. On a
@@ -262,6 +233,11 @@ runtime/deployment checks by changed paths. It starts source validation only
 for opening, reopening and synchronization, not title/body edits. Master pushes
 retain the full outer validation path; nested heavy suites still select their
 actual inputs. Image publication follows successful required validation.
+
+`production-build` is the sole package-test owner for PRs into `dev` and
+`master`. The read-only `service-tests` workflow gives per-service and shared
+package feedback only for PRs into other bases; it has no status, environment
+or publication authority and is not a required check.
 
 Selection and parallelism are not timing acceptance by themselves. Measure the
 complete required check set, including OCI validation, rather than only its
@@ -325,6 +301,29 @@ Optional native-proof control approval is distinct from the mandatory one-use
 production-caller authorization; it is not a global OCI publisher pin or a
 bootstrap receipt. Publisher identity, ownership, freshness, serialization and
 consumed-declaration rules remain unchanged.
+
+Adoption sequence (two stages; no third authorization-preparation promotion):
+
+1. Preparation protected the compatible helpers, the optional OCI producer with
+   consumption **disabled**, and fixtures accepting both the existing and the
+   exact proposed production caller, without changing production workflow
+   bytes. It registered canonical one-use declarations, with separate IDs and
+   the protected-master receipt anchor, for `ci/native-dispatch-adoption` →
+   `dev` and `dev` → `master`. Empirical ordinary-PR inline certificate and
+   execution-profile qualification precedes adoption; observations and
+   unsigned historical successes never become approved originals
+   retroactively.
+2. The adoption candidate uses the exact approved consumption variant and
+   caller on the declared branch. Its declarations and fixture entries are
+   removed in the final tested tree before its first required run, while the
+   protected preparation publisher retains them for both authorized PRs. Proof
+   helpers and the wrapper stay unchanged so wrapper equality remains
+   meaningful; any later source change needs its own native execution, not a
+   proof-tree waiver. The first required run executes assertions and attempts
+   optional publication before those inputs are protected. Master delegates
+   only the authenticated dispatch child; other safety and affected contracts
+   keep their owners. Adoption uses the existing one-use bootstrap and
+   consumed-declaration cleanup.
 
 Native reuse requires the qualified ordinary-PR inline certificate identity
 and a matching complete execution profile.
