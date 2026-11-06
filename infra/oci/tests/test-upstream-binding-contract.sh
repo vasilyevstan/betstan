@@ -5154,6 +5154,34 @@ assert blob(
     (root / "infra/azure/agents/copilot_cli_authority_stan.py").read_text()
 ) != m.CURRENT_READER_AUTHORITY_BLOB
 current_workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+credentialed_workflow = current_workflow
+current_workflow = m.without_checkpoint_read_auth(credentialed_workflow, "checkpoint auth")
+assert credentialed_workflow != current_workflow
+assert m.without_checkpoint_read_auth(current_workflow, "historical auth") == current_workflow
+assert m.current_reader_workflow_v5(credentialed_workflow, "authenticated inverse", inverse=True) == \
+    m.current_reader_workflow_v5(current_workflow, "historical inverse", inverse=True)
+for before, after in m.CHECKPOINT_READ_AUTH_EDITS:
+    assert credentialed_workflow.count(after) == 1
+    mutations = [before, after + after]
+    for line in after.splitlines(keepends=True):
+        if line.startswith("          OCI_CLI_"):
+            mutations.extend((after.replace(line, ""), after.replace(line, line.replace("${{", "wrong-${{"))))
+    for replacement in mutations:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                m.without_read_only_preflight(
+                    credentialed_workflow.replace(after, replacement, 1),
+                    "changed checkpoint auth",
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("partial or changed checkpoint credentials escaped qualification")
+unrelated = credentialed_workflow.replace(
+    "OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}",
+    "OCI_CLI_USER: wrong-identity", 1,
+)
+assert m.without_checkpoint_read_auth(unrelated, "unrelated identity") != current_workflow
 legacy_consumer = m.without_native_deployment_consumer(current_workflow, "current native consumer")
 assert "upstream_run_binding_stan.py validate-deployment" not in legacy_consumer
 assert m.current_reader_workflow_v5(current_workflow, "current inverse", inverse=True) == \

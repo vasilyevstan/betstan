@@ -1777,6 +1777,11 @@ jobs:
         continue-on-error: true
         if: inputs.phase != 'incident-restore' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
           RELEASED_ACTIVATION_QUALIFICATION: ${{ steps.provenance_request.outputs.released_activation_qualification || 'none' }}
           SESSION_STATE_FILE: artifacts/oci-live-data-rollout/k3s-access.env
@@ -1841,6 +1846,11 @@ jobs:
         if: inputs.phase != 'incident-restore'
         id: operation_lock
         env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EXCLUDE_RUN_ID: ${{ github.run_id }}

@@ -615,6 +615,11 @@ jobs:
       - name: Revalidate held release disk checkpoint before lock renewal
         if: env.OCI_RUNTIME_MODE == 'k3s'
         env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           CANDIDATE_IMAGES_FILE: artifacts/oci-deploy/images.tsv
@@ -873,6 +878,11 @@ jobs:
         id: post_checkpoint
         if: env.OCI_RUNTIME_MODE == 'k3s' && steps.health.outcome == 'success'
         env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           CANDIDATE_IMAGES_FILE: artifacts/oci-deploy/images.tsv
