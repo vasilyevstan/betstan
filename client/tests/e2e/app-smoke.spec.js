@@ -635,6 +635,45 @@ test('skip navigation focuses main without a full-height frame and preserves car
   }
 });
 
+test('Events draws no column-height accent rail in any density while short state rails remain', async ({ page }, testInfo) => {
+  await installFakeEventSource(page);
+  await installAppApiMocks(page, createLiveBettingMockState());
+  for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }]) {
+    for (const ui of ['v1', 'v2', 'v3']) {
+      for (const theme of ['dark', 'light']) {
+        await page.setViewportSize(viewport);
+        await page.goto(`/?ui=${ui}&theme=${theme}`);
+        await expect(page.locator('.event-card').first()).toBeVisible();
+        const tallRails = await page.locator('.event-stage').evaluate((stage) => {
+          const cards = [...stage.querySelectorAll('.event-card')].map((card) => card.getBoundingClientRect());
+          if (cards.length < 2) return ['fewer than two event cards'];
+          const columnHeight = Math.max(...cards.map(({ bottom }) => bottom))
+            - Math.min(...cards.map(({ top }) => top));
+          return [...stage.querySelectorAll('*')].filter((element) => {
+            const box = element.getBoundingClientRect();
+            if (box.height < columnHeight * 0.9) return false;
+            const style = getComputedStyle(element);
+            const paintedStrip = box.width <= 8
+              && (style.backgroundColor !== 'rgba(0, 0, 0, 0)' || style.backgroundImage !== 'none');
+            const thickEdge = style.borderInlineStartStyle !== 'none'
+              && parseFloat(style.borderInlineStartWidth) > 1;
+            return paintedStrip || thickEdge;
+          }).map((element) => element.className || element.tagName);
+        });
+        expect(tallRails, `${ui} ${theme} ${viewport.width}px`).toEqual([]);
+        const shortRails = await page.locator('.event-stage *').evaluateAll((elements) => elements.filter((element) => {
+          const style = getComputedStyle(element);
+          return style.borderInlineStartStyle === 'solid' && style.borderInlineStartWidth === '3px';
+        }).length);
+        expect(shortRails).toBeGreaterThan(0);
+        if (ui === 'v3') {
+          await page.screenshot({ path: testInfo.outputPath(`events-${ui}-${viewport.width}-${theme}.png`) });
+        }
+      }
+    }
+  }
+});
+
 test('Events and wildcard routes expose one logical route heading', async ({ page }) => {
   await prepareShell(page);
 

@@ -221,7 +221,9 @@ Unsupported or missing values fall back to `v1`. All variants use the same
 React routes, event/slip data, semantic controls, selected-state keys, and
 click payloads. They also share one brand, palette, surface hierarchy, and
 state grammar: the variants change density and composition, not product
-identity.
+identity. No variant draws a decorative accent rail along the full Events
+column; Spacious aligns event sections with the Events heading, while short
+live, pre-match and other state rails stay on their own cards.
 
 ## Dark and light themes
 
