@@ -2004,21 +2004,6 @@ body {
   --radius-control: 10px;
 }
 
-.event-editorial {
-  position: relative;
-  padding-left: 0.9rem;
-}
-
-.event-editorial__line {
-  position: absolute;
-  left: 0.22rem;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-}
-
 .ui-variant-v1 .card > .card-body,
 .ui-variant-v2 .card > .card-body,
 .ui-variant-v3 .card > .card-body {
