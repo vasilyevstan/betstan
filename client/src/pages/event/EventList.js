@@ -670,10 +670,7 @@ const HandleEventList = ({
   if (uiVariant === 'v3') {
     return <section className={`event-stage event-stage--${uiVariant}`}>
       <EventStageHeader />
-      <div className="event-editorial">
-        <div className="event-editorial__line"></div>
-        <div className="event-editorial__content">{content}</div>
-      </div>
+      <div className="event-editorial__content">{content}</div>
     </section>;
   }
 
