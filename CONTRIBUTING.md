@@ -7,7 +7,7 @@
 1. Make changes on a feature, fix, or operations branch and integrate them into `dev` by pull request. Never push directly to `dev`.
 2. Validate the complete `dev` branch.
 3. Promote only with an up-to-date pull request from `dev` to `master`. PRs into `master` from any other branch are forbidden.
-4. Require the trusted, base-scoped `branch-policy/master` and `pr-quality-gates/master` statuses to pass on both the promotion head and current merge snapshot.
+4. Require every strict, app-bound required status of the target branch to pass on the exact head, and the trusted base-scoped statuses (`pr-quality-gates/<base>`, plus `branch-policy/<base>` where enforced) on the current canonical tested merge snapshot, for `dev` as well as `master`. GitHub's mergeable/clean state is not that proof; `pr-merge-safety-stan.sh` decides. Live protection currently requires `publish-current-pr-snapshot`, `pr-quality-gates` and `oci-validate` for `dev`, and `branch-policy/master`, `pr-quality-gates/master` and `oci-validate` for `master`; read live protection before acting rather than trusting this list.
 5. Before merging a promotion, verify origin/ownership and the applicable exact-head approval, including every production-capable workflow.
 6. Use ancestry-preserving merges. Verify protected ancestry and the exact tested snapshot before merging.
 7. After a promotion, merge the current `origin/master` into the next `dev`-bound branch (content-neutral) so the next promotion head contains the previous promotion merge. Open a standalone sync PR only when no other `dev` work precedes the next promotion.
@@ -49,7 +49,7 @@ Only Copilot CLI may apply `copilot-cli-managed`, and only to a PR the active CL
 
 Verified CLI-created and CLI-owned PRs use `COPILOT_CLI_AUTO_APPROVE=true` without a separate personal prompt, only after `pr-merge-safety-stan.sh` verifies the label, exact refs, trusted checks, resolved threads, production workflow inventory and no competing production activity. Every other PR requires `APPROVED_SHA` equal to its exact current head, including PRs into `dev`; human `master` promotions also require the exact `APPROVED_WORKFLOWS`. Automatic mode never skips checks or production safety.
 
-Progress eligible CLI-owned merges and follow-on protected Actions promptly through the canonical approval path, and respect approved wait timers. Never adopt human-origin work or another owner's operation. Do not merge until `pr-merge-safety-stan.sh` passes for the exact current head.
+Progress eligible CLI-owned merges and follow-on protected Actions promptly through the canonical approval path, and respect environment reviewers or wait timers where they are actually configured. Never adopt human-origin work or another owner's operation. Do not merge until `pr-merge-safety-stan.sh` passes for the exact current head.
 
 ## Public documentation impact
 
@@ -75,7 +75,7 @@ Approval is classified by origin, not workflow type, for deploy, activation, cap
 - Ambiguous dispatch without a captured run stays blocked; recover only via the dispatcher's resume paths, never by inference or redispatch. Ambiguous approval stays `inflight`; use the approver's `--reconcile`, never replay the POST. Terminal zero-job runs may only be `retired`, never approved or rerun.
 - Unresolved `dispatching`/`bound`/`claimed`/`inflight` state blocks every protected dispatch for the repository and control SHA; `issued`/`consumed` blocks the same operation and input hash. Only `retired` is inert.
 - Authority formats are forward-only: never roll the helper or dispatcher back below a version whose records exist (v2, v5), delete spent archives or hand-edit authority; use exact recovery or a reviewed forward correction.
-- Workflow state at approval is policy-defined: the OCI capacity, infrastructure, live-betting activation, live-data rollout, migration-recovery and production-deploy workflows are `disabled_manually`; others `active`. Keep a disabled workflow enabled only until the captured run shows a real job and pending gate. Revalidate control, state, blob and promotion authority after each claim.
+- Workflow state at approval is policy-defined: the OCI capacity, infrastructure, live-betting activation, live-data rollout, migration-recovery and production-deploy workflows are `disabled_manually`; others `active`. Keep a disabled workflow enabled only until the captured run shows a real job and, where the environment is gated, its pending gate. The approver acts only on exactly one pending gate and blocks otherwise; an ungated environment has no provider pending-deployment approval action, but origin-bound human authorization and dispatch ownership records still apply. Revalidate control, state, blob and promotion authority after each claim.
 - OCI release order: GHCR validation, then (k3s only) capacity acquisition, infrastructure finalization, live-data handoff, deployment. Every prerequisite is an explicit hash-covered input validated before authority is issued, because authority is one-use.
 - Data and deploy authority require the exact `k3s-release-disk-checkpoint.v1` artifact; any key, identity, residency or 70-percent drift fails closed.
 - Recovery profiles are fixed contracts binding original build, infrastructure and checkpoint lineage; byte-equivalent new runs are not substitutes.
@@ -85,7 +85,7 @@ Approval is classified by origin, not workflow type, for deploy, activation, cap
 
 ## Production safety
 
-Merging to `master` runs validation and queues the first-attempt image build for approval in `production-emergency`; production never deploys automatically. Dispatch `production-deploy` from `master` with the exact full SHA and build run ID; it needs a second approval and deploys immutable tag-plus-digest images. Rerun builds are not deployable; retired workflows stay disabled.
+Merging to `master` runs validation and the first-attempt image build; production never deploys automatically. Production deployment is a separate exact-SHA dispatch that binds the build run and deploys immutable tag-plus-digest images. Ownership and authority receipts remain mandatory under the origin-specific contract: origin-bound approval, applicable dispatcher/approver records, and `APPROVED_SHA`/`APPROVED_WORKFLOWS` for human-origin PRs. Provider environment reviewers and wait timers apply only where actually configured on the environment; at last review the environments carried branch policies only, so do not describe or wait for a manual provider gate that is not present. Rerun builds are not deployable; retired workflows stay disabled.
 
 ## Trusted-check bootstrap
 

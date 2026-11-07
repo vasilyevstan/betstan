@@ -31,3 +31,4 @@ quality-workflow change.
 | `agents/retire-production-stan.sh`, `retire-migration-identities-stan.sh`, `audit-oci-primary-retirement-stan.sh`, `record-azure-retirement-billing-stan.sh`, `azure-retirement-billing-lib-stan.sh` and their tests | Post-migration Azure retirement and billing evidence |
 | `LESSONS_LEARNED.md` | Azure-era operational lessons |
 | `github-agents/` | Former `betstan-aks-operator`, `betstan-azure-cost-analyst` and `betstan-azure-retirement` agents |
+| `github-agents/betstan-mongo-migration.md` | Former manual shared-Mongo migration agent, kept verbatim as the recovery reference; active recovery obligations live in `.github/agents/betstan-deployment-safety.agent.md` |

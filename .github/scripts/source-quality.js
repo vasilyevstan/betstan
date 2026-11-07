@@ -475,6 +475,7 @@ const DISPATCH_CALLER_BLOBS = Object.freeze({
   ".github/workflows/oci-validate.yml": [
     "0795b8a7efb191d4dae78850844e0612d4f41d56",
     "7bbe29e2bebd4b2054c27824c07d63dc33d366ca",
+    "8a263fb9dd649a68fa94e7fb3eafd36cd43e1e41",
   ],
   ".github/workflows/production-build.yml": ["8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"],
 });

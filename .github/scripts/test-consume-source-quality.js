@@ -809,6 +809,8 @@ async function testNativeDispatchOriginals() {
     assert.ok(!Object.hasOwn(job.permissions ?? {}, "statuses"), "branch-policy remains the sole status writer");
   }
   assert.deepEqual(jobs["full-contracts"].strategy.matrix.shard, ["core", "live", "provenance", "rollback", "governance"]);
+  assert.equal(jobs["full-contracts"].strategy["fail-fast"], true,
+    "definitive offline shard failure should cancel sibling offline shards");
   const capture = jobs["dispatch-contracts"].steps.find((step) => step.id === "worker").with.script;
   const observed = fixture();
   const observedOutputs = {};
@@ -979,6 +981,15 @@ async function testNativeDispatchOriginals() {
         env: { ...env, DISPATCH_RESULT: result }, stdio: "pipe",
       }));
     }
+    if (mode === "full") {
+      for (const field of ["SCOPE_RESULT", "SYNTAX_RESULT", "FULL_RESULT", "DISPATCH_RESULT"]) {
+        for (const result of ["failure", "cancelled", "skipped", ""]) {
+          assert.throws(() => execFileSync("bash", ["-c", aggregate], {
+            env: { ...env, [field]: result }, stdio: "pipe",
+          }), `${field}=${result} cannot authorize a complete full-scope aggregate`);
+        }
+      }
+    }
   }
   const adoptionFile = ".test-workdirs/native-dispatch-adoption/production-build.yml";
   const productionFile = fs.existsSync(path.join(root, adoptionFile)) ? adoptionFile : ".github/workflows/production-build.yml";
@@ -1052,7 +1063,13 @@ async function testNativeDispatchOriginals() {
     const bytes = fs.readFileSync(path.join(root, file.endsWith("production-build.yml") ? productionFile : file));
     const hash = crypto.createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
     if (file.endsWith("oci-validate.yml")) {
-      assert.equal(hash, blobs[oci.env.NATIVE_DISPATCH_REUSE === "disabled" ? 0 : 1]);
+      assert.equal(hash, oci.env.NATIVE_DISPATCH_REUSE === "disabled" ? blobs[0] : blobs.at(-1));
+      const weakened = Buffer.from(bytes.toString().replace(
+        '[ "$FULL_RESULT" = success ]', '[ "$FULL_RESULT" != failure ]'));
+      const weakenedHash = crypto.createHash("sha1")
+        .update(`blob ${weakened.length}\0`).update(weakened).digest("hex");
+      assert.ok(!blobs.includes(weakenedHash),
+        "the fail-fast caller approval must not accept weakened aggregate proof");
     } else if (proof) {
       assert.ok(blobs.includes(hash), `${file} must match its frozen eligibility profile`);
     }
