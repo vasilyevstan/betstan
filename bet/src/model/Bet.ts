@@ -271,6 +271,7 @@ betSchema.set("toObject", {
 });
 
 betSchema.index({ slipId: 1 }, { unique: true });
+betSchema.index({ userId: 1, timestamp: 1 });
 
 const Bet = model<BetRecord>("Bet", betSchema);
 

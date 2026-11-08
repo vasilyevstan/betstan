@@ -14,6 +14,8 @@ For the service map and message catalog, see [[Architecture]] and
 | Process | Primary owner | Supporting services |
 | --- | --- | --- |
 | Account creation and login | Auth | Client |
+| Private profile name | Auth | Client |
+| Personal betting statistics | Bet | Client |
 | Scheduled event creation | Event | Gamemaster, Backoffice |
 | Manual event creation and control | Backoffice | Event, Gamemaster |
 | Pre-match product generation | Event | Client |
@@ -68,6 +70,59 @@ persisted user and clears the session if the user no longer exists, the signed
 timestamp is stale, or the persisted role differs from the role in the token.
 Logout explicitly clears the session. This keeps normal navigation and page
 reloads signed in while ensuring that account and role changes take effect.
+
+## Private player profile
+
+Auth owns the optional persisted `displayName`. New accounts initialize it
+from their login; existing accounts without the field read their stored login
+as the effective name without a backfill. `GET /api/auth/currentuser` returns
+the effective name from Mongo, not a mutable name claim in the signed JWT.
+Existing login/signup response contracts remain unchanged.
+
+`PATCH /api/auth/profile` accepts only `{ displayName }`. Auth validates the
+signed session against the persisted account and role, derives the owner
+from that session, and atomically updates only the name with the observed
+role still matching. Unknown fields and query selectors are rejected.
+Names are trimmed, nonempty single-line text up to 254 characters, with
+Unicode and spaces supported and no uniqueness requirement. A name edit
+does not change credentials, role, public leaderboard names, or existing
+`Bet.userName` snapshots.
+
+Bet owns `GET /api/bet/me/stats`. It requires a verified, fresh signed session
+and always scopes the aggregate to that session's user ID. Caller-supplied
+owner selectors are rejected. Both private endpoints and the current-user
+response use `Cache-Control: no-store`.
+
+The statistics endpoint accepts no range parameters for all time, or both
+`from` and `toExclusive` as canonical UTC ISO instants. It matches placement
+timestamps in the half-open interval `[from, toExclusive)`, parsing legacy
+timestamp strings as instants rather than comparing their spelling.
+The Client converts inclusive local From/To calendar dates to these bounds
+using the start of the first day and the start of the day after the last.
+Incomplete, malformed, repeated, and reversed ranges return `400`; invalid
+sessions return `401`.
+
+The response contains the effective range, accepted-bet count, wins, losses,
+open bets, voided bets, full cash-back tickets, pending submissions, declined
+submissions, and a decimal-string `totalStaked`. Each stored ticket is counted
+once, including accumulators, across pre-match, live, and compatible legacy
+records. The accepted count is open + wins + losses + voids + full cash back.
+Pending and declined submissions remain outside it. Win/loss uses the current
+ticket result, not selection counts or net profitability.
+
+Total staked includes the original wager only for `CONFIRMED`, `WIN`, `LOSS`,
+and `CASH_BACK`. It excludes `PENDING`, `DECLINED`, and fully `VOID` tickets,
+does not subtract returns, and does not change after a partial cash-back
+unless the ticket becomes fully void. Decimal aggregation preserves supported
+historical precision rather than imposing cash-back's whole-cent admission
+rule. This is nominal activity, not wallet accounting.
+
+Statistics are computed from stored Bet history on request with an
+owner-scoped history index, not public leaderboard rows or a client-side
+history sum. Empty activity returns zeros; failed reads or invalid records
+that prevent an accurate calculation return an explicit `503` unavailable
+response. No bet writer, settlement rule, public statistics contract, shared
+message schema, or production feature flag changes.
 
 ## Event creation
 
