@@ -9,7 +9,7 @@ const Header = ({ currentUser, uiVariant, theme }) => {
     const routeIdentity = getRouteIdentity(location.pathname);
     const themeOptions = ['dark', 'light'];
     const explicitRouteIdentities = new Set([
-       '/backoffice', '/bets', '/login', '/logout', '/signup', '/telemetry',
+       '/backoffice', '/bets', '/profile', '/login', '/logout', '/signup', '/telemetry',
     ]);
     const isEventsRoute = routeIdentity === '/' || !explicitRouteIdentities.has(routeIdentity);
 
@@ -23,10 +23,11 @@ const Header = ({ currentUser, uiVariant, theme }) => {
      ]
      .filter(Boolean);
 
-    const displayName = currentUser
-        ? (currentUser.email.split('@')[0].slice(0, 16))
+    const effectiveName = currentUser
+        ? (currentUser.displayName ?? currentUser.email.split('@')[0])
         : '';
-    const initial = displayName ? displayName[0].toUpperCase() : '';
+    const displayName = Array.from(effectiveName).slice(0, 16).join('');
+    const initial = Array.from(displayName)[0]?.toUpperCase() ?? '';
     const buildSearch = (updates = {}) => {
        const params = new URLSearchParams(location.search);
        Object.entries(updates).forEach(([key, value]) => {
@@ -93,10 +94,12 @@ const Header = ({ currentUser, uiVariant, theme }) => {
            <div id="betstan-navbar" className={`collapse navbar-collapse app-navbar__content${menuOpen ? ' show' : ''}`}>
                <div className="navbar-meta">
                    {currentUser && (
-                       <div className="user-chip" title={currentUser.email}>
+                       <Link className="user-chip" title={effectiveName}
+                           aria-label="My profile" aria-current={routeIdentity === '/profile' ? 'page' : undefined}
+                           to={linkTo('/profile')} onClick={closeMenu}>
                            <span className="user-chip__avatar">{initial}</span>
                            <span className="user-chip__name">{displayName}</span>
-                       </div>
+                       </Link>
                    )}
                </div>
                <div className="app-navbar__workspace">

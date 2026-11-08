@@ -1,4 +1,6 @@
-import { UserRole } from "../model/User";
+import { isValidObjectId } from "mongoose";
+import { UserPayload } from "../middleware/CurrentUser";
+import { User, UserRole } from "../model/User";
 
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -20,4 +22,20 @@ export const isSessionTimestampFresh = (
     && timestampMs <= nowMs + MAX_CLOCK_SKEW_MS
     && nowMs <= timestampMs + SESSION_MAX_AGE_MS
   );
+};
+
+export const getSessionUser = async (payload: UserPayload | undefined) => {
+  if (
+    !payload
+    || typeof payload.id !== "string"
+    || !isValidObjectId(payload.id)
+    || !isSessionTimestampFresh(payload.timestamp)
+  ) {
+    return null;
+  }
+
+  const user = await User.findById(payload.id).lean();
+  return user && normalizeUserRole(payload.role) === normalizeUserRole(user.role)
+    ? user
+    : null;
 };

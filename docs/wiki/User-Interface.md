@@ -18,7 +18,7 @@ regions:
 | Region | Purpose |
 | --- | --- |
 | Left sidebar | Statistics and leaderboard |
-| Center stage | Events, authentication, My Bets, Backoffice, or Telemetry route |
+| Center stage | Events, authentication, My Bets, My profile, Backoffice, or Telemetry route |
 | Right sidebar | Independent live and pre-match slips |
 
 The main region receives skip-link focus without drawing a full-height frame
@@ -42,6 +42,7 @@ Primary routes are:
 | --- | --- |
 | `/` | Upcoming, countdown, live, and recently finished events |
 | `/bets` | User betting history and settlement state |
+| `/profile` | Private display-name editing and personal betting statistics |
 | `/backoffice` | Public event simulation controls |
 | `/telemetry` | Fourteen-day activity graphs and current service health |
 | `/signup` | Account creation |
@@ -52,7 +53,9 @@ The header restores the compact, pre-redesign icon composition across all
 density profiles. The theme-appropriate wordmark returns to Events.
 **Backoffice** and **Telemetry** retain visible labels for anonymous and signed-in
 visitors; theme and authentication icons retain accessible names and tooltips.
-Signed-in users also receive **My bets**. Below 992 CSS pixels, **Toggle navigation**
+Signed-in users also receive **My bets** and a name chip linking to **My profile**.
+The chip displays the saved private name, visually shortened when needed,
+without changing the public leaderboard alias. Below 992 CSS pixels, **Toggle navigation**
 opens the collapsed menu. Escape and route-link activation close it; Escape
 returns focus to the toggle. Theme changes keep the menu open.
 Header links preserve the current query parameters; theme changes retain the
@@ -81,6 +84,48 @@ odds, and outcome, plus accepted total odds and relevant financial context.
 The **Bet details** control shares a naturally wrapping row with position
 metadata where space permits; opened details stay inline and readable without
 replacing the recognizable card summary.
+
+## Private player profile
+
+Only a signed-in player can view their own `/profile`. Anonymous or expired
+sessions receive sign-in guidance rather than another player's profile or
+stale private data. The route retains the normal Statistics and slips
+sidebars, all three density layouts, both themes, and existing navigation
+query parameters.
+
+The display name initially matches the full login, including an email login.
+**Save name** persists a trimmed, nonempty, single-line name of up to 254
+characters; spaces and Unicode are supported, and names need not be unique.
+The login is read-only. Saving updates the private profile and signed-in
+header without changing credentials, public aliases, or historical bet names.
+Saved, validation-error, and retryable-failure feedback remain distinct.
+
+**Betting activity** leads with **Bets**, **Wins**, **Losses**, and **Total
+staked**. Bets counts accepted tickets, including void and full cash-back
+outcomes; an accumulator counts once. Open, voided, full cash-back, awaiting
+moderation, and declined counts explain the remaining outcomes. Pending and
+declined submissions do not increase the accepted-bet count. Full cash back
+is neither a win nor a loss; after partial cash back, the ticket's current
+result determines its bucket.
+
+Total staked sums original wagers on confirmed, won, lost, or cash-back
+tickets. Pending, declined, and fully voided bets contribute nothing.
+Winnings and cash-back returns are not deducted, and partial closure does
+not reduce the original wager counted. The amount is nominal Stanbucks,
+not net loss, paid money, or a wallet balance.
+
+**All time** is the default. **From**, **To**, and **Apply dates** select
+placement dates, including both local calendar days. Calendar boundaries
+respect daylight-saving changes. The selected bets' current outcomes are
+shown, not a historical snapshot or results settled during that period.
+A later full void removes that bet's stake from Total staked.
+
+**Refresh statistics** reloads totals without changing the date selection
+or an unsaved name. Statistics failures do not disable name editing.
+Loading, no activity, no activity in a range, and failures are separate
+states; failures never appear as fabricated zeros. Switching accounts or
+losing authentication clears private presentation and pending drafts, and
+late requests cannot restore the previous player's values.
 
 ## Cash back in My Bets - deployment-gated
 

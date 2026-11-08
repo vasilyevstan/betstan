@@ -8,6 +8,7 @@ import App from './App';
 jest.mock('axios', () => ({
   get: jest.fn(),
   post: jest.fn(),
+  patch: jest.fn(),
 }));
 
 jest.mock('./Header', () => () => <div data-testid="header">Header</div>);
@@ -38,6 +39,7 @@ const NavigationControls = () => {
     <button type="button" onClick={() => navigate('/backoffice')}>Backoffice route</button>
     <button type="button" onClick={() => navigate('/BACKOFFICE')}>Backoffice case alias</button>
     <button type="button" onClick={() => navigate('/backoffice/')}>Backoffice slash alias</button>
+    <button type="button" onClick={() => navigate('/profile')}>Profile route</button>
   </div>;
 };
 
@@ -52,6 +54,7 @@ describe('App telemetry routing and page-view reporting', () => {
   beforeEach(() => {
     axios.get.mockReset();
     axios.post.mockReset();
+    axios.patch.mockReset();
     axios.get.mockResolvedValue({ data: { currentUser: null } });
     axios.post.mockResolvedValue({});
   });
@@ -197,5 +200,30 @@ describe('App telemetry routing and page-view reporting', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Backoffice slash alias' }));
     await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
     expect(screen.getByText('Backoffice page')).toBeInTheDocument();
+  });
+
+  it('routes a private profile and retains a saved display name without changing the login', async () => {
+    axios.get.mockImplementation(async (url) => ({
+      data: url === '/api/auth/currentuser'
+        ? { currentUser: { id: 'owner', email: 'login@example.com', displayName: 'Old name' } }
+        : {
+          range: { from: null, toExclusive: null },
+          acceptedBets: 0, wins: 0, losses: 0, openBets: 0, voidedBets: 0, cashBackBets: 0,
+          pendingSubmissions: 0, declinedSubmissions: 0, totalStaked: '0',
+        },
+    }));
+    axios.patch.mockResolvedValue({ data: { displayName: 'Saved name' } });
+    await act(async () => renderApp('/profile?ui=v2&theme=light', true));
+    expect(await screen.findByLabelText('Display name')).toHaveValue('Old name');
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Saved name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    expect(await screen.findByText('Name saved.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Other route' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Profile route' }));
+    expect(await screen.findByLabelText('Display name')).toHaveValue('Saved name');
+    expect(screen.getByText('login@example.com')).toBeVisible();
+    expect(screen.getByTestId('leaderboard')).toBeInTheDocument();
+    expect(screen.getByTestId('slip')).toBeInTheDocument();
+    expect(axios.get.mock.calls.filter(([url]) => url === '/api/auth/currentuser')).toHaveLength(1);
   });
 });

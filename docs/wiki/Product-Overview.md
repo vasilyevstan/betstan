@@ -23,6 +23,7 @@ contain a deposit, withdrawal, card-payment, or external-wallet integration.
 | Settlement | Pre-match and live rows are settled from authoritative match and market outcomes, then rolled up into the final bet result. |
 | Bet history | My Bets distinguishes live from pre-match bets and shows moderation and settlement outcomes without exposing internal identifiers. |
 | Statistics | Public aggregate statistics provide a privacy-limited leaderboard view. |
+| Private player profile | A signed-in player can edit a private display name and review personal ticket counts, wins, losses, and nominal Stanbucks staked, for all time or a placement-date range. |
 | Telemetry | A public dashboard shows bounded fourteen-day operational counts and coarse point-in-time application health. |
 | Backoffice | The event catalog and bounded create, visibility, and result controls are intentionally public in the current product. |
 | Responsive UI | The client supports three layout variants, light/dark themes, keyboard access, and desktop/tablet/mobile layouts. |
@@ -92,6 +93,8 @@ A player can:
 4. See whether moderation accepted or rejected it.
 5. Follow row-level and final settlement in My Bets.
 6. Review public betting statistics.
+7. Open My profile from the signed-in name chip, edit a display name without
+   changing the login, and review private betting activity.
 
 ### Administrator
 

@@ -143,6 +143,23 @@ it('retains authenticated display name and accessible bet/logout icon names', ()
   expect(screen.queryByRole('link', { name: 'Log in' })).not.toBeInTheDocument();
 });
 
+it('links the saved private name to the profile and preserves route identity and query parameters', () => {
+  renderHeader({ email: 'login@example.com', displayName: 'New Player' }, 'v3', '/PROFILE/');
+  const link = screen.getByRole('link', { name: 'My profile' });
+  expect(link).toHaveTextContent('New Player');
+  expect(link).toHaveAttribute('href', '/profile?ui=v3&theme=light');
+  expect(link).toHaveAttribute('aria-current', 'page');
+  expect(screen.getByRole('link', { name: 'BetStan home' })).not.toHaveAttribute('aria-current');
+  fireEvent.click(screen.getByRole('button', { name: 'Toggle navigation' }));
+  fireEvent.click(link);
+  expect(screen.getByRole('button', { name: 'Toggle navigation' })).toHaveAttribute('aria-expanded', 'false');
+});
+
+it('keeps a Unicode profile initial intact', () => {
+  const { container } = renderHeader({ email: 'player', displayName: '\u{1F3C6} Player' });
+  expect(container.querySelector('.user-chip__avatar')).toHaveTextContent('\u{1F3C6}');
+});
+
 it('marks Telemetry as the current page without losing valid navigation query parameters', () => {
   renderHeader(undefined, 'v3', '/telemetry');
 

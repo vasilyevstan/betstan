@@ -15,5 +15,5 @@ export const buildSessionCookie = (
     "base64"
   );
 
-  return [`session=${encodeURIComponent(session)}`];
+  return [`session=${session}`];
 };
