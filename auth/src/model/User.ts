@@ -11,6 +11,10 @@ const userSchema = new Schema({
     type: String,
     required: true,
   },
+  displayName: {
+    type: String,
+    required: false,
+  },
   identifierNormalized: {
     type: String,
     required: false,
@@ -50,6 +54,7 @@ userSchema.set("toJSON", {
     return {
       _id: returnedObject._id,
       email: returnedObject.email,
+      displayName: returnedObject.displayName ?? returnedObject.email,
       role: returnedObject.role,
       timestamp: returnedObject.timestamp,
       lastLogin: returnedObject.lastLogin,

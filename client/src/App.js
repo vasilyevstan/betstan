@@ -8,6 +8,7 @@ import LogOut from './pages/auth/LogOut';
 import LogIn from './pages/auth/LogIn';
 import Backoffice from './pages/account/Backoffice';
 import MyBets from './pages/account/MyBets';
+import Profile from './pages/account/Profile';
 import Slip from './pages/Slip';
 import Statistics from './pages/account/Statistics';
 import Telemetry from './pages/Telemetry';
@@ -84,6 +85,10 @@ const App = () => {
     requestSlipRefresh();
   }, [fetchData, requestSlipRefresh]);
 
+  const handleProfileSaved = useCallback((ownerId, displayName) => {
+    setCurrentUser((user) => user?.id === ownerId ? { ...user, displayName } : user);
+  }, []);
+
   const focusMainContent = useCallback((event) => {
     event.preventDefault();
     mainContent.current?.focus({ preventScroll: true });
@@ -153,6 +158,9 @@ const App = () => {
               />
               <Route path="/bets" element={<MyBets currentUser={currentUser}
                 isCurrentUserResolved={isCurrentUserResolved} onAuthRefresh={fetchData} />} />
+              <Route path="/profile" element={<Profile currentUser={currentUser}
+                isCurrentUserResolved={isCurrentUserResolved} onAuthRefresh={fetchData}
+                onProfileSaved={handleProfileSaved} />} />
               <Route path="/telemetry" element={<Telemetry />} />
               <Route
                 path="*"

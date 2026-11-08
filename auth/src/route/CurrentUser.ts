@@ -1,39 +1,27 @@
 import express from "express";
-import { currentUser, UserPayload } from "../middleware/CurrentUser";
-import { User } from "../model/User";
-import {
-  isSessionTimestampFresh,
-  normalizeUserRole,
-} from "../service/Session";
+import { currentUser } from "../middleware/CurrentUser";
+import { getSessionUser, normalizeUserRole } from "../service/Session";
 
 const router = express.Router();
 
 router.get("/api/auth/currentuser", currentUser, async (req, res) => {
-  let currentUser = req.currentUser;
+  res.setHeader("Cache-Control", "no-store");
+  const payload = req.currentUser;
+  const user = await getSessionUser(payload);
 
-  if (currentUser) {
-    const user = await User.findById(currentUser.id);
-    const signedRole = normalizeUserRole(currentUser.role);
-    const persistedRole = normalizeUserRole(user?.role);
-
-    if (
-      !user
-      || !isSessionTimestampFresh(currentUser.timestamp)
-      || signedRole !== persistedRole
-    ) {
-      req.session = null;
-      currentUser = undefined;
-    } else {
-      currentUser = {
-        id: currentUser.id,
-        email: currentUser.email,
-        role: signedRole,
-        timestamp: currentUser.timestamp,
-      } satisfies UserPayload;
-    }
+  if (payload && !user) {
+    req.session = null;
   }
 
-  res.send({ currentUser: currentUser || null });
+  res.send({
+    currentUser: user && payload ? {
+      id: String(user._id),
+      email: user.email,
+      displayName: user.displayName ?? user.email,
+      role: normalizeUserRole(user.role),
+      timestamp: payload.timestamp,
+    } : null,
+  });
 });
 
 export { router as currentUserRouter };

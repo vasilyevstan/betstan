@@ -61,6 +61,7 @@ router.post(
     try {
       const user = await User.create({
         email: identifier,
+        displayName: identifier,
         identifierNormalized,
         password,
         role: UserRole.USER,

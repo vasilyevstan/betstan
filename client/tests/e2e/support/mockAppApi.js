@@ -400,6 +400,10 @@ const createShellMockState = ({ loginError = null, signupError = null } = {}) =>
     },
     bets: [],
     stats: [],
+    profileStats: {
+      acceptedBets: 0, wins: 0, losses: 0, openBets: 0, voidedBets: 0, cashBackBets: 0,
+      pendingSubmissions: 0, declinedSubmissions: 0, totalStaked: '0',
+    },
     telemetrySummary: createTelemetrySummary(),
     telemetryHourlyResponses: {},
     auth: {
@@ -789,6 +793,28 @@ const installAppApiMocks = async (page, state) => {
 
     if (key === 'GET /api/auth/currentuser') {
       await fulfillJson(route, { currentUser: state.currentUser });
+      return;
+    }
+
+    if (key === 'PATCH /api/auth/profile') {
+      if (!state.currentUser) {
+        await fulfillJson(route, { errors: [{ message: 'Authentication required' }] }, 401);
+      } else {
+        state.currentUser = { ...state.currentUser, displayName: body.displayName };
+        await fulfillJson(route, { displayName: body.displayName });
+      }
+      return;
+    }
+
+    if (key === 'GET /api/bet/me/stats') {
+      const query = new URL(route.request().url()).searchParams;
+      const response = state.profileStatsResponse;
+      const snapshot = deepClone(response?.body ?? {
+        ...state.profileStats,
+        range: { from: query.get('from'), toExclusive: query.get('toExclusive') },
+      });
+      if (response?.wait) await response.wait;
+      await fulfillJson(route, snapshot, response?.status ?? 200);
       return;
     }
 

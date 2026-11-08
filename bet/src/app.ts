@@ -5,6 +5,7 @@ import cookieSession from "cookie-session";
 import { ShowBets } from "./route/ShowBets";
 import { ShowStats } from "./route/ShowStats";
 import { CashBack } from "./route/CashBack";
+import { ShowProfileStats } from "./route/ShowProfileStats";
 
 const cors = require("cors");
 const app = express();
@@ -22,6 +23,7 @@ app.use(currentUser);
 
 app.use(ShowBets);
 app.use(ShowStats);
+app.use(ShowProfileStats);
 app.use(CashBack);
 
 app.use(errorHandler);
