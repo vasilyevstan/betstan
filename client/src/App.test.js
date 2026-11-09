@@ -214,13 +214,16 @@ describe('App telemetry routing and page-view reporting', () => {
     }));
     axios.patch.mockResolvedValue({ data: { displayName: 'Saved name' } });
     await act(async () => renderApp('/profile?ui=v2&theme=light', true));
-    expect(await screen.findByLabelText('Display name')).toHaveValue('Old name');
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit name' }));
+    expect(screen.getByLabelText('Display name')).toHaveValue('Old name');
     fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Saved name' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
     expect(await screen.findByText('Name saved.')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Other route' }));
     fireEvent.click(screen.getByRole('button', { name: 'Profile route' }));
-    expect(await screen.findByLabelText('Display name')).toHaveValue('Saved name');
+    expect(await screen.findByRole('heading', { name: 'Saved name', level: 2 })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit name' }));
+    expect(screen.getByLabelText('Display name')).toHaveValue('Saved name');
     expect(screen.getByText('login@example.com')).toBeVisible();
     expect(screen.getByTestId('leaderboard')).toBeInTheDocument();
     expect(screen.getByTestId('slip')).toBeInTheDocument();

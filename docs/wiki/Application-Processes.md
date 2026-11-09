@@ -110,6 +110,18 @@ records. The accepted count is open + wins + losses + voids + full cash back.
 Pending and declined submissions remain outside it. Win/loss uses the current
 ticket result, not selection counts or net profitability.
 
+The response also contains additive betting-style fields: `preMatchBets`,
+`liveBets`, `singleBets`, `accumulatorBets`, and `favouriteMarket`. They cover
+every submitted ticket in the range, including pending and declined ones, so
+pre-match plus live and single plus accumulator each equal the displayed
+**Bets** total. Legacy tickets without a bet kind count as pre-match; a ticket
+with more than one selection counts as an accumulator. `favouriteMarket` is
+`{ name, selections }` for the most frequently selected nonblank market name,
+counting each selection and breaking ties alphabetically, or `null` when
+there is none. An unknown bet kind makes the response unavailable rather than
+miscounted. Older clients ignore the new fields; the Client tolerates
+responses without them.
+
 The Client's displayed **Bets** total adds `acceptedBets`,
 `pendingSubmissions`, and `declinedSubmissions`. This includes every status,
 matching the public scoreboard's counting rule for all-time activity while

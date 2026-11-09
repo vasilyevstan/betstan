@@ -18,14 +18,15 @@ authenticatedApp.use(cookieSession({ signed: false, secure: false }));
 authenticatedApp.use(actualCommon.currentUser);
 authenticatedApp.use(ShowProfileStats);
 
+const row = (productName = "1X2") => ({
+  id: "row", eventId: "event", eventName: "A - B", productId: "product",
+  productName, oddsId: "home", oddsName: "A", oddsValue: 3,
+  timestamp: "2026-04-01T12:00:00.000Z", status: SlipRowStatus.NOT_SETTLED,
+});
 const createBet = (overrides: Record<string, unknown> = {}) => Bet.create({
   userId: "owner", userName: "private-login@example.com", slipId: new Types.ObjectId().toHexString(),
   status: BetStatus.CONFIRMED, wager: 10, timestamp: "2026-03-29T12:00:00.000Z",
-  rows: [{
-    id: "row", eventId: "event", eventName: "A - B", productId: "product",
-    productName: "1X2", oddsId: "home", oddsName: "A", oddsValue: 3,
-    timestamp: "2026-04-01T12:00:00.000Z", status: SlipRowStatus.NOT_SETTLED,
-  }],
+  rows: [row()],
   ...overrides,
 });
 
@@ -45,6 +46,8 @@ it("returns exact private ticket counts and original non-void stakes across ever
     range: { from: null, toExclusive: null },
     acceptedBets: 5, wins: 1, losses: 1, openBets: 1, voidedBets: 1, cashBackBets: 1,
     pendingSubmissions: 1, declinedSubmissions: 1, totalStaked: "8.75",
+    preMatchBets: 0, liveBets: 7, singleBets: 7, accumulatorBets: 0,
+    favouriteMarket: { name: "1X2", selections: 7 },
   });
   expect(response.headers["cache-control"]).toBe("no-store");
   for (const privateValue of ["owner", "another-player", "private-login", "slipId", "rows", "_id"]) {
@@ -62,6 +65,20 @@ it("counts an accumulator once and retains the original wager after partial cash
   await first.save();
   const response = await request(app).get(endpoint).set("currentUser", owner).expect(200);
   expect(response.body).toMatchObject({ acceptedBets: 1, wins: 1, losses: 0, totalStaked: "100" });
+});
+
+it("summarises bet kinds, accumulators and the most-picked market across every submitted ticket", async () => {
+  const legacy = await createBet({ status: BetStatus.PENDING, rows: [row("Correct Score")] });
+  await Bet.collection.updateOne({ _id: legacy._id }, { $unset: { betKind: "" } });
+  await createBet({ status: BetStatus.DECLINED, betKind: BetKind.LIVE, rows: [row("Next goal"), row("Correct Score")] });
+  await createBet({ status: BetStatus.WIN, betKind: BetKind.PRE_MATCH, rows: [row("1X2"), row("Correct Score"), row("  ")] });
+  await createBet({ userId: "another-player", rows: [row("1X2"), row("1X2"), row("1X2"), row("1X2")] });
+  const response = await request(app).get(endpoint).set("currentUser", owner).expect(200);
+  expect(response.body).toMatchObject({
+    acceptedBets: 1, pendingSubmissions: 1, declinedSubmissions: 1,
+    preMatchBets: 2, liveBets: 1, singleBets: 1, accumulatorBets: 2,
+    favouriteMarket: { name: "Correct Score", selections: 3 },
+  });
 });
 
 it("includes legacy kinds and sub-cent wagers without floating-point addition", async () => {
@@ -82,12 +99,16 @@ it("filters placement instants with inclusive start and exclusive end, including
     .set("currentUser", owner).expect(200);
   expect(response.body).toMatchObject({
     range: { from, toExclusive }, acceptedBets: 2, wins: 1, losses: 1, totalStaked: "3",
+    favouriteMarket: { name: "1X2", selections: 2 },
   });
 });
 
 it("returns genuine zeros for empty history or a range without activity", async () => {
   const empty = await request(app).get(endpoint).set("currentUser", owner).expect(200);
-  expect(empty.body).toMatchObject({ acceptedBets: 0, pendingSubmissions: 0, totalStaked: "0" });
+  expect(empty.body).toMatchObject({
+    acceptedBets: 0, pendingSubmissions: 0, totalStaked: "0",
+    preMatchBets: 0, liveBets: 0, singleBets: 0, accumulatorBets: 0, favouriteMarket: null,
+  });
   await createBet({ timestamp: toExclusive });
   const range = await request(app).get(endpoint).query({ from, toExclusive })
     .set("currentUser", owner).expect(200);
@@ -145,10 +166,12 @@ it("does not silently exclude unassignable legacy placement dates", async () => 
   await request(app).get(endpoint).query({ from, toExclusive }).set("currentUser", owner).expect(503);
 });
 
-it("reports unknown statuses and database failures without exposing private error text", async () => {
+it("reports unknown statuses, unknown bet kinds and database failures without exposing private error text", async () => {
   const bet = await createBet();
   await Bet.collection.updateOne({ _id: bet._id }, { $set: { status: "UNKNOWN" } });
   jest.spyOn(console, "error").mockImplementation(() => {});
+  await request(app).get(endpoint).set("currentUser", owner).expect(503);
+  await Bet.collection.updateOne({ _id: bet._id }, { $set: { status: BetStatus.WIN, betKind: "UNKNOWN" } });
   await request(app).get(endpoint).set("currentUser", owner).expect(503);
   jest.spyOn(Bet, "aggregate").mockImplementationOnce(() => { throw new Error("private database detail"); });
   const response = await request(app).get(endpoint).set("currentUser", owner).expect(503);
