@@ -1,4 +1,4 @@
-import { BetStatus } from "@betstan/common";
+import { BetKind, BetStatus } from "@betstan/common";
 import { PipelineStage } from "mongoose";
 import { Bet } from "../model/Bet";
 
@@ -18,16 +18,26 @@ export interface ProfileBetStats {
   pendingSubmissions: number;
   declinedSubmissions: number;
   totalStaked: string;
+  preMatchBets: number;
+  liveBets: number;
+  singleBets: number;
+  accumulatorBets: number;
+  favouriteMarket: { name: string; selections: number } | null;
 }
 
-type AggregatedStats = Omit<ProfileBetStats, "range" | "acceptedBets"> & {
+type AggregatedStats = Omit<ProfileBetStats, "range" | "acceptedBets" | "favouriteMarket"> & {
   invalidRecords: number;
 };
+type AggregatedMarket = { _id: string; selections: number };
 
 const stakedStatuses = [BetStatus.CONFIRMED, BetStatus.WIN, BetStatus.LOSS, BetStatus.CASH_BACK];
 const countStatus = (status: BetStatus) => ({
   $sum: { $cond: [{ $eq: ["$status", status] }, 1, 0] },
 });
+const countWhen = (condition: unknown) => ({ $sum: { $cond: [condition, 1, 0] } });
+const isPreMatch = { $eq: [{ $ifNull: ["$betKind", BetKind.PRE_MATCH] }, BetKind.PRE_MATCH] };
+const isLive = { $eq: ["$betKind", BetKind.LIVE] };
+const isAccumulator = { $gt: [{ $size: { $ifNull: ["$rows", []] } }, 1] };
 
 export const getProfileBetStats = async (
   userId: string,
@@ -40,7 +50,7 @@ export const getProfileBetStats = async (
       { $match: { profilePlacedAt: { $gte: new Date(range.from), $lt: new Date(range.toExclusive) } } }
     );
   }
-  pipeline.push(
+  const totals: PipelineStage.FacetPipelineStage[] = [
     {
       $set: {
         profileStake: {
@@ -62,6 +72,10 @@ export const getProfileBetStats = async (
         cashBackBets: countStatus(BetStatus.CASH_BACK),
         pendingSubmissions: countStatus(BetStatus.PENDING),
         declinedSubmissions: countStatus(BetStatus.DECLINED),
+        preMatchBets: countWhen(isPreMatch),
+        liveBets: countWhen(isLive),
+        singleBets: countWhen({ $not: [isAccumulator] }),
+        accumulatorBets: countWhen(isAccumulator),
         totalStaked: { $sum: "$profileStake" },
         invalidRecords: {
           $sum: {
@@ -69,6 +83,7 @@ export const getProfileBetStats = async (
               {
                 $or: [
                   { $not: [{ $in: ["$status", Object.values(BetStatus)] }] },
+                  { $not: [{ $or: [isPreMatch, isLive] }] },
                   {
                     $and: [
                       { $in: ["$status", stakedStatuses] },
@@ -90,10 +105,20 @@ export const getProfileBetStats = async (
         },
       },
     },
-    { $set: { totalStaked: { $toString: "$totalStaked" } } }
-  );
+    { $set: { totalStaked: { $toString: "$totalStaked" } } },
+  ];
+  const markets: PipelineStage.FacetPipelineStage[] = [
+    { $unwind: "$rows" },
+    { $match: { "rows.productName": { $type: "string", $regex: /\S/ } } },
+    { $group: { _id: "$rows.productName", selections: { $sum: 1 } } },
+    { $sort: { selections: -1, _id: 1 } },
+    { $limit: 1 },
+  ];
+  pipeline.push({ $facet: { totals, markets } });
 
-  const [row] = await Bet.aggregate<AggregatedStats>(pipeline);
+  const [result] = await Bet.aggregate<{ totals: AggregatedStats[]; markets: AggregatedMarket[] }>(pipeline);
+  const [row] = result?.totals ?? [];
+  const [market] = result?.markets ?? [];
   if (row && (row.invalidRecords !== 0 || !/^\d+(?:\.\d+)?(?:E[+-]?\d+)?$/.test(row.totalStaked))) {
     throw new Error("Personal statistics contain invalid records");
   }
@@ -114,5 +139,10 @@ export const getProfileBetStats = async (
     pendingSubmissions: row?.pendingSubmissions ?? 0,
     declinedSubmissions: row?.declinedSubmissions ?? 0,
     totalStaked: row?.totalStaked ?? "0",
+    preMatchBets: row?.preMatchBets ?? 0,
+    liveBets: row?.liveBets ?? 0,
+    singleBets: row?.singleBets ?? 0,
+    accumulatorBets: row?.accumulatorBets ?? 0,
+    favouriteMarket: market ? { name: market._id, selections: market.selections } : null,
   };
 };

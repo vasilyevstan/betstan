@@ -93,41 +93,53 @@ stale private data. The route retains the normal Statistics and slips
 sidebars, all three density layouts, both themes, and existing navigation
 query parameters.
 
-The display name initially matches the full login, including an email login.
-**Save name** persists a trimmed, nonempty, single-line name of up to 254
-characters; spaces and Unicode are supported, and names need not be unique.
-The login is read-only. Saving updates the private profile and signed-in
-header without changing credentials, public aliases, or historical bet names.
-Saved, validation-error, and retryable-failure feedback remain distinct.
+A compact identity card shows an initial, the saved display name, and the
+read-only login. The display name initially matches the full login, including
+an email login. **Edit name** opens the name field; **Save name** persists a
+trimmed, nonempty, single-line name of up to 254 characters, while **Cancel**
+or Escape restores the saved name. Spaces and Unicode are supported, and names
+need not be unique. Focus returns to **Edit name** after saving or cancelling.
+Saving updates the private profile and signed-in header without changing
+credentials, public aliases, or historical bet names. Saved, validation-error,
+and retryable-failure feedback remain distinct.
 
-**Betting activity** leads with **Bets**, **Wins**, **Losses**, and **Total
-staked**. Bets counts all submitted tickets, including pending, declined,
-void and full cash-back outcomes; an accumulator counts once. This matches
-the public Statistics scoreboard's all-status counting rule for all-time
-activity. Wins, losses, open, voided, full cash-back, awaiting moderation,
-and declined counts break down that total. Full cash back is neither a win
-nor a loss; after partial cash back, the ticket's current result determines
-its bucket.
+**Betting activity** is the focal section. Its headline figures are **Bets**,
+**Win rate**, and **Total staked**. Bets counts all submitted tickets,
+including pending, declined, void and full cash-back outcomes; an accumulator
+counts once. This matches the public Statistics scoreboard's all-status
+counting rule for all-time activity. Win rate is wins divided by settled
+wins plus losses, shown with the underlying "X of Y settled bets won"; it
+shows a dash until a bet is won or lost. Open, voided and cashed-back tickets
+do not affect it. Full cash back is neither a win nor a loss; after partial
+cash back, the ticket's current result determines its bucket.
+
+**How you bet** shows proportional bars for Won/Lost, Pre-match/Live and
+Singles/Accumulators, followed by the player's **Favourite market**: the
+market picked most often, counting each accumulator selection. Pre-match and
+live, and singles and accumulators, each add up to Bets. **Ticket status**
+lists open, voided, cash back, awaiting moderation, and declined counts.
+There is no favourite sport because every BetStan event uses the same
+football-style simulation.
 
 Total staked sums original wagers on confirmed, won, lost, or cash-back
 tickets. Pending, declined, and fully voided bets contribute nothing.
 Winnings and cash-back returns are not deducted, and partial closure does
 not reduce the original wager counted. The amount is nominal Stanbucks,
-not net loss, paid money, or a wallet balance.
+not net loss, paid money, or a wallet balance. It is shown with locale digit
+grouping from the exact decimal string, and long amounts wrap only between
+digit groups. **How these are counted** repeats these rules in place.
 
-**All time** is the default. **From**, **To**, and **Apply dates** select
-placement dates, including both local calendar days. Calendar boundaries
-respect daylight-saving changes. The selected bets' current outcomes are
-shown, not a historical snapshot or results settled during that period.
-A date range narrows only the profile totals; the public scoreboard stays all-time.
-A later full void removes that bet's stake from Total staked.
-
-**Refresh statistics** reloads totals without changing the date selection
-or an unsaved name. Statistics failures do not disable name editing.
-Loading, no activity, no activity in a range, and failures are separate
-states; failures never appear as fabricated zeros. Switching accounts or
-losing authentication clears private presentation and pending drafts, and
-late requests cannot restore the previous player's values.
+**All time** is the default. **Today**, **Last 7 days**, and **Last 30 days**
+apply immediately and use the same windows as My bets: Today starts at local
+midnight, and the rolling presets start 7 or 30 days before the moment they
+are applied or refreshed. **Custom dates** opens **From**, **To**, and
+**Apply dates** for placement dates, including both local calendar days.
+Calendar boundaries respect daylight-saving changes. The selected bets'
+current outcomes are shown, not a historical snapshot or results settled
+during that period. Previous figures stay visible, dimmed, while a new period
+loads. A period narrows only the profile figures; the public scoreboard stays
+all-time. A later full void removes that bet's stake from Total staked.
+**View my bets** opens the full ticket list.
 
 ## Cash back in My Bets - deployment-gated
 
