@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Link, useLocation } from 'react-router-dom';
 import { formatLiveMarketType } from '../../liveBettingUtils';
@@ -139,7 +139,7 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
 
   useEffect(() => () => saveRequest.current?.abort(), []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (editing) nameInput.current?.focus();
     else if (returnFocus.current) {
       returnFocus.current = false;
@@ -147,7 +147,7 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
     }
   }, [editing]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (customOpen) fromInput.current?.focus();
   }, [customOpen]);
 
