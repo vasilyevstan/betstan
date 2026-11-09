@@ -146,7 +146,8 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
 
   if (authExpired) return <SignedOutProfile search={search} />;
   const totals = stats.data;
-  const empty = totals && totals.acceptedBets + totals.pendingSubmissions + totals.declinedSubmissions === 0;
+  const totalBets = totals && totals.acceptedBets + totals.pendingSubmissions + totals.declinedSubmissions;
+  const empty = totalBets === 0;
   return <div className="profile-page">
     <header className="profile-heading">
       <h1>My profile</h1>
@@ -213,7 +214,7 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
           {empty ? <p>{range.from ? 'No betting activity in this date range.' : 'No betting activity yet.'}</p> : null}
           <dl className="profile-totals">
             {[
-              ['Bets', totals.acceptedBets.toLocaleString()],
+              ['Bets', totalBets.toLocaleString()],
               ['Wins', totals.wins.toLocaleString()],
               ['Losses', totals.losses.toLocaleString()],
               ['Total staked', <>{totals.totalStaked} <span>Stanbucks</span></>],
@@ -231,8 +232,8 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
           </dl>
         </> : null}
       </div>
-      <p className="profile-hint">Bets counts accepted tickets, including voids and cash back. An accumulator counts once.
-        Pending and declined submissions are shown separately.</p>
+      <p className="profile-hint">Bets counts all submitted tickets, including pending, declined, voided and cash-back bets.
+        An accumulator counts once.</p>
       <p className="profile-hint">Total staked excludes pending, declined and fully voided bets.
         Winnings and cash-back returns are not deducted. Nominal Stanbucks, not a wallet balance.</p>
     </section>

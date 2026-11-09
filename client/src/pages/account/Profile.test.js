@@ -34,11 +34,29 @@ it("shows only the current player's totals and keeps the login read-only", async
   expect(screen.getByRole('heading', { name: 'My profile', level: 1 })).toBeVisible();
   expect(screen.getByText(player.email)).toBeVisible();
   expect(screen.getByLabelText('Display name')).toHaveValue('Player');
-  expect(screen.getByText('Bets').nextElementSibling).toHaveTextContent('3');
+  expect(screen.getByText('Bets').nextElementSibling).toHaveTextContent('6');
   expect(screen.getByText('Total staked').nextElementSibling).toHaveTextContent('0.301 Stanbucks');
   expect(screen.getByText('Awaiting moderation').nextElementSibling).toHaveTextContent('2');
+  expect(screen.getByText('Declined').nextElementSibling).toHaveTextContent('1');
   expect(axios.get).toHaveBeenCalledWith('/api/bet/me/stats', expect.objectContaining({ params: {} }));
   expect(screen.queryByLabelText('Login')).not.toBeInTheDocument();
+});
+
+it.each([
+  { pendingSubmissions: 2, declinedSubmissions: 0, expectedBets: '2' },
+  { pendingSubmissions: 0, declinedSubmissions: 3, expectedBets: '3' },
+])('counts unaccepted submissions as Bets: %p', async ({ pendingSubmissions, declinedSubmissions, expectedBets }) => {
+  axios.get.mockResolvedValueOnce({ data: stats({
+    acceptedBets: 0, wins: 0, losses: 0, openBets: 0,
+    pendingSubmissions, declinedSubmissions, totalStaked: '0',
+  }) });
+  render(profile());
+  await showTotals();
+  expect(screen.getByText('Bets').nextElementSibling.textContent).toBe(expectedBets);
+  expect(screen.getByText('Wins').nextElementSibling).toHaveTextContent('0');
+  expect(screen.getByText('Losses').nextElementSibling).toHaveTextContent('0');
+  expect(screen.getByText('Total staked').nextElementSibling).toHaveTextContent('0 Stanbucks');
+  expect(screen.queryByText('No betting activity yet.')).not.toBeInTheDocument();
 });
 
 it('saves a trimmed Unicode name and updates the same-owner app state', async () => {
@@ -79,16 +97,25 @@ it('applies inclusive local placement dates and resets to all time without losin
   changeName('Unsaved name');
   fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-03-29' } });
   fireEvent.change(screen.getByLabelText('To'), { target: { value: '2026-03-29' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply dates' }));
   const start = new Date(2026, 2, 29);
   const end = new Date(2026, 2, 30);
+  axios.get.mockResolvedValueOnce({ data: stats({
+    range: { from: start.toISOString(), toExclusive: end.toISOString() },
+    acceptedBets: 1, wins: 0, losses: 0, openBets: 1,
+    pendingSubmissions: 1, declinedSubmissions: 2, totalStaked: '5',
+  }) });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply dates' }));
   await waitFor(() => expect(axios.get).toHaveBeenLastCalledWith('/api/bet/me/stats',
     expect.objectContaining({ params: { from: start.toISOString(), toExclusive: end.toISOString() } })));
   await showTotals();
+  expect(screen.getByText('Bets').nextElementSibling).toHaveTextContent('4');
+  expect(screen.getByText('Total staked').nextElementSibling).toHaveTextContent('5 Stanbucks');
   expect(screen.getByLabelText('Display name')).toHaveValue('Unsaved name');
   fireEvent.click(screen.getByRole('button', { name: 'All time' }));
   await waitFor(() => expect(axios.get).toHaveBeenLastCalledWith('/api/bet/me/stats',
     expect.objectContaining({ params: {} })));
+  await showTotals();
+  expect(screen.getByText('Bets').nextElementSibling).toHaveTextContent('6');
   expect(screen.getByLabelText('From')).toHaveValue('');
   expect(screen.getByLabelText('To')).toHaveValue('');
 });
