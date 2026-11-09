@@ -110,6 +110,12 @@ records. The accepted count is open + wins + losses + voids + full cash back.
 Pending and declined submissions remain outside it. Win/loss uses the current
 ticket result, not selection counts or net profitability.
 
+The Client's displayed **Bets** total adds `acceptedBets`,
+`pendingSubmissions`, and `declinedSubmissions`. This includes every status,
+matching the public scoreboard's counting rule for all-time activity while
+retaining the private endpoint's placement-date filtering. The endpoint's
+accepted-bet field and separate status counts keep their existing meanings.
+
 Total staked includes the original wager only for `CONFIRMED`, `WIN`, `LOSS`,
 and `CASH_BACK`. It excludes `PENDING`, `DECLINED`, and fully `VOID` tickets,
 does not subtract returns, and does not change after a partial cash-back
