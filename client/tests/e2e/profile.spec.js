@@ -12,7 +12,7 @@ const prepareProfile = async (page) => {
     email: `${'long-login-'.repeat(7)}player@example.invalid`,
     displayName: 'Player with a private display name',
   };
-  state.stats = [{ userKey: 'public-alias', displayName: 'Public alias', betCount: 7, wagerTotal: 10 }];
+  state.stats = [{ userKey: 'public-alias', displayName: 'Public alias', betCount: 15, wagerTotal: 10 }];
   state.profileStats = {
     acceptedBets: 12, wins: 7, losses: 2, openBets: 1, voidedBets: 1, cashBackBets: 1,
     pendingSubmissions: 2, declinedSubmissions: 1, totalStaked: '1234567890123456789.123',
@@ -33,6 +33,10 @@ test('private profile fits the existing desktop, tablet and mobile shell', async
     const main = page.getByRole('main');
     await expect(main.getByRole('heading', { name: 'My profile', level: 1 })).toBeVisible();
     await expect(main.locator('.profile-totals')).toContainText('1234567890123456789.123');
+    await expect(main.locator('.profile-totals > div').filter({ hasText: /^Bets/ }).locator('dd'))
+      .toHaveText(String(state.stats[0].betCount));
+    await expect(page.locator('.stat-row').filter({ hasText: 'Public alias' }).locator('.stat-row__count'))
+      .toHaveText(String(state.stats[0].betCount));
     await expect(main.getByLabel('Display name')).toHaveValue(state.currentUser.displayName);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
     const targets = await main.locator('button, input').evaluateAll((controls) => controls.map((control) => {

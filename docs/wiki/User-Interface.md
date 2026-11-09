@@ -101,12 +101,13 @@ header without changing credentials, public aliases, or historical bet names.
 Saved, validation-error, and retryable-failure feedback remain distinct.
 
 **Betting activity** leads with **Bets**, **Wins**, **Losses**, and **Total
-staked**. Bets counts accepted tickets, including void and full cash-back
-outcomes; an accumulator counts once. Open, voided, full cash-back, awaiting
-moderation, and declined counts explain the remaining outcomes. Pending and
-declined submissions do not increase the accepted-bet count. Full cash back
-is neither a win nor a loss; after partial cash back, the ticket's current
-result determines its bucket.
+staked**. Bets counts all submitted tickets, including pending, declined,
+void and full cash-back outcomes; an accumulator counts once. This matches
+the public Statistics scoreboard's all-status counting rule for all-time
+activity. Wins, losses, open, voided, full cash-back, awaiting moderation,
+and declined counts break down that total. Full cash back is neither a win
+nor a loss; after partial cash back, the ticket's current result determines
+its bucket.
 
 Total staked sums original wagers on confirmed, won, lost, or cash-back
 tickets. Pending, declined, and fully voided bets contribute nothing.
@@ -118,6 +119,7 @@ not net loss, paid money, or a wallet balance.
 placement dates, including both local calendar days. Calendar boundaries
 respect daylight-saving changes. The selected bets' current outcomes are
 shown, not a historical snapshot or results settled during that period.
+A date range narrows only the profile totals; the public scoreboard stays all-time.
 A later full void removes that bet's stake from Total staked.
 
 **Refresh statistics** reloads totals without changing the date selection
