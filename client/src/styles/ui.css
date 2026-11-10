@@ -1750,7 +1750,7 @@ body {
 
 .backoffice-event__body {
   display: grid;
-  gap: 1rem;
+  gap: 0.75rem;
   align-items: start;
 }
 
@@ -1797,57 +1797,35 @@ body {
 }
 
 .backoffice-event__controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
   gap: 0.75rem;
 }
 
-.backoffice-task {
+.backoffice-event__actions {
   display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
-  min-width: 0;
-  padding: 0.75rem;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-card);
-  background: var(--surface-elevated);
-}
-
-.backoffice-task__heading {
-  display: flex;
+  flex: 0 1 18rem;
   flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.25rem 0.75rem;
-}
-
-.backoffice-task__heading h4 {
-  margin: 0;
-  font-size: 0.92rem;
-  font-weight: 750;
-}
-
-.backoffice-task__heading span,
-.backoffice-task__target {
-  margin: 0;
-  color: var(--text-subtle);
-  font-size: 0.78rem;
-}
-
-.backoffice-task__target strong {
-  color: var(--text-main);
-  text-transform: uppercase;
-}
-
-.backoffice-result-form {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
+  align-items: flex-end;
   gap: 0.5rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.backoffice-event__actions .backoffice-action {
+  min-width: min(100%, 8rem);
+  max-width: 100%;
+}
+
+.backoffice-event__actions .backoffice-action--primary {
+  min-width: min(100%, 9.5rem);
 }
 
 .backoffice-scores {
   display: grid;
+  flex: 0 1 11.5rem;
+  min-width: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
 }
@@ -1855,12 +1833,6 @@ body {
 .backoffice-scores input {
   text-align: center;
   font-variant-numeric: tabular-nums;
-}
-
-.backoffice-result-form .backoffice-action,
-.backoffice-task--visibility .backoffice-action {
-  width: 100%;
-  margin-top: auto;
 }
 
 @container (min-width: 42rem) {
@@ -1876,10 +1848,6 @@ body {
   .backoffice-filters > .btn,
   .backoffice-search {
     grid-column: auto;
-  }
-
-  .backoffice-event__controls {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

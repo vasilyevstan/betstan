@@ -331,11 +331,10 @@ state treatment remain independent of that decoration. These shared refinements
 preserve all three densities, both themes, responsive behavior, and the
 existing semantic rails.
 
-Backoffice task panels use normal 1-pixel keylines rather than decorative
-3-pixel left accent or information rails. Removing this decoration does not
-remove the explicit **Recorded** and **Online** cues or unrelated domain-state
-rails. Intentional peer and shared-column alignment remains part of the
-consistency contract.
+Backoffice event cards use one compact control strip without nested task
+panels or a dividing keyline. Equal score inputs and adjacent actions replace
+the two wide columns. Explicit **Recorded and locked** and **Online** cues
+and unrelated domain-state rails remain.
 
 ## Preserving presentation choices
 
@@ -614,16 +613,19 @@ themes.
 
 **Create new event** stays expanded and states the server-defined 15-minute
 kickoff lead time. Each displayed card gives event identity the full card
-width, then presents adjacent **Final result** and **Visibility** task groups
-when space permits; the groups stack without changing their semantic order in
-a narrow card. The equal-column geometry remains: **Home score** and **Away
-score** are equal peers, the two wide task groups have equal width, and their
-full-width actions align as peer controls. **Save final result** requires both
+width, then presents a compact, unboxed control strip. **Home score** and
+**Away score** are equal, bounded inputs followed by the primary **Save final
+result** and secondary visibility action. Controls align along their bottom
+edge when space permits; actions wrap below the score pair on narrower cards,
+then stack only when needed. Buttons retain usable touch targets without
+stretching across half the tile. Repeated task headings, current-state text,
+and target labels are removed: the badges give the state and the action names
+give the target. **Save final result** requires both
 scores as whole numbers from `0` to `99`. Recorded scores remain visible but
 disabled, as does result submission: final results cannot be changed once
 recorded.
 
-**Final result: Not recorded / Recorded** and **Visibility: Online / Offline**
+**Final result: Not recorded / Recorded and locked** and **Visibility: Online / Offline**
 are independent, human-readable states, not inferred live-match phases.
 Unknown or missing values receive **Unknown** or **Unavailable** labels.
 Visibility remains actionable after a result is recorded; **Take offline**
@@ -652,7 +654,7 @@ If an action refresh removes the focused card, focus moves to the Events
 heading only when it was lost and the user has not moved elsewhere; local
 filtering does not trigger that fallback.
 
-The task-deck composition changes no mutation behavior. Search, filtering,
+The compact composition changes no mutation behavior. Search, filtering,
 draft retention, one shared mutation-busy state, result locking, explicit
 visibility targets, refresh behavior, and feedback remain as described above.
 

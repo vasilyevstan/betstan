@@ -15,7 +15,7 @@ const prepareShell = async (page, overrides = {}) => {
   return state;
 };
 
-test('approved blue header and plain Backoffice tasks retain representative geometry and contrast', async ({ page }, testInfo) => {
+test('approved blue header and compact Backoffice controls retain representative geometry and contrast', async ({ page }, testInfo) => {
   const state = await prepareShell(page);
   state.backofficeEvents = createBackofficeEvents();
   await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -98,9 +98,9 @@ test('approved blue header and plain Backoffice tasks retain representative geom
             color: parse(getComputedStyle(element).borderInlineStartColor),
             width: getComputedStyle(element).borderInlineStartWidth,
           })),
-          taskBorders: [...document.querySelectorAll('.backoffice-task')].map((task) => getComputedStyle(task).borderInlineStartWidth),
-          taskColumnDeltas: [...document.querySelectorAll('.backoffice-event__controls')].map((group) => {
-            const [a, b] = [...group.querySelectorAll('.backoffice-task')].map(box);
+          controlBorders: [...document.querySelectorAll('.backoffice-event__controls')].map((group) => getComputedStyle(group).borderInlineStartWidth),
+          scoreColumnDeltas: [...document.querySelectorAll('.backoffice-scores')].map((group) => {
+            const [a, b] = [...group.querySelectorAll('input')].map(box);
             return Math.abs(a.width - b.width);
           }),
         };
@@ -125,8 +125,8 @@ test('approved blue header and plain Backoffice tasks retain representative geom
         expect(border.color).toEqual(normal.accent);
         expect(border.width).toBe('3px');
       }
-      expect(normal.taskBorders.every((width) => width === '1px')).toBe(true);
-      expect(Math.max(...normal.taskColumnDeltas)).toBeLessThanOrEqual(0.75);
+      expect(normal.controlBorders.every((width) => width === '0px')).toBe(true);
+      expect(Math.max(...normal.scoreColumnDeltas)).toBeLessThanOrEqual(0.75);
       if (!state.currentUser) {
         await header.getByRole('link', { name: 'Log in', exact: true }).hover();
         expect((await inspect()).textContrast).toBeGreaterThanOrEqual(4.5);
@@ -832,7 +832,7 @@ test('reduced motion removes effective motion while focus and state cues remain'
   }));
 
   await page.goto('/backoffice?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByText('Target: OFFLINE', { exact: false }).first()).toBeVisible();
+  await expect(page.getByText('Visibility: Online', { exact: false }).first()).toBeVisible();
   await expectMotionlessFocus(page.getByRole('button', {
     name: 'Take offline for Northport - Lakewood',
   }));
