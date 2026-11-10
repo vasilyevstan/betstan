@@ -117,13 +117,11 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     const cardBox = cardBounds[index];
     const identity = bounds(card.querySelector('.backoffice-event__identity'));
     const controls = bounds(card.querySelector('.backoffice-event__controls'));
-    const resultTask = bounds(card.querySelector('.backoffice-task--result'));
-    const visibilityTask = bounds(card.querySelector('.backoffice-task--visibility'));
     const scoreRow = bounds(card.querySelector('.backoffice-scores'));
     const homeScoreInput = bounds(card.querySelector('input[id^="backoffice-home-result-"]'));
     const awayScoreInput = bounds(card.querySelector('input[id^="backoffice-away-result-"]'));
-    const saveResultButton = bounds(card.querySelector('.backoffice-task--result button[type="submit"]'));
-    const visibilityButton = bounds(card.querySelector('.backoffice-task--visibility button[type="button"]'));
+    const saveResultButton = bounds(card.querySelector('button[type="submit"]'));
+    const visibilityButton = bounds(card.querySelector('button[type="button"]'));
     const inputs = [homeScoreInput, awayScoreInput];
     const name = card.querySelector('.backoffice-event__name');
     const range = document.createRange();
@@ -133,10 +131,6 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
       height: cardBox.height,
       width: cardBox.width,
       controlsBounds: controls,
-      controlsColumnCount: getComputedStyle(card.querySelector('.backoffice-event__controls'))
-        .gridTemplateColumns.split(' ').filter(Boolean).length,
-      resultTaskBounds: resultTask,
-      visibilityTaskBounds: visibilityTask,
       scoreRowBounds: scoreRow,
       homeScoreInputBounds: homeScoreInput,
       awayScoreInputBounds: awayScoreInput,
@@ -148,9 +142,10 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
       scoreLeft: homeScoreInput.left - cardBox.left,
       regionCollision: overlaps(identity, controls),
       identityBeforeTasks: identity.bottom <= controls.top,
-      taskCollision: overlaps(resultTask, visibilityTask),
       actionCollision: overlaps(saveResultButton, visibilityButton),
-      scoresBeforeSave: Math.max(...inputs.map((input) => input.bottom)) <= saveResultButton.top,
+      scoreActionCollision: inputs.some((input) => (
+        overlaps(input, saveResultButton) || overlaps(input, visibilityButton)
+      )),
       fullNameFits: Array.from(range.getClientRects()).every((rect) => (
         rect.left >= nameBox.left - 1 && rect.right <= nameBox.right + 1
         && rect.top >= nameBox.top - 1 && rect.bottom <= nameBox.bottom + 1
@@ -215,7 +210,7 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     boardWidth: bounds(board).width,
     documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     overflowingComponents: Array.from(board.querySelectorAll(
-      '.backoffice-event, .backoffice-event__body, .backoffice-event__identity, .backoffice-event__controls, .backoffice-task, .backoffice-field, .backoffice-discovery, .backoffice-feedback, .backoffice-state'
+      '.backoffice-event, .backoffice-event__body, .backoffice-event__identity, .backoffice-event__controls, .backoffice-event__actions, .backoffice-field, .backoffice-discovery, .backoffice-feedback, .backoffice-state'
     )).filter((element) => element.scrollWidth > element.clientWidth + 1).map((element) => element.className),
     minTargetWidth: Math.min(...targets.map((target) => target.width)),
     minTargetHeight: Math.min(...targets.map((target) => target.height)),
@@ -231,67 +226,38 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
   };
 });
 
-const expectBackofficeControlGridAlignment = (card) => {
+const expectBackofficeControlAlignment = (card) => {
   const alignedWithinOnePixel = (first, second, relationship) => {
     expect(Math.abs(first - second), relationship).toBeLessThanOrEqual(1);
   };
 
   alignedWithinOnePixel(
     card.scoreRowBounds.left,
-    card.saveResultButtonBounds.left,
-    'score row and Save button left edges'
-  );
-  alignedWithinOnePixel(
-    card.scoreRowBounds.right,
-    card.saveResultButtonBounds.right,
-    'score row and Save button right edges'
-  );
-  alignedWithinOnePixel(
-    card.saveResultButtonBounds.width,
-    card.visibilityButtonBounds.width,
-    'Save and Visibility button widths'
+    card.controlsBounds.left,
+    'score row and controls left edges'
   );
 
-  if (card.controlsColumnCount === 2) {
+  if (card.saveResultButtonBounds.left >= card.scoreRowBounds.right) {
     alignedWithinOnePixel(
-      card.resultTaskBounds.left,
-      card.controlsBounds.left,
-      'Result task and controls left edges'
+      card.homeScoreInputBounds.bottom,
+      card.saveResultButtonBounds.bottom,
+      'score inputs and Save button bottom edges'
     );
-    alignedWithinOnePixel(
-      card.visibilityTaskBounds.right,
-      card.controlsBounds.right,
-      'Visibility task and controls right edges'
-    );
-    alignedWithinOnePixel(
-      card.resultTaskBounds.width,
-      card.visibilityTaskBounds.width,
-      'Result and Visibility task widths'
-    );
-    alignedWithinOnePixel(
-      card.resultTaskBounds.top,
-      card.visibilityTaskBounds.top,
-      'Result and Visibility task top edges'
-    );
-    alignedWithinOnePixel(
-      card.resultTaskBounds.bottom,
-      card.visibilityTaskBounds.bottom,
-      'Result and Visibility task bottom edges'
-    );
+    expect(card.saveResultButtonBounds.left - card.scoreRowBounds.right).toBeLessThanOrEqual(24);
+  } else {
+    expect(card.scoreRowBounds.bottom).toBeLessThanOrEqual(card.saveResultButtonBounds.top);
+    alignedWithinOnePixel(card.scoreRowBounds.left, card.saveResultButtonBounds.left, 'wrapped actions left edge');
+  }
+  if (card.visibilityButtonBounds.left >= card.saveResultButtonBounds.right) {
     alignedWithinOnePixel(
       card.saveResultButtonBounds.bottom,
       card.visibilityButtonBounds.bottom,
       'Save and Visibility button bottom edges'
     );
+    expect(card.visibilityButtonBounds.left - card.saveResultButtonBounds.right).toBeLessThanOrEqual(16);
   } else {
-    for (const [task, label] of [
-      [card.resultTaskBounds, 'Result task'],
-      [card.visibilityTaskBounds, 'Visibility task'],
-    ]) {
-      alignedWithinOnePixel(task.left, card.controlsBounds.left, `${label} and controls left edges`);
-      alignedWithinOnePixel(task.right, card.controlsBounds.right, `${label} and controls right edges`);
-    }
-    expect(card.resultTaskBounds.bottom).toBeLessThanOrEqual(card.visibilityTaskBounds.top);
+    expect(card.saveResultButtonBounds.bottom).toBeLessThanOrEqual(card.visibilityButtonBounds.top);
+    alignedWithinOnePixel(card.saveResultButtonBounds.left, card.visibilityButtonBounds.left, 'stacked actions left edges');
   }
 };
 
@@ -1215,10 +1181,15 @@ test('Backoffice refresh does not steal focus moved during a visibility request'
   await expect(main.getByText('Showing 5 of 5 events')).toBeVisible();
   await main.getByLabel('Visibility', { exact: true }).selectOption('ONLINE');
   const first = main.getByRole('article', { name: offline.name, exact: true });
+  await first.getByRole('spinbutton', { name: /Home score/ }).fill('100');
+  await expect(first.getByRole('spinbutton', { name: /Away score/ })).toHaveValue('');
   const changeVisibility = first.getByRole('button', { name: `Take offline for ${offline.name}` });
+  const idleBounds = await changeVisibility.boundingBox();
   await changeVisibility.focus();
   await page.keyboard.press('Enter');
   await expect(changeVisibility).toHaveText('Changing...');
+  expect((await changeVisibility.boundingBox()).width).toBe(idleBounds.width);
+  expect(state.requestCount('POST /api/backoffice/result')).toBe(0);
   await main.getByRole('searchbox').focus();
   releaseVisibility();
   await expect(first).toHaveCount(0);
@@ -1238,7 +1209,7 @@ test('Backoffice keeps a complete conflict error visible when filters hide its e
   const first = main.getByRole('article', { name: 'Northport - Lakewood', exact: true });
   await first.getByRole('spinbutton', { name: /Home score/ }).fill('1');
   await first.getByRole('spinbutton', { name: /Away score/ }).fill('0');
-  await first.getByRole('button', { name: /Save final result/ }).click();
+  await first.getByRole('spinbutton', { name: /Away score/ }).press('Enter');
   await expect(main.getByRole('alert')).toHaveText(message);
   await main.getByRole('searchbox').fill('not a matching team');
   await expect(first).toHaveCount(0);
@@ -1275,6 +1246,7 @@ for (const scenario of [
   { width: 1440, height: 1000, ui: 'v1', theme: 'dark' },
   { width: 768, height: 1000, ui: 'v2', theme: 'light' },
   { width: 390, height: 844, ui: 'v1', theme: 'dark' },
+  { width: 320, height: 844, ui: 'v2', theme: 'light' },
   { width: 1440, height: 1000, ui: 'v3', theme: 'light' },
 ]) {
   test(`Backoffice compact cards align and wrap (${scenario.width}px ${scenario.ui} ${scenario.theme})`, async ({ page }, testInfo) => {
@@ -1294,6 +1266,14 @@ for (const scenario of [
     const first = main.getByRole('article', { name: 'Northport - Lakewood', exact: true });
     await expect(first.locator('time')).toHaveAttribute('datetime', '2030-01-01T12:00:00.000Z');
     await expect(first.locator('time')).toContainText('January 1st, 2030');
+    await first.getByRole('spinbutton').first().fill('99');
+    await page.keyboard.press('Tab');
+    await expect(first.getByRole('spinbutton').nth(1)).toBeFocused();
+    await first.getByRole('spinbutton').nth(1).fill('99');
+    await page.keyboard.press('Tab');
+    await expect(first.getByRole('button', { name: /Save final result/ })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(first.getByRole('button', { name: /Take offline/ })).toBeFocused();
     await main.getByLabel('Home team', { exact: true }).focus();
     await page.keyboard.press('Tab');
     await expect(main.getByLabel('Away team', { exact: true })).toBeFocused();
@@ -1316,14 +1296,18 @@ for (const scenario of [
       expect(Math.abs(card.width - metrics.boardWidth)).toBeLessThanOrEqual(1);
       expect(card.scoreWidthDifference).toBeLessThanOrEqual(1);
       expect(card.scoreTopDifference).toBeLessThanOrEqual(1);
-      expectBackofficeControlGridAlignment(card);
+      expectBackofficeControlAlignment(card);
       expect(card.regionCollision).toBe(false);
       expect(card.identityBeforeTasks).toBe(true);
-      expect(card.taskCollision).toBe(false);
       expect(card.actionCollision).toBe(false);
-      expect(card.scoresBeforeSave).toBe(true);
+      expect(card.scoreActionCollision).toBe(false);
       expect(card.fullNameFits).toBe(true);
+      expect(card.scoreWidth).toBeLessThanOrEqual(88);
+      if (metrics.boardWidth >= 540) {
+        expect(card.controlsBounds.height).toBeLessThanOrEqual(72);
+      }
     }
+    expect(metrics.cards[0].height).toBeLessThanOrEqual(metrics.boardWidth >= 540 ? 210 : 340);
     expect(Math.max(...metrics.cards.map((card) => card.scoreLeft)) - Math.min(...metrics.cards.map((card) => card.scoreLeft)))
       .toBeLessThanOrEqual(1);
     const metricsPath = testInfo.outputPath('backoffice-layout-metrics.json');
@@ -1345,11 +1329,11 @@ for (const scenario of [
         card.fullNameFits
         && card.identityBeforeTasks
         && !card.regionCollision
-        && !card.taskCollision
         && !card.actionCollision
+        && !card.scoreActionCollision
       ))).toBe(true);
       for (const card of zoomed.cards) {
-        expectBackofficeControlGridAlignment(card);
+        expectBackofficeControlAlignment(card);
       }
       const zoomMetricsPath = testInfo.outputPath('backoffice-200-percent-text-metrics.json');
       await writeFile(zoomMetricsPath, JSON.stringify(zoomed, null, 2));
