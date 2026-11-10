@@ -113,13 +113,25 @@ shows a dash until a bet is won or lost. Open, voided and cashed-back tickets
 do not affect it. Full cash back is neither a win nor a loss; after partial
 cash back, the ticket's current result determines its bucket.
 
+The identity card also shows **Scoreboard rank**, such as "#4 of 38
+players": the player's all-time position in the public Statistics order
+(most bets, then highest wager). It ignores the selected period and appears
+once the player has submitted a bet, even beyond the scoreboard's top 100.
+
 **How you bet** shows proportional bars for Won/Lost, Pre-match/Live and
-Singles/Accumulators, followed by the player's **Favourite market**: the
-market picked most often, counting each accumulator selection. Pre-match and
-live, and singles and accumulators, each add up to Bets. **Ticket status**
-lists open, voided, cash back, awaiting moderation, and declined counts.
-There is no favourite sport because every BetStan event uses the same
-football-style simulation.
+Singles/Accumulators, followed by three highlights. **Favourite market** is
+the market picked most often, counting each accumulator selection.
+**Favourite team** is the team backed most often, by naming it in a match
+result market or picking its side in a live market (card markets excluded);
+it needs at least two such selections. **Best winning pick** shows the highest odds among the
+player's winning selections, including accumulator legs, with the pick,
+market and match. A highlight without data says **None yet** and how to
+earn one. Pre-match and live, and singles and accumulators, each add up to
+Bets. **Ticket status** lists open, voided, cash back, awaiting moderation,
+and declined counts. **Recent results** lists up to five won or lost bets,
+most recently placed first, with the match and pick for a single or the
+selection count for an accumulator. There is no favourite sport because
+every BetStan event uses the same football-style simulation.
 
 Total staked sums original wagers on confirmed, won, lost, or cash-back
 tickets. Pending, declined, and fully voided bets contribute nothing.
@@ -137,8 +149,8 @@ are applied or refreshed. **Custom dates** opens **From**, **To**, and
 Calendar boundaries respect daylight-saving changes. The selected bets'
 current outcomes are shown, not a historical snapshot or results settled
 during that period. Previous figures stay visible, dimmed, while a new period
-loads. A period narrows only the profile figures; the public scoreboard stays
-all-time. A later full void removes that bet's stake from Total staked.
+loads. A period narrows the profile figures, highlights, and recent results;
+the public scoreboard and Scoreboard rank stay all-time. A later full void removes that bet's stake from Total staked.
 **View my bets** opens the full ticket list.
 
 ## Cash back in My Bets - deployment-gated

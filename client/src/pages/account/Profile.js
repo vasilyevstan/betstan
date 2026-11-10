@@ -19,18 +19,29 @@ const styleKeys = ['preMatchBets', 'liveBets', 'singleBets', 'accumulatorBets'];
 const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
 const submittedBets = (data) => data.acceptedBets + data.pendingSubmissions + data.declinedSubmissions;
 const hasStyle = (data) => styleKeys.some((key) => key in data) || 'favouriteMarket' in data;
+const isNamedCount = (value) => typeof value?.name === 'string' && value.name.trim().length > 0
+  && Number.isSafeInteger(value.selections) && value.selections > 0;
 const validStyle = (data) => styleKeys.every((key) => isCount(data[key]))
   && data.preMatchBets + data.liveBets === submittedBets(data)
   && data.singleBets + data.accumulatorBets === submittedBets(data)
-  && (data.favouriteMarket === null || (
-    typeof data.favouriteMarket?.name === 'string' && data.favouriteMarket.name.trim().length > 0
-    && Number.isSafeInteger(data.favouriteMarket.selections) && data.favouriteMarket.selections > 0));
+  && (data.favouriteMarket === null || isNamedCount(data.favouriteMarket));
+const optional = (data, key, valid) => !(key in data) || data[key] === null || valid(data[key]);
+const validResult = (entry) => ['WIN', 'LOSS'].includes(entry?.result) && isCount(entry.selections)
+  && (entry.placedAt === null || (typeof entry.placedAt === 'string' && Number.isFinite(Date.parse(entry.placedAt))))
+  && [entry.eventName, entry.pick].every((value) => value === null || typeof value === 'string');
+const validInsights = (data) => optional(data, 'favouriteTeam', isNamedCount)
+  && optional(data, 'bestWinningPick', (pick) => Number.isFinite(pick.odds) && pick.odds > 1
+    && ['eventName', 'pick', 'market'].every((key) => typeof pick[key] === 'string'))
+  && (!('recentResults' in data) || (Array.isArray(data.recentResults) && data.recentResults.every(validResult)))
+  && optional(data, 'scoreboardRank', (rank) => Number.isSafeInteger(rank.position) && rank.position > 0
+    && Number.isSafeInteger(rank.players) && rank.players >= rank.position);
 const validStats = (data, range) => data
   && countKeys.every((key) => isCount(data[key]))
   && data.acceptedBets === data.wins + data.losses + data.openBets + data.voidedBets + data.cashBackBets
   && typeof data.totalStaked === 'string' && /^\d+(?:\.\d+)?(?:E[+-]?\d+)?$/.test(data.totalStaked)
   && data.range?.from === range.from && data.range?.toExclusive === range.toExclusive
-  && (!hasStyle(data) || validStyle(data));
+  && (!hasStyle(data) || validStyle(data))
+  && validInsights(data);
 const nameError = (error) => {
   const entry = error?.response?.data?.errors?.[0];
   return [entry?.msg, entry?.message].find((message) => typeof message === 'string' && message.trim())
@@ -86,10 +97,32 @@ const formatStake = (value) => {
     {match[2] ? `${decimalSeparator}${match[2]}` : null}
   </>;
 };
+const shortDay = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+const shortDate = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+const placedDay = (date) => (date.getFullYear() === new Date().getFullYear() ? shortDay : shortDate).format(date);
+const plural = (count, word) => `${count.toLocaleString()} ${count === 1 ? word : `${word}s`}`;
 const marketLabel = (name) => {
   if (!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(name)) return name;
   const label = formatLiveMarketType(name);
   return label.charAt(0).toUpperCase() + label.slice(1);
+};
+
+const RecentResult = ({ entry }) => {
+  const won = entry.result === 'WIN';
+  const accumulator = entry.selections > 1;
+  const pick = accumulator ? null : entry.pick;
+  return <li>
+    <span className={`profile-result profile-result--${won ? 'won' : 'lost'}`}>{won ? 'Won' : 'Lost'}</span>
+    <span className="profile-recent__text">
+      <span className="profile-recent__title">
+        {accumulator ? `${entry.selections}-selection accumulator` : entry.eventName ?? 'Single bet'}
+      </span>
+      {pick || entry.placedAt ? <span className="profile-recent__meta">
+        {pick}{pick && entry.placedAt ? ' · ' : null}
+        {entry.placedAt ? <time dateTime={entry.placedAt}>{placedDay(new Date(entry.placedAt))}</time> : null}
+      </span> : null}
+    </span>
+  </li>;
 };
 
 const Split = ({ left, right }) => <li className="profile-split">
@@ -253,6 +286,25 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
   const selectedPeriod = customOpen ? 'CUSTOM' : period.preset;
   const periodLabel = period.label ?? PERIODS.find(({ value }) => value === period.preset).label;
   const initial = Array.from(name.saved)[0]?.toUpperCase() ?? '';
+  const rank = totals?.scoreboardRank ?? null;
+  const recent = totals && Array.isArray(totals.recentResults) ? totals.recentResults : null;
+  const inPeriod = period.preset === 'ALL' ? 'yet' : 'in this period';
+  const highlights = [];
+  if (style?.favouriteMarket) highlights.push({
+    label: 'Favourite market', value: marketLabel(style.favouriteMarket.name),
+    detail: plural(style.favouriteMarket.selections, 'selection'),
+  });
+  if (totals && 'favouriteTeam' in totals) highlights.push(totals.favouriteTeam ? {
+    label: 'Favourite team', value: totals.favouriteTeam.name,
+    detail: plural(totals.favouriteTeam.selections, 'selection'),
+  } : { label: 'Favourite team', detail: 'Back the same team twice to see one' });
+  if (totals && 'bestWinningPick' in totals) {
+    const best = totals.bestWinningPick;
+    highlights.push(best ? {
+      label: 'Best winning pick', value: best.odds.toFixed(2),
+      detail: [best.pick, marketLabel(best.market), best.eventName].filter((part) => part.trim()).join(' · '),
+    } : { label: 'Best winning pick', detail: `No winning selections ${inPeriod}` });
+  }
   return <div className="profile-page">
     <header className="profile-heading">
       <h1>My profile</h1>
@@ -262,6 +314,9 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
       <div className="profile-identity__text">
         <h2 className="profile-identity__name" id="profile-name-heading">{name.saved}</h2>
         <p className="profile-identity__login">Login <span>{user.email}</span></p>
+        {rank ? <p className="profile-identity__rank">
+          Scoreboard rank <strong>#{rank.position.toLocaleString()}</strong> of {plural(rank.players, 'player')}
+        </p> : null}
       </div>
       {editing ? null : <button ref={editButton} className="btn btn-shell profile-identity__action"
         type="button" onClick={() => setEditing(true)}>Edit name</button>}
@@ -376,25 +431,35 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
                   right={{ label: 'Accumulators', value: style.accumulatorBets, tone: 'accumulator' }} />
               </> : null}
             </ul>
-            {style?.favouriteMarket ? <dl className="profile-favourite">
-              <dt>Favourite market</dt>
-              <dd>
-                <strong>{marketLabel(style.favouriteMarket.name)}</strong>
-                <span>{style.favouriteMarket.selections.toLocaleString()} {style.favouriteMarket.selections === 1 ? 'selection' : 'selections'}</span>
-              </dd>
+            {highlights.length ? <dl className="profile-highlights">
+              {highlights.map(({ label, value, detail }) => <div key={label}>
+                <dt>{label}</dt>
+                <dd>
+                  {value ? <strong>{value}</strong> : <strong className="profile-highlights__none">None yet</strong>}
+                  <span>{detail}</span>
+                </dd>
+              </div>)}
             </dl> : null}
           </section>
-          <section aria-labelledby="profile-status-heading">
-            <h3 className="profile-label" id="profile-status-heading">Ticket status</h3>
-            <dl className="profile-breakdown">
-              {[
-                ['Open', totals.openBets], ['Voided', totals.voidedBets], ['Cash back', totals.cashBackBets],
-                ['Awaiting moderation', totals.pendingSubmissions], ['Declined', totals.declinedSubmissions],
-              ].map(([label, value]) => <div key={label}>
-                <dt>{label}</dt><dd>{value.toLocaleString()}</dd>
-              </div>)}
-            </dl>
-          </section>
+          <div className="profile-sheet__side">
+            <section aria-labelledby="profile-status-heading">
+              <h3 className="profile-label" id="profile-status-heading">Ticket status</h3>
+              <dl className="profile-breakdown">
+                {[
+                  ['Open', totals.openBets], ['Voided', totals.voidedBets], ['Cash back', totals.cashBackBets],
+                  ['Awaiting moderation', totals.pendingSubmissions], ['Declined', totals.declinedSubmissions],
+                ].map(([label, value]) => <div key={label}>
+                  <dt>{label}</dt><dd>{value.toLocaleString()}</dd>
+                </div>)}
+              </dl>
+            </section>
+            {recent ? <section aria-labelledby="profile-recent-heading">
+              <h3 className="profile-label" id="profile-recent-heading">Recent results</h3>
+              {recent.length ? <ol className="profile-recent">
+                {recent.map((entry, index) => <RecentResult key={index} entry={entry} />)}
+              </ol> : <p className="profile-hint">No won or lost bets {inPeriod}.</p>}
+            </section> : null}
+          </div>
         </div>
       </div> : null}
       <div className="profile-footer">
@@ -407,6 +472,11 @@ const PlayerProfile = ({ user, onAuthRefresh, onProfileSaved, search }) => {
             <li>Total staked adds the original stakes of accepted bets, except fully voided ones.
               Winnings and cash-back returns are not deducted. Stanbucks are nominal, not a wallet balance.</li>
             <li>Favourite market is the market you picked most often, counting each selection.</li>
+            <li>Favourite team counts each selection that backs a named team, such as a match winner or a live
+              home or away pick; picking a team to be booked does not count. Teams change from match to match, so one appears once you back the same team twice.</li>
+            <li>Best winning pick is the highest odds among your selections that won, including accumulator legs.</li>
+            <li>Recent results lists up to five won or lost bets, most recently placed first.</li>
+            <li>Scoreboard rank is your all-time place on the public scoreboard: most bets first, then highest wager.</li>
             <li>Periods use the date each bet was placed. Outcomes are shown as they stand now.</li>
           </ul>
         </details>

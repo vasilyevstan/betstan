@@ -404,6 +404,7 @@ const createShellMockState = ({ loginError = null, signupError = null } = {}) =>
       acceptedBets: 0, wins: 0, losses: 0, openBets: 0, voidedBets: 0, cashBackBets: 0,
       pendingSubmissions: 0, declinedSubmissions: 0, totalStaked: '0',
       preMatchBets: 0, liveBets: 0, singleBets: 0, accumulatorBets: 0, favouriteMarket: null,
+      favouriteTeam: null, bestWinningPick: null, recentResults: [], scoreboardRank: null,
     },
     telemetrySummary: createTelemetrySummary(),
     telemetryHourlyResponses: {},
