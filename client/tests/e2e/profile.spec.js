@@ -18,6 +18,14 @@ const prepareProfile = async (page) => {
     pendingSubmissions: 2, declinedSubmissions: 1, totalStaked: '1234567890123456789.123',
     preMatchBets: 12, liveBets: 3, singleBets: 11, accumulatorBets: 4,
     favouriteMarket: { name: 'NEXT_CORNER', selections: 9 },
+    favouriteTeam: { name: 'North Alessandroborough', selections: 5 },
+    bestWinningPick: { odds: 7.25, eventName: 'North Alessandroborough - Port Lucinda', pick: 'North Alessandroborough', market: '1X2' },
+    recentResults: [
+      { result: 'WIN', placedAt: '2026-03-29T18:40:00.000Z', selections: 1, eventName: 'North Alessandroborough - Port Lucinda', pick: 'North Alessandroborough' },
+      { result: 'LOSS', placedAt: '2026-03-28T09:15:00.000Z', selections: 3, eventName: null, pick: null },
+      { result: 'WIN', placedAt: '2026-03-27T20:05:00.000Z', selections: 1, eventName: 'Lake Kory - East Joannie', pick: 'Draw' },
+    ],
+    scoreboardRank: { position: 4, players: 38 },
   };
   await installAppApiMocks(page, state);
   return state;
@@ -41,7 +49,11 @@ test('private profile fits the existing desktop, tablet and mobile shell', async
     await expect(figure(main, 'Total staked')).toHaveText('1,234,567,890,123,456,789.123');
     await expect(figure(main, 'Bets')).toHaveText(String(state.stats[0].betCount));
     await expect(figure(main, 'Win rate')).toHaveText('78%');
-    await expect(main.locator('.profile-favourite')).toContainText('Next Corner Kick');
+    await expect(main.locator('.profile-highlights')).toContainText('Next Corner Kick');
+    await expect(main.locator('.profile-highlights')).toContainText('North Alessandroborough');
+    await expect(main.locator('.profile-highlights')).toContainText('7.25');
+    await expect(main.locator('.profile-identity__rank')).toHaveText('Scoreboard rank #4 of 38 players');
+    await expect(main.getByRole('region', { name: 'Recent results' }).getByRole('listitem')).toHaveCount(3);
     await expect(page.locator('.stat-row').filter({ hasText: 'Public alias' }).locator('.stat-row__count'))
       .toHaveText(String(state.stats[0].betCount));
     await expect(main.getByLabel('Display name', { exact: true })).toHaveCount(0);

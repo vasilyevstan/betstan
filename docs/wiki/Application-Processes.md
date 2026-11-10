@@ -122,6 +122,29 @@ there is none. An unknown bet kind makes the response unavailable rather than
 miscounted. Older clients ignore the new fields; the Client tolerates
 responses without them.
 
+Four further additive insight fields follow the same compatibility rule:
+
+- `favouriteTeam` is `{ name, selections }` or `null`. Event names have the
+  form `Home - Away`; a selection backs a team when its live side is `HOME`
+  or `AWAY`, or when a side-less pick names one of the two teams. Draws,
+  other outcomes, and next yellow/red card picks do not count. A team needs at least two selections in the
+  range; ties break alphabetically.
+- `bestWinningPick` is `{ odds, eventName, pick, market }` or `null`: the
+  highest finite odds above 1 among `WIN` selections, including accumulator
+  legs, on tickets that are not pending or declined.
+- `recentResults` lists up to five `WIN` or `LOSS` tickets in the range,
+  newest placement first, as `{ result, placedAt, selections, eventName,
+  pick }`. `placedAt` is a UTC ISO instant or `null` for an unparseable
+  legacy timestamp; `eventName` and `pick` are only set for singles.
+- `scoreboardRank` is `{ position, players }` or `null` when the player has
+  no bets. It uses exactly the grouping and ordering of
+  `GET /api/bet/stats/v2` (bet count, then wager total, then user ID)
+  across all players and all time, ignoring the requested range, and is not
+  limited to the scoreboard's top 100.
+
+None of these fields reveal another player's identity, ticket, or slip
+identifiers.
+
 The Client's displayed **Bets** total adds `acceptedBets`,
 `pendingSubmissions`, and `declinedSubmissions`. This includes every status,
 matching the public scoreboard's counting rule for all-time activity while

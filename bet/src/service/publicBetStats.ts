@@ -90,7 +90,13 @@ const toPublicStatsRow = (
   };
 };
 
-export const buildPublicBetStatsPipeline = (): PipelineStage[] => [
+const scoreboardSort = {
+  betCount: -1 as const,
+  wagerTotal: -1 as const,
+  _id: 1 as const,
+};
+
+const buildScoreboardRowStages = (): PipelineStage[] => [
   {
     $match: {
       userId: {
@@ -107,17 +113,74 @@ export const buildPublicBetStatsPipeline = (): PipelineStage[] => [
       wagerTotal: { $sum: normalizeWagerExpression },
     },
   },
+];
+
+export const buildPublicBetStatsPipeline = (): PipelineStage[] => [
+  ...buildScoreboardRowStages(),
   {
-    $sort: {
-      betCount: -1 as const,
-      wagerTotal: -1 as const,
-      _id: 1 as const,
-    },
+    $sort: scoreboardSort,
   },
   {
     $limit: PUBLIC_SCOREBOARD_LIMIT,
   },
 ];
+
+export interface ScoreboardRank {
+  position: number;
+  players: number;
+}
+
+// Position in the public scoreboard order (bets, then wager, then id), without its display limit.
+export const getScoreboardRank = async (
+  userId: string
+): Promise<ScoreboardRank | null> => {
+  const ownValue = (field: string) => ({
+    $max: { $cond: [{ $eq: ["$_id", { $literal: userId }] }, field, null] },
+  });
+  const [row] = await Bet.aggregate<ScoreboardRank>([
+    ...buildScoreboardRowStages(),
+    {
+      $setWindowFields: {
+        output: {
+          ownBetCount: ownValue("$betCount"),
+          ownWagerTotal: ownValue("$wagerTotal"),
+          players: { $count: {} },
+        },
+      },
+    },
+    {
+      $match: {
+        $expr: {
+          $and: [
+            { $ne: ["$ownBetCount", null] },
+            {
+              $or: [
+                { $gt: ["$betCount", "$ownBetCount"] },
+                {
+                  $and: [
+                    { $eq: ["$betCount", "$ownBetCount"] },
+                    { $gt: ["$wagerTotal", "$ownWagerTotal"] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $eq: ["$betCount", "$ownBetCount"] },
+                    { $eq: ["$wagerTotal", "$ownWagerTotal"] },
+                    { $lte: ["$_id", { $literal: userId }] },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    { $group: { _id: null, position: { $sum: 1 }, players: { $first: "$players" } } },
+    { $project: { _id: 0, position: 1, players: 1 } },
+  ]);
+
+  return row ? { position: row.position, players: row.players } : null;
+};
 
 export const buildLegacyPublicBetStatsPipeline = (): PipelineStage[] => [
   {

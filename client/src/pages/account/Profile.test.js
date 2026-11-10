@@ -108,10 +108,53 @@ it('labels enum-like live market names and still renders legacy responses withou
   expect(screen.queryByText('Favourite market')).not.toBeInTheDocument();
 });
 
+it('shows the scoreboard rank, favourite team, best winning pick and recent results', async () => {
+  axios.get.mockResolvedValueOnce({ data: stats({
+    favouriteTeam: { name: 'Riverside', selections: 3 },
+    bestWinningPick: { odds: 6.5, eventName: 'Riverside - Port Ada', pick: 'Home', market: '1X2' },
+    recentResults: [
+      { result: 'WIN', placedAt: '2026-03-29T12:00:00.000Z', selections: 1, eventName: 'Riverside - Lake Town', pick: 'Riverside' },
+      { result: 'LOSS', placedAt: null, selections: 3, eventName: null, pick: null },
+    ],
+    scoreboardRank: { position: 3, players: 12 },
+  }) });
+  render(profile());
+  await showTotals();
+  expect(screen.getByText(/Scoreboard rank/, { selector: 'p' })).toHaveTextContent('Scoreboard rank #3 of 12 players');
+  expect(screen.getByText('Favourite team').nextElementSibling).toHaveTextContent('Riverside3 selections');
+  expect(screen.getByText('Best winning pick').nextElementSibling)
+    .toHaveTextContent('6.50Home · 1X2 · Riverside - Port Ada');
+  const items = within(screen.getByRole('region', { name: 'Recent results' }))
+    .getAllByRole('listitem').map((item) => item.textContent);
+  expect(items[0]).toMatch(/^WonRiverside - Lake TownRiverside · /);
+  expect(items[1]).toBe('Lost3-selection accumulator');
+  expect(document.querySelector('.profile-recent time')).toHaveAttribute('dateTime', '2026-03-29T12:00:00.000Z');
+});
+
+it('explains missing insights instead of hiding them', async () => {
+  axios.get.mockResolvedValueOnce({ data: stats({
+    favouriteTeam: null, bestWinningPick: null, recentResults: [], scoreboardRank: null,
+  }) });
+  render(profile());
+  await showTotals();
+  expect(screen.getByText('Favourite team').nextElementSibling)
+    .toHaveTextContent('None yetBack the same team twice to see one');
+  expect(screen.getByText('Best winning pick').nextElementSibling).toHaveTextContent('None yetNo winning selections yet');
+  expect(screen.getByText('No won or lost bets yet.')).toBeVisible();
+  expect(screen.queryByText(/Scoreboard rank/, { selector: 'p' })).not.toBeInTheDocument();
+});
+
 it.each([
   { preMatchBets: 1 }, { accumulatorBets: -1 }, { favouriteMarket: { name: ' ', selections: 1 } },
   { favouriteMarket: { name: '1X2', selections: 0 } },
-])('treats inconsistent style figures as unavailable: %p', async (overrides) => {
+  { favouriteTeam: { name: '', selections: 2 } },
+  { bestWinningPick: { odds: 1, eventName: 'A - B', pick: 'A', market: '1X2' } },
+  { bestWinningPick: { odds: 2, eventName: null, pick: 'A', market: '1X2' } },
+  { recentResults: {} },
+  { recentResults: [{ result: 'VOID', placedAt: null, selections: 1, eventName: null, pick: null }] },
+  { recentResults: [{ result: 'WIN', placedAt: 12, selections: 1, eventName: null, pick: null }] },
+  { scoreboardRank: { position: 5, players: 4 } },
+])('treats inconsistent figures as unavailable: %p', async (overrides) => {
   axios.get.mockResolvedValueOnce({ data: stats(overrides) });
   render(profile());
   expect(await screen.findByRole('alert')).toHaveTextContent('statistics are unavailable');
