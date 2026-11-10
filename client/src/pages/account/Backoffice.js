@@ -264,7 +264,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
   const renderedEvents = visibleEvents.map((event) => {
     const isResulted = event.status === 'RESULTED';
     const eventName = event.name || `${event.home || 'Home team unavailable'} - ${event.away || 'Away team unavailable'}`;
-    const resultLabel = isResulted ? 'Recorded'
+    const resultLabel = isResulted ? 'Recorded and locked'
       : event.status === 'NO_RESULT' ? 'Not recorded'
         : event.status ? 'Unknown' : 'Unavailable';
     const visibilityLabel = event.visibility === 'ONLINE' ? 'Online'
@@ -296,83 +296,62 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             </span>
           </div>
         </header>
-        <div className="backoffice-event__controls">
-          <section
-            className="backoffice-task backoffice-task--result"
-            aria-label={`Final result task for ${eventName}`}
-          >
-            <div className="backoffice-task__heading">
-              <h4>Final result</h4>
-              <span>{isResulted ? 'Recorded and locked' : 'Not yet recorded'}</span>
-            </div>
-            <form className="backoffice-result-form" aria-label={`Final result for ${eventName}`}
-              aria-describedby="backoffice-result-help" onSubmit={(submitEvent) => {
-              submitEvent.preventDefault();
-              setResults(event.eventId, eventName);
-            }}>
-              <div className="backoffice-scores">
-                <div className="backoffice-field">
-                  <label className="form-label" htmlFor={homeInputId}>Home score</label>
-                  <input
-                    id={homeInputId}
-                    aria-label={`Home score for ${event.home || 'home team unavailable'} in ${eventName}`}
-                    className="form-control backoffice-control"
-                    type="number"
-                    min="0"
-                    max={MAX_SCORE}
-                    step="1"
-                    required
-                    value={values.home}
-                    disabled={isResulted || Boolean(busyAction)}
-                    onChange={(changeEvent) => updateResultValue(
-                      event.eventId,
-                      'home',
-                      changeEvent.target.value
-                    )}
-                  />
-                </div>
-                <div className="backoffice-field">
-                  <label className="form-label" htmlFor={awayInputId}>Away score</label>
-                  <input
-                    id={awayInputId}
-                    aria-label={`Away score for ${event.away || 'away team unavailable'} in ${eventName}`}
-                    className="form-control backoffice-control"
-                    type="number"
-                    min="0"
-                    max={MAX_SCORE}
-                    step="1"
-                    required
-                    value={values.away}
-                    disabled={isResulted || Boolean(busyAction)}
-                    onChange={(changeEvent) => updateResultValue(
-                      event.eventId,
-                      'away',
-                      changeEvent.target.value
-                    )}
-                  />
-                </div>
-              </div>
-              <button
-                type="submit"
-                className="btn backoffice-control backoffice-action backoffice-action--primary"
+        <form className="backoffice-event__controls" aria-label={`Final result for ${eventName}`}
+          aria-describedby="backoffice-result-help" onSubmit={(submitEvent) => {
+          submitEvent.preventDefault();
+          setResults(event.eventId, eventName);
+        }}>
+          <div className="backoffice-scores">
+            <div className="backoffice-field">
+              <label className="form-label" htmlFor={homeInputId}>Home score</label>
+              <input
+                id={homeInputId}
+                aria-label={`Home score for ${event.home || 'home team unavailable'} in ${eventName}`}
+                className="form-control backoffice-control"
+                type="number"
+                min="0"
+                max={MAX_SCORE}
+                step="1"
+                required
+                value={values.home}
                 disabled={isResulted || Boolean(busyAction)}
-                aria-label={`Save final result for ${eventName}`}
-              >
-                {busyAction === resultActionId ? 'Saving...' : 'Save final result'}
-              </button>
-            </form>
-          </section>
-          <section
-            className="backoffice-task backoffice-task--visibility"
-            aria-label={`Visibility task for ${eventName}`}
-          >
-            <div className="backoffice-task__heading">
-              <h4>Visibility</h4>
-              <span>Current: {visibilityLabel}</span>
+                onChange={(changeEvent) => updateResultValue(
+                  event.eventId,
+                  'home',
+                  changeEvent.target.value
+                )}
+              />
             </div>
-            <p className="backoffice-task__target">
-              Target: <strong>{event.visibility === 'ONLINE' ? 'OFFLINE' : 'ONLINE'}</strong>
-            </p>
+            <div className="backoffice-field">
+              <label className="form-label" htmlFor={awayInputId}>Away score</label>
+              <input
+                id={awayInputId}
+                aria-label={`Away score for ${event.away || 'away team unavailable'} in ${eventName}`}
+                className="form-control backoffice-control"
+                type="number"
+                min="0"
+                max={MAX_SCORE}
+                step="1"
+                required
+                value={values.away}
+                disabled={isResulted || Boolean(busyAction)}
+                onChange={(changeEvent) => updateResultValue(
+                  event.eventId,
+                  'away',
+                  changeEvent.target.value
+                )}
+              />
+            </div>
+          </div>
+          <div className="backoffice-event__actions">
+            <button
+              type="submit"
+              className="btn backoffice-control backoffice-action backoffice-action--primary"
+              disabled={isResulted || Boolean(busyAction)}
+              aria-label={`Save final result for ${eventName}`}
+            >
+              {busyAction === resultActionId ? 'Saving...' : 'Save final result'}
+            </button>
             <button
               type="button"
               className="btn backoffice-control backoffice-action"
@@ -386,8 +365,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             >
               {busyAction === visibilityActionId ? 'Changing...' : visibilityActionLabel}
             </button>
-          </section>
-        </div>
+          </div>
+        </form>
       </div>
     </article>;
   });
