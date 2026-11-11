@@ -152,8 +152,8 @@ test("preserves every legacy runtime export and enum member", () => {
   }
 });
 
-test("preserves the actual published rc.1 exports and every enum wire member", () => {
-  assert.equal(require("predecessor-common/package.json").version, "1.1.0-rc.1");
+test("preserves the actual published predecessor exports and every enum wire member", () => {
+  assert.equal(require("predecessor-common/package.json").version, "1.1.0-rc.2");
   assert.equal(require("legacy-common/package.json").version, "1.0.54");
   for (const [name, value] of Object.entries(predecessorCommon)) {
     assert.ok(Object.hasOwn(common, name), `missing predecessor export ${name}`);
@@ -168,7 +168,7 @@ test("preserves the actual published rc.1 exports and every enum wire member", (
   }
 });
 
-test("cash-back adds only the approved terminal states and four dedicated topics", () => {
+test("cash-back terminal states and dedicated cash-back/market topics preserve predecessor wire values", () => {
   assert.deepEqual(common.BetStatus, {
     ...predecessorCommon.BetStatus,
     CASH_BACK: "CASH_BACK",
@@ -183,6 +183,9 @@ test("cash-back adds only the approved terminal states and four dedicated topics
     CASH_BACK_OUTCOME: "resulting:cash-back:outcome",
     CASH_BACK_SOURCE_REQUEST: "resulting:cash-back:source:request",
     CASH_BACK_SOURCE_REPLY: "cash-back:source:reply",
+    MARKET_CONFIGURED: "backoffice:market:configured",
+    MARKET_PUBLISHED: "event:market:published",
+    MARKET_SETTLED: "backoffice:market:settled",
   });
   assert.equal(new Set(Object.values(common.QueueNames)).size, Object.keys(common.QueueNames).length);
 });

@@ -1,6 +1,6 @@
 {
   "name": "@betstan/common",
-  "version": "1.1.0-rc.2",
+  "version": "1.1.0-rc.3",
   "description": "",
   "main": "./build/index.js",
   "types": "./build/index.d.ts",
@@ -34,7 +34,7 @@
     "del-cli": "^5.1.0",
     "legacy-amqplib-types": "npm:@types/amqplib@0.10.4",
     "legacy-common": "npm:@betstan/common@1.0.54",
-    "predecessor-common": "npm:@betstan/common@1.1.0-rc.1",
+    "predecessor-common": "npm:@betstan/common@1.1.0-rc.2",
     "typescript": "^5.3.3"
   },
   "repository": {
