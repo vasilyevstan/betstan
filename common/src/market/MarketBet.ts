@@ -17,6 +17,15 @@ import { MAX_MARKET_ODDS, MIN_MARKET_ODDS } from "./MarketPricing";
 export const CUSTOM_MARKET_PRODUCT_NAME = "Custom market";
 export const BUILDER_PRODUCT_NAME = "Bet Builder";
 export const MARKET_QUOTE_MAX_AGE_MS = 30_000;
+// Leave space for the publisher envelope inside Resulting's 256 KiB durable retry record.
+export const MAX_MARKET_PLACEMENT_BYTES = 255 * 1024;
+
+export function assertMarketPlacementBudget(data: { rows: Array<{ marketBet?: unknown }> }): void {
+  if (data.rows.some(row => row.marketBet !== undefined)
+    && Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_MARKET_PLACEMENT_BYTES) {
+    throw new MarketValidationError("Market slip exceeds the durable processing size limit; remove selections or shorten market rules and terms");
+  }
+}
 
 export interface MarketSelectionIdentity {
   origin: "TEMPLATE" | "STANDARD";

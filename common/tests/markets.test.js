@@ -10,6 +10,8 @@ const {
   marketWinningOutcomes,
   MarketValidationError,
   assertMarketSlipCompatibility,
+  assertMarketPlacementBudget,
+  MAX_MARKET_PLACEMENT_BYTES,
   parseManualMarketDecision,
   parseEventMarketConfiguration,
   parseMarketBet,
@@ -262,6 +264,27 @@ const manualBet = () => {
   });
   return bet;
 };
+
+test("market placement budgets bound complete UTF-8 data while preserving ordinary slips", () => {
+  const large = parseMarketBet({
+    ...frozenBet(), kind: "BUILDER",
+    selections: Array.from({ length: 10 }, (_, index) => ({
+      ...frozenSelection(`market-${index}`), terms: "\u754c".repeat(2000),
+      rule: { kind: "ALL", rules: Array.from({ length: 127 }, () => homeWin) },
+    })),
+  });
+  const first = { eventId: "event-a", marketBet: large };
+  const second = { eventId: "event-b", marketBet: { ...large, eventId: "event-b", quoteId: "quote-b" } };
+  assertMarketSlipCompatibility([first, second]);
+  assert.doesNotThrow(() => assertMarketPlacementBudget({ rows: [first] }));
+  assert.throws(() => assertMarketPlacementBudget({ rows: [first, second] }), /durable processing size limit/);
+  const boundary = { rows: [first], userName: "" };
+  boundary.userName = "x".repeat(MAX_MARKET_PLACEMENT_BYTES - Buffer.byteLength(JSON.stringify(boundary)));
+  assert.doesNotThrow(() => assertMarketPlacementBudget(boundary));
+  boundary.userName += "x";
+  assert.throws(() => assertMarketPlacementBudget(boundary), /durable processing size limit/);
+  assert.doesNotThrow(() => assertMarketPlacementBudget({ rows: [{ eventName: boundary.userName.repeat(3) }] }));
+});
 
 test("frozen selections retain typed manual identity even when a label resembles a legacy product", () => {
   const snapshot = parseMarketBet(manualBet());

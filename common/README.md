@@ -46,6 +46,14 @@ All backend consumers must use the same exact version without `^`, `~`,
 Shared messages cross independently deployed services, so a source-compatible
 TypeScript change is not sufficient by itself.
 
+Placements containing custom markets or Builders are limited to 255 KiB of
+serialized UTF-8 event data, including all rows and placement metadata.
+`assertMarketPlacementBudget` enforces that limit before submission, reserving
+1 KiB for the publisher envelope within Resulting's 256 KiB durable replay
+budget. Oversized new placements must remain editable drafts, never be
+accepted and subsequently lose their retry payload. Legacy-only slips retain
+their existing behavior.
+
 - Prefer additive optional fields. Old payloads and stored data must remain
   valid when the field is absent.
 - Preserve every existing export and the exact runtime value of existing enum
