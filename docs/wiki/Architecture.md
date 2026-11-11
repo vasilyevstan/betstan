@@ -211,6 +211,31 @@ guards must be installed before writers are enabled. Disabling new authoring or
 acceptance cannot remove settlement/history support for existing records, and an
 older reader-unaware image is not a valid rollback after new exposures exist.
 
+### Reusable market contracts - candidate only
+
+The `1.1.0-rc.3` Common source candidate defines immutable reusable template
+versions, bound event markets, generated-odds previews, frozen single/Builder
+selections and revision-bound manual decisions. This source-only foundation
+does not enable market authoring or betting. Backend manifests and lockfiles
+remain pinned to published `1.1.0-rc.2` until coordinated consumer delivery.
+
+Bounded declarative full-time score rules support modeled prices and a 2-10
+selection same-match intersection with one margin. Manual generation supports
+explicit equal-chance assumptions, probabilities and relative weights; it
+does not make manual or operator-overridden selections Builder eligible.
+The retained score model covers 0-99 goals per side without reconstructing
+legacy probabilities. Typed identity takes precedence over display labels.
+
+Frozen manifests preserve accepted rules, prices and manual-result authority.
+New exposures explicitly identify unsupported cash back. A shared 255 KiB
+placement-data budget reserves 1 KiB for the durable retry envelope.
+Compatible readers and settlement/history support must precede new writers;
+an unaware older image is not a valid rollback after new exposures exist.
+The [Common contract reference](https://github.com/vasilyevstan/betstan/blob/master/common/README.md)
+defines the validation, generation and compatibility contracts. Package
+publication uses the canonical exact-master workflow and does not deploy or
+activate application services.
+
 ### Cash-back runtime - deployment-gated
 
 The runtime implements the published `@betstan/common`
