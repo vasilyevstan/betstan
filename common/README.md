@@ -319,7 +319,8 @@ using this evaluator and preserve their existing exactly-once terminal guards.
 Install compatible readers, validators, projections and settlement before
 enabling writers. Older binaries ignoring an optional field do not establish safe
 mixed-version operation for the new semantics. New exposures must explicitly
-decline unsupported cash-back instead of using independent-leg arithmetic.
+decline unsupported cash-back with `MARKET_BET_UNSUPPORTED` instead of using
+independent-leg arithmetic.
 Feature-off must keep settlement and history readers running; reader-unaware
 rollback images are unsafe after new exposures exist.
 
