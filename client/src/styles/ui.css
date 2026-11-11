@@ -1750,8 +1750,8 @@ body {
 
 .backoffice-event__body {
   display: grid;
-  gap: 0.75rem;
-  align-items: start;
+  gap: 0.75rem 1.25rem;
+  align-items: center;
 }
 
 .backoffice-event__identity {
@@ -1797,37 +1797,16 @@ body {
 }
 
 .backoffice-event__controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 0.75rem;
-}
-
-.backoffice-event__actions {
-  display: flex;
-  flex: 0 1 18rem;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 0.5rem;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.backoffice-event__actions .backoffice-action {
-  min-width: min(100%, 8rem);
-  max-width: 100%;
-}
-
-.backoffice-event__actions .backoffice-action--primary {
-  min-width: min(100%, 9.5rem);
-}
-
-.backoffice-scores {
   display: grid;
-  flex: 0 1 11.5rem;
-  min-width: 0;
+  gap: 0.5rem;
+}
+
+.backoffice-scores,
+.backoffice-event__actions {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
+  min-width: 0;
 }
 
 .backoffice-scores input {
@@ -1848,6 +1827,10 @@ body {
   .backoffice-filters > .btn,
   .backoffice-search {
     grid-column: auto;
+  }
+
+  .backoffice-event__body {
+    grid-template-columns: minmax(0, 1fr) 18rem;
   }
 }
 

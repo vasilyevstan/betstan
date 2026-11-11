@@ -331,10 +331,10 @@ state treatment remain independent of that decoration. These shared refinements
 preserve all three densities, both themes, responsive behavior, and the
 existing semantic rails.
 
-Backoffice event cards use one compact control strip without nested task
-panels or a dividing keyline. Equal score inputs and adjacent actions replace
-the two wide columns. Explicit **Recorded and locked** and **Online** cues
-and unrelated domain-state rails remain.
+Backoffice event cards restore the pre-Match Desk horizontal composition:
+event identity on the left and a compact two-row score/action block on the
+right, without nested task panels or a dividing keyline. Explicit **Recorded
+and locked** and **Online** cues and unrelated domain-state rails remain.
 
 ## Preserving presentation choices
 
@@ -612,15 +612,17 @@ visitors retain the same catalog and controls in all three layouts and both
 themes.
 
 **Create new event** stays expanded and states the server-defined 15-minute
-kickoff lead time. Each displayed card gives event identity the full card
-width, then presents a compact, unboxed control strip. **Home score** and
-**Away score** are equal, bounded inputs followed by the primary **Save final
-result** and secondary visibility action. Controls align along their bottom
-edge when space permits; actions wrap below the score pair on narrower cards,
-then stack only when needed. Buttons retain usable touch targets without
-stretching across half the tile. Repeated task headings, current-state text,
-and target labels are removed: the badges give the state and the action names
-give the target. **Save final result** requires both
+kickoff lead time. Event cards use the compact composition from before the
+Match Desk redesign: event name, kickoff and states on the left, with a
+bounded two-row control block on the right. **Home score** and **Away score**
+are equal peers above equally aligned **Save final result** and visibility
+buttons. The two regions are vertically centered, so the controls no longer
+add a separate full-width band below the event details. Below a `42rem`
+Backoffice container width, identity and controls stack in reading order;
+the score and action rows each keep their two equal columns. Controls retain
+at least 44-pixel touch targets, visible labels and focus treatment. There
+are no nested panels, dividers or repeated task headings: badges give the
+state and action names give the target. **Save final result** requires both
 scores as whole numbers from `0` to `99`. Recorded scores remain visible but
 disabled, as does result submission: final results cannot be changed once
 recorded.
