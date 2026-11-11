@@ -124,6 +124,48 @@ it("creates draft instances idempotently and publishes only an explicit reviewed
     .send({ revision: 1, availability: "SUSPENDED", publish: true }).expect(409);
 });
 
+it("keeps an unpriced manual draft editable when publication or operator prices are invalid", async () => {
+  const { template } = await setupMarket();
+  const draft = await request(app).post("/api/backoffice/events/event-a/markets").send({
+    requestId: "unpriced", templateId: template.templateId, templateVersion: 1, parameters: {},
+  }).expect(201);
+  const url = `/api/backoffice/events/event-a/markets/${draft.body.marketId}`;
+  await request(app).put(url).send({ revision: 1, publish: true }).expect(400);
+  await request(app).put(url).send({
+    revision: 1, pricing: { method: "OPERATOR", odds: { a: 0, b: 2 } }, publish: true,
+  }).expect(400);
+  const current = await request(app).get("/api/backoffice/events/event-a/markets").expect(200);
+  const unchanged = current.body.markets.find((market: { marketId: string }) => market.marketId === draft.body.marketId);
+  expect(unchanged).toMatchObject({ revision: 1, status: "DRAFT" });
+  expect(unchanged.configuration).toBeUndefined();
+  const published = await request(app).put(url).send({
+    revision: 1, pricing: { method: "OPERATOR", odds: { a: 2, b: 2 } }, publish: true,
+  }).expect(202);
+  expect(published.body.configuration.pricing).toEqual({ method: "OPERATOR", odds: { a: 2, b: 2 } });
+});
+
+it("binds a reusable score starter independently and publishes model pricing without operator odds", async () => {
+  await setupMarket();
+  const template = await request(app).post("/api/backoffice/market-templates")
+    .send({ requestId: "score-template", starterId: "total-goals" }).expect(201);
+  const first = await request(app).post("/api/backoffice/events/event-a/markets").send({
+    requestId: "total-first", templateId: template.body.templateId, templateVersion: 1, parameters: { line: 2.5 },
+  }).expect(201);
+  const second = await request(app).post("/api/backoffice/events/event-a/markets").send({
+    requestId: "total-second", templateId: template.body.templateId, templateVersion: 1, parameters: { line: 3.5 },
+  }).expect(201);
+  expect(first.body.pricing).toEqual({ method: "SCORE_MODEL" });
+  const published = await request(app).put(`/api/backoffice/events/event-a/markets/${first.body.marketId}`)
+    .send({ revision: 1, parameters: { line: 1.5 }, publish: true }).expect(202);
+  expect(published.body.configuration).toMatchObject({
+    parameters: { line: 1.5 }, pricing: { method: "SCORE_MODEL" },
+    template: { id: template.body.templateId, version: 1 },
+  });
+  const current = await request(app).get("/api/backoffice/events/event-a/markets").expect(200);
+  expect(current.body.markets.find((market: { marketId: string }) => market.marketId === second.body.marketId))
+    .toMatchObject({ parameters: { line: 3.5 }, revision: 1, status: "DRAFT" });
+});
+
 it("keeps manual settlement available after kickoff and writer disablement, with immutable idempotent decisions", async () => {
   const { market } = await setupMarket();
   await publishMarket(market.marketId);
