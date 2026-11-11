@@ -186,33 +186,6 @@ service.
 
 ### Reusable market contracts - candidate only
 
-The unpublished `1.1.0-rc.3` Common source candidate defines reusable market
-templates, event-bound versions, generated-odds previews, frozen selections and
-revision-bound manual decisions. Service pins remain `1.1.0-rc.2`; this foundation
-does not yet make market authoring or Bet Builder available.
-
-Automatic rules use only supported full-time score facts. The new retained
-Poisson model covers scores 0-99 per side and calculates a same-match
-intersection with one margin, rather than multiplying correlated selection
-prices. Existing historical prices and models are not reconstructed or changed.
-Manual generation uses explicit equal-chance assumptions or operator probabilities
-and weights; it does not make an outcome eligible for modeled combinations.
-
-New selection messages may carry a typed `marketBet` snapshot. Its rules,
-template/quote revisions and accepted price remain attached to the exposure.
-Display names are not settlement authority. Final scores leave manual selections
-pending; a modeled Builder settles as one exposure. Separate market configuration,
-publication and manual-settlement topics reuse the existing messaging primitives.
-The [Common contract reference](https://github.com/vasilyevstan/betstan/blob/master/common/README.md)
-defines validation limits and generation semantics.
-
-Compatible service readers, persistence, acceptance checks and terminal settlement
-guards must be installed before writers are enabled. Disabling new authoring or
-acceptance cannot remove settlement/history support for existing records, and an
-older reader-unaware image is not a valid rollback after new exposures exist.
-
-### Reusable market contracts - candidate only
-
 The `1.1.0-rc.3` Common source candidate defines immutable reusable template
 versions, bound event markets, generated-odds previews, frozen single/Builder
 selections and revision-bound manual decisions. This source-only foundation
