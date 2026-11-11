@@ -11,6 +11,7 @@ export const cashBackReason = (reason) => ({
   SELECTION_RESOLVED: 'An original selection has already resolved. Cash back is no longer available for this slip.',
   PRE_MATCH_CUTOFF: 'The earliest kickoff has been reached. A pre-match slip cannot switch to live cash back.',
   MARKET_UNAVAILABLE: 'An exact selected market is unavailable or suspended. Request a new offer when it is available.',
+  MARKET_BET_UNSUPPORTED: 'Cash back is not available for custom markets or Bet Builders. Your accepted wager and selections are unchanged.',
   QUOTE_EXPIRED: 'This offer expired. Request a new offer and review it before confirming.',
   QUOTE_CHANGED: 'The offer changed. Request a new offer and explicitly confirm the new amounts.',
   STALE_REVISION: 'This slip changed, possibly in another tab. Refresh it and request a new offer.',
@@ -63,6 +64,10 @@ export const acceptedOddsForBet = (bet) => {
   const digits = String(product).padStart(scale + 1, '0');
   return scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits;
 };
+
+export const settlementOddsForBet = (bet) => acceptedOddsForBet({
+  ...bet, rows: (bet.rows ?? []).filter((row) => row.status !== 'VOID'),
+});
 
 export const isPendingOperation = (operation) => (
   operation?.state === 'QUOTE_PENDING' || operation?.state === 'CONFIRM_PENDING'

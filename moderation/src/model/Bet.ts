@@ -49,6 +49,7 @@ const affectedRowSchema = new Schema(
 
 const betRowSchema = new Schema(
   {
+    marketBet: { type: Schema.Types.Mixed },
     id: {
       type: String,
       required: true,

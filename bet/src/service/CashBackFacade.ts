@@ -126,6 +126,7 @@ export class CashBackFacade {
       if (operation.operation.fingerprint !== fingerprint) throw new CashBackHttpError(409, "OPERATION_CONFLICT");
       return operation;
     }
+    if (bet.rows.some(row => row.marketBet !== undefined)) throw new CashBackHttpError(409, "MARKET_BET_UNSUPPORTED");
     if (!this.cashBackEnabled) throw new CashBackHttpError(503, "AUTHORITY_UNAVAILABLE");
     if (bet.status !== BetStatus.CONFIRMED) throw new CashBackHttpError(409, "BET_NOT_CONFIRMED");
     const createdAt = await databaseTime();
@@ -158,6 +159,7 @@ export class CashBackFacade {
     if (!operation) throw new CashBackHttpError(404, "OPERATION_NOT_FOUND");
     if (operation.quote?.quoteId !== request.quoteId) throw new CashBackHttpError(409, "QUOTE_CHANGED");
     if (["CONFIRM_PENDING", "ACCEPTED", "REJECTED"].includes(operation.state)) return operation;
+    if (bet.rows.some(row => row.marketBet !== undefined)) throw new CashBackHttpError(409, "MARKET_BET_UNSUPPORTED");
     if (operation.state !== "QUOTED") throw new CashBackHttpError(409, "QUOTE_UNAVAILABLE");
     if (!this.cashBackEnabled) throw new CashBackHttpError(503, "AUTHORITY_UNAVAILABLE");
     const requestedAt = (await databaseTime()).toISOString();

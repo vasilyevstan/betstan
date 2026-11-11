@@ -12,6 +12,8 @@ import {
   ModerationStatus,
   ResultingStatus,
   SlipRowStatus,
+  MarketBet,
+  parseMarketBet,
 } from "@betstan/common";
 import { BetPlacementConflict } from "../model/BetPlacementConflict";
 import { Bet, BetDocument, BetRecord, BetRowRecord } from "../model/Bet";
@@ -67,6 +69,7 @@ export interface PlaceBetPersistenceResult {
 }
 
 interface CanonicalPlacedBetRow {
+  marketBet?: MarketBet;
   id: string;
   eventId: string;
   eventName: string;
@@ -251,6 +254,7 @@ const buildBetRow = (row: PlaceBetRow, fallbackBetKind: BetKind): BetRowRecord =
   side: row.side,
   selectedAt: row.selectedAt,
   quoteValidUntil: row.quoteValidUntil,
+  ...(row.marketBet === undefined ? {} : { marketBet: parseMarketBet(row.marketBet) }),
 });
 
 const buildBetRecord = (event: IPlaceBetEvent): BetRecord => {
@@ -290,6 +294,7 @@ const buildCanonicalPlacedBetRow = (
     | "side"
     | "selectedAt"
     | "quoteValidUntil"
+    | "marketBet"
   >,
   fallbackBetKind: BetKind
 ): CanonicalPlacedBetRow => ({
@@ -312,6 +317,7 @@ const buildCanonicalPlacedBetRow = (
   side: normalizeOptionalPlacementValue(row.side),
   selectedAt: normalizeOptionalPlacementValue(row.selectedAt),
   quoteValidUntil: normalizeOptionalPlacementValue(row.quoteValidUntil),
+  ...(row.marketBet === undefined ? {} : { marketBet: parseMarketBet(row.marketBet) }),
 });
 
 export const buildCanonicalPlacedBetPayload = (
@@ -344,6 +350,7 @@ export const buildCanonicalPlacedBetPayload = (
           side: row.side,
           selectedAt: row.selectedAt,
           quoteValidUntil: row.quoteValidUntil,
+          ...(row.marketBet === undefined ? {} : { marketBet: row.marketBet }),
         },
         betKind
       )
@@ -402,6 +409,9 @@ const mergePlaceRow = (
   changed = setMissingValue(row, "selectedAt", incoming.selectedAt) || changed;
   changed =
     setMissingValue(row, "quoteValidUntil", incoming.quoteValidUntil) || changed;
+  if (incoming.marketBet !== undefined) {
+    changed = setMissingValue(row, "marketBet", parseMarketBet(incoming.marketBet)) || changed;
+  }
 
   const nextBetKind = mergeBetKind(row.betKind, incoming.betKind ?? fallbackBetKind);
   if (row.betKind !== nextBetKind) {

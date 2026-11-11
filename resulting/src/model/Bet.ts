@@ -14,6 +14,7 @@ import {
 } from "../compat/LiveContract";
 
 const rowSchema = new Schema({
+  marketBet: { type: Schema.Types.Mixed },
   id: {
     type: String,
     required: true,

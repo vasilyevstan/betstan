@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { BetKind, messengerWrapper } from "@betstan/common";
+import { assertMarketSlipCompatibility, BetKind, MarketValidationError, messengerWrapper } from "@betstan/common";
 import {
   buildLegacyBoardSessionScope,
   createPlacementAttemptId,
@@ -326,7 +326,7 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
   );
 
   if (authoritativeDraft) {
-    const preparedDraft = await prepareSlipForResponse(
+    const preparedDraft: NonNullable<typeof authoritativeDraft> = await prepareSlipForResponse(
       authoritativeDraft,
       betKind
     );
@@ -346,6 +346,11 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
 
     if (slipHasMixedBetKinds(preparedDraft, betKind)) {
       return res.status(400).send({ message: "slip contains mixed bet kinds" });
+    }
+    try { assertMarketSlipCompatibility(Array.from(preparedDraft.rows)); }
+    catch (error) {
+      if (!(error instanceof MarketValidationError)) throw error;
+      return res.status(409).send({ message: error.message });
     }
 
     if (
@@ -382,7 +387,9 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
     return res.status(400).send({ message: "slip does not exist" });
   }
 
-  const submittedDraft = await submitDraftSlipAtomically({
+  let submittedDraft: Awaited<ReturnType<typeof submitDraftSlipAtomically>>;
+  try {
+    submittedDraft = await submitDraftSlipAtomically({
     slipId,
     userId: req.currentUser.id,
     userName,
@@ -392,7 +399,11 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
     expectedBoardRevision: boardConfirmation.expectedBoardRevision,
     expectedBoardFingerprint:
       boardConfirmation.expectedBoardFingerprint,
-  });
+    });
+  } catch (error) {
+    if (!(error instanceof MarketValidationError)) throw error;
+    return res.status(409).send({ message: error.message });
+  }
 
   if (!submittedDraft) {
     const submittedSlip = await findSubmittedSlipByIdForUser(

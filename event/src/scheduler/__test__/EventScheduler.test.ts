@@ -90,6 +90,36 @@ it("uses scheduler defaults and validates environment overrides", () => {
   ).toMatchObject({ poolSize: 9, horizonMinutes: 9 });
 });
 
+it("persists new scheduled models once and retains their publication obligations", async () => {
+  const previousFlag = process.env.EXTENSIBLE_MARKETS_ENABLED;
+  process.env.EXTENSIBLE_MARKETS_ENABLED = "true";
+  try {
+    const scheduler = new EventScheduler({
+      config: config(),
+      now: () => new Date("2030-01-01T00:01:00.001Z"),
+      publisherFactory: publisher,
+    });
+    await scheduler.ensureSlotKeyIndex();
+    await scheduler.runOnce();
+    const first = await Event.find({ source: "SCHEDULER" })
+      .select("+pricingModel +pricingRules +marketModelPublicationPending").sort({ eventId: 1 }).lean();
+    expect(first).toHaveLength(3);
+    for (const event of first) {
+      expect(event.pricingModel?.id).toBeDefined();
+      expect(event.pricingRules).toHaveLength(13);
+      expect(event.marketModelPublicationPending).toBe(true);
+    }
+    await scheduler.runOnce();
+    const replayed = await Event.find({ source: "SCHEDULER" })
+      .select("+pricingModel +pricingRules").sort({ eventId: 1 }).lean();
+    expect(replayed.map(event => event.pricingModel)).toEqual(first.map(event => event.pricingModel));
+    expect(replayed.map(event => event.pricingRules)).toEqual(first.map(event => event.pricingRules));
+  } finally {
+    if (previousFlag === undefined) delete process.env.EXTENSIBLE_MARKETS_ENABLED;
+    else process.env.EXTENSIBLE_MARKETS_ENABLED = previousFlag;
+  }
+});
+
 it("creates the exact epoch-aligned slots at the configured spacing", async () => {
   const now = new Date("2030-01-01T00:01:00.001Z");
   const sent = publisher();

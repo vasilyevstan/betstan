@@ -14,9 +14,12 @@ import {
   ResultingStatus,
   SlipRowStatus,
   TeamSide,
+  MarketBet,
+  messengerWrapper,
 } from "@betstan/common";
 import { Bet } from "../../model/Bet";
 import { BetPlacementConflict } from "../../model/BetPlacementConflict";
+import { CashBackFacade } from "../CashBackFacade";
 import {
   PendingBetUpdate,
   PendingBetUpdateKind,
@@ -79,6 +82,36 @@ const buildPlaceEvent = (
     data,
   };
 };
+
+it("keeps frozen custom selections in history identity and explicitly refuses unsupported cash-back", async () => {
+  const quote: MarketBet = {
+    schemaVersion: 1, kind: "SINGLE", eventId: "event-a", quoteId: "quote-a", odds: 2,
+    issuedAt: "2025-01-01T00:00:00.000Z", expiresAt: "2025-01-01T00:00:30.000Z",
+    selections: [{
+      origin: "TEMPLATE", marketId: "market-a", outcomeKey: "a", rulesRevision: 1, quoteRevision: 2,
+      templateId: "template-a", templateVersion: 1, marketName: "Manual market", label: "Nominee A",
+      terms: "Operator declares the winner", settlementMode: "MANUAL", pricingMethod: "OPERATOR",
+    }],
+  };
+  const event = buildPlaceEvent({ data: { rows: [{ eventId: quote.eventId, oddsValue: quote.odds, marketBet: quote }] } });
+  const first = await upsertPlaceBet(event);
+  expect(first.outcome).toBe("inserted");
+  expect(first.bet.rows[0].marketBet).toEqual(quote);
+  expect((await upsertPlaceBet(event)).outcome).toBe("exact_duplicate");
+  const changed: IPlaceBetEvent = {
+    ...event,
+    data: { ...event.data, rows: [{
+      ...event.data.rows[0], marketBet: { ...quote, selections: [{ ...quote.selections[0], terms: "Changed terms" }] },
+    }] },
+  };
+  expect((await upsertPlaceBet(changed)).outcome).toBe("conflicting_duplicate");
+  const saved = await Bet.findOne({ slipId: event.data.slipId });
+  expect(saved?.rows[0].marketBet).toEqual(quote);
+  const facade = new CashBackFacade(messengerWrapper.connection);
+  await expect(facade.quote(event.data.userId, event.data.slipId, {
+    action: "QUOTE", clientOperationId: "custom-market-quote", portion: { mode: "FULL" },
+  })).rejects.toMatchObject({ status: 409, code: "MARKET_BET_UNSUPPORTED" });
+});
 
 const buildBet = (overrides: Record<string, unknown> = {}) =>
   new Bet({

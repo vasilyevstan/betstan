@@ -184,32 +184,91 @@ wire contract therefore requires:
 Source appearing in the repository does not silently alter a deployed
 service.
 
-### Reusable market contracts - candidate only
+### Reusable markets and Bet Builder - deployment-gated
 
-The unpublished `1.1.0-rc.3` Common source candidate defines reusable market
-templates, event-bound versions, generated-odds previews, frozen selections and
-revision-bound manual decisions. Service pins remain `1.1.0-rc.2`; this foundation
-does not yet make market authoring or Bet Builder available.
+The `1.1.0-rc.3` Common candidate defines reusable market templates, event-bound
+versions, generated-odds previews, frozen selections and revision-bound manual
+decisions. Compatible service source implements authoring, pricing, acceptance,
+settlement and history. Source delivery is not runtime activation.
 
-Automatic rules use only supported full-time score facts. The new retained
-Poisson model covers scores 0-99 per side and calculates a same-match
-intersection with one margin, rather than multiplying correlated selection
-prices. Existing historical prices and models are not reconstructed or changed.
-Manual generation uses explicit equal-chance assumptions or operator probabilities
-and weights; it does not make an outcome eligible for modeled combinations.
+`EXTENSIBLE_MARKETS_ENABLED` defaults to false in Backoffice, Event, Slip and
+Moderation. When enabled in a compatible generation,
+scheduled and Backoffice-created events retain their original model, typed rules
+for standard selections and a durable model-publication obligation. Replaying
+creation does not replace a retained model or invent one for an existing legacy
+event. These internal fields are excluded from ordinary catalog queries.
 
-New selection messages may carry a typed `marketBet` snapshot. Its rules,
-template/quote revisions and accepted price remain attached to the exposure.
-Display names are not settlement authority. Final scores leave manual selections
-pending; a modeled Builder settles as one exposure. Separate market configuration,
-publication and manual-settlement topics reuse the existing messaging primitives.
+Backoffice owns immutable template versions and event-embedded market
+configurations. Parameter bindings freeze when publication is requested.
+Draft edits do not replace the previous successful projection; a publishing
+revision blocks new acceptance until Event acknowledges that exact configuration.
+Archive operations prevent new template instances, never delete historical
+authority. Configuration and manual-decision sends retain durable publication
+obligations and coalesce concurrent local sends without claiming exactly-once
+transport.
+
+Automatic rules use full-time home goals, away goals, total goals and goal
+difference, combined through bounded comparisons, AND, OR and NOT. Templates
+allow at most 64 outcomes, 16 numeric parameters, 128 rule nodes and eight
+levels. The retained Poisson model covers scores 0-99 per side. A Builder
+intersects 2-10 modeled selections from one event/model and applies the 1.07
+margin once, rather than multiplying correlated prices. Impossible
+combinations reject; implied selections cannot improve the payout. Decimal
+prices are bounded to 1.01-1000.
+
+Manual generation uses explicit equal-chance assumptions, probabilities or
+relative weights, with an unlisted-result weight for partial coverage.
+Independent outcomes require probabilities. Generated or operator-entered
+manual prices do not establish an automatic settlement rule or Builder
+eligibility. Operator-overridden score prices are also excluded from Builders.
+Legacy events without retained models may receive manual markets, but their
+old probabilities are never reconstructed from rounded prices.
+
+Event issues owner-bound, stored quotes lasting at most 30 seconds; expiry is
+exclusive. `BACKOFFICE_SERVICE_URL` connects Event's bounded availability check
+to the source event/market authority. `EVENT_SERVICE_URL` connects Slip and
+Moderation to Event's authoritative quote lookup/validation. Authority failure
+does not become acceptance: quote operations report unavailability and moderation
+parks requests for retry. The browser sends selection identities and the quote
+ID, never authoritative prices or manifests. Slip requires the reviewed board
+revision/fingerprint and explicit same-event replacement. New custom exposures
+cannot be independently stacked on the same event; ordinary legacy-only slips
+keep their existing behavior.
+
+New selection messages carry a frozen `marketBet` snapshot. Rules,
+template/quote revisions, settlement terms and accepted prices survive every
+submission, moderation, settlement and history mapping. Display names are not
+authority: a manual market named `1X2` still waits for an operator decision.
+Resulting retains first-authoritative score/manual evidence, including evidence
+arriving before placement. A Builder settles as one exposure. A custom void
+retains its original row and price; effective return uses a factor of one for
+that row. New exposures explicitly reject cash back.
+
+Placements containing new markets are limited to 255 KiB of serialized UTF-8
+event data, leaving 1 KiB for the envelope within the durable 256 KiB replay
+cap. Slip budgets and persists the same undefined-free JSON snapshot under its
+board CAS, preserving literal labels such as `$`-prefixed strings. Oversized
+placements remain editable drafts.
+
+`MARKET_CONFIGURED`, `MARKET_PUBLISHED` and `MARKET_SETTLED` reuse the existing
+confirmed-publication and durable consumer/retry infrastructure. An early
+configuration for a visibility-only placeholder waits for actual event
+metadata; an initialized legacy event without a model receives a definitive
+automatic-market rejection.
 The [Common contract reference](https://github.com/vasilyevstan/betstan/blob/master/common/README.md)
 defines validation limits and generation semantics.
 
 Compatible service readers, persistence, acceptance checks and terminal settlement
-guards must be installed before writers are enabled. Disabling new authoring or
-acceptance cannot remove settlement/history support for existing records, and an
-older reader-unaware image is not a valid rollback after new exposures exist.
+guards must be installed before writers are enabled. Publish Common through the
+canonical exact-master package workflow and update all eight service pins
+together before runtime delivery. Disabling new authoring/acceptance leaves
+manual settlement, pending publication replay and history available.
+An older reader-unaware image is not a valid rollback after new exposures exist.
+The evaluator supports event-level void evidence, but this release does not
+wire an authoritative cancellation feed; do not infer cancellation from
+visibility or invent a final result. Manual market void is the explicit
+supported operator action. Automated live/player-stat markets and wallets are
+outside this release.
 
 ### Cash-back runtime - deployment-gated
 

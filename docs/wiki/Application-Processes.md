@@ -19,6 +19,7 @@ For the service map and message catalog, see [[Architecture]] and
 | Scheduled event creation | Event | Gamemaster, Backoffice |
 | Manual event creation and control | Backoffice | Event, Gamemaster |
 | Pre-match product generation | Event | Client |
+| Reusable markets and Bet Builder (deployment-gated) | Backoffice, Event | Slip, Moderation, Resulting, Bet, Client |
 | Live simulation and pricing | Gamemaster | Event, Moderation, Resulting |
 | Draft slip maintenance | Slip | Event, Client |
 | Placement and moderation | Slip, Moderation | Bet, Resulting |
@@ -270,6 +271,68 @@ to their original scorelines.
 Prices are generated when an event is created, not randomly regenerated on
 every read. Compatibility logic can derive deterministic expected goals from
 an existing event ID when older stored data needs product completion.
+
+## Reusable markets and Bet Builder - deployment-gated
+
+The **Markets** link on each compact Backoffice event opens
+`/backoffice/events/:eventId/markets`; it does not expand the score controls.
+Authoring remains public, consistent with the existing Backoffice.
+
+An operator selects a saved immutable template version, adds an event draft
+and binds numeric parameters. The reusable library also creates custom
+definitions or new versions from starters, archives templates and restores
+them. The guided rule editor supports full-time score conditions or explicit
+operator-declared outcomes, not executable formulas. Versions already used by
+events and accepted bets never follow later library edits.
+
+**Generate odds** previews retained-model prices for score rules, or explicit
+equal-chance, probability and relative-weight assumptions for manual markets.
+Probabilities use 0-1, not percentages. Partial weight distributions include
+the unlisted-result weight. Manual odds can be edited; score-price overrides
+lose Builder eligibility. **Save draft** does not publish. **Publish market**
+shows pending, available or rejected status; pricing confirmation is required
+before new acceptance. A concurrent revision preserves the operator's unsaved
+inputs and requires an explicit reload instead of silently discarding them.
+
+Published manual markets expose a separate result review. The operator chooses
+winning outcomes or void, reviews the consequences, then confirms one immutable
+decision. A final match score does not settle a manual market. Pending result
+publication retries automatically, including when new-market writers are off.
+
+On `/events/:eventId/markets`, a registered player chooses a custom single or
+2-10 modeled selections in **Bet Builder**. The Builder may include retained
+standard selections. Large outcome groups are disclosed rather than filling
+the page with Correct Score buttons. Manual and operator-priced outcomes are
+restricted to singles or different-match accumulators.
+
+**Get quote** / **Get combined odds** requests one authoritative combined price
+with a short expiry. The reviewed quote lists frozen rules and terms. Adding
+it to the pre-match slip uses that quote ID and the reviewed board
+revision/fingerprint. Existing same-event selections require an explicit
+replacement checkbox. A stale board, unavailable market or expired quote
+requires another review; there is no silent replacement or repricing.
+The player must still enter a wager and place the slip before quote expiry.
+
+Slip and My Bets retain grouped selection details. Accepted total odds remain
+historical; a void custom exposure contributes one to effective return. For
+example, a 10-Stanbuck accumulator with a void row originally priced at 5 and
+a winning row at 3 retains accepted total odds 15 but reports nominal return
+30, not 150. Cash back is explicitly unavailable for these new exposures.
+
+| API owner | Paths |
+| --- | --- |
+| Backoffice | GET/POST `/api/backoffice/market-templates`; PUT `/api/backoffice/market-templates/:templateId` |
+| Backoffice | GET/POST `/api/backoffice/events/:eventId/markets`; PUT `/api/backoffice/events/:eventId/markets/:marketId`; POST `.../:marketId/result` |
+| Backoffice | POST `/api/backoffice/events/:eventId/markets/validate` for exact current source revisions |
+| Event | GET `/api/event/events/:eventId/markets`; POST `.../markets/preview`; POST `/api/event/events/:eventId/market-quotes` |
+| Event | GET `/api/event/market-quotes/:quoteId`; POST `.../:quoteId/validate` for authoritative owner/snapshot validation |
+| Slip | POST `/api/slip/market-selection` with quote identity and reviewed board state |
+
+These are source capabilities, not proof of activation. Writers default off.
+Legacy events without retained pricing models do not support automatic new
+markets or Builders, but may support manual markets. There is no automatic
+live/player-statistics provider or event-cancellation feed in this slice.
+See [[Architecture]] for lifecycle, replay budgets and compatible rollback.
 
 ## Live simulation and live odds
 

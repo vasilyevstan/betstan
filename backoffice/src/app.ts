@@ -6,6 +6,7 @@ import { SetResult } from "./route/SetResult";
 import { NewEvent } from "./route/NewEvent";
 import { EventVisibility } from "./route/EventVisibility";
 import { publicBackofficeAccess } from "./middleware/PublicBackofficeAccess";
+import { Markets } from "./route/Markets";
 
 const cors = require("cors");
 const app = express();
@@ -18,6 +19,7 @@ app.use(ShowEvents);
 app.use(SetResult);
 app.use(NewEvent);
 app.use(EventVisibility);
+app.use(Markets);
 
 app.use(errorHandler);
 

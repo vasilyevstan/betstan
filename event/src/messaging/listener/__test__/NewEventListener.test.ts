@@ -4,11 +4,14 @@ import {
   EventStatus,
   EventVisibility,
   INewEventEvent,
+  EventMarketConfiguration,
   messengerWrapper,
 } from "@betstan/common";
 import NewEventListener from "../NewEventListener";
 import EventVisibilityListener from "../EventVisibilityListener";
 import { Event } from "../../../model/Event";
+import { MarketProjectionService, storeMarketConfiguration } from "../../../service/MarketProjectionService";
+import { MarketProjection } from "../../../model/Market";
 
 const buildMessage = (): ConsumeMessage => ({
   content: Buffer.alloc(5),
@@ -37,6 +40,52 @@ const buildMessage = (): ConsumeMessage => ({
   },
 });
 
+it("defers market pricing for a visibility placeholder until its creation metadata and model arrive", async () => {
+  const previous = process.env.EXTENSIBLE_MARKETS_ENABLED;
+  process.env.EXTENSIBLE_MARKETS_ENABLED = "true";
+  const service = new MarketProjectionService(messengerWrapper.connection);
+  try {
+    const visibility = new EventVisibilityListener(messengerWrapper.connection);
+    await visibility.init();
+    await visibility.onMessage({ data: { eventId: "late-event", visibility: EventVisibility.ONLINE } }, buildMessage());
+    const configuration: EventMarketConfiguration = {
+      schemaVersion: 1, eventId: "late-event", marketId: "late-market", revision: 1, rulesRevision: 1,
+      configuredAt: "2025-01-01T00:00:00.000Z", parameters: {}, availability: "OPEN", pricing: { method: "SCORE_MODEL" },
+      template: { id: "totals", version: 1, publishedAt: "2025-01-01T00:00:00.000Z", definition: {
+        schemaVersion: 1, name: "Total goals", settlementMode: "FINAL_SCORE", outcomeMode: "EXCLUSIVE",
+        coverage: "PARTIAL", terms: "Full-time score", parameters: [],
+        outcomes: [{ key: "over", label: "Over 0.5", rule: {
+          kind: "COMPARE", metric: "TOTAL_GOALS", comparison: "GT", value: 0.5,
+        } }],
+      } },
+    };
+    await storeMarketConfiguration(configuration);
+    await service.replayPending();
+    const waiting = await MarketProjection.findOne({ marketId: "late-market" }).lean();
+    expect(waiting?.processingPending).toBe(true);
+    expect(waiting?.publication).toBeUndefined();
+    const creation = new NewEventListener(messengerWrapper.connection);
+    await creation.init();
+    await creation.onMessage({ data: {
+      id: "late-event", name: "Home - Away", home: "Home", away: "Away", time: "2030-01-01T12:00:00.000Z",
+    } }, buildMessage());
+    await service.replayPending();
+    const complete = await MarketProjection.findOne({ marketId: "late-market" }).lean();
+    expect(complete?.processingPending).toBe(false);
+    expect(complete?.publication?.kind).toBe("MARKET_AVAILABLE");
+    await Event.create({ eventId: "initialized-legacy", name: "Legacy", time: "2030-01-01T12:00:00.000Z", products: [] });
+    await storeMarketConfiguration({ ...configuration, eventId: "initialized-legacy", marketId: "legacy-market" });
+    await service.replayPending();
+    const legacy = await MarketProjection.findOne({ marketId: "legacy-market" }).lean();
+    expect(legacy?.processingPending).toBe(false);
+    expect(legacy?.publication?.kind).toBe("MARKET_REJECTED");
+  } finally {
+    await service.stop();
+    if (previous === undefined) delete process.env.EXTENSIBLE_MARKETS_ENABLED;
+    else process.env.EXTENSIBLE_MARKETS_ENABLED = previous;
+  }
+});
+
 it("creates a new event with products when a NewEvent message arrives", async () => {
   const listener = new NewEventListener(messengerWrapper.connection);
   await listener.init();
@@ -60,6 +109,42 @@ it("creates a new event with products when a NewEvent message arrives", async ()
   expect(storedEvent).not.toBeNull();
   expect(storedEvent!.status).toEqual(EventStatus.NO_RESULT);
   expect(storedEvent!.products.length).toBeGreaterThan(0);
+});
+
+it("retains a new model across ingress replay without inventing models for legacy events", async () => {
+  const previousFlag = process.env.EXTENSIBLE_MARKETS_ENABLED;
+  const listener = new NewEventListener(messengerWrapper.connection);
+  await listener.init();
+  const message: INewEventEvent = {
+    sender: "backoffice_new_event",
+    data: {
+      id: "legacy-priced-event", name: "Home - Away", home: "Home", away: "Away",
+      time: "2030-01-01T12:00:00.000Z",
+    },
+  };
+  try {
+    delete process.env.EXTENSIBLE_MARKETS_ENABLED;
+    await listener.onMessage(message, buildMessage());
+    process.env.EXTENSIBLE_MARKETS_ENABLED = "true";
+    const retained = { ...message, data: { ...message.data, id: "retained-priced-event" } };
+    await listener.onMessage(retained, buildMessage());
+    const first = await Event.findOne({ eventId: retained.data.id })
+      .select("+pricingModel +pricingRules +marketModelPublicationPending").lean();
+    expect(first?.pricingModel?.id).toBeDefined();
+    expect(first?.pricingRules).toHaveLength(13);
+    expect(first?.marketModelPublicationPending).toBe(true);
+    await listener.onMessage(retained, buildMessage());
+    await listener.onMessage(message, buildMessage());
+    const replayed = await Event.findOne({ eventId: retained.data.id })
+      .select("+pricingModel +pricingRules").lean();
+    expect(replayed?.pricingModel).toEqual(first?.pricingModel);
+    expect(replayed?.pricingRules).toEqual(first?.pricingRules);
+    const legacy = await Event.findOne({ eventId: message.data.id }).select("+pricingModel").lean();
+    expect(legacy?.pricingModel).toBeUndefined();
+  } finally {
+    if (previousFlag === undefined) delete process.env.EXTENSIBLE_MARKETS_ENABLED;
+    else process.env.EXTENSIBLE_MARKETS_ENABLED = previousFlag;
+  }
 });
 
 it("keeps an acceptance event offline from its first projection", async () => {

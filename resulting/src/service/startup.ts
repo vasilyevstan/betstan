@@ -11,6 +11,7 @@ import { TerminalSettlementSweepWorker } from "./terminalSettlementSweep";
 import { getCashBackCoordinator } from "./CashBackCoordinator";
 import { CashBackRequestListener } from "../event/listener/CashBackRequestListener";
 import { CashBackSourceReplyListener } from "../event/listener/CashBackSourceReplyListener";
+import { MarketSettledListener } from "../event/listener/MarketSettledListener";
 
 export interface ResultingServiceConfig {
   mongoUri: string;
@@ -102,6 +103,7 @@ function createDefaultDependencies(): Required<StartupDependencies> {
       new LiveEventUpdateListener(connection),
       new CashBackRequestListener(connection),
       new CashBackSourceReplyListener(connection),
+      new MarketSettledListener(connection),
     ],
     createWorkers: (connection: IAmqpConnection) => [
       new RetryWorker(connection),
