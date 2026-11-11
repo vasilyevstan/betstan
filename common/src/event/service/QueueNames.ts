@@ -12,4 +12,7 @@ export enum QueueNames {
   CASH_BACK_OUTCOME = "resulting:cash-back:outcome",
   CASH_BACK_SOURCE_REQUEST = "resulting:cash-back:source:request",
   CASH_BACK_SOURCE_REPLY = "cash-back:source:reply",
+  MARKET_CONFIGURED = "backoffice:market:configured",
+  MARKET_PUBLISHED = "event:market:published",
+  MARKET_SETTLED = "backoffice:market:settled",
 }

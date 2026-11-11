@@ -2,6 +2,7 @@ import { IEvent } from "./IEvent";
 import { BetKind } from "./status/BetKind";
 import { LiveMarketType } from "./status/LiveMarketType";
 import { TeamSide } from "./status/TeamSide";
+import { MarketBet } from "../market/MarketBet";
 
 export interface SlipRow {
   eventId: string;
@@ -24,6 +25,7 @@ export interface SlipRow {
   selectedAt?: string;
   /** When absent, the quote has no time-based expiry. */
   quoteValidUntil?: string;
+  marketBet?: MarketBet;
 }
 
 export interface IPlaceBetEvent extends IEvent {

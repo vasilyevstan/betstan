@@ -46,6 +46,14 @@ All backend consumers must use the same exact version without `^`, `~`,
 Shared messages cross independently deployed services, so a source-compatible
 TypeScript change is not sufficient by itself.
 
+Placements containing custom markets or Builders are limited to 255 KiB of
+serialized UTF-8 event data, including all rows and placement metadata.
+`assertMarketPlacementBudget` enforces that limit before submission, reserving
+1 KiB for the publisher envelope within Resulting's 256 KiB durable replay
+budget. Oversized new placements must remain editable drafts, never be
+accepted and subsequently lose their retry payload. Legacy-only slips retain
+their existing behavior.
+
 - Prefer additive optional fields. Old payloads and stored data must remain
   valid when the field is absent.
 - Preserve every existing export and the exact runtime value of existing enum
@@ -239,13 +247,90 @@ cash-back-history completeness flag is introduced, and existing live-history
 attestations are unchanged.
 
 Tests use actual npm aliases for `1.0.54` and the immediate published
-`1.1.0-rc.1`, plus one shared type-checked/runtime fixture. They prove old
+`1.1.0-rc.2`, plus shared type-checked/runtime fixtures. They prove old
 payload assignability, optional-field tolerance and envelope compatibility,
 **not** database/broker race safety or safe mixed writers after activation.
 Cash-back production must remain inactive until coordinated compatible
 consumers, persistence/recovery and adversarial tests are delivered.
 Pre-feature binaries are not a safe rollback target once cash-back state
 exists; publication alone neither activates the feature nor changes that rule.
+
+## Custom market candidate contracts - not activated
+
+The `1.1.0-rc.3` source candidate adds declarative market definitions, numeric
+parameter binding, frozen single/Builder manifests, odds generation and pure
+settlement evaluation. It does not by itself install service readers, expose
+authoring routes, persist models, accept new bets or activate a player UI. All
+eight service pins remain on `1.1.0-rc.2` until a separate coordinated update
+after controlled package publication.
+
+Definitions explicitly declare manual versus final-score settlement, exclusive
+versus overlapping outcomes, and complete versus partial coverage. Rule version
+1 supports home goals, away goals, total goals and goal difference with numeric
+comparisons, ALL/ANY groups and NOT. Definitions are bounded to 16 numeric
+parameters, 64 outcomes, 128 rule nodes and eight nested levels. Unknown facts,
+executable expressions, unbound parameters and unsupported schema versions fail
+validation; display names never determine settlement semantics.
+
+Score-model version 1 conditions independent Poisson team scores on the existing
+accepted final-score domain **0-99 per side**. It retains a unique model identity
+and the original home/away expected-goal inputs in the existing 0.6-2.6 range.
+Pricing uses log probabilities, including for rare feasible scores below
+floating-point probability precision. A zero numeric preview probability is not
+proof of impossibility: the finite log probability retains that distinction.
+Impossible and logically certain outcomes are rejected. The margin is 1.07,
+applied once to a Builder's intersection probability; decimal odds remain
+1.01-1000 with two decimal places. Values within `1e-7` cents of a half-cent
+are treated as ties and rounded upward, so bounded log/exp roundoff does not
+change prices when equivalent relative weights change units. Legacy 0-6 pricing is not changed by this
+candidate, and rounded historical prices cannot reconstruct a retained model.
+
+Manual generation distinguishes probabilities from weights. Exclusive complete
+probabilities must sum to one; partial probabilities report the unlisted
+remainder. Equal-chance partial markets include one explicit, equally weighted
+unlisted outcome. Partial weight inputs require an explicit unlisted weight.
+Overlapping manual outcomes require individual probabilities: normalized weights
+cannot establish their unknown correlations or unlisted-outcome probability.
+Generation remains a preview. An operator override stays operator-priced even
+when its provenance records model-based generation.
+
+`MarketBet` is optional on existing odds-selection and slip-row messages. It
+freezes the event, quote, rules/template/price revisions, bound rules and accepted
+odds. Quotes have an immutable maximum 30-second validity window; service
+acceptance must additionally enforce ownership, current availability and kickoff.
+Builders contain 2-10 distinct modeled selections. Manual and overridden prices
+cannot enter them. The shared slip guard blocks independent same-event legs
+alongside any new market exposure, while leaving legacy ordinary slips unchanged.
+Expired quote metadata remains readable for settlement and history; parsing is
+not acceptance authorization.
+
+The additive topics are:
+
+| Topic | Owner and purpose |
+| --- | --- |
+| `backoffice:market:configured` | Backoffice publishes an event-bound immutable template snapshot and revisioned pricing/availability instruction. |
+| `event:market:published` | Event publishes retained model/standard-product evidence, an applied market configuration, or an explicit rejected revision. |
+| `backoffice:market:settled` | Backoffice publishes a revision-bound manual decision with its exact template definition. |
+
+Domain timestamps remain in `data` across retries. A rejected requested revision
+must not silently replace a previously available revision. Durable publication,
+ordered projection, immutable version storage and idempotent application remain
+service responsibilities, not guarantees of the TypeScript declarations.
+
+Pure settlement evaluation keeps a manual market pending after a final score
+until its exact manual decision arrives. A modeled Builder is one exposure:
+all frozen conditions win together, or it loses; authoritative event invalidation
+voids the whole exposure without dropping legs or repricing. Services must
+validate incoming manual decisions against their published definition before
+using this evaluator and preserve their existing exactly-once terminal guards.
+
+Install compatible readers, validators, projections and settlement before
+enabling writers. Older binaries ignoring an optional field do not establish safe
+mixed-version operation for the new semantics. New exposures must explicitly
+decline unsupported cash-back with `MARKET_BET_UNSUPPORTED` instead of using
+independent-leg arithmetic.
+Feature-off must keep settlement and history readers running; reader-unaware
+rollback images are unsafe after new exposures exist.
 
 ## Change and validation workflow
 
