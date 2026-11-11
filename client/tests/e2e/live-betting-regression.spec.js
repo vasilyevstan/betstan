@@ -130,6 +130,7 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     return {
       height: cardBox.height,
       width: cardBox.width,
+      identityBounds: identity,
       controlsBounds: controls,
       scoreRowBounds: scoreRow,
       homeScoreInputBounds: homeScoreInput,
@@ -141,7 +142,7 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
       scoreTopDifference: Math.abs(homeScoreInput.top - awayScoreInput.top),
       scoreLeft: homeScoreInput.left - cardBox.left,
       regionCollision: overlaps(identity, controls),
-      identityBeforeTasks: identity.bottom <= controls.top,
+      identityPrecedesControls: identity.bottom <= controls.top || identity.right <= controls.left,
       actionCollision: overlaps(saveResultButton, visibilityButton),
       scoreActionCollision: inputs.some((input) => (
         overlaps(input, saveResultButton) || overlaps(input, visibilityButton)
@@ -208,6 +209,7 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     cards,
     siblingCardIntersections,
     boardWidth: bounds(board).width,
+    horizontalCards: bounds(board).width >= 42 * parseFloat(getComputedStyle(document.documentElement).fontSize),
     documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     overflowingComponents: Array.from(board.querySelectorAll(
       '.backoffice-event, .backoffice-event__body, .backoffice-event__identity, .backoffice-event__controls, .backoffice-event__actions, .backoffice-field, .backoffice-discovery, .backoffice-feedback, .backoffice-state'
@@ -237,28 +239,20 @@ const expectBackofficeControlAlignment = (card) => {
     'score row and controls left edges'
   );
 
-  if (card.saveResultButtonBounds.left >= card.scoreRowBounds.right) {
-    alignedWithinOnePixel(
-      card.homeScoreInputBounds.bottom,
-      card.saveResultButtonBounds.bottom,
-      'score inputs and Save button bottom edges'
-    );
-    expect(card.saveResultButtonBounds.left - card.scoreRowBounds.right).toBeLessThanOrEqual(24);
-  } else {
-    expect(card.scoreRowBounds.bottom).toBeLessThanOrEqual(card.saveResultButtonBounds.top);
-    alignedWithinOnePixel(card.scoreRowBounds.left, card.saveResultButtonBounds.left, 'wrapped actions left edge');
+  for (const [input, action, label] of [
+    [card.homeScoreInputBounds, card.saveResultButtonBounds, 'Home and Save'],
+    [card.awayScoreInputBounds, card.visibilityButtonBounds, 'Away and Visibility'],
+  ]) {
+    alignedWithinOnePixel(input.left, action.left, `${label} left edges`);
+    alignedWithinOnePixel(input.right, action.right, `${label} right edges`);
+    expect(input.bottom).toBeLessThanOrEqual(action.top);
   }
-  if (card.visibilityButtonBounds.left >= card.saveResultButtonBounds.right) {
-    alignedWithinOnePixel(
-      card.saveResultButtonBounds.bottom,
-      card.visibilityButtonBounds.bottom,
-      'Save and Visibility button bottom edges'
-    );
-    expect(card.visibilityButtonBounds.left - card.saveResultButtonBounds.right).toBeLessThanOrEqual(16);
-  } else {
-    expect(card.saveResultButtonBounds.bottom).toBeLessThanOrEqual(card.visibilityButtonBounds.top);
-    alignedWithinOnePixel(card.saveResultButtonBounds.left, card.visibilityButtonBounds.left, 'stacked actions left edges');
-  }
+  alignedWithinOnePixel(
+    card.saveResultButtonBounds.bottom,
+    card.visibilityButtonBounds.bottom,
+    'Save and Visibility button bottom edges'
+  );
+  alignedWithinOnePixel(card.scoreRowBounds.right, card.controlsBounds.right, 'score row and controls right edges');
 };
 
 const getTokenContrastMetrics = (locator, {
@@ -1298,16 +1292,23 @@ for (const scenario of [
       expect(card.scoreTopDifference).toBeLessThanOrEqual(1);
       expectBackofficeControlAlignment(card);
       expect(card.regionCollision).toBe(false);
-      expect(card.identityBeforeTasks).toBe(true);
+      expect(card.identityPrecedesControls).toBe(true);
       expect(card.actionCollision).toBe(false);
       expect(card.scoreActionCollision).toBe(false);
       expect(card.fullNameFits).toBe(true);
-      expect(card.scoreWidth).toBeLessThanOrEqual(88);
-      if (metrics.boardWidth >= 540) {
-        expect(card.controlsBounds.height).toBeLessThanOrEqual(72);
+      if (metrics.horizontalCards) {
+        expect(card.identityBounds.right).toBeLessThanOrEqual(card.controlsBounds.left);
+        expect(Math.abs(
+          (card.identityBounds.top + card.identityBounds.bottom) / 2
+          - (card.controlsBounds.top + card.controlsBounds.bottom) / 2
+        )).toBeLessThanOrEqual(1);
+      } else {
+        expect(card.identityBounds.bottom).toBeLessThanOrEqual(card.controlsBounds.top);
+        expect(Math.abs(card.identityBounds.left - card.controlsBounds.left)).toBeLessThanOrEqual(1);
+        expect(Math.abs(card.identityBounds.right - card.controlsBounds.right)).toBeLessThanOrEqual(1);
       }
     }
-    expect(metrics.cards[0].height).toBeLessThanOrEqual(metrics.boardWidth >= 540 ? 210 : 340);
+    expect(metrics.cards[0].height).toBeLessThanOrEqual(metrics.horizontalCards ? 170 : 300);
     expect(Math.max(...metrics.cards.map((card) => card.scoreLeft)) - Math.min(...metrics.cards.map((card) => card.scoreLeft)))
       .toBeLessThanOrEqual(1);
     const metricsPath = testInfo.outputPath('backoffice-layout-metrics.json');
@@ -1327,7 +1328,7 @@ for (const scenario of [
       expect(zoomed.siblingCardIntersections).toEqual([]);
       expect(zoomed.cards.every((card) => (
         card.fullNameFits
-        && card.identityBeforeTasks
+        && card.identityPrecedesControls
         && !card.regionCollision
         && !card.actionCollision
         && !card.scoreActionCollision

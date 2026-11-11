@@ -111,10 +111,11 @@ The shared shell adds durable review rules:
   behind its keyboard-operable toggle; verify both sides of that breakpoint.
   All three `ui` URLs remain supported without rendering a Layout label or
   density selector in the DOM.
-- **Purposeful decoration and graph exception:** Backoffice event cards group
-  equal, bounded score inputs and adjacent actions in one compact strip,
-  without nested task panels, dividing keylines, or repeated state labels.
-  Controls align at the bottom and wrap in DOM order. Explicit Recorded/Online cues
+- **Purposeful decoration and graph exception:** Backoffice event cards restore
+  their pre-Match Desk composition: identity on the left and a compact two-row
+  score/action block on the right, vertically centered without nested panels,
+  dividing keylines or repeated state labels. Equal input/action columns stay
+  aligned when the regions stack on narrow containers. Explicit Recorded/Online cues
   and unrelated domain-state rails remain. Online, healthy-service and success
   borders use the blue accent rather than green; healthy status dots and text,
   warning and error semantics are unchanged. Telemetry daily and hourly bars
