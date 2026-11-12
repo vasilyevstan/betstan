@@ -1071,8 +1071,8 @@ fi
 if oci_rabbitmq_queue_rows <<<$'name messages_ready messages_unacknowledged consumers\nname messages_ready messages_unacknowledged consumers' >/dev/null; then
   fail "duplicate RabbitMQ queue headers were accepted"
 fi
-[[ "$(oci_application_rabbitmq_queue_count)" == "28" ]] ||
-  fail "current RabbitMQ application queue count omits cash-back consumers"
+[[ "$(oci_application_rabbitmq_queue_count)" == "31" ]] ||
+  fail "current RabbitMQ application queue count omits cash-back or market consumers"
 expected_queues="$(oci_application_rabbitmq_queue_names)"
 current_queue_rows="$(
   sed 's/^event_live_update\.\*$/event_live_update.fixture-pod/' <<<"$expected_queues" |
@@ -1107,7 +1107,7 @@ if oci_rabbitmq_queue_inventory_matches \
     "$(printf '%s\nevent_live_update.second-pod\t0\t0\t1\n' "$current_queue_rows")" "$expected_queues"; then
   fail "unexpected second pod-scoped Event queue was accepted"
 fi
-historical_queues="$(grep -v '_cash_back_' <<<"$expected_queues" |
+historical_queues="$(grep -vE '_cash_back_|_market_(published|configured|settled)$' <<<"$expected_queues" |
   sed 's/^event_live_update\.\*$/event_live_update.historical-pod/')"
 [[ "$(awk 'END {print NR}' <<<"$historical_queues")" == "23" ]] ||
   fail "cash-back compatibility baseline changed historical queue names"
@@ -1123,9 +1123,12 @@ for binding in \
   "gamemaster/src/event/listener/CashBackSourceListener.ts:gamemaster_cash_back_source" \
   "bet/src/event/listener/CashBackOutcomeListener.ts:bet_cash_back_outcome" \
   "resulting/src/event/listener/CashBackRequestListener.ts:resulting_cash_back_request" \
-  "resulting/src/event/listener/CashBackSourceReplyListener.ts:resulting_cash_back_source_reply"; do
+  "resulting/src/event/listener/CashBackSourceReplyListener.ts:resulting_cash_back_source_reply" \
+  "backoffice/src/event/listener/MarketPublishedListener.ts:backoffice_market_published" \
+  "event/src/messaging/listener/MarketConfiguredListener.ts:event_market_configured" \
+  "resulting/src/event/listener/MarketSettledListener.ts:resulting_market_settled"; do
   grep -Fq "serviceName = \"${binding#*:}\";" "$ROOT_DIR/${binding%%:*}" ||
-    fail "cash-back queue inventory differs from its consumer: ${binding%%:*}"
+    fail "queue inventory differs from its consumer: ${binding%%:*}"
 done
 grep -Fq 'zero_consumer_queues=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits zero-consumer diagnostics"
