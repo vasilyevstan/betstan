@@ -626,8 +626,19 @@ gh() {
       emit_other_active_inventory
       return
     fi
+    # Eventually consistent list: the first in_progress page (or every page
+    # with STUB_INVENTORY_PERSISTENT) reports a count without its rows.
+    if [[ "$mode" == transient-* && "$endpoint" == *"status=in_progress"* ]]; then
+      local reads
+      reads=$(( $(cat "$STUB_INVENTORY_READS") + 1 ))
+      echo "$reads" >"$STUB_INVENTORY_READS"
+      if [[ "$reads" == 1 || -n "${STUB_INVENTORY_PERSISTENT:-}" ]]; then
+        printf '%s\n' '{"total_count":1,"workflow_runs":[]}'
+        return
+      fi
+    fi
     case "$mode" in
-      none)
+      none|transient-none)
         printf '%s\n' '{"total_count":0,"workflow_runs":[]}'
         ;;
       overflow)
@@ -1258,4 +1269,31 @@ for mode in unmaterialized-data superseded-capacity pr-validation; do
   }
 done
 echo "observation_authoritative_rebound_tests=PASS"
+
+inventory_reads="$(mktemp)"
+trap 'rm -f "$detail_trace" "$inventory_reads"' EXIT
+transient_case() {
+  echo 0 >"$inventory_reads"
+  STUB_INVENTORY_READS="$inventory_reads" EXCLUSIVITY_INVENTORY_SLEEP_SECONDS=0 "$@"
+}
+transient_case run_case transient-none >/dev/null
+[[ "$(cat "$inventory_reads")" = 2 ]] || {
+  echo "inconsistent active inventory was not re-read exactly once" >&2
+  exit 1
+}
+[[ "$(transient_case observe_case transient-unmaterialized-data)" = \
+  "$(observe_case unmaterialized-data)" ]] || {
+  echo "re-read inventory changed the strict observation result" >&2
+  exit 1
+}
+persistent_output="$(STUB_INVENTORY_PERSISTENT=1 transient_case run_case transient-none 2>&1)" && {
+  echo "persistently inconsistent active inventory was accepted" >&2
+  exit 1
+}
+[[ "$persistent_output" == *"active run inventory is incomplete"* &&
+  "$(cat "$inventory_reads")" = 5 ]] || {
+  echo "persistent inconsistency did not fail closed after 5 reads" >&2
+  exit 1
+}
+echo "active_inventory_consistency_retry_tests=PASS"
 echo "production_run_exclusivity_tests=PASS"

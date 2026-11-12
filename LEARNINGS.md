@@ -6,6 +6,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 
 - One owner through the real outcome. A merged fix, green build or finished watcher is not restored production; report source, deploy, activation and health separately.
 - Wait on PRs with bounded `wait-required-checks-stan.sh`, never `gh pr checks --watch`: the always-pending `trusted-quality-transition/*` ledger kept a green promotion idle ~9 hours.
+- Read-only guards over eventually consistent list APIs (e.g. `total_count` vs returned rows) re-read the whole inventory a bounded number of times before failing closed; a one-use protected run must not be burned by a transient read.
 
 ## Shared contracts
 
