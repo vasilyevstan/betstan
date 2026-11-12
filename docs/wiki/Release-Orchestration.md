@@ -1447,8 +1447,10 @@ proves consistency only within the observed window, not UTC/NTP accuracy,
 physical commit time, perpetual monotonicity, or behavior between samples or
 after the probe.
 
-The cash-back-compatible queue catalog contains **28 queues**: 22 existing
-static queues, five cash-back queues, and one pod-scoped Event fanout queue.
+The current queue catalog contains **31 queues**: 22 existing static queues,
+five cash-back queues, three market queues, and one pod-scoped Event fanout
+queue. The OCI contract test derives the expected set from source listeners, so
+a new consumer cannot merge without its catalog entry.
 Readiness verifies names and consumers for every queue, not count alone.
 Only the current catalog permits the known Event dynamic prefix; authenticated
 historical baselines retain their exact captured names and count. Health uses
