@@ -9,6 +9,22 @@ and artifact identity.
 Production is never updated directly from a developer worktree, a mutable
 image tag, a stale branch name, or an unverified workflow rerun.
 
+## Promotion fast path
+
+For a CLI-owned PR (feature-to-`dev` or `dev`-to-`master` promotion):
+
+1. `./infra/azure/agents/wait-required-checks-stan.sh <pr>` — bounded, quiet
+   wait for the branch-protection-required checks on the exact head (and, for
+   `master`, merge snapshot). Exit `0` READY, `1` failed, `2` stale snapshot,
+   `3` timeout; it grants no authority.
+2. `COPILOT_CLI_AUTO_APPROVE=true ./infra/azure/agents/pr-merge-safety-stan.sh <pr>`.
+3. `gh pr merge <pr> --merge --match-head-commit <sha>`.
+4. Wait, bounded, on the `master` builds, then run the protected OCI chain.
+
+Never use `gh pr checks --watch` or any other unbounded watcher: it waits on
+every status and never exits. `trusted-quality-transition/*` is a
+pending-by-design ledger marker, never a gate.
+
 ## Delivery redesign: compatibility stage
 
 The delivery redesign is implemented only in part. [[Quality Gates]] is its

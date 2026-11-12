@@ -399,7 +399,8 @@ jobs:
           trap record_verification EXIT
 
           found=false
-          for _attempt in $(seq 1 12); do
+          # Read-only visibility backoff (~10 minutes); never republish.
+          for _attempt in $(seq 1 40); do
             if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" --json \
               --registry=https://registry.npmjs.org >"$metadata"; then
               if node - "$metadata" <<'NODE'
@@ -422,7 +423,7 @@ jobs:
                 break
               fi
             fi
-            sleep 5
+            sleep 15
           done
           [ "$found" = "true" ]
 

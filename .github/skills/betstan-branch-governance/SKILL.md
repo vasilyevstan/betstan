@@ -22,7 +22,7 @@ Use for branches, commits, pushes, PRs, CI gates, merges and production dispatch
 2. For a live decision, fetch refs and check protection, PR head/base, mergeability and trusted checks.
 3. Use ancestry, not tip equality. `pr-validation-stan.sh` binds head/base/merge snapshot and workflow IDs.
 4. Run `pr-merge-safety-stan.sh` in the correct mode immediately before merging.
-5. Observe jobs and pending gates to terminal state; respect environment reviewers or timers only where configured. Report a definitive job failure immediately; never treat cancelled, skipped or stale results as success.
+5. Wait for required checks with `wait-required-checks-stan.sh <pr>` (bounded; never `gh pr checks --watch`; `trusted-quality-transition/*` is a pending-by-design ledger, not a gate). Observe jobs and pending gates to terminal state; respect environment reviewers or timers only where configured. Report a definitive job failure immediately; never treat cancelled, skipped or stale results as success.
 
 ## Trust mechanics
 
