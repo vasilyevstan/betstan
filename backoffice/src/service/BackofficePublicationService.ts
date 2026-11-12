@@ -6,6 +6,7 @@ import EventVisibilityPublisher from "../event/publisher/EventVisibilityPublishe
 import NewEventPublisher from "../event/publisher/NewEventPublisher";
 import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
 import { Event } from "../model/Event";
+import { MarketConfiguredPublisher, MarketSettledPublisher } from "../event/publisher/MarketPublishers";
 
 export type PublicationOutcome = "PUBLISHED" | "PENDING";
 
@@ -26,9 +27,13 @@ export class BackofficePublicationService {
   private readonly newEventPublisher: NewEventPublisher;
   private readonly resultSetPublisher: ResultSetPublisher;
   private readonly eventVisibilityPublisher: EventVisibilityPublisher;
+  private readonly marketConfiguredPublisher: MarketConfiguredPublisher;
+  private readonly marketSettledPublisher: MarketSettledPublisher;
+  private marketInitialization: Promise<void> | null = null;
   private initialization: Promise<void> | null = null;
   private replayTimer: NodeJS.Timeout | null = null;
   private activeReplay: Promise<number> | null = null;
+  private readonly activeMarketPublications = new Map<string, Promise<number>>();
   private readonly activeResultPublications = new Map<
     string,
     Promise<PublicationOutcome>
@@ -46,6 +51,8 @@ export class BackofficePublicationService {
     this.newEventPublisher = new NewEventPublisher(connection);
     this.resultSetPublisher = new ResultSetPublisher(connection);
     this.eventVisibilityPublisher = new EventVisibilityPublisher(connection);
+    this.marketConfiguredPublisher = new MarketConfiguredPublisher(connection);
+    this.marketSettledPublisher = new MarketSettledPublisher(connection);
   }
 
   async init() {
@@ -91,6 +98,7 @@ export class BackofficePublicationService {
       this.replayTimer = null;
     }
     await this.activeReplay;
+    await Promise.all(this.activeMarketPublications.values());
   }
 
   async publishNewEventNow(eventId: string): Promise<PublicationOutcome> {
@@ -227,6 +235,63 @@ export class BackofficePublicationService {
     );
   }
 
+  async publishMarketsNow(eventId: string): Promise<number> {
+    const active = this.activeMarketPublications.get(eventId);
+    if (active) return active;
+    const publication = this.runMarketPublication(eventId).finally(() => {
+      if (this.activeMarketPublications.get(eventId) === publication) this.activeMarketPublications.delete(eventId);
+    });
+    this.activeMarketPublications.set(eventId, publication);
+    return publication;
+  }
+
+  private async runMarketPublication(eventId: string): Promise<number> {
+    const event = await Event.findOne({ eventId }).select("+customMarkets +newEventPublicationPending").lean();
+    if (!event || event.newEventPublicationPending) return 0;
+    let published = 0;
+    for (const market of event.customMarkets ?? []) {
+      if (market.publicationPending && market.configuration) {
+        const configuration = market.configuration;
+        const outcome = await this.publishAndClear(
+          async () => {
+            await this.initMarketPublishers();
+            await this.marketConfiguredPublisher.publishWithConfirm({ data: configuration });
+          },
+          () => Event.updateOne({
+            eventId, customMarkets: { $elemMatch: { marketId: market.marketId, revision: configuration.revision } },
+          }, { $unset: { "customMarkets.$.publicationPending": 1 } }),
+          "market configuration", eventId,
+        );
+        if (outcome === "PUBLISHED") published++;
+      }
+      if (market.resultPublicationPending && market.decision) {
+        const decision = market.decision;
+        const outcome = await this.publishAndClear(
+          async () => {
+            await this.initMarketPublishers();
+            await this.marketSettledPublisher.publishWithConfirm({ data: { decision, template: market.template } });
+          },
+          () => Event.updateOne({
+            eventId, customMarkets: { $elemMatch: { marketId: market.marketId, "decision.decisionId": decision.decisionId } },
+          }, { $unset: { "customMarkets.$.resultPublicationPending": 1 } }),
+          "manual market result", eventId,
+        );
+        if (outcome === "PUBLISHED") published++;
+      }
+    }
+    return published;
+  }
+
+  private async initMarketPublishers() {
+    if (!this.marketInitialization) {
+      this.marketInitialization = Promise.all([
+        this.marketConfiguredPublisher.initConfirmChannel(),
+        this.marketSettledPublisher.initConfirmChannel(),
+      ]).then(() => undefined);
+    }
+    await this.marketInitialization;
+  }
+
   async replayPending(): Promise<number> {
     if (this.activeReplay) {
       return this.activeReplay;
@@ -247,11 +312,13 @@ export class BackofficePublicationService {
         { newEventPublicationPending: true },
         { resultPublicationPending: true },
         { visibilityPublicationPending: true },
+        { "customMarkets.publicationPending": true },
+        { "customMarkets.resultPublicationPending": true },
       ],
     })
       .select(
         "+newEventPublicationPending +resultPublicationPending "
-        + "+visibilityPublicationPending +visibilityPublicationTarget"
+        + "+visibilityPublicationPending +visibilityPublicationTarget +customMarkets"
       )
       .sort({ _id: 1 })
       .limit(this.options.replayBatchSize);
@@ -269,6 +336,9 @@ export class BackofficePublicationService {
       if (event.resultPublicationPending) {
         published +=
           (await this.publishResultNow(event.eventId)) === "PUBLISHED" ? 1 : 0;
+      }
+      if (event.customMarkets?.some(market => market.publicationPending || market.resultPublicationPending)) {
+        published += await this.publishMarketsNow(event.eventId);
       }
     }
 
@@ -338,6 +408,8 @@ export class BackofficePublicationService {
       this.newEventPublisher,
       this.resultSetPublisher,
       this.eventVisibilityPublisher,
+      this.marketConfiguredPublisher,
+      this.marketSettledPublisher,
     ];
     const channels = publishers.map((publisher) =>
       Reflect.get(publisher, "_confirmChannel") as
@@ -346,6 +418,7 @@ export class BackofficePublicationService {
     );
 
     this.initialization = null;
+    this.marketInitialization = null;
     for (const publisher of publishers) {
       Reflect.set(publisher, "_confirmChannel", undefined);
     }

@@ -1,4 +1,5 @@
 import {
+  assertMarketPlacementBudget,
   BetKind,
   IAmqpConnection,
   IPlaceBetEvent,
@@ -91,6 +92,7 @@ const buildNormalizedRowsExpression = (betKind: BetKind) => ({
       side: "$$row.side",
       selectedAt: "$$row.selectedAt",
       quoteValidUntil: "$$row.quoteValidUntil",
+      marketBet: "$$row.marketBet",
     },
   },
 });
@@ -121,6 +123,7 @@ const buildSubmittedEventRowsExpression = (betKind: BetKind) => ({
       side: "$$row.side",
       selectedAt: "$$row.selectedAt",
       quoteValidUntil: "$$row.quoteValidUntil",
+      marketBet: "$$row.marketBet",
     },
   },
 });
@@ -190,6 +193,15 @@ export const submitDraftSlipAtomically = async (
     },
     ...buildCompatibleDraftRowsFilter(args.betKind),
   };
+  const marketDraft = await Slip.findOne({ ...filter, "rows.marketBet": { $exists: true } }).lean();
+  const marketEvent: ReturnType<typeof toPublishedSubmittedEventData> | undefined = marketDraft ? JSON.parse(JSON.stringify(toPublishedSubmittedEventData({
+    userId: args.userId, userName: args.userName, slipId: args.slipId,
+    submittedAt, placementAttemptId: args.placementAttemptId, wager: args.wager, betKind: args.betKind,
+    rows: marketDraft.rows.map(row => ({
+      ...row, id: String(row._id), betKind: normalizeBetKind(row.betKind ?? args.betKind),
+    })),
+  }))) : undefined;
+  if (marketEvent) assertMarketPlacementBudget(marketEvent);
   const updatePipeline = [
     {
       $set: {
@@ -200,7 +212,7 @@ export const submitDraftSlipAtomically = async (
         boardRevision: args.expectedBoardRevision,
         boardFingerprint: args.expectedBoardFingerprint,
         rows: buildNormalizedRowsExpression(args.betKind),
-        submittedEvent: {
+        submittedEvent: marketEvent ? { $literal: marketEvent } : {
           userId: args.userId,
           userName: args.userName,
           slipId: args.slipId,

@@ -13,6 +13,7 @@ jest.mock("@betstan/common", () => {
     assertQueue: jest.fn(),
     bindQueue: jest.fn(),
     publish: jest.fn(),
+    close: jest.fn(async () => {}),
   };
 
   class AListener<T> {
@@ -39,15 +40,17 @@ jest.mock("@betstan/common", () => {
     constructor(public connection: unknown) {}
     async init() {}
     publish(_event: T) {}
+    async publishWithConfirm(_event: T) {}
   }
   APublisher.prototype.init = jest.fn(async () => {});
   APublisher.prototype.publish = jest.fn();
+  APublisher.prototype.publishWithConfirm = jest.fn(async () => {});
 
   return {
     ...actual,
     AListener,
     APublisher,
-    messengerWrapper: { connection: {} },
+    messengerWrapper: { connection: { createConfirmChannel: jest.fn(async () => channel) } },
   };
 });
 

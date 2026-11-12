@@ -4,6 +4,8 @@ import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./event/listener/NewEventListener";
 import EventResultListener from "./event/listener/EventResultListener";
 import { CashBackSourceListener } from "./event/listener/CashBackSourceListener";
+import { MarketPublishedListener } from "./event/listener/MarketPublishedListener";
+import { MarketTemplate } from "./model/MarketTemplate";
 import {
   BackofficePublicationService,
   getBackofficePublicationService,
@@ -45,6 +47,10 @@ const startUp = async () => {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
+    await MarketTemplate.init();
+    const marketPublishedListener = new MarketPublishedListener(messengerWrapper.connection);
+    await marketPublishedListener.init();
+    marketPublishedListener.listen();
 
     const cashBackSourceListener = new CashBackSourceListener(messengerWrapper.connection);
     await cashBackSourceListener.init();

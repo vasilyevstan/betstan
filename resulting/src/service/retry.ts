@@ -4,6 +4,7 @@ import {
   ILiveEventUpdateEvent,
   IModerationResultEvent,
   IPlaceBetEvent,
+  IMarketSettledEvent,
 } from "@betstan/common";
 import SettleSlipPublisher from "../event/publisher/SettleSlipPublisher";
 import SettleSlipRowPublisher from "../event/publisher/SettleSlipRowPublisher";
@@ -17,6 +18,7 @@ import {
   processFinalScore,
   processLiveUpdate,
   upsertPlaceBet,
+  processManualMarketResult,
 } from "./resulting";
 import {
   buildRetryPayloadStorage,
@@ -332,6 +334,9 @@ async function processRetryRecord(
   }
 
   switch (retryRecord.kind as RetryRecordKind) {
+    case "MARKET_SETTLED":
+      await processManualMarketResult(retryRecord.payload as IMarketSettledEvent, publishers);
+      return;
     case "PLACE_BET":
       await upsertPlaceBet(retryRecord.payload as IPlaceBetEvent, publishers);
       return;

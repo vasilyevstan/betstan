@@ -6,6 +6,7 @@ import cookieSession from "cookie-session";
 import { DeleteSlipRow } from "./route/DeleteSlipRow";
 import { CleanSlip } from "./route/CleanSlip";
 import { PlaceBet } from "./route/PlaceBet";
+import { MarketSelection } from "./route/MarketSelection";
 
 const cors = require("cors");
 const app = express();
@@ -25,6 +26,7 @@ app.use(ShowSlip);
 app.use(DeleteSlipRow);
 app.use(CleanSlip);
 app.use(PlaceBet);
+app.use(MarketSelection);
 
 app.use(errorHandler);
 

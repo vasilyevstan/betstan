@@ -36,6 +36,10 @@ spec:
               value: "mongodb://gaming-shared-mongo-srv:27017/gaming_slip"
             - name: RABBITMQ_URI
               value: "amqp://gaming-rabbitmq-srv"
+            - name: EVENT_SERVICE_URL
+              value: "http://gaming-event-srv:3000"
+            - name: EXTENSIBLE_MARKETS_ENABLED
+              value: "false"
             - name: CLIENT_ID
               valueFrom:
                 fieldRef:

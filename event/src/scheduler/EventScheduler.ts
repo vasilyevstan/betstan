@@ -237,6 +237,7 @@ export class EventScheduler {
               home: template.home,
               away: template.away,
               products: template.products,
+              ...template.pricingPersistenceFields(),
               source: "SCHEDULER",
               slotKey,
               newEventPublishedAt: null,

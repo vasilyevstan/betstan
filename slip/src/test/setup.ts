@@ -2,7 +2,21 @@ import { MongoMemoryServer } from "mongodb-memory-server";
 import mongoose from "mongoose";
 import { currentUser, errorHandler, messengerWrapper } from "@betstan/common";
 
-jest.mock("@betstan/common");
+jest.mock("@betstan/common", () => {
+  const mocked = jest.createMockFromModule<typeof import("@betstan/common")>("@betstan/common");
+  const actual = jest.requireActual<typeof import("@betstan/common")>("@betstan/common");
+  return {
+    ...mocked,
+    marketKey: actual.marketKey,
+    marketObject: actual.marketObject,
+    marketText: actual.marketText,
+    marketDomainTime: actual.marketDomainTime,
+    parseMarketBet: actual.parseMarketBet,
+    assertMarketSlipCompatibility: actual.assertMarketSlipCompatibility,
+    assertMarketPlacementBudget: actual.assertMarketPlacementBudget,
+    MarketValidationError: actual.MarketValidationError,
+  };
+});
 jest.setTimeout(60000);
 
 let mongo: any;

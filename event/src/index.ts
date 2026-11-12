@@ -6,6 +6,9 @@ import EventResultListener from "./messaging/listener/EventResultListener";
 import EventVisibilityListener from "./messaging/listener/EventVisibilityListener";
 import { createLiveEventListeners } from "./messaging/listener/liveEventListeners";
 import { EventScheduler } from "./scheduler/EventScheduler";
+import { MarketConfiguredListener } from "./messaging/listener/MarketConfiguredListener";
+import { MarketProjectionService } from "./service/MarketProjectionService";
+import { MarketProjection, MarketQuote } from "./model/Market";
 
 type InitialisableListener = {
   init(): Promise<void>;
@@ -24,6 +27,7 @@ const startListeners = async (listeners: InitialisableListener[]) => {
 
 const startUp = async () => {
   let scheduler: EventScheduler | null = null;
+  let marketProjection: MarketProjectionService | null = null;
   let server: ReturnType<typeof app.listen> | null = null;
   let rabbitConnection: { close(): Promise<void> } | null = null;
   let shuttingDown = false;
@@ -37,6 +41,7 @@ const startUp = async () => {
 
     try {
       await scheduler?.stop();
+      await marketProjection?.stop();
       if (server) {
         await new Promise<void>((resolve, reject) => {
           server!.close((err) => {
@@ -79,6 +84,7 @@ const startUp = async () => {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
+    await Promise.all([MarketProjection.init(), MarketQuote.init()]);
 
     const newEventListener = new NewEventListener(messengerWrapper.connection);
     const eventResultListener = new EventResultListener(
@@ -95,11 +101,14 @@ const startUp = async () => {
       newEventListener,
       eventResultListener,
       eventVisibilityListener,
+      new MarketConfiguredListener(messengerWrapper.connection),
       ...liveEventListeners.all,
     ]);
 
     scheduler = new EventScheduler();
     await scheduler.start();
+    marketProjection = new MarketProjectionService(messengerWrapper.connection);
+    await marketProjection.start();
 
     server = app.listen(3000, () => {
       console.log("listening on port 3000");
