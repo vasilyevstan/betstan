@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 
 jest.mock("@betstan/common", () => {
   const mocked = jest.createMockFromModule<typeof import("@betstan/common")>("@betstan/common");
+  const actual = jest.requireActual<typeof import("@betstan/common")>("@betstan/common");
   class AListener<T> {
     ack = jest.fn();
     channel = { prefetch: jest.fn(), nack: jest.fn() };
@@ -11,7 +12,19 @@ jest.mock("@betstan/common", () => {
     async init() {}
     listen = jest.fn();
   }
-  return { ...mocked, AListener };
+  return {
+    ...mocked, AListener,
+    assertMarketScore: actual.assertMarketScore,
+    evaluateMarketBetResult: actual.evaluateMarketBetResult,
+    marketDomainTime: actual.marketDomainTime,
+    marketKey: actual.marketKey,
+    marketObject: actual.marketObject,
+    marketRevision: actual.marketRevision,
+    MarketValidationError: actual.MarketValidationError,
+    parseManualMarketDecision: actual.parseManualMarketDecision,
+    parseMarketBet: actual.parseMarketBet,
+    parseMarketDefinition: actual.parseMarketDefinition,
+  };
 });
 jest.setTimeout(60000);
 process.env.CASH_BACK_ENABLED = "true";

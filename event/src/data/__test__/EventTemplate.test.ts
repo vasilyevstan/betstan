@@ -1,5 +1,7 @@
 import EventTemplate from "../EventTemplate";
 import { ProductType } from "../product/ProductType";
+import { priceScoreCombination } from "@betstan/common";
+import { Event } from "../../model/Event";
 
 it("uses explicit constructor values when provided", () => {
   const eventTemplate = new EventTemplate(
@@ -44,6 +46,7 @@ describe("coherent pre-match pricing (once per template)", () => {
       expect(Number.isFinite(odd.value)).toBe(true);
       expect(odd.value).toBeGreaterThanOrEqual(1.01);
     });
+
     expect(oneCrossTwo?.odds.map((odd) => odd.name)).toEqual(["Team A", "draw", "Team B"]);
   });
 
@@ -81,5 +84,48 @@ describe("coherent pre-match pricing (once per template)", () => {
 
     expect(firstOneCrossTwo?.odds.every((odd) => Number.isFinite(odd.value))).toBe(true);
     expect(secondOneCrossTwo?.odds.every((odd) => Number.isFinite(odd.value))).toBe(true);
+  });
+});
+
+describe("retained market pricing", () => {
+  const previousFlag = process.env.EXTENSIBLE_MARKETS_ENABLED;
+  afterEach(() => {
+    if (previousFlag === undefined) delete process.env.EXTENSIBLE_MARKETS_ENABLED;
+    else process.env.EXTENSIBLE_MARKETS_ENABLED = previousFlag;
+  });
+
+  it("keeps the legacy generation unchanged while new writers are disabled", () => {
+    delete process.env.EXTENSIBLE_MARKETS_ENABLED;
+    const template = new EventTemplate();
+    expect(template.pricingModel).toBeUndefined();
+    expect(template.pricingPersistenceFields()).toEqual({});
+  });
+
+  it("retains the exact model and typed rules used to price every standard selection", async () => {
+    process.env.EXTENSIBLE_MARKETS_ENABLED = "true";
+    const template = new EventTemplate("retained-event", "Home", "Away", "2030-01-01T12:00:00.000Z");
+    const rules = template.pricingRules!;
+    expect(rules).toHaveLength(13);
+    for (const product of template.products) {
+      for (const odd of product.odds) {
+        const selected = rules.find(rule => rule.productId === product.id && rule.oddsId === odd.id);
+        expect(selected).toBeDefined();
+        expect(priceScoreCombination(template.pricingModel, [selected!.rule])).toBe(odd.value);
+      }
+    }
+    await Event.create({
+      eventId: template.eventId, name: template.name, time: template.time,
+      home: template.home, away: template.away, products: template.products,
+      ...template.pricingPersistenceFields(),
+    });
+    const stored = await Event.findOne({ eventId: template.eventId })
+      .select("+pricingModel +pricingRules +pricingModelCreatedAt +marketModelPublicationPending").lean();
+    expect(stored?.pricingModel).toEqual(template.pricingModel);
+    expect(stored?.pricingRules).toEqual(rules);
+    expect(stored?.marketModelPublicationPending).toBe(true);
+    expect(stored?.pricingModelCreatedAt).toBe(template.pricingModelCreatedAt);
+    const catalog = await Event.findOne({ eventId: template.eventId }).lean();
+    expect(catalog?.pricingModel).toBeUndefined();
+    expect(catalog?.pricingRules).toBeUndefined();
   });
 });

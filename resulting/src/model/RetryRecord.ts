@@ -9,6 +9,7 @@ export const RETRY_RECORD_KINDS = [
   "MODERATION_RESULT",
   "EVENT_RESULT",
   "LIVE_EVENT_UPDATE",
+  "MARKET_SETTLED",
 ] as const;
 
 export type RetryRecordKind = (typeof RETRY_RECORD_KINDS)[number];

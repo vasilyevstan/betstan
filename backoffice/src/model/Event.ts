@@ -1,5 +1,6 @@
 import { CashBackSourceReply, EventStatus, EventVisibility } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import { eventMarketSchema } from "./EventMarket";
 
 export interface BackofficeCashBackHold {
   requestFingerprint: string;
@@ -12,6 +13,7 @@ const cashBackHoldSchema = new Schema<BackofficeCashBackHold>({
 }, { _id: false });
 
 const eventSchema = new Schema({
+  customMarkets: { type: [eventMarketSchema], default: [], select: false },
   cashBackGeneration: { type: Number, required: false, select: false },
   cashBackAuthorityRevision: { type: Number, required: false, select: false },
   cashBackAuthorityAt: { type: Date, required: false, select: false },

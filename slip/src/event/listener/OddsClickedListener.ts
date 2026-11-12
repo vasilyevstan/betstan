@@ -44,6 +44,7 @@ const buildSlipRow = (
     side: event.data.side,
     selectedAt: event.data.selectedAt ?? event.timestamp ?? new Date().toISOString(),
     quoteValidUntil: event.data.quoteValidUntil,
+    ...(event.data.marketBet === undefined ? {} : { marketBet: event.data.marketBet }),
   };
 };
 
@@ -77,11 +78,12 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
       return;
     }
 
-    const { wasInserted } = await upsertDraftSlipRow(
+    const { wasInserted, accepted } = await upsertDraftSlipRow(
       userId,
       betKind,
       buildSlipRow(event, betKind)
     );
+    if (!accepted) console.warn("slip_selection_not_applied_review_current_board");
     if (wasInserted) {
       try {
         this.telemetry.reportSlipCreated();

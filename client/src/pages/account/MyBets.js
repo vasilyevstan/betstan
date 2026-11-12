@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef,
 import { format } from 'date-fns';
 import useMyBets from '../../hook/useMyBets';
 import CashBackPanel, { emptyCashBackDraft, needsCashBackRecovery } from './CashBackPanel';
-import { acceptedOddsForBet, cashBackReason, formatMinor, parseStakeMinor, possibleReturn } from '../../cashBackUtils';
+import { cashBackReason, formatMinor, parseStakeMinor, possibleReturn, settlementOddsForBet } from '../../cashBackUtils';
+import MarketSelections from '../../components/MarketSelections';
 import {
   formatDeclineReason,
   formatLegacyLiveSelectionLabel,
@@ -100,6 +101,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
             row.productName,
             row.marketType,
             row.oddsName,
+            ...(row.marketBet?.selections ?? []).map((selection) => `${selection.marketName} ${selection.label}`),
             row.declineReason,
             row.status,
             getBetKindLabel(row.betKind ?? bet.betKind),
@@ -196,7 +198,11 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
     const terminal = isTerminalBetStatus(bet.status);
     const settled = ['WIN', 'LOSS', 'VOID'].includes(bet.status);
     const remainder = financial?.remainingStakeMinor ?? parseStakeMinor(String(bet.wager));
-    const acceptedOdds = acceptedOddsForBet(bet);
+    const returnOdds = settlementOddsForBet(bet);
+    const hasCustomMarket = rows.some((row) => row.marketBet);
+    const nominalReturn = remainder === null
+      ? returnOdds ? (Number(returnOdds) * bet.wager).toFixed(2) : 'Unavailable'
+      : possibleReturn(remainder, returnOdds);
 
     return <div className="card mb-2 my-bets-card" key={betKey} data-slip-id={bet.slipId}>
       <div className="card-body my-bets-summary">
@@ -267,17 +273,24 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
               </div>
               {row.declineReason ? <div className="my-bets-note my-bets-note--danger">{formatDeclineReason(row.declineReason)}</div> : null}
             </div>
-            <div className={`col-2 col-md-3${rowColor}`} data-label="Selection">{selectionLabel}</div>
+            <div className={`col-2 col-md-3${rowColor}`} data-label="Selection">
+              {row.marketBet ? `${row.marketBet.selections.length} frozen selection${row.marketBet.selections.length === 1 ? '' : 's'}` : selectionLabel}
+            </div>
             <div className={`col-2 col-md-2 text-end${rowColor}`} data-label="Odds / Outcome">
               <div>{row.oddsValue}</div>
               <div className="my-bets-outcome">{rowOutcome}</div>
             </div>
+            {row.marketBet ? <div className="col-12 market-history-selections">
+              <MarketSelections marketBet={row.marketBet} />
+            </div> : null}
           </div>;
         })}
 
       <div className="my-bets-footer">
         <span>Accepted total odds: {totalOdds.toFixed(2)}</span>
-        {!terminal ? <span>Possible return on remaining stake: {remainder === null ? (totalOdds * bet.wager).toFixed(2) : possibleReturn(remainder, acceptedOdds)} Stanbucks</span> : null}
+        {!terminal ? <span>Possible return on remaining stake: {nominalReturn} Stanbucks</span> : null}
+        {hasCustomMarket && settled ? <span>Settled return (nominal): {bet.status === 'WIN' ? nominalReturn
+          : bet.status === 'VOID' ? Number(bet.wager).toFixed(2) : '0.00'} Stanbucks</span> : null}
         {financial?.cumulativeClosedStakeMinor > 0 ? <>
           <span>Cumulative closed principal: {formatMinor(financial.cumulativeClosedStakeMinor)} Stanbucks</span>
           <span>Cumulative recorded nominal return: {formatMinor(financial.cumulativeReturnMinor)} Stanbucks</span>
@@ -285,9 +298,9 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
       </div>
       </div> : null}
       <div className="card-body my-bets-cash-back">
-        <CashBackPanel bet={bet} ownerId={currentUser?.id} model={model}
+        {hasCustomMarket ? <p className="market-help">{cashBackReason('MARKET_BET_UNSUPPORTED')}</p> : <CashBackPanel bet={bet} ownerId={currentUser?.id} model={model}
           draft={drafts.ownerId === currentUser?.id ? drafts.values[bet.slipId] ?? emptyCashBackDraft : emptyCashBackDraft}
-          onDraftChange={updateDraft} />
+          onDraftChange={updateDraft} />}
       </div>
     </div>;
   });

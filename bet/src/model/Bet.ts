@@ -4,6 +4,7 @@ import {
   CashBackFinancialSnapshot,
   LiveMarketStatus,
   ModerationDeclineReason,
+  MarketBet,
   SlipRowStatus,
 } from "@betstan/common";
 import { HydratedDocument, Schema, model } from "mongoose";
@@ -14,6 +15,7 @@ import {
 } from "../compat/LiveContract";
 
 export interface BetRowRecord {
+  marketBet?: MarketBet;
   id: string;
   eventId: string;
   eventName: string;
@@ -63,6 +65,7 @@ type SerializedBet = Partial<BetRecord> & {
 } & Record<string, unknown>;
 
 const betRowSchema = new Schema<BetRowRecord>({
+  marketBet: { type: Schema.Types.Mixed },
   eventId: {
     type: String,
     required: true,

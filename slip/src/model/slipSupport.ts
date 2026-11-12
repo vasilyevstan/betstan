@@ -4,6 +4,9 @@ import {
   IPlaceBetEvent,
   LiveMarketStatus,
   LiveMarketType,
+  MarketBet,
+  MarketValidationError,
+  parseMarketBet,
   ModerationDeclineReason,
   SlipStatus,
   TeamSide,
@@ -31,6 +34,7 @@ interface MutableModerationAffectedRow {
 }
 
 export interface MutableSlipRow extends MutableModel {
+  marketBet?: MarketBet;
   id?: string;
   _id?: ModelId;
   eventId: string;
@@ -93,6 +97,7 @@ export interface MutablePublicationState {
 }
 
 export interface MutableSubmittedEventRow {
+  marketBet?: MarketBet;
   eventId: string;
   eventName: string;
   oddsId: string;
@@ -126,6 +131,7 @@ export interface SubmittedEventData {
 }
 
 export interface PlainSlipRow {
+  marketBet?: MarketBet;
   _id?: string | Types.ObjectId;
   eventId: string;
   eventName: string;
@@ -773,6 +779,7 @@ const buildSameMarketCondition = (
   row: PlainSlipRow,
   rowExpression = "$$row"
 ) => {
+  if (row.marketBet !== undefined) return { $eq: [`${rowExpression}.oddsId`, row.oddsId] };
   if (
     normalizeBetKind(row.betKind) !== BetKind.LIVE
     || !row.marketId
@@ -825,7 +832,7 @@ const buildMergedDraftRowsExpression = (
             $cond: [
               "$$hasConflict",
               "$$currentRows",
-              { $concatArrays: ["$$currentRows", [rowToMerge]] },
+              { $concatArrays: ["$$currentRows", { $literal: [rowToMerge] }] },
             ],
           },
         },
@@ -837,8 +844,19 @@ const buildMergedDraftRowsExpression = (
 export const upsertDraftSlipRow = async (
   userId: string,
   betKind: BetKind,
-  row: PlainSlipRow
-): Promise<{ wasInserted: boolean }> => {
+  row: PlainSlipRow,
+  confirmation?: {
+    expectedBoardRevision: number | null;
+    expectedBoardFingerprint: string | null;
+    replaceEventSelections: boolean;
+  }
+): Promise<{ wasInserted: boolean; accepted: boolean }> => {
+  if (row.marketBet !== undefined) {
+    const quote = parseMarketBet(row.marketBet);
+    if (betKind !== BetKind.PRE_MATCH || quote.eventId !== row.eventId || quote.odds !== row.oddsValue) {
+      throw new MarketValidationError("Market quote does not match the pre-match row");
+    }
+  }
   const activeScope = {
     userId,
     status: {
@@ -847,7 +865,8 @@ export const upsertDraftSlipRow = async (
     ...buildBetKindScope(betKind),
   };
   const now = new Date().toISOString();
-  const sameMarketCondition = buildSameMarketCondition(row);
+  const sameMarketCondition = confirmation?.replaceEventSelections
+    ? { $eq: ["$$row.eventId", row.eventId] } : buildSameMarketCondition(row);
   const currentRows = buildCurrentRowsExpression(betKind);
   const updatePipeline = [
     {
@@ -918,12 +937,12 @@ export const upsertDraftSlipRow = async (
                 in: {
                   $cond: [
                     "$$hasSameMarket",
-                    { $concatArrays: ["$$rowsWithoutSameMarket", [row]] },
+                    { $concatArrays: ["$$rowsWithoutSameMarket", { $literal: [row] }] },
                     {
                       $cond: [
                         "$$hasDuplicateOdds",
                         "$$currentRows",
-                        { $concatArrays: ["$$currentRows", [row]] },
+                        { $concatArrays: ["$$currentRows", { $literal: [row] }] },
                       ],
                     },
                   ],
@@ -1024,9 +1043,42 @@ export const upsertDraftSlipRow = async (
     },
   ];
 
+  const conflict = {
+    $gt: [{ $size: { $filter: {
+      input: currentRows, as: "row", cond: { $and: [
+        { $eq: ["$$row.eventId", row.eventId] },
+        { $ne: ["$$row.oddsId", row.oddsId] },
+        { $or: [
+          { $literal: row.marketBet !== undefined },
+          { $ne: [{ $type: "$$row.marketBet" }, "missing"] },
+        ] },
+      ] },
+    } } }, 0],
+  };
+  const boardMatches = !confirmation ? { $literal: true }
+    : confirmation.expectedBoardRevision === null
+      ? { $eq: [{ $type: "$status" }, "missing"] }
+      : { $and: [
+        { $eq: ["$boardRevision", confirmation.expectedBoardRevision] },
+        { $eq: ["$boardFingerprint", confirmation.expectedBoardFingerprint] },
+      ] };
+  const canMutate = { $and: [
+    boardMatches,
+    confirmation?.replaceEventSelections ? { $literal: true } : { $not: [conflict] },
+  ] };
+  const guardedPipeline = [{ $set: Object.fromEntries(
+    Object.entries(updatePipeline[0].$set).map(([key, value]) => [key, { $cond: [canMutate, value, `$${key}`] }])
+  ) }];
+  const accepted = (value: unknown) => {
+    const slip = asPlainSlip(value);
+    return slip?.status === SlipStatus.DRAFT && slip.rows.some(current => row.marketBet !== undefined
+      ? current.marketBet?.quoteId === row.marketBet.quoteId
+      : current.oddsId === row.oddsId);
+  };
+
   try {
-    const result = await Slip.collection.findOneAndUpdate(activeScope, updatePipeline, {
-      upsert: true,
+    const result = await Slip.collection.findOneAndUpdate(activeScope, guardedPipeline, {
+      upsert: !confirmation || confirmation.expectedBoardRevision === null,
       includeResultMetadata: true,
       sort: {
         status: 1,
@@ -1037,6 +1089,7 @@ export const upsertDraftSlipRow = async (
     });
     return {
       wasInserted: Boolean(result?.lastErrorObject?.upserted),
+      accepted: accepted(result?.value),
     };
   } catch (error) {
     if (!isDuplicateKeyError(error)) {
@@ -1044,8 +1097,9 @@ export const upsertDraftSlipRow = async (
     }
   }
 
-  await Slip.collection.findOneAndUpdate(activeScope, updatePipeline, {
+  const result = await Slip.collection.findOneAndUpdate(activeScope, guardedPipeline, {
     upsert: false,
+    includeResultMetadata: true,
     sort: {
       status: 1,
       timestamp: -1,
@@ -1053,7 +1107,7 @@ export const upsertDraftSlipRow = async (
     },
     returnDocument: "after",
   });
-  return { wasInserted: false };
+  return { wasInserted: false, accepted: accepted(result?.value) };
 };
 
 export const toPlaceBetRows = (
@@ -1088,6 +1142,7 @@ export const toPlaceBetRows = (
       side: row.side ?? undefined,
       selectedAt: row.selectedAt ?? undefined,
       quoteValidUntil: row.quoteValidUntil ?? undefined,
+      marketBet: row.marketBet === undefined ? undefined : parseMarketBet(row.marketBet),
     };
   });
 };
@@ -1499,5 +1554,6 @@ export const toPublishedSubmittedEventData = (
     side: row.side ?? undefined,
     selectedAt: row.selectedAt ?? undefined,
     quoteValidUntil: row.quoteValidUntil ?? undefined,
+    marketBet: row.marketBet === undefined ? undefined : parseMarketBet(row.marketBet),
   })),
 });

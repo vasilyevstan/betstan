@@ -8,6 +8,17 @@ import {
   ISettleSlipRowEvent,
   ModerationStatus,
   ResultingStatus,
+  assertMarketScore,
+  evaluateMarketBetResult,
+  IMarketSettledEvent,
+  marketDomainTime,
+  marketKey,
+  marketObject,
+  marketRevision,
+  MarketValidationError,
+  parseManualMarketDecision,
+  parseMarketBet,
+  parseMarketDefinition,
 } from "@betstan/common";
 import { randomUUID } from "crypto";
 import {
@@ -22,13 +33,14 @@ import SettleSlipRowPublisher from "../event/publisher/SettleSlipRowPublisher";
 import { Bet, BetArchive } from "../model/Bet";
 import FinalScoreLedger from "../model/FinalScoreLedger";
 import LiveSettlementLedger from "../model/LiveSettlementLedger";
+import { ManualMarketLedger } from "../model/ManualMarketLedger";
 import {
   clearPendingModerationResult,
   parkPendingModerationResult,
   PendingModerationReplayOutcome,
   recoverPendingModerationForSlip,
 } from "./pendingModeration";
-import { CashBackBet, cashBackPlacementState, mutateCashBackBet } from "./cashBackState";
+import { cashBackHash, CashBackBet, cashBackPlacementState, mutateCashBackBet } from "./cashBackState";
 
 const PRE_MATCH_PRODUCTS = new Set(["1X2", "Correct Score"]);
 const SETTLED_BET_STATUS_VALUES = [
@@ -115,7 +127,7 @@ function isLiveRow(bet: any, row: any): boolean {
 }
 
 function isPreMatchRow(bet: any, row: any): boolean {
-  return !isLiveRow(bet, row) && PRE_MATCH_PRODUCTS.has(row.productName);
+  return row.marketBet === undefined && !isLiveRow(bet, row) && PRE_MATCH_PRODUCTS.has(row.productName);
 }
 
 function inferMarketType(marketId: string): LiveMarketType | undefined {
@@ -200,6 +212,7 @@ function dedupeRows(
       side: row.side,
       selectedAt: row.selectedAt ?? row.timestamp,
       quoteValidUntil: row.quoteValidUntil,
+      ...(row.marketBet === undefined ? {} : { marketBet: parseMarketBet(row.marketBet) }),
       winningSelection: "",
       resultingTimestamp: "",
       settlementPublicationState: "",
@@ -451,7 +464,7 @@ async function applyLossDecision(
   return Boolean(updatedBet);
 }
 
-async function applyManualVoidDecision(
+async function applyVoidDecision(
   bet: any,
   row: any,
   decision: RowDecision
@@ -462,7 +475,7 @@ async function applyManualVoidDecision(
     "rows.$[target].winningSelection": decision.winningSelection ?? "",
     "rows.$[target].resultingTimestamp": resultingTimestamp,
     "rows.$[target].settlementPublicationState": PUBLICATION_STATE_PENDING,
-    "rows.$[target].pendingRemoval": true,
+    "rows.$[target].pendingRemoval": decision.removeRow === true,
   };
 
   if (decision.winningSide !== undefined) {
@@ -552,8 +565,8 @@ async function applyRowDecision(
     return applyLossDecision(bet, row, decision);
   }
 
-  if (decision.result === ResultingStatus.ROW_VOID && decision.removeRow) {
-    return applyManualVoidDecision(bet, row, decision);
+  if (decision.result === ResultingStatus.ROW_VOID) {
+    return applyVoidDecision(bet, row, decision);
   }
 
   return applyWinningDecision(bet, row, decision);
@@ -1272,7 +1285,88 @@ async function replayStoredSettlementsForSlip(
 ): Promise<void> {
   await replayFinalScoresForSlip(slipId);
   await replayLiveSettlementsForSlip(slipId);
+  await replayCustomSettlementsForSlip(slipId);
   await reconcileSlip(slipId, publishers);
+}
+
+async function replayCustomSettlementsForSlip(slipId: string): Promise<void> {
+  const bet = await Bet.findOne({ slipId, status: ResultingStatus.BET_APPROVED });
+  if (!bet) return;
+  for (const row of bet.rows) {
+    if (row.marketBet === undefined || row.result !== ResultingStatus.ROW_NO_RESULT) continue;
+    const quote = parseMarketBet(row.marketBet);
+    if (quote.eventId !== row.eventId || quote.odds !== row.oddsValue || isLiveRow(bet, row)) {
+      throw new MarketValidationError("Frozen market exposure does not match its stored row");
+    }
+    const manual = quote.selections.find(selection => selection.settlementMode === "MANUAL");
+    let result: ReturnType<typeof evaluateMarketBetResult>;
+    if (manual) {
+      const ledger = await ManualMarketLedger.findOne({
+        eventId: quote.eventId, marketId: manual.marketId, rulesRevision: manual.rulesRevision,
+      }).lean();
+      if (!ledger) continue;
+      const definition = parseMarketDefinition(ledger.template.definition);
+      const outcome = definition.outcomes.find(item => item.key === manual.outcomeKey);
+      if (ledger.template.id !== manual.templateId || ledger.template.version !== manual.templateVersion
+        || definition.name !== manual.marketName || definition.terms !== manual.terms || outcome?.label !== manual.label) {
+        throw new MarketValidationError("Manual result template does not match the accepted snapshot");
+      }
+      result = evaluateMarketBetResult(quote, {
+        eventId: quote.eventId, manualDecision: parseManualMarketDecision(ledger.decision, definition),
+      });
+    } else {
+      const score = await FinalScoreLedger.findOne({ eventId: quote.eventId }).lean();
+      if (!score) continue;
+      result = evaluateMarketBetResult(quote, {
+        eventId: quote.eventId, finalScore: { home: score.homeScore, away: score.awayScore },
+      });
+    }
+    if (result === null) continue;
+    const decision: RowDecision = {
+      result: result === "WIN" ? ResultingStatus.ROW_WIN
+        : result === "LOSS" ? ResultingStatus.ROW_LOSS : ResultingStatus.ROW_VOID,
+      winningSelection: result === "WIN" ? row.oddsName : "",
+      removeRow: false,
+    };
+    const changed = await applyRowDecision(bet, row, decision);
+    if (changed && result === "LOSS") break;
+  }
+}
+
+export async function processManualMarketResult(
+  event: IMarketSettledEvent,
+  publishers: SettlementPublishers
+): Promise<void> {
+  const data = marketObject(event.data, ["decision", "template"], "Manual market result");
+  const source = marketObject(data.template, ["id", "version", "definition", "publishedAt"], "Result template");
+  const template = {
+    id: marketKey(source.id, "Template id"), version: marketRevision(source.version),
+    definition: parseMarketDefinition(source.definition),
+    publishedAt: marketDomainTime(source.publishedAt, "Template publication time"),
+  };
+  const decision = parseManualMarketDecision(data.decision, template.definition);
+  const fingerprint = cashBackHash({ decision, template });
+  const identity = { eventId: decision.eventId, marketId: decision.marketId, rulesRevision: decision.rulesRevision };
+  try {
+    await ManualMarketLedger.updateOne(identity, {
+      $setOnInsert: { ...identity, fingerprint, decision, template },
+    }, { upsert: true });
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === 11000)) throw error;
+  }
+  const ledger = await ManualMarketLedger.findOne(identity).lean();
+  if (!ledger || ledger.fingerprint !== fingerprint) throw new MarketValidationError("Conflicting immutable manual result");
+  const bets = await Bet.find({
+    status: { $in: [...ACTIVE_SETTLEMENT_STATUS_VALUES] },
+    rows: { $elemMatch: {
+      eventId: decision.eventId,
+      "marketBet.selections": { $elemMatch: { marketId: decision.marketId, rulesRevision: decision.rulesRevision } },
+    } },
+  }).select({ slipId: 1 }).lean();
+  for (const bet of bets) {
+    await replayCustomSettlementsForSlip(bet.slipId);
+    await reconcileSlip(bet.slipId, publishers);
+  }
 }
 
 async function discardArchivedPlacement(placedBet: CashBackBet | null): Promise<void> {
@@ -1451,8 +1545,9 @@ export async function processFinalScore(
   publishers: SettlementPublishers
 ): Promise<void> {
   const storedFinalScore = buildStoredFinalScore(event);
+  assertMarketScore(storedFinalScore.homeScore, storedFinalScore.awayScore);
 
-  await FinalScoreLedger.findOneAndUpdate(
+  const authoritativeScore = await FinalScoreLedger.findOneAndUpdate(
     { eventId: storedFinalScore.eventId },
     { $setOnInsert: storedFinalScore },
     {
@@ -1462,6 +1557,7 @@ export async function processFinalScore(
       setDefaultsOnInsert: true,
     }
   );
+  if (!authoritativeScore) throw new Error("Final score authority was not persisted");
 
   const bets = await Bet.find({
     status: {
@@ -1470,9 +1566,7 @@ export async function processFinalScore(
     rows: {
       $elemMatch: {
         eventId: storedFinalScore.eventId,
-        productName: {
-          $in: [...PRE_MATCH_PRODUCTS],
-        },
+        $or: [{ productName: { $in: [...PRE_MATCH_PRODUCTS] } }, { marketBet: { $exists: true } }],
       },
     },
   });
@@ -1486,7 +1580,8 @@ export async function processFinalScore(
       continue;
     }
 
-    await settleApprovedPreMatchRows(bet, storedFinalScore);
+    await settleApprovedPreMatchRows(bet, authoritativeScore.toObject());
+    await replayCustomSettlementsForSlip(bet.slipId);
   }
 
   for (const slipId of slipIds) {

@@ -13,7 +13,7 @@ const HandleProducts = ({
   selectedSelectionKeys,
   uiVariant,
 }) => (
-  (products ?? []).map((product) => {
+  <>{(products ?? []).map((product) => {
     if (product.type === '1X2') {
       return <Product1X2
         away={away}
@@ -42,7 +42,11 @@ const HandleProducts = ({
     }
 
     return null;
-  })
+  })}
+  {!resulted && eventId ? <a className="btn btn-shell inline-control-target"
+    href={`/events/${encodeURIComponent(eventId)}/markets${window.location.search}`}>
+    Markets &amp; Bet Builder
+  </a> : null}</>
 );
 
 export default HandleProducts;

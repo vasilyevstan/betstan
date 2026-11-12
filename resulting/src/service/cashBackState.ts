@@ -48,6 +48,9 @@ export const cashBackPlacementState = (data: IPlaceBetEvent["data"]): {
   cashBackAnySelectionResolved?: boolean;
   cashBackUnavailableReason?: CashBackUnavailableReason;
 } => {
+  if (data.rows.some(row => row.marketBet !== undefined)) {
+    return { cashBackUnavailableReason: "MARKET_BET_UNSUPPORTED" };
+  }
   try {
     const principal = originalStakeMinor(data.wager);
     const selections: CashBackAcceptedSelection[] = [];

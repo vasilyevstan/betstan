@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { isDeepStrictEqual } from "util";
 import {
   BetKind,
   BettingStatus,
@@ -11,12 +12,16 @@ import {
   ModerationDeclineReason,
   ModerationStatus,
   SlipRow,
+  assertMarketSlipCompatibility,
+  MarketValidationError,
+  parseMarketBet,
 } from "@betstan/common";
 import { LiveMarketType, TeamSide } from "../compat/LiveContract";
 import { Bet } from "../model/Bet";
 import { LiveEventMirror } from "../model/LiveEventMirror";
 import { ParkedPlaceBet, ParkedPlaceBetStatus } from "../model/ParkedPlaceBet";
 import { Resulted } from "../model/Resulted";
+import { verifyMarketQuote } from "./MarketQuoteVerifier";
 
 interface NormalizedSlipRow extends SlipRow {
   betKind: BetKind;
@@ -932,6 +937,13 @@ class ModerationService {
     event: NormalizedPlaceBetEvent,
     evaluatedAt: Date
   ): Promise<EvaluationResult> {
+    try { assertMarketSlipCompatibility(event.data.rows); }
+    catch (error) {
+      if (!(error instanceof MarketValidationError)) throw error;
+      return { type: "decision", decision: this.buildDecision(event.data.rows, {
+        betKind: event.data.betKind, declineReason: ModerationDeclineReason.INVALID_SELECTION,
+      }, ModerationStatus.DECLINED, evaluatedAt.toISOString()) };
+    }
     const eventIds = [...new Set(event.data.rows.map((row) => row.eventId))];
     const [resulted, mirrors] = await Promise.all([
       Resulted.find({ eventId: { $in: eventIds } }).lean(),
@@ -955,6 +967,36 @@ class ModerationService {
         affectedRows.push(
           this.buildAffectedRow(row, ModerationDeclineReason.EVENT_RESULTED)
         );
+        continue;
+      }
+
+      if (row.marketBet !== undefined) {
+        if (process.env.EXTENSIBLE_MARKETS_ENABLED !== "true") {
+          affectedRows.push(this.buildAffectedRow(row, ModerationDeclineReason.MARKET_CLOSED));
+          continue;
+        }
+        try {
+          const quote = parseMarketBet(row.marketBet);
+          const submittedAt = Date.parse(event.data.submittedAt ?? "");
+          if (row.betKind !== BetKind.PRE_MATCH || quote.eventId !== row.eventId || quote.odds !== row.oddsValue) {
+            affectedRows.push(this.buildAffectedRow(row, ModerationDeclineReason.INVALID_SELECTION));
+          } else if (!Number.isFinite(submittedAt) || submittedAt < Date.parse(quote.issuedAt)
+            || submittedAt >= Date.parse(quote.expiresAt) || Date.now() >= Date.parse(quote.expiresAt)) {
+            affectedRows.push(this.buildAffectedRow(row, ModerationDeclineReason.STALE_QUOTE));
+          } else {
+            try {
+              if (!await verifyMarketQuote(event.data.userId, quote)) {
+                affectedRows.push(this.buildAffectedRow(row, ModerationDeclineReason.STALE_QUOTE));
+              }
+            } catch (error) {
+              console.error("market_quote_verification_pending", error);
+              pendingEventIds.add(row.eventId);
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof MarketValidationError)) throw error;
+          affectedRows.push(this.buildAffectedRow(row, ModerationDeclineReason.INVALID_SELECTION));
+        }
         continue;
       }
 
@@ -1144,6 +1186,13 @@ class ModerationService {
       }
     }
 
+    for (const row of event.data.rows) {
+      if (row.marketBet !== undefined && Date.now() >= Date.parse(row.marketBet.expiresAt)
+        && !affectedRows.some(affected => affected.rowId === row.id)) {
+        affectedRows.push(this.buildAffectedRow(row, ModerationDeclineReason.STALE_QUOTE));
+      }
+    }
+
     if (affectedRows.length > 0) {
       return {
         type: "decision",
@@ -1274,8 +1323,11 @@ class ModerationService {
       update.$set.submittedAt = event.data.submittedAt;
     }
 
+    const hasMarkets = event.data.rows.some(row => row.marketBet !== undefined);
     try {
-      await Bet.findOneAndUpdate({ slipId: event.data.slipId }, update, {
+      await Bet.findOneAndUpdate({
+        slipId: event.data.slipId, ...(hasMarkets ? {} : { "rows.marketBet": { $exists: false } }),
+      }, hasMarkets ? { $setOnInsert: { ...update.$setOnInsert, ...update.$set } } : update, {
         upsert: true,
       });
     } catch (error) {
@@ -1288,6 +1340,16 @@ class ModerationService {
 
     if (!stored) {
       throw new Error(`Missing moderation record for slip ${event.data.slipId}`);
+    }
+    if (hasMarkets || stored.rows.some(row => row.marketBet !== undefined)) {
+      const identity = (value: Pick<StoredBetRecord, "userId" | "slipId" | "wager" | "rows" | "betKind" | "submittedAt">) =>
+        JSON.parse(JSON.stringify({
+          userId: value.userId, slipId: value.slipId, wager: value.wager, rows: value.rows,
+          betKind: value.betKind, submittedAt: value.submittedAt,
+        }));
+      if (!isDeepStrictEqual(identity(stored), identity(event.data))) {
+        throw new Error("Immutable market submission conflicts with the stored slip");
+      }
     }
 
     return stored;
@@ -1334,7 +1396,10 @@ class ModerationService {
       };
     }
 
-    await Bet.findOneAndUpdate({ slipId: event.data.slipId }, update);
+    await Bet.findOneAndUpdate({
+      slipId: event.data.slipId,
+      ...(event.data.rows.some(row => row.marketBet !== undefined) ? { status: ModerationStatus.RECEIVED } : {}),
+    }, update);
 
     const stored = await this.findStoredBet(event.data.slipId);
 

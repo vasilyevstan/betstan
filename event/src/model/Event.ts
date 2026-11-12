@@ -274,6 +274,29 @@ const eventSchema = new Schema({
     required: false,
     default: null,
   },
+  pricingModel: {
+    type: new Schema({
+      version: { type: Number, required: true, enum: [1] },
+      id: { type: String, required: true },
+      homeExpectedGoals: { type: Number, required: true, min: 0.6, max: 2.6 },
+      awayExpectedGoals: { type: Number, required: true, min: 0.6, max: 2.6 },
+    }, { _id: false }),
+    required: false,
+    select: false,
+  },
+  pricingModelCreatedAt: { type: String, required: false, select: false },
+  pricingRules: {
+    type: [new Schema({
+      productId: { type: String, required: true },
+      oddsId: { type: String, required: true },
+      rule: { type: Schema.Types.Mixed, required: true },
+    }, { _id: false })],
+    required: false,
+    default: undefined,
+    select: false,
+  },
+  marketModelPublicationPending: { type: Boolean, required: false, select: false },
+  marketModelPublicationAttemptedAt: { type: Date, required: false, select: false },
   products: [
     new Schema({
       id: {

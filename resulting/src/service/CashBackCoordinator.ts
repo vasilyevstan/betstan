@@ -53,6 +53,9 @@ const now = async (): Promise<Date> => {
 };
 
 const financialSnapshot = (bet: CashBackBet): CashBackFinancialSnapshot => {
+  if (bet.cashBackUnavailableReason === "MARKET_BET_UNSUPPORTED" || bet.rows.some(row => row.marketBet !== undefined)) {
+    throw new CashBackUnavailable("MARKET_BET_UNSUPPORTED");
+  }
   const stored = bet.cashBackFinancial;
   if (!stored) throw new CashBackUnavailable(
     bet.cashBackUnavailableReason === "LEGACY_PRECISION_UNSUPPORTED"

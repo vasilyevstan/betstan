@@ -282,11 +282,16 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       <div className="card-body backoffice-event__body">
         <header className="backoffice-event__identity">
           <h3 className="h5 backoffice-event__name" id={`backoffice-event-${event.eventId}`}>{eventName}</h3>
-          <p className="backoffice-kickoff">
-            {kickoffLabel
-              ? <>Kickoff: <time dateTime={event.time}>{kickoffLabel}</time></>
-              : 'Kickoff time unavailable'}
-          </p>
+          <div className="backoffice-event__market-navigation">
+            <p className="backoffice-kickoff">
+              {kickoffLabel
+                ? <>Kickoff: <time dateTime={event.time}>{kickoffLabel}</time></>
+                : 'Kickoff time unavailable'}
+            </p>
+            <a className="btn btn-shell inline-control-target backoffice-markets-link"
+              href={`/backoffice/events/${encodeURIComponent(event.eventId)}/markets${window.location.search}`}
+              aria-label={`Markets for ${eventName}`}>Markets</a>
+          </div>
           <div className="backoffice-states">
             <span className={`backoffice-state${isResulted ? ' backoffice-state--recorded' : ''}`}>
               Final result: <strong>{resultLabel}</strong>

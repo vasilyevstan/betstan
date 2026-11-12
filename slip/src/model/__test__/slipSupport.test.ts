@@ -428,7 +428,7 @@ describe("slipSupport", () => {
       BetKind.PRE_MATCH,
       buildRow()
     );
-    expect(retryResult).toEqual({ wasInserted: false });
+    expect(retryResult).toEqual({ wasInserted: false, accepted: false });
     expect(duplicateSpy).toHaveBeenNthCalledWith(
       2,
       expect.any(Object),
@@ -491,7 +491,7 @@ describe("slipSupport", () => {
           oddsId: "metadata-odds-3",
         }
       )
-    ).resolves.toEqual({ wasInserted: false });
+    ).resolves.toEqual({ wasInserted: false, accepted: true });
   });
 
   it("serializes place-bet rows, wagers, placement attempts, and published events", () => {

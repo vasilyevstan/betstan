@@ -8,6 +8,7 @@ import {
   getBetKindLabel,
 } from '../liveBettingUtils';
 import { BOARD_KINDS, getBoardId, getRowId } from '../hook/useSlipBoards';
+import MarketSelections from '../components/MarketSelections';
 
 const formatTimestamp = (value, fallback = '—') => {
   const parsed = new Date(value ?? '');
@@ -153,10 +154,17 @@ const SlipBoardPanel = ({
           <div className="card-text d-flex justify-content-between align-items-start gap-2">
             <div>
               <div>{row.productName}</div>
-              <div className="slip-row-card__selection">{row.oddsName}</div>
+              {row.marketBet ? <MarketSelections marketBet={row.marketBet} />
+                : <div className="slip-row-card__selection">{row.oddsName}</div>}
             </div>
             <div className="slip-row-card__odds">{row.oddsValue}</div>
           </div>
+          {row.marketBet ? <p className="market-help">
+            Quote expires {formatTimestamp(row.marketBet.expiresAt)}.{' '}
+            <a className="inline-control-target" href={`/events/${encodeURIComponent(row.eventId)}/markets${window.location.search}`}>
+              Review a fresh quote
+            </a>
+          </p> : null}
           <BoardModeration row={row} />
         </div>
       </div>;

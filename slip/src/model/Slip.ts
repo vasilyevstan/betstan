@@ -56,6 +56,7 @@ const affectedRowSchema = new Schema(
 );
 
 const slipRowSchema = new Schema({
+  marketBet: { type: Schema.Types.Mixed },
   eventId: {
     type: String,
     required: true,
@@ -127,6 +128,7 @@ const slipRowSchema = new Schema({
 
 const submittedSlipRowSchema = new Schema(
   {
+    marketBet: { type: Schema.Types.Mixed },
     eventId: {
       type: String,
       required: true,

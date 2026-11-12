@@ -44,6 +44,7 @@ class NewEventListener extends AListener<INewEventEvent> {
       home: newEvent.home,
       away: newEvent.away,
       products: newEvent.products,
+      ...newEvent.pricingPersistenceFields(),
     };
 
     try {

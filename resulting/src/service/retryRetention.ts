@@ -4,6 +4,7 @@ import {
   ILiveEventUpdateEvent,
   IModerationResultEvent,
   IPlaceBetEvent,
+  MAX_MARKET_PLACEMENT_BYTES,
 } from "@betstan/common";
 import { createHash } from "node:crypto";
 import { RetryRecordKind } from "../model/RetryRecord";
@@ -13,7 +14,7 @@ export const MAX_RETRY_ERROR_MESSAGE_BYTES = 512;
 export const MAX_RETRY_ERROR_STACK_BYTES = 2048;
 export const MAX_RETRY_ERROR_STACK_FRAMES = 20;
 export const MAX_RETRY_ID_BYTES = 128;
-export const MAX_RETRY_PAYLOAD_BYTES = 256 * 1024;
+export const MAX_RETRY_PAYLOAD_BYTES = MAX_MARKET_PLACEMENT_BYTES + 1024;
 export const MAX_RETRY_SUMMARY_EVENT_IDS = 5;
 
 export interface RetryPayloadSummary {
