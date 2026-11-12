@@ -139,7 +139,9 @@ for name in required:
     head_state = combine([s for s in (head_s.get(name), head_r.get(name)) if s], False)
     merge_state = merge_s.get(name, "missing")
     # master statuses publish on head and merge snapshot; dev only on merge snapshot.
-    states[name] = combine([head_state, merge_state], base_ref == "master")
+    # Check-runs (e.g. oci-validate) attach only to the head, never the merge snapshot.
+    is_check_run = name in head_r and name not in head_s and name not in merge_s
+    states[name] = combine([head_state, merge_state], base_ref == "master" and not is_check_run)
 
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 for name in required:
