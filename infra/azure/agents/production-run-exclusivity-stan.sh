@@ -12,6 +12,13 @@ EXCLUDE_RUN_ID="${EXCLUDE_RUN_ID:-}"
 STALE_DISABLED_MIN_AGE_SECONDS="${STALE_DISABLED_MIN_AGE_SECONDS:-600}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 PROSPECTIVE_PROMOTION_PR="${PROSPECTIVE_PROMOTION_PR:-}"
+EXCLUSIVITY_INVENTORY_ATTEMPTS="${EXCLUSIVITY_INVENTORY_ATTEMPTS:-5}"
+EXCLUSIVITY_INVENTORY_SLEEP_SECONDS="${EXCLUSIVITY_INVENTORY_SLEEP_SECONDS:-3}"
+[[ "$EXCLUSIVITY_INVENTORY_ATTEMPTS" =~ ^[1-9][0-9]?$ &&
+  "$EXCLUSIVITY_INVENTORY_SLEEP_SECONDS" =~ ^[0-9]{1,2}$ ]] || {
+  echo "inventory retry settings must be bounded integers" >&2
+  exit 1
+}
 COMPARE_JQ='{status,ahead_by,behind_by,total_commits,base_commit:{sha:.base_commit.sha},merge_base_commit:{sha:.merge_base_commit.sha},commits:[.commits[]|{sha:.sha}]}'
 # Frozen prepared disabled-workflow transition targets. Separate from both
 # UNMATERIALIZED_WORKFLOWS and the broader protected-operation policy
@@ -477,12 +484,20 @@ observation_master=""
 if [[ "$OBSERVE_TRANSITION" = true ]]; then
   observation_master="$(read_current_master)"
 fi
-for status in queued in_progress waiting requested pending; do
-  gh api "repos/$REPO/actions/runs?status=$status&per_page=100" >>"$tmp_runs"
-  printf '\n' >>"$tmp_runs"
-done
+# The list endpoint is eventually consistent between total_count and
+# workflow_runs; re-read the whole inventory a bounded number of times before
+# failing closed. Nothing else is retried.
+inventory_attempt=1
+while true; do
+  : >"$tmp_runs"
+  rm -f "$tmp_inventory_dir"/*.json
+  for status in queued in_progress waiting requested pending; do
+    gh api "repos/$REPO/actions/runs?status=$status&per_page=100" >>"$tmp_runs"
+    printf '\n' >>"$tmp_runs"
+  done
 
-python3 - "$tmp_runs" "$tmp_workflows" "$OBSERVE_TRANSITION" "$tmp_inventory_dir" >"$tmp_candidates" <<'PY'
+  inventory_rc=0
+  python3 - "$tmp_runs" "$tmp_workflows" "$OBSERVE_TRANSITION" "$tmp_inventory_dir" >"$tmp_candidates" <<'PY' || inventory_rc=$?
 import datetime
 import json
 import os
@@ -524,8 +539,11 @@ while index < len(payload):
         raise SystemExit("active run inventory count is malformed")
     if total_count > 100:
         raise SystemExit("more than 100 active runs requires manual review")
-    if not isinstance(runs, list) or len(runs) != total_count:
+    if not isinstance(runs, list):
         raise SystemExit("active run inventory is incomplete")
+    if len(runs) != total_count:
+        # Distinct status lets the caller re-read an eventually consistent page.
+        sys.exit(75)
     for run in runs:
         if not isinstance(run, dict):
             raise SystemExit("active run inventory entry is malformed")
@@ -591,6 +609,19 @@ while index < len(payload):
 if strict and pages != 5:
     raise SystemExit("active run status inventory is incomplete")
 PY
+  if [[ "$inventory_rc" = 0 ]]; then
+    break
+  fi
+  if [[ "$inventory_rc" != 75 ]]; then
+    exit "$inventory_rc"
+  fi
+  if (( inventory_attempt >= EXCLUSIVITY_INVENTORY_ATTEMPTS )); then
+    echo "active run inventory is incomplete" >&2
+    exit 1
+  fi
+  inventory_attempt=$((inventory_attempt + 1))
+  sleep "$EXCLUSIVITY_INVENTORY_SLEEP_SECONDS"
+done
 
 while IFS=$'\t' read -r \
   run_id workflow_id path status updated_at head_sha event run_attempt
