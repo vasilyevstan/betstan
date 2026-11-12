@@ -210,6 +210,8 @@ RUBY
       infra/azure/agents/production-workflow-inventory-stan.sh
       infra/azure/agents/test-production-workflow-inventory-stan.sh
       infra/azure/agents/test-pr-validation-stan.sh
+      infra/azure/agents/wait-required-checks-stan.sh
+      infra/azure/agents/test-wait-required-checks-stan.sh
       infra/azure/agents/test-workflow-run-provenance-stan.sh
       infra/azure/agents/reconcile-nodepool-profile-stan.sh
       infra/azure/agents/pre-commit-infra-check-stan.sh
@@ -250,6 +252,7 @@ RUBY
     ./infra/azure/agents/test-branch-policy-guard-stan.sh
     ./infra/azure/agents/test-production-workflow-inventory-stan.sh
     ./infra/azure/agents/test-pr-validation-stan.sh
+    ./infra/azure/agents/test-wait-required-checks-stan.sh
     ./infra/azure/agents/test-workflow-run-provenance-stan.sh
     python3 infra/azure/agents/test_image_provenance_stan.py
     ;;

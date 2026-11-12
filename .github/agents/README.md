@@ -40,6 +40,7 @@ Record documentation impact per [CONTRIBUTING.md](../../CONTRIBUTING.md#public-d
 
 ## Waits and operations
 
+- Wait on PR checks only with bounded `infra/azure/agents/wait-required-checks-stan.sh <pr>`; never `gh pr checks --watch` or other unbounded watchers. `trusted-quality-transition/*` is a pending-by-design ledger, never a gate.
 - Use one active observer per wait and one concise state record. Inspect exact jobs and pending gates at startup, resume and checkpoints; route eligible CLI-owned approvals through canonical helpers. Respect environment reviewers or timers only where actually configured; an approved timer is not missing consent.
 - After fifteen minutes without decisive progress, report blocker, evidence and smallest next action. If no required check has succeeded for thirty minutes, inspect remaining jobs and report the blocker; neither authorizes cancellation or a new agent.
 - Timeout, runner exit or lease expiry is not proof that a writer stopped. Never edit live authority, consumed receipts or locks ad hoc; use the exact recovery path. Respect explicit pauses.

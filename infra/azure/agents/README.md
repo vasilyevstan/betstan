@@ -14,6 +14,7 @@ migration workflows they still mention are disabled.
 - `test-workflow-run-provenance-stan.sh` — rejects wrong-SHA artifacts and untrusted build/deploy workflow runs.
 - `production-workflow-inventory-stan.sh` — derives and validates the exact governed Azure-plus-OCI production workflow set matched by a promotion diff.
 - `pr-validation-stan.sh` — inspects trusted required checks for a PR's exact head SHA.
+- `wait-required-checks-stan.sh` — bounded, quiet wait for a PR's branch-protection-required checks on its exact head/merge snapshot; ignores non-required contexts such as `trusted-quality-transition/*`; exits READY/FAILED/STALE/TIMEOUT and grants no authority.
 - `pr-merge-safety-stan.sh` — combines branch policy, exact-SHA validation, mergeability, and production approval gates.
 - `copilot-cli-protected-operation-policy-stan.sh` — one policy for every protected workflow, operation, input set, title, environment, SHA role, and automatic lineage.
 - `copilot_cli_authority_stan.py` — canonical transport-input hashing plus private dispatch intents, one-run authority state, approval receipts, reconciliation, and inert retirement.
