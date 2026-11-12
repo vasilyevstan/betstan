@@ -318,6 +318,7 @@ oci_rabbitmq_queue_rows() {
 oci_application_rabbitmq_queue_names() {
   cat <<'QUEUES'
 backoffice_cash_back_source
+backoffice_market_published
 backoffice_new_event
 backoffice_result_set
 bet_cash_back_outcome
@@ -328,6 +329,7 @@ bet_settle_slip_row
 event_event_visibility
 event_live_projection
 event_live_update.*
+event_market_configured
 event_new_event
 event_result
 gamemaster_cash_back_source
@@ -339,6 +341,7 @@ moderation_place_bet
 resulting_cash_back_request
 resulting_cash_back_source_reply
 resulting_live_event_update
+resulting_market_settled
 resulting_moderation_result
 resulting_place_bet
 resulting_result
