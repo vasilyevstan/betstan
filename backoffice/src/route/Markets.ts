@@ -7,9 +7,10 @@ import {
 } from "@betstan/common";
 import { Event } from "../model/Event";
 import { EventMarket, publicEventMarket } from "../model/EventMarket";
-import { MarketTemplate } from "../model/MarketTemplate";
+import { MarketTemplate, publicMarketTemplate } from "../model/MarketTemplate";
 import { cashBackAuthorityWritable } from "../service/CashBackSourceService";
 import { marketStarters } from "../service/MarketStarters";
+import { parseMarketLayout } from "../service/MarketLayout";
 import { getBackofficePublicationService } from "../service/BackofficePublicationService";
 
 const router = express.Router();
@@ -32,60 +33,62 @@ const requireWriting: RequestHandler = (_req, res, next) => {
 
 router.get("/api/backoffice/market-templates", run(async (_req, res) => {
   const templates = await MarketTemplate.find().sort({ templateId: 1 }).lean();
-  res.send({ enabled: writingEnabled(), templates, starters: marketStarters });
+  res.send({ enabled: writingEnabled(), templates: templates.map(publicMarketTemplate), starters: marketStarters });
 }));
 
 router.post("/api/backoffice/market-templates", requireWriting, run(async (req, res) => {
-  const body = marketObject(req.body, ["requestId", "definition", "starterId"], "Template creation");
+  const body = marketObject(req.body, ["requestId", "definition", "starterId", "layout"], "Template creation");
   const requestId = marketKey(body.requestId, "Request id");
   const starter = body.starterId === undefined ? undefined : marketStarters.find(item => item.id === body.starterId);
   if (body.starterId !== undefined && !starter) throw new MarketValidationError("Unknown starter template");
   const definition = parseMarketDefinition(starter?.definition ?? body.definition);
+  const layout = body.layout === undefined ? undefined : parseMarketLayout(body.layout, definition);
   const templateId = hash(["template", requestId]).slice(0, 32);
-  const fingerprint = hash(definition);
+  const fingerprint = hash(layout ? { definition, layout } : definition);
   try {
     const template = await MarketTemplate.create({
       templateId, revision: 1, archived: false, creationFingerprint: fingerprint,
       versions: [{ id: templateId, version: 1, definition, publishedAt: new Date().toISOString() }],
+      ...(layout ? { layouts: { "1": layout } } : {}),
     });
-    res.status(201).send({ templateId, revision: template.revision, archived: false, versions: template.versions });
+    res.status(201).send(publicMarketTemplate(template.toObject()));
   } catch (error) {
     if (!(error && typeof error === "object" && "code" in error && error.code === 11000)) throw error;
     const existing = await MarketTemplate.findOne({ templateId }).select("+creationFingerprint").lean();
     if (existing?.creationFingerprint !== fingerprint) {
       res.status(409).send({ message: "Request id was already used for a different template" }); return;
     }
-    const { creationFingerprint: _fingerprint, ...template } = existing;
-    res.send(template);
+    res.send(publicMarketTemplate(existing));
   }
 }));
 
 router.put("/api/backoffice/market-templates/:templateId", requireWriting, run(async (req, res) => {
-  const body = marketObject(req.body, ["revision", "definition", "archived"], "Template update");
+  const body = marketObject(req.body, ["revision", "definition", "archived", "layout"], "Template update");
   const templateId = marketKey(req.params.templateId, "Template id");
   const revision = marketRevision(body.revision);
   const updatedRevision = nextRevision(revision);
   const current = await MarketTemplate.findOne({ templateId, revision }).lean();
   if (!current) { res.status(409).send({ message: "Template changed or does not exist; reload it" }); return; }
   if (body.archived !== undefined) {
-    if (typeof body.archived !== "boolean" || body.definition !== undefined) {
+    if (typeof body.archived !== "boolean" || body.definition !== undefined || body.layout !== undefined) {
       throw new MarketValidationError("Archive changes cannot edit a template definition");
     }
     const updated = await MarketTemplate.findOneAndUpdate({ templateId, revision }, {
       $set: { archived: body.archived, revision: updatedRevision },
     }, { new: true });
     if (!updated) { res.status(409).send({ message: "Template changed; reload it" }); return; }
-    res.send(updated); return;
+    res.send(publicMarketTemplate(updated.toObject())); return;
   }
   if (current.archived) { res.status(409).send({ message: "Restore the template before adding a version" }); return; }
   const definition = parseMarketDefinition(body.definition);
+  const layout = body.layout === undefined ? undefined : parseMarketLayout(body.layout, definition);
   const version = nextRevision(current.versions[current.versions.length - 1].version);
   const updated = await MarketTemplate.findOneAndUpdate({ templateId, revision, archived: false }, {
-    $set: { revision: updatedRevision },
+    $set: { revision: updatedRevision, ...(layout ? { [`layouts.${version}`]: layout } : {}) },
     $push: { versions: { id: templateId, version, definition, publishedAt: new Date().toISOString() } },
   }, { new: true });
   if (!updated) { res.status(409).send({ message: "Template changed; reload it" }); return; }
-  res.send(updated);
+  res.send(publicMarketTemplate(updated.toObject()));
 }));
 
 router.get("/api/backoffice/events/:eventId/markets", run(async (req, res) => {
@@ -133,6 +136,7 @@ router.post("/api/backoffice/events/:eventId/markets", requireWriting, run(async
   const source = await MarketTemplate.findOne({ templateId, archived: false }).lean();
   const template = source?.versions.find(item => item.version === version);
   if (!template) { res.status(404).send({ message: "Published template version not found or template archived" }); return; }
+  const layout = source?.layouts?.[version];
   const definition = parseMarketDefinition(template.definition);
   const parameters = bindMarketParameters(definition, body.parameters);
   const pricing = body.pricing === undefined
@@ -143,6 +147,7 @@ router.post("/api/backoffice/events/:eventId/markets", requireWriting, run(async
   const market: EventMarket = {
     marketId, creationFingerprint: fingerprint, revision: 1, rulesRevision: 1, template,
     parameters, pricing, availability: "OPEN", status: "DRAFT", configuredAt: new Date().toISOString(),
+    ...(layout ? { layout: parseMarketLayout(layout, definition) } : {}),
   };
   const event = await Event.findOneAndUpdate({
     eventId, status: { $ne: EventStatus.RESULTED }, newEventPublicationPending: { $ne: true },

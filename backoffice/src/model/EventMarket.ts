@@ -2,6 +2,7 @@ import {
   EventMarketConfiguration, ManualMarketDecision, MarketPricingInstruction, MarketTemplateVersion,
 } from "@betstan/common";
 import { Schema } from "mongoose";
+import { MarketLayout } from "../service/MarketLayout";
 
 export interface EventMarket {
   marketId: string;
@@ -9,6 +10,7 @@ export interface EventMarket {
   revision: number;
   rulesRevision: number;
   template: MarketTemplateVersion;
+  layout?: MarketLayout;
   parameters: Record<string, number>;
   availability: "OPEN" | "SUSPENDED";
   pricing?: MarketPricingInstruction;
@@ -28,6 +30,7 @@ export const eventMarketSchema = new Schema<EventMarket>({
   revision: { type: Number, required: true },
   rulesRevision: { type: Number, required: true },
   template: { type: Schema.Types.Mixed, required: true },
+  layout: { type: Schema.Types.Mixed, required: false },
   parameters: { type: Schema.Types.Mixed, required: true },
   availability: { type: String, required: true, enum: ["OPEN", "SUSPENDED"] },
   pricing: { type: Schema.Types.Mixed, required: false },

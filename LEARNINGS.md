@@ -12,6 +12,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 
 - `common/` is a tracked directory, not a submodule; its candidate version differs from consumers' installed pins. Validate packed bytes and lock-exact rolling combinations.
 - Teach readers a new value before activating its producer; remove bridges only after consumers migrate.
+- Keep presentation metadata outside persisted objects that predecessor writers copy into strict shared payloads. Test mixed-writer creation and retry fingerprints, not only new-code publication.
 
 ## Messaging and persistence
 
