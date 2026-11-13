@@ -38,6 +38,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - Preserve selection identity and focus when order changes; follow product-wide tokens.
 - Claim complete history only with valid cumulative producer evidence; partial inputs stay partial.
 - Measure unresolved geometry on the rendered layout. Navigation visibility is not feature access.
+- Mocked browser suites cannot see a disabled runtime flag: markets shipped with writers off and an unusable page. Activation ends with a real-backend smoke of the core write path.
 
 ## Authorization and fixtures
 

@@ -37,7 +37,7 @@ spec:
             - name: RABBITMQ_URI
               value: "amqp://gaming-rabbitmq-srv"
             - name: EXTENSIBLE_MARKETS_ENABLED
-              value: "false"
+              value: "true"
             # Preserve image-only rollback compatibility with protected Backoffice releases.
             - name: AUTH_SERVICE_URL
               value: "http://gaming-auth-srv:3000"

@@ -49,7 +49,7 @@ spec:
             - name: BACKOFFICE_SERVICE_URL
               value: "http://gaming-backoffice-srv:3000"
             - name: EXTENSIBLE_MARKETS_ENABLED
-              value: "false"
+              value: "true"
             - name: RABBITMQ_URI
               value: "amqp://gaming-rabbitmq-srv"
             - name: EVENT_PUBLIC_SSE_MAX_CONNECTIONS

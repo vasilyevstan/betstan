@@ -282,16 +282,11 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       <div className="card-body backoffice-event__body">
         <header className="backoffice-event__identity">
           <h3 className="h5 backoffice-event__name" id={`backoffice-event-${event.eventId}`}>{eventName}</h3>
-          <div className="backoffice-event__market-navigation">
-            <p className="backoffice-kickoff">
-              {kickoffLabel
-                ? <>Kickoff: <time dateTime={event.time}>{kickoffLabel}</time></>
-                : 'Kickoff time unavailable'}
-            </p>
-            <a className="btn btn-shell inline-control-target backoffice-markets-link"
-              href={`/backoffice/events/${encodeURIComponent(event.eventId)}/markets${window.location.search}`}
-              aria-label={`Markets for ${eventName}`}>Markets</a>
-          </div>
+          <p className="backoffice-kickoff">
+            {kickoffLabel
+              ? <>Kickoff: <time dateTime={event.time}>{kickoffLabel}</time></>
+              : 'Kickoff time unavailable'}
+          </p>
           <div className="backoffice-states">
             <span className={`backoffice-state${isResulted ? ' backoffice-state--recorded' : ''}`}>
               Final result: <strong>{resultLabel}</strong>
@@ -301,12 +296,12 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             </span>
           </div>
         </header>
-        <form className="backoffice-event__controls" aria-label={`Final result for ${eventName}`}
-          aria-describedby="backoffice-result-help" onSubmit={(submitEvent) => {
-          submitEvent.preventDefault();
-          setResults(event.eventId, eventName);
-        }}>
-          <div className="backoffice-scores">
+        <div className="backoffice-event__controls">
+          <form className="backoffice-scores" aria-label={`Final result for ${eventName}`}
+            aria-describedby="backoffice-result-help" onSubmit={(submitEvent) => {
+            submitEvent.preventDefault();
+            setResults(event.eventId, eventName);
+          }}>
             <div className="backoffice-field">
               <label className="form-label" htmlFor={homeInputId}>Home score</label>
               <input
@@ -347,16 +342,16 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
                 )}
               />
             </div>
-          </div>
-          <div className="backoffice-event__actions">
             <button
               type="submit"
-              className="btn backoffice-control backoffice-action backoffice-action--primary"
+              className="btn backoffice-control backoffice-action backoffice-action--primary backoffice-save-result"
               disabled={isResulted || Boolean(busyAction)}
               aria-label={`Save final result for ${eventName}`}
             >
               {busyAction === resultActionId ? 'Saving...' : 'Save final result'}
             </button>
+          </form>
+          <div className="backoffice-event__actions">
             <button
               type="button"
               className="btn backoffice-control backoffice-action"
@@ -370,8 +365,11 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             >
               {busyAction === visibilityActionId ? 'Changing...' : visibilityActionLabel}
             </button>
+            <a className="btn backoffice-control backoffice-action"
+              href={`/backoffice/events/${encodeURIComponent(event.eventId)}/markets${window.location.search}`}
+              aria-label={`Markets for ${eventName}`}>Markets</a>
           </div>
-        </form>
+        </div>
       </div>
     </article>;
   });
