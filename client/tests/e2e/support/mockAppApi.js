@@ -825,6 +825,12 @@ const installAppApiMocks = async (page, state) => {
       return;
     }
 
+    // Match cards ask for Backoffice-published markets; the shared fixture has none.
+    if (method === 'GET' && /^\/api\/event\/events\/[^/]+\/markets$/.test(pathname)) {
+      await fulfillJson(route, { enabled: false, markets: [] });
+      return;
+    }
+
     if (key === 'GET /api/event/stream') {
       await route.fulfill({
         status: 204,

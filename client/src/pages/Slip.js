@@ -160,10 +160,7 @@ const SlipBoardPanel = ({
             <div className="slip-row-card__odds">{row.oddsValue}</div>
           </div>
           {row.marketBet ? <p className="market-help">
-            Quote expires {formatTimestamp(row.marketBet.expiresAt)}.{' '}
-            <a className="inline-control-target" href={`/events/${encodeURIComponent(row.eventId)}/markets${window.location.search}`}>
-              Review a fresh quote
-            </a>
+            Quote expires {formatTimestamp(row.marketBet.expiresAt)}. To refresh it, select the outcome again on the match card.
           </p> : null}
           <BoardModeration row={row} />
         </div>

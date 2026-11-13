@@ -184,7 +184,7 @@ wire contract therefore requires:
 Source appearing in the repository does not silently alter a deployed
 service.
 
-### Reusable markets and Bet Builder
+### Reusable markets
 
 The `1.1.0-rc.3` Common candidate defines reusable market templates, event-bound
 versions, generated-odds previews, frozen selections and revision-bound manual
@@ -244,6 +244,11 @@ Resulting retains first-authoritative score/manual evidence, including evidence
 arriving before placement. A Builder settles as one exposure. A custom void
 retains its original row and price; effective return uses a factor of one for
 that row. New exposures explicitly reject cash back.
+
+The client offers published markets only as one-click singles on pre-match
+event cards; it has no player Builder. The server's Builder quote and
+settlement support remains for compatibility with already accepted Builder
+bets and their history.
 
 Placements containing new markets are limited to 255 KiB of serialized UTF-8
 event data, leaving 1 KiB for the envelope within the durable 256 KiB replay

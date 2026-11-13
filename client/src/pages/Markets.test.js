@@ -3,9 +3,10 @@ import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import axios from 'axios';
-import EventMarkets from './event/EventMarkets';
+import ProductCustomMarkets from './event/product/ProductCustomMarkets';
 import BackofficeMarkets from './account/BackofficeMarkets';
 import { acceptedOddsForBet, possibleReturn, settlementOddsForBet } from '../cashBackUtils';
+import { extractSelectionKeysFromBoards } from '../liveBettingUtils';
 
 jest.mock('axios', () => ({ get: jest.fn(), post: jest.fn(), put: jest.fn() }));
 
@@ -32,8 +33,7 @@ const quote = () => ({
   odds: 3.75, selections: [selection('standard-a'), selection('standard-b', 'Away win')],
 });
 const renderRoute = (component, route) => render(<MemoryRouter initialEntries={[route]}>
-  <Routes><Route path="/events/:eventId/markets" element={component} />
-    <Route path="/backoffice/events/:eventId/markets" element={component} /></Routes>
+  <Routes><Route path="/backoffice/events/:eventId/markets" element={component} /></Routes>
 </MemoryRouter>);
 let market;
 let catalog;
@@ -60,59 +60,81 @@ beforeEach(() => {
 });
 afterEach(() => Object.defineProperty(window, 'crypto', { configurable: true, value: originalCrypto }));
 
-it('uses authoritative Builder quotes and requires explicit same-event replacement', async () => {
+const renderCard = (props = {}) => render(<ProductCustomMarkets eventId="event-a" eventName="Home - Away"
+  resulted={false} selectedSelectionKeys={new Set()} {...props} />);
+const acceptQuotes = () => axios.post.mockImplementation(async (url) => {
+  if (url === '/api/event/events/event-a/market-quotes') return { data: { ...quote(), kind: 'SINGLE' } };
+  if (url === '/api/slip/market-selection') return { data: { accepted: true } };
+  throw new Error(`Unexpected POST ${url}`);
+});
+const outcome = (label) => `Select Match award ${label} in Home - Away at 2.00`;
+
+it('shows published markets on the match card and adds an outcome to the slip in one click', async () => {
+  acceptQuotes();
+  const placed = jest.fn();
+  const selectedSelectionKeys = extractSelectionKeysFromBoards({ PRE_MATCH: { rows: [{ eventId: 'event-a',
+    marketBet: { kind: 'SINGLE', selections: [{ origin: 'TEMPLATE', marketId: 'market-a', outcomeKey: 'b' }] } }] } });
+  renderCard({ onSelectionPlaced: placed, selectedSelectionKeys });
+  expect(await screen.findByRole('heading', { name: 'Match award' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: outcome('Nominee B') })).toHaveAttribute('aria-pressed', 'true');
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: outcome('Nominee A') })); });
+  await waitFor(() => expect(placed).toHaveBeenCalledTimes(1));
+  expect(axios.post.mock.calls).toEqual([
+    ['/api/event/events/event-a/market-quotes', { requestId: expect.any(String), kind: 'SINGLE',
+      selections: [{ origin: 'TEMPLATE', marketId: 'market-a', outcomeKey: 'a', quoteRevision: 2 }] }],
+    ['/api/slip/market-selection', { quoteId: 'quote-a', expectedBoardRevision: null, expectedBoardFingerprint: null,
+      replaceEventSelections: false }],
+  ]);
+});
+
+it('asks before replacing another selection from the same match and refreshes its own selection silently', async () => {
+  acceptQuotes();
   boards.PRE_MATCH = { status: 'DRAFT', boardRevision: 4, boardFingerprint: 'reviewed-board',
-    rows: [{ id: 'old-row', eventId: 'event-a', productName: '1X2', oddsName: 'Home', oddsValue: 2 }] };
-  axios.post.mockImplementation(async (url) => {
-    if (url.endsWith('market-quotes')) return { data: quote() };
-    if (url === '/api/slip/market-selection') return { data: {} };
-    throw new Error(`Unexpected POST ${url}`);
-  });
-  const refresh = jest.fn();
-  renderRoute(<EventMarkets currentUser={{ id: 'player' }} onSelectionPlaced={refresh} />, '/events/event-a/markets');
-  fireEvent.click(await screen.findByRole('button', { name: 'Bet Builder', exact: true }));
-  fireEvent.click(screen.getByRole('button', { name: 'Home win 2.00' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Away win 2.00' }));
-  expect(screen.getByRole('button', { name: 'Nominee A 2.00' })).toBeDisabled();
-  fireEvent.click(screen.getByRole('button', { name: 'Get combined odds' }));
-  const add = await screen.findByRole('button', { name: 'Add quoted selection to slip' });
-  expect(add).toBeDisabled();
-  expect(axios.post.mock.calls[0][1].selections[0]).toEqual({
-    origin: 'STANDARD', marketId: 'standard-a', outcomeKey: 'home', quoteRevision: 1,
-  });
-  fireEvent.click(screen.getByLabelText('Replace these same-match selections with this quote'));
-  fireEvent.click(add);
+    rows: [{ eventId: 'event-a', productName: '1X2', oddsName: 'Home', oddsValue: 2 }] };
+  renderCard();
+  fireEvent.click(await screen.findByRole('button', { name: outcome('Nominee A') }));
+  const replace = await screen.findByRole('button', { name: 'Replace with Nominee A' });
+  expect(replace).toHaveFocus();
+  expect(axios.post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Keep current' }));
+  expect(screen.queryByRole('button', { name: 'Replace with Nominee A' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: outcome('Nominee A') }));
+  const confirm = await screen.findByRole('button', { name: 'Replace with Nominee A' });
+  await act(async () => { fireEvent.click(confirm); });
   await waitFor(() => expect(axios.post).toHaveBeenLastCalledWith('/api/slip/market-selection', {
     quoteId: 'quote-a', expectedBoardRevision: 4, expectedBoardFingerprint: 'reviewed-board', replaceEventSelections: true,
   }));
-  expect(await screen.findByText(/Added to your pre-match slip/)).toBeInTheDocument();
-  expect(refresh).toHaveBeenCalledTimes(1);
+  axios.post.mockClear();
+  boards.PRE_MATCH.rows = [{ eventId: 'event-a', marketBet: { kind: 'SINGLE',
+    selections: [{ origin: 'TEMPLATE', marketId: 'market-a', outcomeKey: 'a' }] } }];
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: outcome('Nominee A') })); });
+  await waitFor(() => expect(axios.post).toHaveBeenLastCalledWith('/api/slip/market-selection', expect.objectContaining({
+    replaceEventSelections: true,
+  })));
+  expect(screen.queryByRole('button', { name: 'Replace with Nominee A' })).not.toBeInTheDocument();
 });
 
-it('enforces ten Builder picks and does not add an expired quote', async () => {
-  catalog.standardSelections = Array.from({ length: 11 }, (_, index) => selection(`market-${index}`, `Selection ${index + 1}`));
-  axios.post.mockResolvedValue({ data: { ...quote(), expiresAt: new Date(Date.now() - 1).toISOString() } });
-  renderRoute(<EventMarkets currentUser={{ id: 'player' }} />, '/events/event-a/markets');
-  fireEvent.click(await screen.findByRole('button', { name: 'Bet Builder', exact: true }));
-  for (let index = 1; index <= 10; index += 1) fireEvent.click(screen.getByRole('button', { name: `Selection ${index} 2.00` }));
-  expect(screen.getByRole('button', { name: 'Selection 11 2.00' })).toBeDisabled();
-  fireEvent.click(screen.getByRole('button', { name: 'Get combined odds' }));
-  expect(await screen.findByRole('button', { name: 'Add quoted selection to slip' })).toBeDisabled();
-  expect(screen.getByText(/Quote expired/)).toBeInTheDocument();
-  expect(axios.post).toHaveBeenCalledTimes(1);
+it('explains sign-in and board conflicts inline and refreshes the slip after a conflict', async () => {
+  const placed = jest.fn();
+  axios.post.mockRejectedValueOnce({ response: { status: 401, data: { message: 'Sign in to generate a betting quote' } } })
+    .mockResolvedValueOnce({ data: { ...quote(), kind: 'SINGLE' } })
+    .mockRejectedValueOnce({ response: { status: 409, data: { message: 'Your board changed.' } } });
+  renderCard({ onSelectionPlaced: placed });
+  const select = await screen.findByRole('button', { name: outcome('Nominee A') });
+  await act(async () => { fireEvent.click(select); });
+  expect(await screen.findByRole('alert')).toHaveTextContent('Log in to add this selection to your slip.');
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: outcome('Nominee A') })); });
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Your board changed.'));
+  expect(placed).toHaveBeenCalledTimes(1);
 });
 
-it('clears stale quote review after a board conflict instead of silently adopting new selections', async () => {
-  axios.post.mockImplementation(async (url) => {
-    if (url.endsWith('market-quotes')) return { data: { ...quote(), kind: 'SINGLE' } };
-    throw { response: { status: 409, data: { message: 'Your board changed.' } } };
-  });
-  renderRoute(<EventMarkets currentUser={{ id: 'player' }} />, '/events/event-a/markets');
-  fireEvent.click(await screen.findByRole('button', { name: 'Nominee A 2.00' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Get quote' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Add quoted selection to slip' }));
-  expect(await screen.findByRole('alert')).toHaveTextContent('Your board changed.');
-  expect(screen.queryByRole('button', { name: 'Add quoted selection to slip' })).not.toBeInTheDocument();
+it('shows nothing for resulted events or when custom markets are not open', async () => {
+  const { container, rerender } = renderCard({ resulted: true });
+  expect(axios.get).not.toHaveBeenCalled();
+  catalog = { ...catalog, enabled: false };
+  rerender(<ProductCustomMarkets eventId="event-a" resulted={false} selectedSelectionKeys={new Set()} />);
+  await waitFor(() => expect(axios.get).toHaveBeenCalledWith('/api/event/events/event-a/markets'));
+  expect(container).toBeEmptyDOMElement();
 });
 
 it('previews generated manual odds without publication and publishes only the reviewed revision', async () => {
@@ -137,6 +159,10 @@ it('previews generated manual odds without publication and publishes only the re
     pricing: { method: 'OPERATOR', odds: { a: 1.9, b: 1.87 } },
   }));
   expect(await screen.findByText(/Publishing\. The market goes live/)).toBeInTheDocument();
+  market = { ...market, status: 'PUBLISHED', publishedConfiguration: configuration };
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  expect(await screen.findByText('Published. It now shows on the match card.')).toBeInTheDocument();
+  expect(screen.queryByText(/Publishing\. The market goes live/)).not.toBeInTheDocument();
 });
 
 it('requires a separate immutable manual-result review and keeps the decision locked', async () => {
@@ -231,6 +257,8 @@ it('creates a manual market in one step and reuses its saved template when the d
   fireEvent.change(screen.getByLabelText('Outcome 1'), { target: { value: 'Home captain' } });
   fireEvent.change(screen.getByLabelText('Outcome 2'), { target: { value: 'Away captain' } });
   fireEvent.change(screen.getByLabelText('How the result is decided'), { target: { value: 'Official award.' } });
+  expect(document.querySelector('.market-add .market-player-preview'))
+    .toHaveTextContent(/Player preview.*Player of the match.*Home captain.*Away captain/);
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create draft' })); });
   expect(await screen.findByRole('alert')).toHaveTextContent('Connection interrupted');
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create draft' })); });
@@ -255,6 +283,7 @@ it('explains why automatic markets are unavailable for an event without a pricin
   expect(await screen.findByText(/no pricing model, so automatic markets are unavailable/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Add market' }));
   expect(screen.getByRole('radio', { name: /Total goals.*Needs a pricing model/ })).toBeDisabled();
+  expect(screen.getByRole('radio', { name: /Total goals/ }).closest('label')).toHaveTextContent(/Total goals 2\.5.*Over.*Under/);
   expect(screen.getByRole('radio', { name: /Manual market/ })).toBeEnabled();
 });
 
@@ -282,23 +311,6 @@ it('keeps manual results available but explains that authoring is off', async ()
   expect(screen.getByRole('button', { name: 'Review final decision' })).toBeDisabled();
   fireEvent.click(screen.getByLabelText('Nominee A'));
   expect(screen.getByRole('button', { name: 'Review final decision' })).toBeEnabled();
-});
-
-it('does not expose a late quote to a different authenticated owner', async () => {
-  let resolveQuote;
-  axios.post.mockImplementation(() => new Promise((resolve) => { resolveQuote = resolve; }));
-  const page = (owner) => <MemoryRouter initialEntries={['/events/event-a/markets']}>
-    <Routes><Route path="/events/:eventId/markets" element={<EventMarkets currentUser={{ id: owner }} />} /></Routes>
-  </MemoryRouter>;
-  const rendered = render(page('first-owner'));
-  fireEvent.click(await screen.findByRole('button', { name: 'Nominee A 2.00' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Get quote' }));
-  await waitFor(() => expect(resolveQuote).toEqual(expect.any(Function)));
-  rendered.rerender(page('second-owner'));
-  await screen.findByRole('button', { name: 'Nominee A 2.00' });
-  await act(async () => { resolveQuote({ data: quote() }); });
-  expect(screen.queryByRole('button', { name: 'Add quoted selection to slip' })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Get quote' })).toBeDisabled();
 });
 
 it('preserves accepted odds while treating retained void exposures as one for returns', () => {
