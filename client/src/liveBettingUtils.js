@@ -409,6 +409,14 @@ export const getPreMatchSelectionKey = ({ eventId, productId, oddsId }) => {
   return `${BET_KIND.PRE_MATCH}:${eventId}:${productId}:${oddsId}`;
 };
 
+export const getCustomMarketSelectionKey = ({ eventId, marketId, outcomeKey }) => {
+  if (!normalizeText(eventId) || !normalizeText(marketId) || !normalizeText(outcomeKey)) {
+    return null;
+  }
+
+  return `${BET_KIND.PRE_MATCH}:custom:${eventId}:${marketId}:${outcomeKey}`;
+};
+
 export const getLiveSelectionKey = ({ eventId, marketId, marketVersion, selectionId }) => {
   if (
     !normalizeText(eventId)
@@ -446,6 +454,18 @@ export const extractSelectionKeysFromBoards = (boards) => {
 
   Object.values(boards ?? {}).forEach((board) => {
     (board?.rows ?? []).forEach((row) => {
+      if (row?.marketBet) {
+        (row.marketBet.selections ?? []).forEach((selection) => {
+          const customKey = selection?.origin === 'TEMPLATE' ? getCustomMarketSelectionKey({
+            eventId: row.eventId, marketId: selection.marketId, outcomeKey: selection.outcomeKey,
+          }) : null;
+          if (customKey) {
+            keys.add(customKey);
+          }
+        });
+        return;
+      }
+
       const selectionKey = getSelectionKeyFromSlipRow(row, board?.betKind);
       if (selectionKey) {
         keys.add(selectionKey);

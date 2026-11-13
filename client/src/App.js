@@ -13,7 +13,6 @@ import Slip from './pages/Slip';
 import Statistics from './pages/account/Statistics';
 import Telemetry from './pages/Telemetry';
 import getRouteIdentity from './routeIdentity';
-import EventMarkets from './pages/event/EventMarkets';
 import BackofficeMarkets from './pages/account/BackofficeMarkets';
 import './styles/markets.css';
 
@@ -150,8 +149,6 @@ const App = () => {
                 />}
               />
               <Route path="/signup" element={<NewUser callback={handleAuthChange} />} />
-              <Route path="/events/:eventId/markets" element={<EventMarkets
-                currentUser={currentUser} onSelectionPlaced={requestSlipRefresh} />} />
               <Route path="/backoffice/events/:eventId/markets" element={<BackofficeMarkets />} />
               <Route path="/logout" element={<LogOut callback={handleAuthChange} />} />
               <Route path="/login" element={<LogIn callback={handleAuthChange} />} />

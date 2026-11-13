@@ -38,3 +38,16 @@ export const numericMarketValues = (values) => Object.fromEntries(Object.entries
   if (value === '' || !Number.isFinite(Number(value))) throw new Error(`Enter a number for ${key}.`);
   return [key, Number(value)];
 }));
+// Player-facing market name: a single bound parameter reads as "Total goals 2.5".
+export const marketTitle = (definition, parameters = {}) => {
+  const name = definition?.name?.trim() ?? '';
+  const bound = (definition?.parameters ?? []).filter((parameter) => (
+    parameters?.[parameter.key] !== undefined && parameters[parameter.key] !== null && parameters[parameter.key] !== ''));
+  if (!bound.length) return name;
+  if (bound.length === 1) return `${name} ${parameters[bound[0].key]}`;
+  return `${name} · ${bound.map((parameter) => `${parameter.label}: ${parameters[parameter.key]}`).join(', ')}`;
+};
+export const formatMarketOdds = (value) => {
+  const odds = value === '' || value === null || value === undefined ? Number.NaN : Number(value);
+  return Number.isFinite(odds) && odds > 1 ? odds.toFixed(2) : '–';
+};

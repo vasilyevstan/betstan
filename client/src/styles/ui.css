@@ -713,6 +713,50 @@ body {
   }
 }
 
+/* Published Backoffice markets share the 1X2/CS block language; two or three outcomes fill one
+   row, longer manual markets wrap into equal touch targets. */
+.product-block--custom {
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.product-block--custom:first-child,
+.product-block--1x2 + .product-block--custom {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.product-custom-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 5.5rem), 1fr));
+  gap: 0.5rem;
+}
+
+.custom-market-replace {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border-subtle);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+  font-size: 0.82rem;
+  text-align: start;
+}
+
+.custom-market-replace p {
+  margin: 0 0 0.4rem;
+}
+
+.custom-market-replace__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.custom-market-replace__actions .btn {
+  min-height: var(--control-target);
+}
+
 .auth-card {
   width: min(100%, 30rem);
   margin-inline: auto;
