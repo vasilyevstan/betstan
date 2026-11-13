@@ -762,6 +762,10 @@ for literal in \
   'require_one_generation_origin' \
   'validate_recovery()' \
   'validate_deploy()' \
+  'git merge-base --is-ancestor "$source_sha" "$deploy_sha"' \
+  'git merge-base --is-ancestor "$deploy_sha" "$SOURCE_SHA"' \
+  "''|.github/*|infra/*|*.md) ;;" \
+  'grep -Fxq "build_run_id=$build_run_id" "$provenance"' \
   '.path == ".github/workflows/oci-ghcr-cache-recovery.yml"' \
   'artifact_name="ghcr-cache-recovery-${source_sha}-${run_id}-1"' \
   'PROVENANCE_MODE=recovery EXPECTED_RECOVERY_RUN_ID="$run_id"' \
