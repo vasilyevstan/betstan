@@ -764,6 +764,7 @@ for literal in \
   'validate_deploy()' \
   'git merge-base --is-ancestor "$source_sha" "$deploy_sha"' \
   'git merge-base --is-ancestor "$deploy_sha" "$SOURCE_SHA"' \
+  'git diff --no-renames --name-only "$source_sha" "$deploy_sha"' \
   "''|.github/*|infra/*|*.md) ;;" \
   'grep -Fxq "build_run_id=$build_run_id" "$provenance"' \
   '.path == ".github/workflows/oci-ghcr-cache-recovery.yml"' \

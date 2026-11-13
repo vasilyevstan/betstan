@@ -475,7 +475,7 @@ jobs:
               git cat-file -e "${deploy_sha}^{commit}"
               git merge-base --is-ancestor "$source_sha" "$deploy_sha"
               git merge-base --is-ancestor "$deploy_sha" "$SOURCE_SHA"
-              changed_paths="$(git diff --name-only "$source_sha" "$deploy_sha")"
+              changed_paths="$(git diff --no-renames --name-only "$source_sha" "$deploy_sha")"
               while IFS= read -r changed_path; do
                 case "$changed_path" in
                   ''|.github/*|infra/*|*.md) ;;
