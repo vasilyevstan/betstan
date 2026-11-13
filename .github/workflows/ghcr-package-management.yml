@@ -464,20 +464,37 @@ jobs:
           validate_deploy() {
             local source_sha="$1" build_run_id="$2" deploy_run_id="$3" role="$4"
             local workflow_id run artifact_name artifact_count artifact_dir provenance
-            local event=workflow_dispatch title="oci-deploy $source_sha"
+            local deploy_sha changed_paths changed_path
             workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
             run="$(gh api "repos/$REPO/actions/runs/$deploy_run_id/attempts/1")"
+            deploy_sha="$(jq -r .head_sha <<<"$run")"
+            [[ "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]
+            if [ "$deploy_sha" != "$source_sha" ]; then
+              # Ancestor resume: a later master deployed this exact build because
+              # every intervening change was under .github/, infra/ or Markdown.
+              git cat-file -e "${deploy_sha}^{commit}"
+              git merge-base --is-ancestor "$source_sha" "$deploy_sha"
+              git merge-base --is-ancestor "$deploy_sha" "$SOURCE_SHA"
+              changed_paths="$(git diff --no-renames --name-only "$source_sha" "$deploy_sha")"
+              while IFS= read -r changed_path; do
+                case "$changed_path" in
+                  ''|.github/*|infra/*|*.md) ;;
+                  *) return 1 ;;
+                esac
+              done <<<"$changed_paths"
+            fi
+            local event=workflow_dispatch title="oci-deploy $deploy_sha"
             if [ "$(jq -r .event <<<"$run")" = workflow_run ]; then
               event="$(
                 ./infra/oci/scripts/upstream_run_binding_stan.py validate-deployment \
-                  --repository "$REPO" --subject-sha "$source_sha" \
+                  --repository "$REPO" --subject-sha "$deploy_sha" \
                   --run-id "$deploy_run_id" --conclusion success
               )" || return 1
               title="$(jq -r .display_title <<<"$run")"
             fi
             jq -e \
               --argjson workflow_id "$workflow_id" \
-              --arg sha "$source_sha" \
+              --arg sha "$deploy_sha" \
               --arg repo "$REPO" \
               --arg event "$event" --arg title "$title" '
                 .workflow_id == $workflow_id and
@@ -507,9 +524,12 @@ jobs:
             [ -z "$(find "$artifact_dir" -type l -print -quit)" ]
             provenance="$artifact_dir/provenance.txt"
             [ -f "$provenance" ]
-            grep -Fxq "source_sha=$source_sha" "$provenance"
+            grep -Fxq "source_sha=$deploy_sha" "$provenance"
             grep -Fxq "deployment_run_id=$deploy_run_id" "$provenance"
             grep -Fxq 'deployment_run_attempt=1' "$provenance"
+            if [ "$deploy_sha" != "$source_sha" ]; then
+              grep -Fxq "build_run_id=$build_run_id" "$provenance"
+            fi
             cmp -s \
               "$artifact_dir/images.tsv" \
               "$RUNNER_TEMP/protected-${role}-build-${build_run_id}/verified-images.tsv"
