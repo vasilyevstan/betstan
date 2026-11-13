@@ -8,6 +8,9 @@ const prepare = async (page) => {
   state.currentUser = { id: 'market-player', email: 'player@example.com', role: 'USER' };
   state.backofficeEvents = createBackofficeEvents();
   const event = state.backofficeEvents[0];
+  state.events = [{ ...event, products: [{ id: 'northport-1x2', type: '1X2', name: '1X2', odds: [
+    { id: 'home', name: 'Northport', value: 2.2 }, { id: 'draw', name: 'Draw', value: 3.4 }, { id: 'away', name: 'Lakewood', value: 3.1 },
+  ] }] }];
   const definition = {
     schemaVersion: 1, name: 'Total goals', settlementMode: 'FINAL_SCORE', outcomeMode: 'EXCLUSIVE', coverage: 'COMPLETE',
     terms: 'Settled on the full-time score.', parameters: [{ key: 'line', label: 'Goals line', minimum: 0.5, maximum: 10.5, defaultValue: 2.5 }],
@@ -19,13 +22,12 @@ const prepare = async (page) => {
   const template = { id: 'totals', version: 1, definition, publishedAt: '2025-01-01T00:00:00Z' };
   let market = { schemaVersion: 1, eventId: event.eventId, marketId: 'totals-a', revision: 1, rulesRevision: 1,
     template, parameters: { line: 2.5 }, pricing: { method: 'SCORE_MODEL' }, availability: 'OPEN', status: 'DRAFT' };
-  const home = { origin: 'STANDARD', marketId: 'standard-1x2', outcomeKey: 'home', quoteRevision: 1,
-    rulesRevision: 1, templateId: 'standard-1x2', templateVersion: 1, marketName: 'Match result', label: 'Northport win',
-    terms: 'Full-time score', settlementMode: 'FINAL_SCORE', pricingMethod: 'SCORE_MODEL', odds: 2.2,
-    rule: { kind: 'COMPARE', metric: 'GOAL_DIFFERENCE', comparison: 'GT', value: 0 } };
-  const total = { ...home, origin: 'TEMPLATE', marketId: 'totals-a', templateId: 'totals', outcomeKey: 'over',
-    marketName: 'Total goals', label: 'Over', rule: { kind: 'COMPARE', metric: 'TOTAL_GOALS', comparison: 'GT', value: 2.5 } };
+  const total = { origin: 'TEMPLATE', marketId: 'totals-a', outcomeKey: 'over', quoteRevision: 2, rulesRevision: 1,
+    templateId: 'totals', templateVersion: 1, marketName: 'Total goals', label: 'Over', terms: 'Settled on the full-time score.',
+    settlementMode: 'FINAL_SCORE', pricingMethod: 'SCORE_MODEL', odds: 2.14,
+    rule: { kind: 'COMPARE', metric: 'TOTAL_GOALS', comparison: 'GT', value: 2.5 } };
   const quotes = [];
+  const quoteRequests = [];
   const writes = [];
   await installFakeEventSource(page);
   await installAppApiMocks(page, state);
@@ -52,16 +54,13 @@ const prepare = async (page) => {
     }
     if (url.pathname === `/api/event/events/${event.eventId}/markets`) return send({
       enabled: true, event, hasRetainedModel: true,
-      standardSelections: [home, ...Array.from({ length: 49 }, (_, index) => ({
-        ...home, marketId: 'correct-score', marketName: 'Correct score', outcomeKey: `score-${index}`,
-        label: `${Math.floor(index / 7)}:${index % 7}`, odds: 10 + index,
-      }))],
-      markets: [{ configuration: market, preview: { odds: { over: 2.14, under: 1.66 } }, builderEligible: true }],
+      markets: market.status === 'PUBLISHED' ? [{ configuration: market, preview: { odds: { over: 2.14, under: 1.66 } } }] : [],
     });
     if (url.pathname === `/api/event/events/${event.eventId}/market-quotes`) {
       const now = Date.now();
-      quotes.push({ ...route.request().postDataJSON(), schemaVersion: 1, quoteId: 'reviewed-quote',
-        eventId: event.eventId, modelId: 'retained-model', selections: [home, total], odds: 3.25,
+      quoteRequests.push(route.request().postDataJSON());
+      quotes.push({ schemaVersion: 1, quoteId: 'reviewed-quote',
+        kind: 'SINGLE', eventId: event.eventId, modelId: 'retained-model', selections: [total], odds: 2.14,
         issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 30000).toISOString() });
       return send(quotes[quotes.length - 1]);
     }
@@ -69,24 +68,24 @@ const prepare = async (page) => {
       writes.push({ path: url.pathname, body: route.request().postDataJSON() });
       state.boards.PRE_MATCH = { id: 'draft', betKind: 'PRE_MATCH', status: 'DRAFT', wager: 10,
         boardRevision: 1, boardFingerprint: 'draft-fingerprint', rows: [{
-          id: 'builder-row', eventId: event.eventId, eventName: event.name, productName: 'Bet Builder',
-          oddsName: 'Northport win + Over', oddsValue: 3.25, betKind: 'PRE_MATCH', marketBet: quotes[0],
+          id: 'custom-row', eventId: event.eventId, eventName: event.name, productName: 'Custom market', productId: 'totals-a',
+          oddsName: 'Over', oddsValue: 2.14, betKind: 'PRE_MATCH', marketBet: quotes[0],
         }] };
       return send(state.boards.PRE_MATCH);
     }
     return route.fallback();
   });
-  return { state, event, writes, definition, quotes };
+  return { state, event, writes, definition, quotes, quoteRequests };
 };
 
 for (const theme of ['dark', 'light']) {
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
-  test(`market authoring and Builder review at ${viewport.width}px${theme === 'light' ? ' light' : ''}`, async ({ page }, testInfo) => {
+  test(`market authoring and match-card selection at ${viewport.width}px${theme === 'light' ? ' light' : ''}`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    const { state, event, writes, quotes } = await prepare(page);
+    const { state, event, writes, quotes, quoteRequests } = await prepare(page);
     const capture = async (name) => {
       await page.evaluate(() => { window.scrollTo(0, 0); });
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1);
@@ -109,6 +108,8 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.getByRole('button', { name: 'Add market' }).click();
     await expect(page.getByRole('radio', { name: /Manual market/ })).toBeChecked();
     await expect(page.getByRole('radio', { name: /Total goals.*Template v1/ })).toBeEnabled();
+    await expect(page.locator('.market-choice .market-preview').filter({ hasText: 'Total goals 2.5' })).toContainText('Over');
+    await expect(page.locator('.market-player-preview')).toContainText('Player preview');
     await capture('backoffice-add-market');
     await page.getByRole('button', { name: 'Cancel' }).click();
     await page.getByRole('tab', { name: 'Template library' }).click();
@@ -116,22 +117,21 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.getByLabel('Start from').selectOption('totals');
     await expect(page.getByRole('group', { name: 'New template' })).toBeVisible();
     await expect(page.getByLabel('Template name')).toHaveValue('Total goals');
+    await expect(page.locator('.market-definition-editor .market-player-preview')).toContainText('Total goals 2.5');
     await capture('template-rules');
-    await page.goto(`/events/${event.eventId}/markets?theme=${theme}`);
-    await page.getByRole('button', { name: 'Bet Builder', exact: true }).click();
-    await page.getByRole('button', { name: 'Northport win 2.20' }).click();
-    await page.getByRole('button', { name: 'Over 2.14', exact: true }).click();
-    await expect(page.getByText('49 outcomes (0 selected)', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: '0:0 10.00' })).toBeHidden();
-    await expect(page.getByText('Goals line: 2.5', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Get combined odds' }).click();
-    await expect(page.getByRole('button', { name: 'Add quoted selection to slip' })).toBeEnabled();
-    await capture('builder-review');
-    await page.getByRole('button', { name: 'Add quoted selection to slip' }).click();
-    await expect(page.getByText(/Added to your pre-match slip/)).toBeVisible();
+    await page.goto(`/?theme=${theme}`);
+    const card = page.getByRole('article', { name: event.name });
+    await expect(card.getByRole('heading', { name: 'Total goals 2.5' })).toBeVisible();
+    await expect(card.getByRole('link', { name: /Markets/ })).toHaveCount(0);
+    const over = card.getByRole('button', { name: `Select Total goals 2.5 Over in ${event.name} at 2.14` });
+    await over.click();
+    await expect(over).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByRole('complementary').getByText(/Quote expires/)).toBeVisible();
+    expect(quoteRequests).toEqual([{ requestId: expect.any(String), kind: 'SINGLE',
+      selections: [{ origin: 'TEMPLATE', marketId: 'totals-a', outcomeKey: 'over', quoteRevision: 2 }] }]);
     expect(writes[2].body).toEqual({ quoteId: 'reviewed-quote', expectedBoardRevision: null,
       expectedBoardFingerprint: null, replaceEventSelections: false });
+    await capture('match-card-market');
     state.boards.PRE_MATCH = null;
     state.bets = [{ id: 'retained-history', slipId: 'retained-history', userId: 'market-player',
       status: 'WIN', betKind: 'PRE_MATCH', wager: 10, timestamp: new Date().toISOString(), rows: [

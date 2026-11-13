@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { PlayerPreview } from '../../components/MarketPreview';
 import { marketActionClass, marketComparisons, marketMetrics, uniqueMarketKey } from '../../marketUi';
 
 const numberInput = (value) => value === '' ? '' : Number(value);
@@ -184,6 +185,8 @@ const MarketDefinitionEditor = ({ initial, disabled, onSave, onCancel, versioned
       <button className={marketActionClass()} type="button" disabled={definition.outcomes.length >= 64} onClick={() => change('outcomes', deriveKeys([
         ...definition.outcomes, ...withLocalIdentity([{ key: '', label: '', ...(automatic ? { rule: newRule() } : {}) }]),
       ], 'outcome'))}>Add outcome</button>
+      <PlayerPreview definition={definition} note="default values; odds are set per event"
+        parameters={Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, parameter.defaultValue]))} />
       <div className="market-form-actions">
         <button className={marketActionClass(true)} type="submit">{versioned ? 'Save new version' : 'Save template'}</button>
         <button className={marketActionClass()} type="button" onClick={onCancel}>Cancel</button>

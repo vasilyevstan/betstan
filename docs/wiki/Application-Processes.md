@@ -19,7 +19,7 @@ For the service map and message catalog, see [[Architecture]] and
 | Scheduled event creation | Event | Gamemaster, Backoffice |
 | Manual event creation and control | Backoffice | Event, Gamemaster |
 | Pre-match product generation | Event | Client |
-| Reusable markets and Bet Builder | Backoffice, Event | Slip, Moderation, Resulting, Bet, Client |
+| Reusable markets | Backoffice, Event | Slip, Moderation, Resulting, Bet, Client |
 | Live simulation and pricing | Gamemaster | Event, Moderation, Resulting |
 | Draft slip maintenance | Slip | Event, Client |
 | Placement and moderation | Slip, Moderation | Bet, Resulting |
@@ -272,7 +272,7 @@ Prices are generated when an event is created, not randomly regenerated on
 every read. Compatibility logic can derive deterministic expected goals from
 an existing event ID when older stored data needs product completion.
 
-## Reusable markets and Bet Builder
+## Reusable markets
 
 The **Markets** button sits beside the visibility button on each compact
 Backoffice event and opens `/backoffice/events/:eventId/markets`; it does not
@@ -282,14 +282,17 @@ Backoffice, Event, Slip and Moderation manifests.
 
 The page has two tabs. **Event markets** lists the event's markets with status
 beside the selected market's editor. **Add market** starts from a manual market
-(the default), a saved template version or a starter, then **Create draft**
+(the default), a saved template version or a starter. Each choice shows a
+small preview of the block players will see on the match card, and the form
+shows a live player preview of the name, bound values and outcomes. **Create draft**
 saves the template and the event draft together; a retry reuses the saved
 template. Automatic choices are disabled with "Needs a pricing model" on
 legacy events that have no retained model, and one banner explains why
 authoring is unavailable (feature off, kickoff passed, resulted, or load
 failure). **Template library** creates custom definitions or new versions,
 optionally starting from a starter, and archives or restores templates.
-Outcome and parameter keys are derived from their labels unless edited. The guided rule editor supports full-time score conditions or explicit
+Library rows and the template editor show the same player preview using
+default values. Outcome and parameter keys are derived from their labels unless edited. The guided rule editor supports full-time score conditions or explicit
 operator-declared outcomes, not executable formulas. Versions already used by
 events and accepted bets never follow later library edits.
 
@@ -297,11 +300,13 @@ events and accepted bets never follow later library edits.
 equal-chance, probability and relative-weight assumptions for manual markets.
 Probabilities use 0-1, not percentages. Partial weight distributions include
 the unlisted-result weight. Manual odds can be edited; score-price overrides
-lose Builder eligibility. **Save draft** does not publish and keeps the
+lose Builder eligibility. The editor's player preview shows the current
+odds. **Save draft** does not publish and keeps the
 previous odds when manual odds are incomplete. **Publish market** is disabled
 with a stated reason until the market is publishable, then shows pending,
 available or rejected status; pricing confirmation is required
-before new acceptance. A concurrent revision preserves the operator's unsaved
+before new acceptance. After **Refresh** shows the market as published, the
+page confirms that it now appears on the match card. A concurrent revision preserves the operator's unsaved
 inputs and requires an explicit reload instead of silently discarding them.
 
 Published manual markets expose a separate result review. The operator chooses
@@ -309,19 +314,21 @@ winning outcomes or void, reviews the consequences, then confirms one immutable
 decision. A final match score does not settle a manual market. Pending result
 publication retries automatically, including when new-market writers are off.
 
-On `/events/:eventId/markets`, a registered player chooses a custom single or
-2-10 modeled selections in **Bet Builder**. The Builder may include retained
-standard selections. Large outcome groups are disclosed rather than filling
-the page with Correct Score buttons. Manual and operator-priced outcomes are
-restricted to singles or different-match accumulators.
+Markets are authored only in the Backoffice. There is no player-side market
+page or Bet Builder; old `/events/:eventId/markets` links fall back to the
+event list. Published, open markets of an online pre-kickoff event appear on
+its pre-match card below 1X2 and Correct Score, in the same button style.
+Suspended markets show disabled buttons.
 
-**Get quote** / **Get combined odds** requests one authoritative combined price
-with a short expiry. The reviewed quote lists frozen rules and terms. Adding
-it to the pre-match slip uses that quote ID and the reviewed board
-revision/fingerprint. Existing same-event selections require an explicit
-replacement checkbox. A stale board, unavailable market or expired quote
-requires another review; there is no silent replacement or repricing.
-The player must still enter a wager and place the slip before quote expiry.
+One click on an outcome requests an authoritative single quote with a short
+expiry and adds it to the pre-match slip with the current board
+revision/fingerprint. Clicking the same outcome again refreshes its quote. If
+the slip already holds another selection from that match, the card asks
+**Replace with …** or **Keep current**; custom markets cannot be combined with
+other selections from the same match. Signed-out players, a slip under review,
+a changed board and unavailable markets get an inline message; a conflict
+refreshes the slip. The player must still enter a wager and place the slip
+before quote expiry.
 
 Slip and My Bets retain grouped selection details. Accepted total odds remain
 historical; a void custom exposure contributes one to effective return. For
@@ -340,7 +347,7 @@ a winning row at 3 retains accepted total odds 15 but reports nominal return
 
 These are source capabilities, not proof of activation. Writers default off.
 Legacy events without retained pricing models do not support automatic new
-markets or Builders, but may support manual markets. There is no automatic
+markets, but may support manual markets. There is no automatic
 live/player-statistics provider or event-cancellation feed in this slice.
 See [[Architecture]] for lifecycle, replay budgets and compatible rollback.
 
@@ -640,7 +647,9 @@ administrator-only screen.
 
 Its current responsibilities are:
 
-- list event catalog and durable operation state;
+- list event catalog and durable operation state; resulted events leave the
+  list 24 hours after kickoff unless a published manual market still awaits
+  its result (they are hidden, not deleted, because bet history references them);
 - show each event's scheduled kickoff time;
 - create a bounded synthetic event;
 - request an explicit online or offline visibility target;

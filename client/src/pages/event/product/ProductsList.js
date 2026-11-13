@@ -1,6 +1,7 @@
 import React from 'react';
 import Product1X2 from './Product1X2';
 import ProductCS from './ProductCS';
+import ProductCustomMarkets from './ProductCustomMarkets';
 
 const HandleProducts = ({
   away,
@@ -43,10 +44,14 @@ const HandleProducts = ({
 
     return null;
   })}
-  {!resulted && eventId ? <a className="btn btn-shell inline-control-target"
-    href={`/events/${encodeURIComponent(eventId)}/markets${window.location.search}`}>
-    Markets &amp; Bet Builder
-  </a> : null}</>
+  <ProductCustomMarkets
+    eventId={eventId}
+    eventName={eventName}
+    onSelectionPlaced={onSelectionPlaced}
+    resulted={resulted}
+    selectedSelectionKeys={selectedSelectionKeys}
+    uiVariant={uiVariant}
+  /></>
 );
 
 export default HandleProducts;

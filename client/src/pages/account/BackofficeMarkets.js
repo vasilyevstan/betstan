@@ -7,11 +7,14 @@ import {
   createMarketRequestId, describeMarketRule, marketActionClass, marketError, marketKeysFromLabels, numericMarketValues,
 } from '../../marketUi';
 import MarketDefinitionEditor, { blankMarketDefinition } from './MarketDefinitionEditor';
+import MarketPreview, { PlayerPreview } from '../../components/MarketPreview';
 
 const TEMPLATES_PATH = '/api/backoffice/market-templates';
 const MIN_ODDS = 1.01;
 const MAX_ODDS = 1000;
 const TABS = [['event', 'Event markets'], ['library', 'Template library']];
+const PUBLISHING_MESSAGE = 'Publishing. The market goes live when pricing is confirmed.';
+const MANUAL_SAMPLE = { name: 'Your market', parameters: [], outcomes: [{ key: 'a', label: 'Outcome 1' }, { key: 'b', label: 'Outcome 2' }] };
 
 const requestIdentity = (reference, body) => {
   const fingerprint = JSON.stringify(body);
@@ -27,6 +30,7 @@ const parameterSummary = (definition, values) => definition.parameters
 const resultBadge = (definition) => definition.settlementMode === 'FINAL_SCORE' ? 'Automatic result' : 'Manual result';
 const validOdds = (value) => value !== '' && value !== null && value !== undefined
   && Number.isFinite(Number(value)) && Number(value) >= MIN_ODDS && Number(value) <= MAX_ODDS;
+const selectedMarketStatus = (data, marketId) => data?.markets.find((item) => item.marketId === marketId)?.status;
 const formatKickoff = (value) => {
   const parsed = new Date(value ?? '');
   return Number.isNaN(parsed.getTime()) ? 'Kickoff time unavailable' : `Kickoff ${format(parsed, 'MMMM do, yyyy H:mm')}`;
@@ -167,7 +171,7 @@ const MarketEditor = ({
       ...(includePricing ? {
         pricing: pricing.method === 'SCORE_MODEL' ? pricing : { ...pricing, odds: numericMarketValues(pricing.odds) },
       } : {}),
-    }), publish ? 'Publishing. The market goes live when pricing is confirmed.'
+    }), publish ? PUBLISHING_MESSAGE
       : includePricing ? 'Draft saved.' : 'Draft saved without odds. Enter odds for every outcome before publishing.');
     if (saved) setReviewedRevision(saved.revision);
   };
@@ -257,9 +261,11 @@ const MarketEditor = ({
         {automatic && preview ? <label className="market-check-label market-help">
           <input type="checkbox" checked={pricing.method === 'OPERATOR'} onChange={(event) => setPricing(event.target.checked
             ? { method: 'OPERATOR', odds: preview.odds } : { method: 'SCORE_MODEL' })} />
-          Edit generated odds (edited odds can't be used in Bet Builder)
+          Edit generated odds
         </label> : null}
         {preview ? <p role="status" className="market-help">Price preview. Review the odds, then publish.</p> : null}
+        <PlayerPreview definition={definition} parameters={parameters} odds={odds}
+          note={odds ? null : 'odds appear once generated or entered'} />
       </section>
       {market.decision ? null : <div className="market-editor__footer">
         {publishBlocker ? <p className="market-help market-editor__reason" id="market-publish-reason">{publishBlocker}</p> : null}
@@ -321,10 +327,11 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
             {definition ? <>
               <span className="market-badge">{resultBadge(definition)}</span>
               <span className="market-badge">{item.kind === 'starter' ? 'Starter' : `Template v${item.version}`}</span>
-              {unavailable ? <span>Needs a pricing model</span> : definition.parameters.length
-                ? <span>{parameterSummary(definition)}</span> : null}
+              {unavailable ? <span>Needs a pricing model</span> : null}
             </> : <span>You name the outcomes, set the odds and declare the result.</span>}
           </span>
+          <MarketPreview compact definition={definition ?? MANUAL_SAMPLE}
+            parameters={definition ? parameterDefaults(definition) : {}} />
         </span>
       </label>
     </li>;
@@ -361,6 +368,9 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
           value={manual.terms} onChange={(event) => setManual({ ...manual, terms: event.target.value })} /></label>
         <p className="market-help">Only one outcome can win. It is saved as a template so you can reuse it.</p>
       </>}
+      <PlayerPreview definition={option ? option.definition : {
+        name: manual.name, parameters: [], outcomes: manual.outcomes.map((label, index) => ({ key: `outcome-${index}`, label })),
+      }} parameters={option ? values : {}} note="odds are set after you create the draft" />
     </fieldset>
     <div className="market-form-actions">
       <button type="submit" className={marketActionClass(true)} disabled={busy || Boolean(option && needsModel(option.definition))}>
@@ -409,6 +419,7 @@ const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive }) => {
             <span className="market-badge">v{latest.version}</span>
             {template.archived ? <span className="market-badge market-badge--muted">Archived</span> : null}
           </span>
+          <MarketPreview compact definition={latest.definition} parameters={parameterDefaults(latest.definition)} />
         </div>
         <div className="market-template-row__actions">
           <button type="button" className={marketActionClass()} disabled={busy || !enabled || template.archived || Boolean(draft)}
@@ -472,6 +483,12 @@ const BackofficeMarketView = ({ eventId }) => {
     const timer = setInterval(() => { if (!acting.current) void reload(); }, 3000);
     return () => clearInterval(timer);
   }, [pending, reload]);
+  const selectedStatus = selectedMarketStatus(data, selectedId);
+  useEffect(() => {
+    // Replace the publish acknowledgement once polling shows the outcome.
+    if (pending || message !== PUBLISHING_MESSAGE) return;
+    setMessage(selectedStatus === 'PUBLISHED' ? 'Published. It now shows on the match card.' : '');
+  }, [pending, message, selectedStatus]);
   const run = async (action, success) => {
     if (acting.current) return null;
     acting.current = true;

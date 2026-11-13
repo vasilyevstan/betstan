@@ -21,6 +21,11 @@ jest.mock('./ProductCS', () => {
   );
 });
 
+jest.mock('./ProductCustomMarkets', () => {
+  const ReactModule = require('react');
+  return (props) => ReactModule.createElement('div', { 'data-testid': 'product-custom' }, props.eventId);
+});
+
 it('routes known products and ignores missing or unknown products', () => {
   const { rerender } = render(<ProductsList products={undefined} />);
   expect(screen.queryByTestId('product-1x2')).toBeNull();
@@ -46,4 +51,5 @@ it('routes known products and ignores missing or unknown products', () => {
   expect(screen.getByTestId('product-1x2')).toHaveTextContent('one');
   expect(screen.getByTestId('product-cs')).toHaveTextContent('two');
   expect(screen.queryByText('three')).toBeNull();
+  expect(screen.getByTestId('product-custom')).toHaveTextContent('event-1');
 });

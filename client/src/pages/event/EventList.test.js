@@ -17,6 +17,8 @@ import {
   getPreMatchSelectionKey,
 } from '../../liveBettingUtils';
 
+jest.mock('./product/ProductCustomMarkets', () => () => null);
+
 jest.mock('axios', () => ({
   post: jest.fn(),
 }));
