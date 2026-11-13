@@ -1670,7 +1670,8 @@ body {
 
 /* The shared My Bets control grammar supplies touch size, strong token
    boundaries and focus; numeric editors intentionally stay a bounded pair. */
-.backoffice-board .backoffice-control {
+.backoffice-board .backoffice-control,
+.backoffice-markets .backoffice-control {
   min-width: 44px;
   min-height: 44px;
   border-color: var(--text-subtle);
@@ -1678,25 +1679,35 @@ body {
   color: var(--text-main);
 }
 
-.backoffice-board .backoffice-action {
+.backoffice-board .backoffice-action,
+.backoffice-markets .backoffice-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0.5rem 0.7rem;
   background: var(--surface-soft);
   font-size: 0.875rem;
   font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  text-decoration: none;
   white-space: normal;
 }
 
-.backoffice-board .backoffice-action--primary {
+.backoffice-board .backoffice-action--primary,
+.backoffice-markets .backoffice-action--primary {
   background: var(--accent);
   color: var(--accent-contrast);
 }
 
-.backoffice-board .backoffice-action:hover:not(:disabled) {
+.backoffice-board .backoffice-action:hover:not(:disabled),
+.backoffice-markets .backoffice-action:hover:not(:disabled) {
   border-color: var(--text-main);
   box-shadow: inset 0 0 0 1px var(--text-main);
 }
 
-.backoffice-board .backoffice-control:disabled {
+.backoffice-board .backoffice-control:disabled,
+.backoffice-markets .backoffice-control:disabled {
   opacity: 1;
   background: var(--surface-elevated);
   color: color-mix(in srgb, var(--text-subtle) 90%, var(--text-main));
@@ -1704,6 +1715,7 @@ body {
 }
 
 .backoffice-board .backoffice-control:focus-visible,
+.backoffice-markets .backoffice-control:focus-visible,
 .backoffice-results-heading:focus {
   outline: 3px solid var(--text-main);
   outline-offset: 3px;
@@ -1806,7 +1818,16 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
+  align-items: end;
   min-width: 0;
+}
+
+.backoffice-event__actions {
+  align-items: stretch;
+}
+
+.backoffice-save-result {
+  grid-column: 1 / -1;
 }
 
 .backoffice-scores input {
@@ -1830,7 +1851,16 @@ body {
   }
 
   .backoffice-event__body {
-    grid-template-columns: minmax(0, 1fr) 18rem;
+    grid-template-columns: minmax(0, 1fr) 22rem;
+  }
+
+  /* Four equal tracks: Save spans the same two tracks as Markets below it. */
+  .backoffice-scores {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .backoffice-save-result {
+    grid-column: span 2;
   }
 }
 

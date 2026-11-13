@@ -18,6 +18,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - Persist publication state to recover committed writes after broker failure; in-process coalescing is not exactly-once.
 - Duplicates, delays and reordering are normal; keep immutable domain time and identity.
 - Broker readiness is not consumer readiness; test real consume callbacks, ack limits and shutdown. Bound SSE buffers; reconnect via monotonic sequence.
+- The OCI deploy requires the exact RabbitMQ queue set; a new listener without its `oci_application_rabbitmq_queue_names` entry fails the deploy after rollout while writers stay fenced. `test-contract.sh` now derives the set from source listeners.
 
 ## Atomic data
 
@@ -37,6 +38,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - Preserve selection identity and focus when order changes; follow product-wide tokens.
 - Claim complete history only with valid cumulative producer evidence; partial inputs stay partial.
 - Measure unresolved geometry on the rendered layout. Navigation visibility is not feature access.
+- Mocked browser suites cannot see a disabled runtime flag: markets shipped with writers off and an unusable page. Activation ends with a real-backend smoke of the core write path.
 
 ## Authorization and fixtures
 
@@ -61,6 +63,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - File seals bind inode, never `st_dev` (macOS renumbers APFS devices).
 - Removing environment reviewers changes timing; test ungated, terminal and chained paths.
 - Every authority profile a validator can emit needs an end-to-end chained fixture; an unhandled arm fails the restore late.
+- A master push auto-chains `production-build` then `oci-production-build`; exclusivity blocks live-data dispatch until both finish. `oci-production-deploy` stays disabled, so after a live-data handoff dispatch it explicitly before the handoff lock lease expires.
 
 ## Infrastructure
 

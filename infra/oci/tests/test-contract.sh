@@ -1118,18 +1118,40 @@ if oci_rabbitmq_queue_inventory_matches \
     "$(awk '{print $0 "\t0\t0\t1"}' <<<"${historical_queues/historical-pod/other-pod}")" "$historical_queues"; then
   fail "historical queue identity was silently normalized"
 fi
-for binding in \
-  "backoffice/src/event/listener/CashBackSourceListener.ts:backoffice_cash_back_source" \
-  "gamemaster/src/event/listener/CashBackSourceListener.ts:gamemaster_cash_back_source" \
-  "bet/src/event/listener/CashBackOutcomeListener.ts:bet_cash_back_outcome" \
-  "resulting/src/event/listener/CashBackRequestListener.ts:resulting_cash_back_request" \
-  "resulting/src/event/listener/CashBackSourceReplyListener.ts:resulting_cash_back_source_reply" \
-  "backoffice/src/event/listener/MarketPublishedListener.ts:backoffice_market_published" \
-  "event/src/messaging/listener/MarketConfiguredListener.ts:event_market_configured" \
-  "resulting/src/event/listener/MarketSettledListener.ts:resulting_market_settled"; do
-  grep -Fq "serviceName = \"${binding#*:}\";" "$ROOT_DIR/${binding%%:*}" ||
-    fail "queue inventory differs from its consumer: ${binding%%:*}"
-done
+# The deploy queue catalog must equal the queues the services actually consume,
+# so a new listener cannot reach production without its catalog entry.
+source_listener_queue_names() {
+  python3 - "$1" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+names = set()
+for path in sorted(root.glob("*/src/**/*.ts")):
+    rel = path.relative_to(root).as_posix()
+    if rel.startswith("common/") or "/test/" in rel or "/__test__/" in rel or rel.endswith(".test.ts"):
+        continue
+    for block in re.split(r"(?=\bclass\s)", path.read_text(encoding="utf-8"))[1:]:
+        if not re.match(r"class\s+\w+(?:<[^>{]*>)?\s+extends\s+\w*Listener\b", block):
+            continue
+        match = re.search(r'\bserviceName(?:\s*:\s*string)?\s*=\s*"([^"]+)"', block)
+        if match:
+            pod_scoped = re.search(r"\bget\s+queueName\s*\(", block)
+            names.add(match.group(1) + (".*" if pod_scoped else ""))
+print("\n".join(sorted(names)))
+PY
+}
+grep -Fq 'assertQueue("telemetry:events:v1"' "$ROOT_DIR/telemetry/src/event/TelemetryConsumer.ts" ||
+  fail "telemetry queue inventory differs from its consumer"
+source_queues="$(
+  { source_listener_queue_names "$ROOT_DIR"; printf '%s\n' 'telemetry:events:v1'; } | LC_ALL=C sort
+)"
+catalog_queues="$(LC_ALL=C sort <<<"$expected_queues")"
+[[ "$catalog_queues" == "$source_queues" ]] ||
+  fail "OCI RabbitMQ queue catalog differs from source listeners: $(
+    diff <(printf '%s\n' "$catalog_queues") <(printf '%s\n' "$source_queues") | grep '^[<>]' | tr '\n' ' '
+  )(< catalog only, > source only; update oci_application_rabbitmq_queue_names)"
 grep -Fq 'zero_consumer_queues=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits zero-consumer diagnostics"
 grep -Fq 'queue_names=' "$OCI_DIR/scripts/deploy.sh" ||

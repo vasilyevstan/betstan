@@ -122,6 +122,7 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
     const awayScoreInput = bounds(card.querySelector('input[id^="backoffice-away-result-"]'));
     const saveResultButton = bounds(card.querySelector('button[type="submit"]'));
     const visibilityButton = bounds(card.querySelector('button[type="button"]'));
+    const marketsLink = bounds(card.querySelector('a.backoffice-action'));
     const inputs = [homeScoreInput, awayScoreInput];
     const name = card.querySelector('.backoffice-event__name');
     const range = document.createRange();
@@ -137,15 +138,17 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
       awayScoreInputBounds: awayScoreInput,
       saveResultButtonBounds: saveResultButton,
       visibilityButtonBounds: visibilityButton,
+      marketsLinkBounds: marketsLink,
       scoreWidth: homeScoreInput.width,
       scoreWidthDifference: Math.abs(homeScoreInput.width - awayScoreInput.width),
       scoreTopDifference: Math.abs(homeScoreInput.top - awayScoreInput.top),
       scoreLeft: homeScoreInput.left - cardBox.left,
       regionCollision: overlaps(identity, controls),
       identityPrecedesControls: identity.bottom <= controls.top || identity.right <= controls.left,
-      actionCollision: overlaps(saveResultButton, visibilityButton),
+      actionCollision: [[saveResultButton, visibilityButton], [saveResultButton, marketsLink], [visibilityButton, marketsLink]]
+        .some(([first, second]) => overlaps(first, second)),
       scoreActionCollision: inputs.some((input) => (
-        overlaps(input, saveResultButton) || overlaps(input, visibilityButton)
+        overlaps(input, saveResultButton) || overlaps(input, visibilityButton) || overlaps(input, marketsLink)
       )),
       fullNameFits: Array.from(range.getClientRects()).every((rect) => (
         rect.left >= nameBox.left - 1 && rect.right <= nameBox.right + 1
@@ -161,7 +164,7 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
       }
     }
   }
-  const targets = Array.from(board.querySelectorAll('input, select, button')).map(bounds);
+  const targets = Array.from(board.querySelectorAll('input, select, button, a.backoffice-action')).map(bounds);
 
   // Resolve computed colors (including color-mix) and alpha-composite local
   // surfaces. This checks rendered text/boundaries, not just token spelling.
@@ -228,31 +231,32 @@ const getBackofficeLayout = (page) => page.locator('.backoffice-board').evaluate
   };
 });
 
-const expectBackofficeControlAlignment = (card) => {
+// Result row above the action row; the action row shares the result grid's outer edges.
+const expectBackofficeControlAlignment = (card, horizontal) => {
   const alignedWithinOnePixel = (first, second, relationship) => {
     expect(Math.abs(first - second), relationship).toBeLessThanOrEqual(1);
   };
+  const home = card.homeScoreInputBounds;
+  const away = card.awayScoreInputBounds;
+  const save = card.saveResultButtonBounds;
+  const visibility = card.visibilityButtonBounds;
+  const markets = card.marketsLinkBounds;
 
-  alignedWithinOnePixel(
-    card.scoreRowBounds.left,
-    card.controlsBounds.left,
-    'score row and controls left edges'
-  );
-
-  for (const [input, action, label] of [
-    [card.homeScoreInputBounds, card.saveResultButtonBounds, 'Home and Save'],
-    [card.awayScoreInputBounds, card.visibilityButtonBounds, 'Away and Visibility'],
-  ]) {
-    alignedWithinOnePixel(input.left, action.left, `${label} left edges`);
-    alignedWithinOnePixel(input.right, action.right, `${label} right edges`);
-    expect(input.bottom).toBeLessThanOrEqual(action.top);
-  }
-  alignedWithinOnePixel(
-    card.saveResultButtonBounds.bottom,
-    card.visibilityButtonBounds.bottom,
-    'Save and Visibility button bottom edges'
-  );
+  alignedWithinOnePixel(card.scoreRowBounds.left, card.controlsBounds.left, 'score row and controls left edges');
   alignedWithinOnePixel(card.scoreRowBounds.right, card.controlsBounds.right, 'score row and controls right edges');
+  alignedWithinOnePixel(home.left, visibility.left, 'Home and Visibility left edges');
+  alignedWithinOnePixel(save.right, markets.right, 'Save and Markets right edges');
+  alignedWithinOnePixel(visibility.top, markets.top, 'Visibility and Markets top edges');
+  alignedWithinOnePixel(visibility.bottom, markets.bottom, 'Visibility and Markets bottom edges');
+  expect(save.bottom).toBeLessThanOrEqual(visibility.top);
+  if (horizontal) {
+    alignedWithinOnePixel(home.bottom, save.bottom, 'Home and Save bottom edges');
+    alignedWithinOnePixel(save.left, markets.left, 'Save and Markets left edges');
+  } else {
+    alignedWithinOnePixel(home.left, save.left, 'Home and Save left edges');
+    alignedWithinOnePixel(away.right, markets.right, 'Away and Markets right edges');
+    expect(home.bottom).toBeLessThanOrEqual(save.top);
+  }
 };
 
 const getTokenContrastMetrics = (locator, {
@@ -1268,6 +1272,8 @@ for (const scenario of [
     await expect(first.getByRole('button', { name: /Save final result/ })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(first.getByRole('button', { name: /Take offline/ })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(first.getByRole('link', { name: 'Markets for Northport - Lakewood', exact: true })).toBeFocused();
     await main.getByLabel('Home team', { exact: true }).focus();
     await page.keyboard.press('Tab');
     await expect(main.getByLabel('Away team', { exact: true })).toBeFocused();
@@ -1290,7 +1296,7 @@ for (const scenario of [
       expect(Math.abs(card.width - metrics.boardWidth)).toBeLessThanOrEqual(1);
       expect(card.scoreWidthDifference).toBeLessThanOrEqual(1);
       expect(card.scoreTopDifference).toBeLessThanOrEqual(1);
-      expectBackofficeControlAlignment(card);
+      expectBackofficeControlAlignment(card, metrics.horizontalCards);
       expect(card.regionCollision).toBe(false);
       expect(card.identityPrecedesControls).toBe(true);
       expect(card.actionCollision).toBe(false);
@@ -1308,7 +1314,7 @@ for (const scenario of [
         expect(Math.abs(card.identityBounds.right - card.controlsBounds.right)).toBeLessThanOrEqual(1);
       }
     }
-    expect(metrics.cards[0].height).toBeLessThanOrEqual(metrics.horizontalCards ? 170 : 300);
+    expect(metrics.cards[0].height).toBeLessThanOrEqual(metrics.horizontalCards ? 170 : 330);
     expect(Math.max(...metrics.cards.map((card) => card.scoreLeft)) - Math.min(...metrics.cards.map((card) => card.scoreLeft)))
       .toBeLessThanOrEqual(1);
     const metricsPath = testInfo.outputPath('backoffice-layout-metrics.json');
@@ -1334,7 +1340,7 @@ for (const scenario of [
         && !card.scoreActionCollision
       ))).toBe(true);
       for (const card of zoomed.cards) {
-        expectBackofficeControlAlignment(card);
+        expectBackofficeControlAlignment(card, zoomed.horizontalCards);
       }
       const zoomMetricsPath = testInfo.outputPath('backoffice-200-percent-text-metrics.json');
       await writeFile(zoomMetricsPath, JSON.stringify(zoomed, null, 2));
