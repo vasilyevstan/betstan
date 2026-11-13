@@ -1,11 +1,14 @@
 import request from "supertest";
-import { APublisher, EventStatus, messengerWrapper } from "@betstan/common";
+import { createHash } from "crypto";
+import { APublisher, compileScoreRule, EventStatus, messengerWrapper, parseMarketDefinition } from "@betstan/common";
 import { ConsumeMessage } from "amqplib";
 import { app } from "../../app";
 import { Event } from "../../model/Event";
 import { MarketTemplate } from "../../model/MarketTemplate";
 import { MarketPublishedListener } from "../../event/listener/MarketPublishedListener";
 import { BackofficePublicationService } from "../../service/BackofficePublicationService";
+import { gridLayout, parseMarketLayout } from "../../service/MarketLayout";
+import { marketStarters } from "../../service/MarketStarters";
 
 const definition = {
   schemaVersion: 1, name: "Player of the match", settlementMode: "MANUAL", outcomeMode: "EXCLUSIVE",
@@ -22,6 +25,7 @@ const message = (): ConsumeMessage => ({
   },
 });
 const previousFlag = process.env.EXTENSIBLE_MARKETS_ENABLED;
+const layout = () => gridLayout(parseMarketDefinition(definition), 2);
 beforeAll(async () => { await MarketTemplate.init(); });
 beforeEach(() => { process.env.EXTENSIBLE_MARKETS_ENABLED = "true"; });
 afterEach(() => {
@@ -53,6 +57,111 @@ const publishMarket = async (marketId: string) => {
   } }, message());
   return configuration;
 };
+
+it("snapshots versioned layouts outside pricing authority and retains them after edits and archival", async () => {
+  const { template } = await setupMarket();
+  const designed = { ...layout(), tiles: [
+    { outcomeKey: "a", row: 1, column: 1, width: 2, height: 1 },
+    { outcomeKey: "b", row: 2, column: 2, width: 1, height: 2 },
+  ] };
+  await request(app).put(`/api/backoffice/market-templates/${template.templateId}`)
+    .send({ revision: 1, definition, layout: designed }).expect(200);
+  await Event.create({ eventId: "event-b", name: "Other - Match", home: "Other", away: "Match", time: "2030-01-01T12:00:00Z" });
+  for (const eventId of ["event-a", "event-b"]) {
+    const draft = await request(app).post(`/api/backoffice/events/${eventId}/markets`)
+      .send({ requestId: "designed", templateId: template.templateId, templateVersion: 2, parameters: {},
+        pricing: { method: "OPERATOR", odds: { a: 2, b: 2 } } }).expect(201);
+    expect(draft.body.layout).toEqual(designed);
+    expect(draft.body.template.layout).toBeUndefined();
+    const published = await request(app).put(`/api/backoffice/events/${eventId}/markets/${draft.body.marketId}`)
+      .send({ revision: 1, publish: true }).expect(202);
+    expect(published.body.layout).toEqual(designed);
+    expect(published.body.configuration).not.toHaveProperty("layout");
+    expect(published.body.configuration.template).not.toHaveProperty("layout");
+  }
+  await request(app).put(`/api/backoffice/market-templates/${template.templateId}`)
+    .send({ revision: 2, definition, layout: layout() }).expect(200);
+  await request(app).put(`/api/backoffice/market-templates/${template.templateId}`)
+    .send({ revision: 3, archived: true }).expect(200);
+  const listed = await request(app).get("/api/backoffice/events/event-a/markets").expect(200);
+  expect(listed.body.markets.find((market: { layout?: unknown }) => market.layout).layout).toEqual(designed);
+  const library = await request(app).get("/api/backoffice/market-templates").expect(200);
+  expect(library.body.templates[0].versions[1].layout).toEqual(designed);
+  expect(library.body.templates[0].versions[2].layout).toEqual(layout());
+});
+
+it("includes design content in idempotency and rejects edits through archive or instance requests", async () => {
+  const body = { requestId: "designed-template", definition, layout: layout() };
+  const created = await request(app).post("/api/backoffice/market-templates").send(body).expect(201);
+  await request(app).post("/api/backoffice/market-templates").send(body).expect(200);
+  await request(app).post("/api/backoffice/market-templates")
+    .send({ ...body, layout: { ...layout(), tileShape: "pill" } }).expect(409);
+  await request(app).put(`/api/backoffice/market-templates/${created.body.templateId}`)
+    .send({ revision: 1, archived: true, layout: layout() }).expect(400);
+  const { market } = await setupMarket();
+  await request(app).put(`/api/backoffice/events/event-a/markets/${market.marketId}`)
+    .send({ revision: 1, layout: layout() }).expect(400);
+});
+
+it("keeps stored versions safe for predecessor writers and replays their layout-free instances", async () => {
+  await Event.create({ eventId: "legacy-event", name: "Old - New", home: "Old", away: "New", time: "2030-01-01T12:00:00Z" });
+  const created = await request(app).post("/api/backoffice/market-templates")
+    .send({ requestId: "designed", definition, layout: layout() }).expect(201);
+  const stored = await MarketTemplate.findOne({ templateId: created.body.templateId }).lean();
+  const template = stored!.versions[0];
+  expect(template).not.toHaveProperty("layout");
+  expect(stored!.layouts?.["1"]).toEqual(layout());
+  const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const marketId = hash(["legacy-event", "legacy-request"]).slice(0, 32);
+  const pricing = { method: "OPERATOR", odds: { a: 2, b: 2 } };
+  // This is the predecessor writer's exact instance/fingerprint shape.
+  await Event.updateOne({ eventId: "legacy-event" }, { $push: { customMarkets: {
+    marketId, creationFingerprint: hash({ template, parameters: {}, pricing }), template,
+    revision: 1, rulesRevision: 1, parameters: {}, pricing, availability: "OPEN", status: "DRAFT",
+    configuredAt: new Date().toISOString(),
+  } } });
+  const replay = await request(app).post("/api/backoffice/events/legacy-event/markets").send({
+    requestId: "legacy-request", templateId: created.body.templateId, templateVersion: 1, parameters: {}, pricing,
+  }).expect(200);
+  expect(replay.body.marketId).toBe(marketId);
+  expect(replay.body.layout).toBeUndefined();
+  await request(app).put(`/api/backoffice/events/legacy-event/markets/${marketId}`).send({ revision: 1, publish: true }).expect(202);
+  expect(JSON.stringify(jest.mocked(APublisher.prototype.publishWithConfirm).mock.calls)).not.toContain('"layout"');
+});
+
+it.each([
+  { ...layout(), tiles: [] },
+  { ...layout(), columns: 5 },
+  { ...layout(), tileShape: "url(javascript:alert(1))" },
+  { ...layout(), html: "<script></script>" },
+  { ...layout(), tiles: [layout().tiles[0], layout().tiles[0]] },
+  { ...layout(), tiles: [layout().tiles[0], { ...layout().tiles[1], column: 1 }] },
+  { ...layout(), tiles: [layout().tiles[0], { ...layout().tiles[1], width: 2 }] },
+  { ...layout(), tiles: [layout().tiles[0], { ...layout().tiles[1], outcomeKey: "unknown" }] },
+  { ...layout(), tiles: [layout().tiles[0], { ...layout().tiles[1], row: 64, height: 2 }] },
+  { ...layout(), tiles: [layout().tiles[0], { ...layout().tiles[1], row: 1.5 }] },
+])("rejects malformed, overlapping or outcome-changing layouts %#", async invalid => {
+  await request(app).post("/api/backoffice/market-templates")
+    .send({ requestId: "bad-layout", definition, layout: invalid }).expect(400);
+  expect(await MarketTemplate.countDocuments()).toBe(0);
+});
+
+it("keeps standard products non-authorable and supplies distinct, valid real-market starters", async () => {
+  for (const starterId of ["1x2", "correct-score"]) {
+    await request(app).post("/api/backoffice/market-templates").send({ requestId: starterId, starterId }).expect(400);
+  }
+  for (const id of ["result-both-score", "winning-margin", "total-goals-bands"]) {
+    const starter = marketStarters.find(item => item.id === id)!;
+    const parsed = parseMarketDefinition(starter.definition);
+    expect(parseMarketLayout(starter.layout, parsed)).toEqual(starter.layout);
+    const wins = parsed.outcomes.map(outcome => compileScoreRule(outcome.rule));
+    for (let home = 0; home <= 10; home += 1) {
+      for (let away = 0; away <= 10; away += 1) expect(wins.filter(win => win(home, away))).toHaveLength(1);
+    }
+    await request(app).post("/api/backoffice/market-templates")
+      .send({ requestId: id, starterId: id, layout: starter.layout }).expect(201);
+  }
+});
 
 it("shares manual-result confirmation between concurrent HTTP publication and replay", async () => {
   const { market } = await setupMarket();

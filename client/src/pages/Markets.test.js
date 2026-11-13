@@ -7,6 +7,7 @@ import ProductCustomMarkets from './event/product/ProductCustomMarkets';
 import BackofficeMarkets from './account/BackofficeMarkets';
 import { acceptedOddsForBet, possibleReturn, settlementOddsForBet } from '../cashBackUtils';
 import { extractSelectionKeysFromBoards } from '../liveBettingUtils';
+import { gridLayout } from '../marketLayout';
 
 jest.mock('axios', () => ({ get: jest.fn(), post: jest.fn(), put: jest.fn() }));
 
@@ -250,7 +251,7 @@ it('creates a manual market in one step and reuses its saved template when the d
     return { data: { marketId: 'market-new' } };
   });
   renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
-  expect(await screen.findByText(/No markets yet/)).toBeInTheDocument();
+  expect(await screen.findByText('Add a market to start.')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Add market' }));
   expect(screen.getByRole('radio', { name: /Manual market/ })).toBeChecked();
   fireEvent.change(screen.getByLabelText('Market name'), { target: { value: 'Player of the match' } });
@@ -268,6 +269,7 @@ it('creates a manual market in one step and reuses its saved template when the d
   expect(templateCalls).toHaveLength(1);
   expect(templateCalls[0][1].definition).toMatchObject({ name: 'Player of the match', settlementMode: 'MANUAL', terms: 'Official award.',
     outcomes: [{ key: 'home-captain', label: 'Home captain' }, { key: 'away-captain', label: 'Away captain' }] });
+  expect(templateCalls[0][1].layout.tiles.map((tile) => tile.outcomeKey)).toEqual(['home-captain', 'away-captain']);
   expect(marketCalls).toHaveLength(2);
   expect(marketCalls[1][1]).toEqual(marketCalls[0][1]);
   expect(marketCalls[0][1]).toMatchObject({ templateId: 'quick-template', templateVersion: 1, parameters: {} });
@@ -317,4 +319,85 @@ it('preserves accepted odds while treating retained void exposures as one for re
   const bet = { rows: [{ status: 'VOID', oddsValue: 5 }, { status: 'WIN', oddsValue: 3 }] };
   expect(Number(acceptedOddsForBet(bet))).toBe(15);
   expect(possibleReturn(1000, settlementOddsForBet(bet))).toBe('30.00');
+});
+
+it('offers locked standard designs without permitting duplicate markets or editing them', async () => {
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  fireEvent.click(await screen.findByRole('button', { name: 'Add market' }));
+  for (const name of ['1X2', 'Correct Score']) {
+    fireEvent.click(screen.getByRole('radio', { name: new RegExp(`^${name} Locked`) }));
+    expect(screen.getByText(/Its layout, outcomes and rules cannot be changed here/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create draft' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Customize design and outcomes' })).not.toBeInTheDocument();
+  }
+  expect(axios.post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('radio', { name: /Match award.*Template v1/ }));
+  fireEvent.click(screen.getByRole('button', { name: 'Customize design and outcomes' }));
+  expect(screen.getByRole('group', { name: 'Market layout canvas' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save design and create draft' })).toBeEnabled();
+});
+
+it('keeps dragged and resized tile positions while outcome labels and keys change', async () => {
+  axios.post.mockResolvedValue({ data: { templateId: 'designed', versions: [{ ...template, version: 1 }] } });
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  fireEvent.click(await screen.findByRole('tab', { name: 'Template library' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New template' }));
+  fireEvent.change(screen.getByLabelText('Template name'), { target: { value: 'Award layout' } });
+  fireEvent.change(screen.getByLabelText('Settlement terms'), { target: { value: 'Declared by the operator.' } });
+  const inputs = screen.getAllByLabelText('Outcome label');
+  fireEvent.change(inputs[0], { target: { value: 'Captain' } });
+  fireEvent.change(inputs[1], { target: { value: 'Keeper' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Design Keeper' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Place Keeper at row 2, column 1' }));
+  fireEvent.change(screen.getByLabelText('Tile width'), { target: { value: '2' } });
+  fireEvent.change(screen.getByLabelText('Tile height'), { target: { value: '2' } });
+  fireEvent.change(screen.getByLabelText('Selected outcome'), { target: { value: 'Goalkeeper' } });
+  expect(screen.getByLabelText('Selected outcome')).toHaveValue('Goalkeeper');
+  expect(screen.getByRole('button', { name: 'Design Goalkeeper' })).toHaveStyle({ gridColumn: '1 / span 2', gridRow: '2 / span 2' });
+  fireEvent.click(screen.getByRole('button', { name: 'Up', exact: true }));
+  expect(screen.getByRole('alert')).toHaveTextContent('That space is occupied');
+  expect(screen.getByRole('button', { name: 'Design Goalkeeper' })).toHaveStyle({ gridRow: '2 / span 2' });
+  fireEvent.click(screen.getByRole('button', { name: 'Save template' }));
+  await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/backoffice/market-templates', expect.objectContaining({
+    definition: expect.objectContaining({ outcomes: [{ key: 'captain', label: 'Captain' }, { key: 'goalkeeper', label: 'Goalkeeper' }] }),
+    layout: { version: 1, columns: 2, tileShape: 'rounded', tiles: [
+      { outcomeKey: 'captain', row: 1, column: 1, width: 1, height: 1 },
+      { outcomeKey: 'goalkeeper', row: 2, column: 1, width: 2, height: 2 },
+    ] },
+  })));
+});
+
+it('renders the event snapshot design without changing outcome identity or quoted odds', async () => {
+  market.layout = { ...gridLayout(manualDefinition.outcomes), tileShape: 'pill',
+    tiles: [{ outcomeKey: 'b', row: 1, column: 1, width: 2, height: 1 },
+      { outcomeKey: 'a', row: 2, column: 2, width: 1, height: 2 }] };
+  acceptQuotes();
+  renderCard();
+  const nominee = await screen.findByRole('button', { name: outcome('Nominee A') });
+  await waitFor(() => expect(nominee.parentElement).toHaveStyle({ gridColumn: '2 / span 1', gridRow: '2 / span 2' }));
+  expect(nominee.parentElement.parentElement).toHaveClass('market-layout--pill');
+  fireEvent.click(nominee);
+  await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/event/events/event-a/market-quotes', expect.objectContaining({
+    selections: [{ origin: 'TEMPLATE', marketId: 'market-a', outcomeKey: 'a', quoteRevision: 2 }],
+  })));
+});
+
+it('keeps betting available with a clear standard-layout notice if presentation cannot be loaded', async () => {
+  const base = axios.get.getMockImplementation();
+  axios.get.mockImplementation((url) => url.startsWith('/api/backoffice/events/')
+    ? Promise.reject(new Error('Presentation unavailable')) : base(url));
+  renderCard();
+  expect(await screen.findByRole('status')).toHaveTextContent('Markets use the standard layout.');
+  expect(screen.getByRole('button', { name: outcome('Nominee A') })).toBeEnabled();
+});
+
+it.each(['market', 'template', 'version'])('never attaches a design from a different %s identity', async (mismatch) => {
+  market.layout = gridLayout(manualDefinition.outcomes, 1);
+  market = { ...market, template: { ...market.template } };
+  if (mismatch === 'market') market.marketId = 'another-market';
+  if (mismatch === 'template') market.template.id = 'another-template';
+  if (mismatch === 'version') market.template.version = 2;
+  renderCard();
+  await waitFor(() => expect(axios.get).toHaveBeenCalledWith('/api/backoffice/events/event-a/markets'));
+  expect(screen.getByRole('button', { name: outcome('Nominee A') }).parentElement).toHaveClass('product-custom-grid');
 });

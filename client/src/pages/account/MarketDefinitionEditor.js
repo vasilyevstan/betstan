@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { PlayerPreview } from '../../components/MarketPreview';
 import { marketActionClass, marketComparisons, marketMetrics, uniqueMarketKey } from '../../marketUi';
+import { layoutError, reconcileLayout } from '../../marketLayout';
+import MarketLayoutEditor from './MarketLayoutEditor';
 
 const numberInput = (value) => value === '' ? '' : Number(value);
 const newRule = () => ({ kind: 'COMPARE', metric: 'TOTAL_GOALS', comparison: 'GT', value: 2.5 });
@@ -77,17 +79,21 @@ const RuleEditor = ({ rule, parameters, onChange, depth = 1 }) => <div className
   </div> : null}
 </div>;
 
-const MarketDefinitionEditor = ({ initial, disabled, onSave, onCancel, versioned }) => {
-  const [definition, setDefinition] = useState(() => ({
-    ...initial, parameters: withLocalIdentity(initial.parameters), outcomes: withLocalIdentity(initial.outcomes),
+const MarketDefinitionEditor = ({ initial, initialLayout, disabled, onSave, onCancel, versioned, submitLabel }) => {
+  const [definition, setDefinition] = useState(() => {
+    const outcomes = deriveKeys(withLocalIdentity(initial.outcomes), 'outcome');
+    return { ...initial, parameters: withLocalIdentity(initial.parameters), outcomes, layout: reconcileLayout(initialLayout, outcomes) };
+  });
+  const change = (field, value) => setDefinition((previous) => ({
+    ...previous, [field]: value,
+    ...(field === 'outcomes' ? { layout: reconcileLayout(previous.layout, value, previous.outcomes) } : {}),
   }));
-  const change = (field, value) => setDefinition((previous) => ({ ...previous, [field]: value }));
-  const updateOutcome = (index, fields) => setDefinition((previous) => ({
-    ...previous,
-    outcomes: deriveKeys(previous.outcomes.map((outcome, position) => (
+  const updateOutcome = (index, fields) => setDefinition((previous) => {
+    const outcomes = deriveKeys(previous.outcomes.map((outcome, position) => (
       position === index ? { ...outcome, ...fields } : outcome
-    )), 'outcome'),
-  }));
+    )), 'outcome');
+    return { ...previous, outcomes, layout: reconcileLayout(previous.layout, outcomes, previous.outcomes) };
+  });
   const updateParameter = (index, fields) => setDefinition((previous) => {
     const parameters = deriveKeys(previous.parameters.map((parameter, position) => (
       position === index ? { ...parameter, ...fields } : parameter
@@ -104,12 +110,13 @@ const MarketDefinitionEditor = ({ initial, disabled, onSave, onCancel, versioned
   const automatic = definition.settlementMode === 'FINAL_SCORE';
   return <form className="market-definition-editor" onSubmit={(event) => {
     event.preventDefault();
-    const { parameters, outcomes, ...rest } = definition;
+    const { parameters, outcomes, layout, ...rest } = definition;
+    if (layoutError(layout, outcomes)) return;
     void onSave({
       ...rest,
       parameters: withoutLocalIdentity(parameters),
       outcomes: withoutLocalIdentity(outcomes).map(({ rule, ...outcome }) => automatic ? { ...outcome, rule } : outcome),
-    });
+    }, layout);
   }}>
     <fieldset disabled={disabled}>
       <legend>{versioned ? `New version of ${initial.name}` : 'New template'}</legend>
@@ -142,6 +149,9 @@ const MarketDefinitionEditor = ({ initial, disabled, onSave, onCancel, versioned
       <label className="mt-3">Settlement terms<textarea className="form-control" rows={3} maxLength={2000}
         required={!automatic} value={definition.terms}
         onChange={(event) => change('terms', event.target.value)} /></label>
+      <MarketLayoutEditor outcomes={definition.outcomes} layout={definition.layout} disabled={disabled}
+        onChange={(layout) => change('layout', layout)}
+        onRename={(key, label) => updateOutcome(definition.outcomes.findIndex((outcome) => outcome.key === key), { label })} />
       <h3 className="market-subheading">Parameters</h3>
       <p className="market-help">A number chosen per event, such as a goals line. It is locked once the market is published.</p>
       {definition.parameters.map((parameter, index) => <fieldset className="market-parameter" key={parameter.localId}>
@@ -185,10 +195,12 @@ const MarketDefinitionEditor = ({ initial, disabled, onSave, onCancel, versioned
       <button className={marketActionClass()} type="button" disabled={definition.outcomes.length >= 64} onClick={() => change('outcomes', deriveKeys([
         ...definition.outcomes, ...withLocalIdentity([{ key: '', label: '', ...(automatic ? { rule: newRule() } : {}) }]),
       ], 'outcome'))}>Add outcome</button>
-      <PlayerPreview definition={definition} note="default values; odds are set per event"
+      <PlayerPreview definition={definition} layout={definition.layout} note="default values; odds are set per event"
         parameters={Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, parameter.defaultValue]))} />
       <div className="market-form-actions">
-        <button className={marketActionClass(true)} type="submit">{versioned ? 'Save new version' : 'Save template'}</button>
+        <button className={marketActionClass(true)} type="submit" disabled={Boolean(layoutError(definition.layout, definition.outcomes))}>
+          {submitLabel || (versioned ? 'Save new version' : 'Save template')}
+        </button>
         <button className={marketActionClass()} type="button" onClick={onCancel}>Cancel</button>
       </div>
     </fieldset>
