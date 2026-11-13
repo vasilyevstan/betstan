@@ -64,6 +64,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - Removing environment reviewers changes timing; test ungated, terminal and chained paths.
 - Every authority profile a validator can emit needs an end-to-end chained fixture; an unhandled arm fails the restore late.
 - A master push auto-chains `production-build` then `oci-production-build`; exclusivity blocks live-data dispatch until both finish. `oci-production-deploy` stays disabled, so after a live-data handoff dispatch it explicitly before the handoff lock lease expires.
+- An ancestor-resume deploy runs at a later head than its image build; every downstream validator of deployed generations must accept that proven GitHub/infra/Markdown-only lineage, or the next release has no truthful tuple.
 
 ## Infrastructure
 

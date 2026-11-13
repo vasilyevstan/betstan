@@ -533,6 +533,15 @@ Deployment, lock, and release provenance continue to use the current approved
 control `SOURCE_SHA`; lock and fence checks remain unchanged. Callers that omit
 the checkpoint source retain the existing equal-source behavior.
 
+GHCR package validation names the deployed and last-known-good generations
+by their image build source, not by the deploy run's head. After an ancestor
+resume, the deploy run's head is a later `master` SHA whose provenance records
+the original `build_run_id`. Validation accepts that deploy only when its head
+descends from the build source, is an ancestor of the candidate, every
+intervening change is under `.github/`, `infra/`, or Markdown, the provenance
+names the same build run, and the deployed images byte-match that build.
+Equal-source deploys keep the unchanged exact checks.
+
 The journal extension adds one fixed cleanup category, its distinct protected
 operation, and public runtime v3. It adds no workflow, release phase, threshold
 change, credential path, or alternate image client. Because the checked-in
