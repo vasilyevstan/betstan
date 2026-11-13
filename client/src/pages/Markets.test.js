@@ -136,7 +136,7 @@ it('previews generated manual odds without publication and publishes only the re
     revision: 1, parameters: {}, availability: 'OPEN', publish: true,
     pricing: { method: 'OPERATOR', odds: { a: 1.9, b: 1.87 } },
   }));
-  expect(await screen.findByText(/Configuration saved/)).toBeInTheDocument();
+  expect(await screen.findByText(/Publishing\. The market goes live/)).toBeInTheDocument();
 });
 
 it('requires a separate immutable manual-result review and keeps the decision locked', async () => {
@@ -162,9 +162,9 @@ it('saves reusable custom definitions with a stable request id after an uncertai
   axios.post.mockRejectedValueOnce(new Error('Connection interrupted'))
     .mockResolvedValueOnce({ data: { templateId: 'new-template', versions: [{ ...template, version: 1 }] } });
   renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
-  fireEvent.click(await screen.findByText('Reusable template library'));
-  fireEvent.click(screen.getByRole('button', { name: 'Create custom template' }));
-  const form = screen.getByRole('group', { name: 'Create reusable template' });
+  fireEvent.click(await screen.findByRole('tab', { name: 'Template library' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New template' }));
+  const form = screen.getByRole('group', { name: 'New template' });
   fireEvent.change(within(form).getByLabelText('Template name'), { target: { value: 'New award' } });
   fireEvent.change(within(form).getByLabelText('Settlement terms'), { target: { value: 'Operator declares the winner.' } });
   const outcomes = within(form).getAllByLabelText('Outcome label');
@@ -176,7 +176,7 @@ it('saves reusable custom definitions with a stable request id after an uncertai
   await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(2));
   expect(axios.post.mock.calls[1][1]).toEqual(axios.post.mock.calls[0][1]);
   expect(axios.post.mock.calls[0][1].definition).toMatchObject({
-    name: 'New award', settlementMode: 'MANUAL', outcomes: [{ key: 'first', label: 'First nominee' }, { key: 'second', label: 'Second nominee' }],
+    name: 'New award', settlementMode: 'MANUAL', outcomes: [{ key: 'first-nominee', label: 'First nominee' }, { key: 'second-nominee', label: 'Second nominee' }],
   });
   await screen.findByText(/Template saved/);
 });
@@ -186,13 +186,102 @@ it('preserves unsaved inputs after a concurrent revision until the operator expl
   fireEvent.click(await screen.findByRole('button', { name: /Match award.*Published/ }));
   fireEvent.change(screen.getByLabelText('Nominee A: decimal odds'), { target: { value: '2.25' } });
   market = { ...market, revision: 3, pricing: { method: 'OPERATOR', odds: { a: 3.5, b: 2 } } };
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh status' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Your unsaved inputs are still shown.');
   expect(screen.getByLabelText('Nominee A: decimal odds')).toHaveValue(2.25);
   expect(screen.getByRole('button', { name: 'Publish market' })).toBeDisabled();
   fireEvent.click(screen.getByRole('button', { name: 'Discard edits and reload market' }));
   expect(screen.getByLabelText('Nominee A: decimal odds')).toHaveValue(3.5);
   expect(screen.getByRole('button', { name: 'Publish market' })).toBeEnabled();
+});
+
+const totalGoals = {
+  schemaVersion: 1, name: 'Total goals', settlementMode: 'FINAL_SCORE', outcomeMode: 'EXCLUSIVE', coverage: 'COMPLETE', terms: '',
+  parameters: [{ key: 'line', label: 'Goals line', minimum: 0.5, maximum: 20.5, defaultValue: 2.5 }],
+  outcomes: [
+    { key: 'over', label: 'Over', rule: { kind: 'COMPARE', metric: 'TOTAL_GOALS', comparison: 'GT', value: { parameter: 'line' } } },
+    { key: 'under', label: 'Under', rule: { kind: 'COMPARE', metric: 'TOTAL_GOALS', comparison: 'LT', value: { parameter: 'line' } } },
+  ],
+};
+const overrideGet = (routes) => {
+  const base = axios.get.getMockImplementation();
+  axios.get.mockImplementation(async (url) => (routes[url] ? { data: routes[url]() } : base(url)));
+};
+
+it('creates a manual market in one step and reuses its saved template when the draft request is retried', async () => {
+  market = undefined;
+  overrideGet({ '/api/backoffice/events/event-a/markets': () => ({ enabled: true, event, markets: market ? [market] : [] }) });
+  let marketAttempts = 0;
+  axios.post.mockImplementation(async (url, body) => {
+    if (url === '/api/backoffice/market-templates') {
+      return { data: { templateId: 'quick-template', revision: 1, archived: false,
+        versions: [{ id: 'quick-template', version: 1, definition: body.definition }] } };
+    }
+    marketAttempts += 1;
+    if (marketAttempts === 1) throw new Error('Connection interrupted');
+    market = { ...configuration, marketId: 'market-new', revision: 1, status: 'DRAFT', pricing: undefined,
+      template: { id: 'quick-template', version: 1, definition: { ...manualDefinition, name: 'Player of the match' } } };
+    return { data: { marketId: 'market-new' } };
+  });
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  expect(await screen.findByText(/No markets yet/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add market' }));
+  expect(screen.getByRole('radio', { name: /Manual market/ })).toBeChecked();
+  fireEvent.change(screen.getByLabelText('Market name'), { target: { value: 'Player of the match' } });
+  fireEvent.change(screen.getByLabelText('Outcome 1'), { target: { value: 'Home captain' } });
+  fireEvent.change(screen.getByLabelText('Outcome 2'), { target: { value: 'Away captain' } });
+  fireEvent.change(screen.getByLabelText('How the result is decided'), { target: { value: 'Official award.' } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create draft' })); });
+  expect(await screen.findByRole('alert')).toHaveTextContent('Connection interrupted');
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create draft' })); });
+  expect(await screen.findByText(/Draft created\. Set the odds, then publish\./)).toBeInTheDocument();
+  const templateCalls = axios.post.mock.calls.filter(([url]) => url === '/api/backoffice/market-templates');
+  const marketCalls = axios.post.mock.calls.filter(([url]) => url === '/api/backoffice/events/event-a/markets');
+  expect(templateCalls).toHaveLength(1);
+  expect(templateCalls[0][1].definition).toMatchObject({ name: 'Player of the match', settlementMode: 'MANUAL', terms: 'Official award.',
+    outcomes: [{ key: 'home-captain', label: 'Home captain' }, { key: 'away-captain', label: 'Away captain' }] });
+  expect(marketCalls).toHaveLength(2);
+  expect(marketCalls[1][1]).toEqual(marketCalls[0][1]);
+  expect(marketCalls[0][1]).toMatchObject({ templateId: 'quick-template', templateVersion: 1, parameters: {} });
+  expect(await screen.findByRole('heading', { name: 'Player of the match' })).toHaveFocus();
+});
+
+it('explains why automatic markets are unavailable for an event without a pricing model', async () => {
+  catalog = { ...catalog, hasRetainedModel: false };
+  overrideGet({ '/api/backoffice/market-templates': () => ({
+    enabled: true, templates: [], starters: [{ id: 'total-goals', definition: totalGoals }],
+  }) });
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  expect(await screen.findByText(/no pricing model, so automatic markets are unavailable/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add market' }));
+  expect(screen.getByRole('radio', { name: /Total goals.*Needs a pricing model/ })).toBeDisabled();
+  expect(screen.getByRole('radio', { name: /Manual market/ })).toBeEnabled();
+});
+
+it('saves a draft without incomplete odds and states why it cannot be published yet', async () => {
+  market = { ...market, revision: 1, status: 'DRAFT', pricing: undefined, publishedConfiguration: undefined };
+  axios.put.mockImplementation(async (_url, body) => ({ data: (market = { ...market, revision: 2 }) }));
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  fireEvent.click(await screen.findByRole('button', { name: /Match award.*Draft/ }));
+  const publish = screen.getByRole('button', { name: 'Publish market' });
+  expect(publish).toBeDisabled();
+  expect(publish).toHaveAccessibleDescription('Enter odds from 1.01 to 1000 for every outcome.');
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save draft' })); });
+  await waitFor(() => expect(axios.put).toHaveBeenCalledWith('/api/backoffice/events/event-a/markets/market-a', {
+    revision: 1, parameters: {}, availability: 'OPEN', publish: false,
+  }));
+  expect(await screen.findByText(/Draft saved without odds/)).toBeInTheDocument();
+});
+
+it('keeps manual results available but explains that authoring is off', async () => {
+  overrideGet({ '/api/backoffice/events/event-a/markets': () => ({ enabled: false, event, markets: [market] }) });
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  expect(await screen.findByText(/Market authoring is off/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Add market' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: /Match award.*Published/ }));
+  expect(screen.getByRole('button', { name: 'Review final decision' })).toBeDisabled();
+  fireEvent.click(screen.getByLabelText('Nominee A'));
+  expect(screen.getByRole('button', { name: 'Review final decision' })).toBeEnabled();
 });
 
 it('does not expose a late quote to a different authenticated owner', async () => {

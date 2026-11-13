@@ -39,7 +39,7 @@ spec:
             - name: EVENT_SERVICE_URL
               value: "http://gaming-event-srv:3000"
             - name: EXTENSIBLE_MARKETS_ENABLED
-              value: "false"
+              value: "true"
             - name: CLIENT_ID
               valueFrom:
                 fieldRef:

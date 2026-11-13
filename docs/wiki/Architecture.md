@@ -184,7 +184,7 @@ wire contract therefore requires:
 Source appearing in the repository does not silently alter a deployed
 service.
 
-### Reusable markets and Bet Builder - deployment-gated
+### Reusable markets and Bet Builder
 
 The `1.1.0-rc.3` Common candidate defines reusable market templates, event-bound
 versions, generated-odds previews, frozen selections and revision-bound manual
@@ -192,7 +192,8 @@ decisions. Compatible service source implements authoring, pricing, acceptance,
 settlement and history. Source delivery is not runtime activation.
 
 `EXTENSIBLE_MARKETS_ENABLED` defaults to false in Backoffice, Event, Slip and
-Moderation. When enabled in a compatible generation,
+Moderation code; the deployed manifests set it to true. When enabled in a
+compatible generation,
 scheduled and Backoffice-created events retain their original model, typed rules
 for standard selections and a durable model-publication obligation. Replaying
 creation does not replace a retained model or invent one for an existing legacy

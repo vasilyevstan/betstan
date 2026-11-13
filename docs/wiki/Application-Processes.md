@@ -19,7 +19,7 @@ For the service map and message catalog, see [[Architecture]] and
 | Scheduled event creation | Event | Gamemaster, Backoffice |
 | Manual event creation and control | Backoffice | Event, Gamemaster |
 | Pre-match product generation | Event | Client |
-| Reusable markets and Bet Builder (deployment-gated) | Backoffice, Event | Slip, Moderation, Resulting, Bet, Client |
+| Reusable markets and Bet Builder | Backoffice, Event | Slip, Moderation, Resulting, Bet, Client |
 | Live simulation and pricing | Gamemaster | Event, Moderation, Resulting |
 | Draft slip maintenance | Slip | Event, Client |
 | Placement and moderation | Slip, Moderation | Bet, Resulting |
@@ -272,16 +272,24 @@ Prices are generated when an event is created, not randomly regenerated on
 every read. Compatibility logic can derive deterministic expected goals from
 an existing event ID when older stored data needs product completion.
 
-## Reusable markets and Bet Builder - deployment-gated
+## Reusable markets and Bet Builder
 
-The **Markets** link on each compact Backoffice event opens
-`/backoffice/events/:eventId/markets`; it does not expand the score controls.
-Authoring remains public, consistent with the existing Backoffice.
+The **Markets** button sits beside the visibility button on each compact
+Backoffice event and opens `/backoffice/events/:eventId/markets`; it does not
+expand the score controls. Authoring remains public, consistent with the
+existing Backoffice. `EXTENSIBLE_MARKETS_ENABLED` is on in the deployed
+Backoffice, Event, Slip and Moderation manifests.
 
-An operator selects a saved immutable template version, adds an event draft
-and binds numeric parameters. The reusable library also creates custom
-definitions or new versions from starters, archives templates and restores
-them. The guided rule editor supports full-time score conditions or explicit
+The page has two tabs. **Event markets** lists the event's markets with status
+beside the selected market's editor. **Add market** starts from a manual market
+(the default), a saved template version or a starter, then **Create draft**
+saves the template and the event draft together; a retry reuses the saved
+template. Automatic choices are disabled with "Needs a pricing model" on
+legacy events that have no retained model, and one banner explains why
+authoring is unavailable (feature off, kickoff passed, resulted, or load
+failure). **Template library** creates custom definitions or new versions,
+optionally starting from a starter, and archives or restores templates.
+Outcome and parameter keys are derived from their labels unless edited. The guided rule editor supports full-time score conditions or explicit
 operator-declared outcomes, not executable formulas. Versions already used by
 events and accepted bets never follow later library edits.
 
@@ -289,8 +297,10 @@ events and accepted bets never follow later library edits.
 equal-chance, probability and relative-weight assumptions for manual markets.
 Probabilities use 0-1, not percentages. Partial weight distributions include
 the unlisted-result weight. Manual odds can be edited; score-price overrides
-lose Builder eligibility. **Save draft** does not publish. **Publish market**
-shows pending, available or rejected status; pricing confirmation is required
+lose Builder eligibility. **Save draft** does not publish and keeps the
+previous odds when manual odds are incomplete. **Publish market** is disabled
+with a stated reason until the market is publishable, then shows pending,
+available or rejected status; pricing confirmation is required
 before new acceptance. A concurrent revision preserves the operator's unsaved
 inputs and requires an explicit reload instead of silently discarding them.
 

@@ -8,14 +8,31 @@ export const marketMetrics = {
   HOME_GOALS: 'Home goals', AWAY_GOALS: 'Away goals', TOTAL_GOALS: 'Total goals', GOAL_DIFFERENCE: 'Home minus away goals',
 };
 export const marketComparisons = { EQ: '=', GT: '>', GTE: '>=', LT: '<', LTE: '<=' };
-export const describeMarketRule = (rule) => {
+export const describeMarketRule = (rule, parameters) => {
   if (!rule) return 'Rule unavailable';
   if (rule.kind === 'COMPARE') {
-    const value = typeof rule.value === 'object' ? `[${rule.value.parameter}]` : rule.value;
+    const value = typeof rule.value === 'object'
+      ? (parameters?.[rule.value.parameter] ?? `[${rule.value.parameter}]`) : rule.value;
     return `${marketMetrics[rule.metric]} ${marketComparisons[rule.comparison]} ${value}`;
   }
-  if (rule.kind === 'NOT') return `Not (${describeMarketRule(rule.rule)})`;
-  return `(${rule.rules.map(describeMarketRule).join(rule.kind === 'ALL' ? ' and ' : ' or ')})`;
+  if (rule.kind === 'NOT') return `Not (${describeMarketRule(rule.rule, parameters)})`;
+  return `(${rule.rules.map((child) => describeMarketRule(child, parameters)).join(rule.kind === 'ALL' ? ' and ' : ' or ')})`;
+};
+export const marketActionClass = (primary = false) => `btn backoffice-control backoffice-action${primary ? ' backoffice-action--primary' : ''}`;
+const reservedMarketKeys = ['constructor', 'prototype', '__proto__'];
+const slugMarketKey = (label) => String(label ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 56).replace(/-+$/, '');
+// Stable keys are derived from labels; collisions and reserved words get a numeric suffix.
+export const uniqueMarketKey = (label, fallback, used) => {
+  const base = slugMarketKey(label) || fallback;
+  let key = base;
+  for (let suffix = 2; used.has(key) || reservedMarketKeys.includes(key); suffix += 1) key = `${base}-${suffix}`;
+  used.add(key);
+  return key;
+};
+export const marketKeysFromLabels = (labels, fallback = 'outcome') => {
+  const used = new Set();
+  return labels.map((label, index) => uniqueMarketKey(label, `${fallback}-${index + 1}`, used));
 };
 export const numericMarketValues = (values) => Object.fromEntries(Object.entries(values).map(([key, value]) => {
   if (value === '' || !Number.isFinite(Number(value))) throw new Error(`Enter a number for ${key}.`);
