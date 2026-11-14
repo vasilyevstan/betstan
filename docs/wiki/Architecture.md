@@ -208,6 +208,34 @@ authority. Configuration and manual-decision sends retain durable publication
 obligations and coalesce concurrent local sends without claiming exactly-once
 transport.
 
+The Backoffice starter catalogue supplies copyable 1X2 and Correct Score
+definitions with declarative final-score rules. Copies get independent template
+identities and versions; editing them never changes the source starters or
+legacy standard products. Correct Score declares partial coverage for its
+listed scores. Template selection and design do not require an event pricing
+model; automatic publication still does. A model-less event requires an
+explicit manual-result copy rather than inferred prices or silent rule changes.
+
+Visual layouts are optional Backoffice-owned presentation metadata, stored in
+a top-level version-keyed `layouts` map and copied to the event market on
+creation. Persisted template `versions` remain byte-shape compatible with
+predecessor writers, which copy them directly into strict shared payloads.
+The public template DTO joins each version's layout for authoring.
+The layout contains only bounded grid coordinates, spans, corner shape and
+outcome keys; the server rejects overlaps and missing or duplicate outcomes.
+Template request fingerprints include explicitly supplied layout content;
+instance fingerprints retain their predecessor shape for mixed-writer retries.
+Instance updates cannot change the snapshot. Layouts are deliberately excluded
+from Common's strict market configuration and RabbitMQ/quote/settlement
+payloads, so this UI capability requires no shared-contract migration.
+The browser reads presentation from the existing public Backoffice event-market
+endpoint only when Event has returned custom markets, and joins by market ID
+and exact template ID/version. Event's catalogue, quote service and Slip remain
+the only betting authorities. Missing legacy layouts use the existing grid;
+read failures or invalid designs produce an explicit standard-layout notice.
+An older application can ignore the optional metadata; a rollback may discard
+presentation during an edit, but does not change any betting rules or prices.
+
 Automatic rules use full-time home goals, away goals, total goals and goal
 difference, combined through bounded comparisons, AND, OR and NOT. Templates
 allow at most 64 outcomes, 16 numeric parameters, 128 rule nodes and eight

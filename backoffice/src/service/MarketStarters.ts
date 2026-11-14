@@ -1,6 +1,7 @@
 import { MarketDefinition, MarketMetric, ScoreRule } from "@betstan/common";
+import { gridLayout, MarketLayout } from "./MarketLayout";
 
-const compare = (metric: MarketMetric, comparison: "GT" | "LT" | "GTE" | "LTE", value: number): ScoreRule =>
+const compare = (metric: MarketMetric, comparison: "EQ" | "GT" | "LT" | "GTE" | "LTE", value: number): ScoreRule =>
   ({ kind: "COMPARE", metric, comparison, value });
 
 const total = (metric: MarketMetric, name: string, maximum: number): MarketDefinition => ({
@@ -17,7 +18,25 @@ const bothScore: ScoreRule = {
   kind: "ALL", rules: [compare("HOME_GOALS", "GT", 0), compare("AWAY_GOALS", "GT", 0)],
 };
 
-export const marketStarters: Array<{ id: string; definition: MarketDefinition }> = [
+const starters: Array<{ id: string; definition: MarketDefinition }> = [
+  { id: "1x2", definition: {
+    schemaVersion: 1, name: "1X2", settlementMode: "FINAL_SCORE", outcomeMode: "EXCLUSIVE",
+    coverage: "COMPLETE", terms: "Full-time result: 1 is a home win, X is a draw, and 2 is an away win.", parameters: [],
+    outcomes: [
+      { key: "home", label: "1", rule: compare("GOAL_DIFFERENCE", "GT", 0) },
+      { key: "draw", label: "X", rule: compare("GOAL_DIFFERENCE", "EQ", 0) },
+      { key: "away", label: "2", rule: compare("GOAL_DIFFERENCE", "LT", 0) },
+    ],
+  } },
+  { id: "correct-score", definition: {
+    schemaVersion: 1, name: "Correct Score", settlementMode: "FINAL_SCORE", outcomeMode: "EXCLUSIVE",
+    coverage: "PARTIAL", terms: "Exact full-time score. If the score is not listed, no listed outcome wins.", parameters: [],
+    outcomes: [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [2, 0], [2, 1], [2, 2], [3, 0], [3, 1]].map(([home, away]) => ({
+      key: `score-${home}-${away}`, label: `${home} - ${away}`, rule: {
+        kind: "ALL", rules: [compare("HOME_GOALS", "EQ", home), compare("AWAY_GOALS", "EQ", away)],
+      },
+    })),
+  } },
   { id: "total-goals", definition: total("TOTAL_GOALS", "Total goals", 197.5) },
   { id: "home-total", definition: total("HOME_GOALS", "Home team total", 98.5) },
   { id: "away-total", definition: total("AWAY_GOALS", "Away team total", 98.5) },
@@ -46,4 +65,49 @@ export const marketStarters: Array<{ id: string; definition: MarketDefinition }>
       ],
     } }],
   } },
+  { id: "result-both-score", definition: {
+    schemaVersion: 1, name: "Match result & both teams to score", settlementMode: "FINAL_SCORE",
+    outcomeMode: "EXCLUSIVE", coverage: "COMPLETE", terms: "Full-time match result and whether both teams score.", parameters: [],
+    outcomes: [
+      { key: "home", label: "Home", rule: compare("GOAL_DIFFERENCE", "GT", 0) },
+      { key: "draw", label: "Draw", rule: compare("GOAL_DIFFERENCE", "EQ", 0) },
+      { key: "away", label: "Away", rule: compare("GOAL_DIFFERENCE", "LT", 0) },
+    ].flatMap(result => [
+      { key: `${result.key}-yes`, label: `${result.label} & Yes`, rule: { kind: "ALL" as const, rules: [result.rule, bothScore] } },
+      { key: `${result.key}-no`, label: `${result.label} & No`, rule: {
+        kind: "ALL" as const, rules: [result.rule, { kind: "NOT" as const, rule: bothScore }],
+      } },
+    ]),
+  } },
+  { id: "winning-margin", definition: {
+    schemaVersion: 1, name: "Winning margin", settlementMode: "FINAL_SCORE", outcomeMode: "EXCLUSIVE",
+    coverage: "COMPLETE", terms: "Full-time winning team and goal margin. A draw is a separate outcome.", parameters: [],
+    outcomes: [
+      { key: "home-one", label: "Home by 1", rule: compare("GOAL_DIFFERENCE", "EQ", 1) },
+      { key: "away-one", label: "Away by 1", rule: compare("GOAL_DIFFERENCE", "EQ", -1) },
+      { key: "home-two", label: "Home by 2+", rule: compare("GOAL_DIFFERENCE", "GTE", 2) },
+      { key: "away-two", label: "Away by 2+", rule: compare("GOAL_DIFFERENCE", "LTE", -2) },
+      { key: "draw", label: "Draw", rule: compare("GOAL_DIFFERENCE", "EQ", 0) },
+    ],
+  } },
+  { id: "total-goals-bands", definition: {
+    schemaVersion: 1, name: "Total goals bands", settlementMode: "FINAL_SCORE", outcomeMode: "EXCLUSIVE",
+    coverage: "COMPLETE", terms: "Full-time combined goals, grouped into non-overlapping bands.", parameters: [],
+    outcomes: [
+      { key: "zero-one", label: "0-1 goals", rule: compare("TOTAL_GOALS", "LTE", 1) },
+      { key: "two-three", label: "2-3 goals", rule: { kind: "ALL", rules: [
+        compare("TOTAL_GOALS", "GTE", 2), compare("TOTAL_GOALS", "LTE", 3),
+      ] } },
+      { key: "four-five", label: "4-5 goals", rule: { kind: "ALL", rules: [
+        compare("TOTAL_GOALS", "GTE", 4), compare("TOTAL_GOALS", "LTE", 5),
+      ] } },
+      { key: "six-plus", label: "6+ goals", rule: compare("TOTAL_GOALS", "GTE", 6) },
+    ],
+  } },
 ];
+
+export const marketStarters: Array<{ id: string; definition: MarketDefinition; layout: MarketLayout }> = starters.map(starter => {
+  const layout = gridLayout(starter.definition, ["1x2", "double-chance"].includes(starter.id) ? 3 : starter.id === "total-goals-bands" ? 1 : 2);
+  if (starter.id === "winning-margin") layout.tiles[4].width = 2;
+  return { ...starter, layout };
+});

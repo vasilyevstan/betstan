@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { getCustomMarketSelectionKey } from '../../../liveBettingUtils';
 import { createMarketRequestId, formatMarketOdds, marketError, marketTitle } from '../../../marketUi';
+import MarketOutcomeGrid from '../../../components/MarketOutcomeGrid';
+import { layoutError } from '../../../marketLayout';
 
 const SIGN_IN_MESSAGE = 'Log in to add this selection to your slip.';
 const BOARD_BUSY_MESSAGE = 'Your pre-match slip is being reviewed. Wait for it to finish before adding a selection.';
@@ -19,6 +21,8 @@ const ProductCustomMarkets = ({
   eventId, eventName, onSelectionPlaced, resulted, selectedSelectionKeys, uiVariant,
 }) => {
   const [markets, setMarkets] = useState([]);
+  const [layouts, setLayouts] = useState({});
+  const [layoutNotice, setLayoutNotice] = useState('');
   const [busyKey, setBusyKey] = useState('');
   const [error, setError] = useState('');
   const [replacement, setReplacement] = useState(null);
@@ -35,10 +39,31 @@ const ProductCustomMarkets = ({
   useEffect(() => {
     let current = true;
     setMarkets([]);
+    setLayouts({});
+    setLayoutNotice('');
     if (resulted || !eventId) return undefined;
-    axios.get(`${path}/markets`).then(({ data }) => {
-      if (current) setMarkets(isOpenCatalog(data) ? data.markets ?? [] : []);
-    }, () => {});
+    axios.get(`${path}/markets`).then(async ({ data }) => {
+      if (!current) return;
+      const available = isOpenCatalog(data) ? data.markets ?? [] : [];
+      setMarkets(available);
+      if (!available.length) return;
+      try {
+        const { data: presentation } = await axios.get(`/api/backoffice/events/${encodeURIComponent(eventId)}/markets`);
+        if (!current) return;
+        const found = {};
+        for (const { configuration } of available) {
+          const source = presentation.markets?.find((market) => market.marketId === configuration.marketId
+            && market.template.id === configuration.template.id && market.template.version === configuration.template.version);
+          if (!source?.layout) continue;
+          if (layoutError(source.layout, configuration.template.definition.outcomes)) {
+            setLayoutNotice('A saved layout is invalid. That market is shown in the standard layout.');
+          } else found[configuration.marketId] = source.layout;
+        }
+        setLayouts(found);
+      } catch (failure) {
+        if (current) setLayoutNotice(`Custom layouts could not be loaded. Markets use the standard layout. ${marketError(failure)}`);
+      }
+    }, (failure) => { if (current) setError(marketError(failure)); });
     return () => { current = false; };
   }, [eventId, path, resulted]);
 
@@ -84,7 +109,7 @@ const ProductCustomMarkets = ({
     }
   };
 
-  if (!markets.length) return null;
+  if (!markets.length) return error ? <p className="selection-feedback" role="alert">{error}</p> : null;
   const buttonClass = `btn w-100 product-button product-button--${uiVariant ?? 'v1'} product-button--labelled`;
   return <>
     {markets.map(({ configuration, preview }) => {
@@ -93,8 +118,8 @@ const ProductCustomMarkets = ({
       const suspended = configuration.availability !== 'OPEN';
       return <div className="text-center product-block product-block--custom" key={configuration.marketId}>
         <h4 className="fw-semibold mb-2 product-block__title">{title}</h4>
-        <div className="product-custom-grid">
-          {definition.outcomes.map((outcome) => {
+        <MarketOutcomeGrid outcomes={definition.outcomes} layout={layouts[configuration.marketId]}>
+          {(outcome) => {
             const key = getCustomMarketSelectionKey({ eventId, marketId: configuration.marketId, outcomeKey: outcome.key });
             const selected = Boolean(key && selectedSelectionKeys?.has(key));
             const odds = formatMarketOdds(preview?.odds?.[outcome.key]);
@@ -110,10 +135,11 @@ const ProductCustomMarkets = ({
               <span className="product-button__label">{outcome.label}</span>
               <strong className="product-button__value">{odds}</strong>
             </button>;
-          })}
-        </div>
+          }}
+        </MarketOutcomeGrid>
       </div>;
     })}
+    {layoutNotice ? <p className="selection-feedback" role="status">{layoutNotice}</p> : null}
     {replacement ? <div className="custom-market-replace" role="group" aria-label="Replace selection from this match">
       <p>This match already has a selection in your slip. Extra markets can't be combined with it.</p>
       <div className="custom-market-replace__actions">
