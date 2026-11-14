@@ -35,7 +35,16 @@ brokerTests("durable moderation publication with a real broker", () => {
         await docker(["exec", name, "rabbitmq-diagnostics", "-q", "check_running"], 5000);
         return;
       } catch (error) {
-        if (Date.now() >= deadline) throw error;
+        const state = await docker([
+          "inspect", "--format",
+          "{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}",
+          name,
+        ], 5000);
+        if (!state.stdout.startsWith("running ") || Date.now() >= deadline) {
+          const logs = await docker(["logs", "--tail", "80", name], 5000);
+          throw new Error(`Test broker did not become ready: ${String(error)}\n`
+            + `${state.stdout}\n${logs.stdout}\n${logs.stderr}`);
+        }
         await pause(500);
       }
     }
