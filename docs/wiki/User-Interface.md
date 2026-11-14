@@ -513,9 +513,11 @@ desktop widths its identity, products, live markets, score, progress, and
 timeline regions use parallel columns where that reduces unnecessary vertical
 growth. The DOM remains one event article in logical reading order.
 
-Pre-match events form a responsive three-, two-, then one-card grid. Card
-headers and product decks use flexible layout so long team names do not push
-1X2 or Correct Score controls out of alignment with sibling cards.
+Pre-match events form a responsive three-, two-, then one-card grid. In
+multi-column layouts each card reserves two title lines, so a long team name
+does not push 1X2 or Correct Score out of alignment with sibling cards. Markets
+start directly below each card's header: extra custom markets lengthen only
+their own card and never push a neighbour's markets down.
 
 The kickoff timer uses a stable, horizontally balanced shape and tabular
 digits. During the final minute its numeric value changes to the semantic

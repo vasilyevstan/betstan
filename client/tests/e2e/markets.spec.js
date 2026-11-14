@@ -10,7 +10,11 @@ const prepare = async (page, { hasRetainedModel = true } = {}) => {
   const event = state.backofficeEvents[0];
   state.events = [{ ...event, products: [{ id: 'northport-1x2', type: '1X2', name: '1X2', odds: [
     { id: 'home', name: 'Northport', value: 2.2 }, { id: 'draw', name: 'Draw', value: 3.4 }, { id: 'away', name: 'Lakewood', value: 3.1 },
-  ] }] }];
+  ] }] }, { ...event, eventId: 'neighbour-event', name: 'North Christopherborough United - Eastwick', products: [
+    { id: 'neighbour-1x2', type: '1X2', name: '1X2', odds: [
+      { id: 'home', name: 'North Christopherborough United', value: 1.9 }, { id: 'draw', name: 'Draw', value: 3.5 },
+      { id: 'away', name: 'Eastwick', value: 4.1 },
+    ] }] }];
   const definition = {
     schemaVersion: 1, name: 'Total goals', settlementMode: 'FINAL_SCORE', outcomeMode: 'EXCLUSIVE', coverage: 'COMPLETE',
     terms: 'Settled on the full-time score.', parameters: [{ key: 'line', label: 'Goals line', minimum: 0.5, maximum: 10.5, defaultValue: 2.5 }],
@@ -98,6 +102,7 @@ const prepare = async (page, { hasRetainedModel = true } = {}) => {
       market.publishedConfiguration = { ...market.configuration };
       return send(market);
     }
+    if (url.pathname === '/api/event/events/neighbour-event/markets') return send({ enabled: true, event: state.events[1], markets: [] });
     if (url.pathname === `/api/event/events/${event.eventId}/markets`) return send({
       enabled: true, event, hasRetainedModel,
       markets: market.status === 'PUBLISHED' ? [{ configuration: market, preview: { odds: odds() } }] : [],
@@ -158,13 +163,17 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await expect(page.getByRole('button', { name: /Total goals.*Published/ })).toBeVisible();
     expect(writes[1].body).toMatchObject({ revision: 1, publish: true, parameters: { line: 2.5 }, pricing: { method: 'SCORE_MODEL' } });
     await page.getByRole('button', { name: 'Add market' }).click();
-    await expect(page.getByRole('radio', { name: /Manual market/ })).toBeChecked();
-    await expect(page.getByRole('radio', { name: /Total goals.*Template v1/ })).toBeEnabled();
+    await expect(page.getByRole('radio', { name: /Total goals.*Template v1/ })).toBeChecked();
+    await expect(page.getByRole('radio', { name: /^1X2 .*Built-in/ })).toBeEnabled();
+    await expect(page.getByRole('radio', { name: /Total goals.*Built-in/ })).toHaveCount(0);
     await expect(page.locator('.market-choice .market-preview').filter({ hasText: 'Total goals 2.5' })).toContainText('Over');
-    await expect(page.locator('.market-player-preview')).toContainText('Player preview');
+    await expect(page.locator('.market-add .market-player-preview')).toContainText('Player preview');
+    await expect(page.getByLabel('Template name')).toHaveCount(0);
     await capture('backoffice-add-market');
     await page.getByRole('button', { name: 'Cancel' }).click();
-    await page.getByRole('tab', { name: 'Template library' }).click();
+    await page.goto(`/backoffice?theme=${theme}`);
+    await page.getByRole('link', { name: 'Market designer', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Market designer' })).toBeVisible();
     await page.getByRole('button', { name: 'New template' }).click();
     await page.getByLabel('Start from').selectOption('totals');
     await expect(page.getByRole('group', { name: 'New template' })).toBeVisible();
@@ -220,11 +229,11 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     expect(Math.abs(detailBox.width - toolbarBox.width)).toBeLessThan(2);
     await page.getByRole('button', { name: 'Add market' }).click();
     await page.getByRole('radio', { name: /^1X2 / }).check();
-    await expect(page.getByRole('button', { name: 'Use template' })).toBeEnabled();
-    if (viewport.width > 1000) await expect(page.getByRole('button', { name: 'Use template' })).toBeInViewport();
+    await expect(page.getByRole('button', { name: 'Add to event' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Add to event' })).toBeInViewport();
     await expect(page.getByRole('radio', { name: /^Correct Score / })).toBeEnabled();
-    await page.screenshot({ path: testInfo.outputPath('full-width-gallery.png'), fullPage: true });
-    await page.getByRole('tab', { name: 'Template library' }).click();
+    await page.screenshot({ path: testInfo.outputPath('event-market-picker.png'), fullPage: true });
+    await page.goto(`/backoffice/markets?theme=${theme}`);
     await page.getByRole('button', { name: 'New template' }).click();
     await page.getByLabel('Template name').fill('Player of the match');
     await page.getByLabel('Settlement terms').fill('Operator declares the official award winner.');
@@ -247,26 +256,29 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.getByLabel('Selected outcome', { exact: true }).fill('Goalkeeper');
     await expect(page.getByLabel('Selected outcome', { exact: true })).toHaveValue('Goalkeeper');
     await page.getByRole('button', { name: 'Up', exact: true }).click();
-    await expect(page.getByRole('alert')).toContainText('That space is occupied');
-    await page.getByRole('button', { name: 'Design Goalkeeper', exact: true }).click();
+    await expect(page.getByText('Moved Captain to make room.', { exact: false })).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Design Goalkeeper', exact: true })).toHaveCSS('grid-row', '1 / span 2');
+    await expect(page.getByRole('button', { name: 'Design Captain', exact: true })).toHaveCSS('grid-row', '3 / span 1');
+    await expect(page.getByRole('button', { name: 'Up', exact: true })).toBeDisabled();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1);
     await page.locator('.market-designer').screenshot({ path: testInfo.outputPath('visual-designer.png') });
     await page.getByRole('button', { name: 'Save template', exact: true }).click();
     await expect(page.getByText('Template saved.', { exact: false })).toBeVisible();
     const saved = templates[1].versions[0];
     expect(saved.layout.tiles).toEqual([
-      { outcomeKey: 'captain', row: 1, column: 1, width: 1, height: 1 },
-      { outcomeKey: 'goalkeeper', row: 2, column: 1, width: 2, height: 2 },
+      { outcomeKey: 'captain', row: 3, column: 1, width: 1, height: 1 },
+      { outcomeKey: 'goalkeeper', row: 1, column: 1, width: 2, height: 2 },
     ]);
     await page.reload();
-    await page.getByRole('tab', { name: 'Template library' }).click();
     await page.getByRole('button', { name: 'New version of Player of the match' }).click();
     await expect(page.getByRole('button', { name: 'Design Goalkeeper' })).toHaveCSS('grid-column', '1 / span 2');
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await page.getByRole('tab', { name: 'Event markets' }).click();
+    await page.goto(`/backoffice/events/${event.eventId}/markets?theme=${theme}`);
     await page.getByRole('button', { name: 'Add market' }).click();
     await page.getByRole('radio', { name: /^Player of the match/ }).check();
-    await page.getByRole('button', { name: 'Use saved version' }).click();
+    await page.getByRole('button', { name: 'Add to event' }).click();
+    await expect(page.getByText('Draft created.', { exact: false })).toBeVisible();
     await page.getByRole('button', { name: 'Generate odds' }).click();
     await expect(page.getByText('Price preview.', { exact: false })).toBeVisible();
     await page.getByRole('button', { name: 'Publish market' }).click();
@@ -275,7 +287,17 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     const card = page.getByRole('article', { name: event.name });
     const selection = card.getByRole('button', { name: /Select Player of the match Goalkeeper/ });
     await expect(selection.locator('..')).toHaveCSS('grid-column', '1 / span 2');
-    await expect(selection.locator('..')).toHaveCSS('grid-row', '2 / span 2');
+    await expect(selection.locator('..')).toHaveCSS('grid-row', '1 / span 2');
+    if (viewport.width > 1000) {
+      // The neighbour has a longer name and no custom market; its 1X2 must stay level and directly under its header.
+      const neighbour = page.getByRole('article', { name: 'North Christopherborough United - Eastwick' });
+      const deckGap = async (article) => article.evaluate((node) => node.querySelector('.event-card__product-deck').getBoundingClientRect().top
+        - node.querySelector('.event-card__prematch-header').getBoundingClientRect().bottom);
+      const oneXTwoTop = (article) => article.locator('.product-block--1x2 .product-block__title').evaluate((node) => node.getBoundingClientRect().top);
+      expect((await card.boundingBox()).y).toBeCloseTo((await neighbour.boundingBox()).y, 0);
+      expect(Math.abs(await oneXTwoTop(card) - await oneXTwoTop(neighbour))).toBeLessThan(2);
+      expect(Math.abs(await deckGap(neighbour) - await deckGap(card))).toBeLessThan(2);
+    }
     await selection.click();
     await expect.poll(() => quoteRequests.length).toBe(1);
     await expect(selection).toHaveAttribute('aria-pressed', 'true');
@@ -299,28 +321,18 @@ for (const scenario of [
     const { state, event, templates, writes, quoteRequests } = await prepare(page, { hasRetainedModel: false });
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    await page.goto(`/backoffice/events/${event.eventId}/markets?theme=${scenario.theme}`);
-    await page.getByRole('button', { name: 'Add market' }).click();
-    await page.getByRole('radio', { name: new RegExp(`^${scenario.name} `) }).check();
-    await page.getByRole('button', { name: 'Use template' }).click();
+    await page.goto(`/backoffice/markets?theme=${scenario.theme}`);
+    await page.getByRole('button', { name: `Use ${scenario.name} template` }).click();
     await expect(page.getByLabel('Template name')).toHaveValue(`${scenario.name} copy`);
-    await expect(page.getByRole('button', { name: 'Save design and create draft' })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Save template only' })).toBeEnabled();
     await page.getByLabel('Template name').fill('My match product');
     await page.getByRole('combobox', { name: 'Result', exact: true }).selectOption('MANUAL');
     await page.getByRole('combobox', { name: 'Tile shape', exact: true }).selectOption('pill');
-    await page.getByRole('button', { name: 'Save design and create draft' }).click();
-    await expect(page.getByText('Draft created.', { exact: false })).toBeVisible();
+    await page.getByRole('button', { name: 'Save template', exact: true }).click();
+    await expect(page.getByText('Template saved.', { exact: false })).toBeVisible();
     const copy = templates[1].versions[0];
     expect(copy.definition).toMatchObject({ name: 'My match product', settlementMode: 'MANUAL' });
     expect(copy.definition.outcomes.every((outcome) => !outcome.rule)).toBe(true);
     expect(copy.layout.tileShape).toBe('pill');
-    await page.getByRole('button', { name: 'Generate odds' }).click();
-    await expect(page.getByText('Price preview.', { exact: false })).toBeVisible();
-    expect(writes.find((write) => write.path.endsWith('/preview')).body.generation.method).toBe('EQUAL_CHANCE');
-    await page.getByRole('button', { name: 'Publish market' }).click();
-    await expect(page.getByRole('button', { name: /My match product.*Published/ })).toBeVisible();
-    await page.getByRole('tab', { name: 'Template library' }).click();
     await expect(page.getByRole('button', { name: 'Use Free draw template' })).toBeVisible();
     const gallery = await page.locator('.market-standard-designs .market-choices').boundingBox();
     const library = await page.locator('.market-library').boundingBox();
@@ -331,6 +343,19 @@ for (const scenario of [
     await expect(page.getByLabel('Template name')).toHaveValue(`${scenario.name} copy`);
     await expect(page.getByRole('combobox', { name: 'Result', exact: true })).toHaveValue('FINAL_SCORE');
     await expect(page.getByRole('combobox', { name: 'Tile shape', exact: true })).toHaveValue('rounded');
+    await page.goto(`/backoffice/events/${event.eventId}/markets?theme=${scenario.theme}`);
+    await expect(page.getByText(/only manual-result templates can be added/)).toBeVisible();
+    await page.getByRole('button', { name: 'Add market' }).click();
+    await expect(page.getByRole('radio', { name: new RegExp(`^${scenario.name} `) })).toBeDisabled();
+    await expect(page.getByRole('radio', { name: /^My match product/ })).toBeChecked();
+    await page.getByRole('button', { name: 'Add to event' }).click();
+    await expect(page.getByText('Draft created.', { exact: false })).toBeVisible();
+    expect(writes.filter((write) => write.path === '/api/backoffice/market-templates')).toHaveLength(1);
+    await page.getByRole('button', { name: 'Generate odds' }).click();
+    await expect(page.getByText('Price preview.', { exact: false })).toBeVisible();
+    expect(writes.find((write) => write.path.endsWith('/preview')).body.generation.method).toBe('EQUAL_CHANCE');
+    await page.getByRole('button', { name: 'Publish market' }).click();
+    await expect(page.getByRole('button', { name: /My match product.*Published/ })).toBeVisible();
     await page.goto(`/?theme=${scenario.theme}`);
     const card = page.getByRole('article', { name: event.name });
     const pick = card.getByRole('button', { name: `Select My match product ${scenario.outcome} in ${event.name} at 1.87` });

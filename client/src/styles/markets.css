@@ -516,6 +516,9 @@
 .backoffice-markets .market-add > fieldset:first-of-type {
   margin-block-start: 1rem;
 }
+.backoffice-markets .market-add > fieldset:not(.market-section) + fieldset:not(.market-section) {
+  margin-block-start: 1.25rem;
+}
 .backoffice-markets .market-choices {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr));
@@ -561,6 +564,34 @@
 .backoffice-markets .market-choice:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+.backoffice-markets .market-choice:has(input:disabled) {
+  cursor: not-allowed;
+  border-style: dashed;
+}
+.backoffice-markets .market-choice:has(input:disabled) .market-preview {
+  opacity: 0.55;
+}
+.backoffice-markets .market-choice__reason {
+  color: var(--warning);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.backoffice-markets .market-add .market-help a {
+  color: var(--accent);
+  font-weight: 600;
+  text-underline-offset: 0.2em;
+}
+.backoffice-markets .market-add > .market-form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-inline: -1rem;
+  margin-bottom: -1rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
+  background: var(--surface-soft);
 }
 .backoffice-markets .market-choice__body {
   display: grid;
@@ -670,6 +701,11 @@
   }
   .backoffice-markets .market-editor__footer > .backoffice-action {
     flex: 1 1 8rem;
+  }
+  .backoffice-markets .market-add > .market-form-actions {
+    margin-inline: -0.75rem;
+    margin-bottom: -0.75rem;
+    padding-inline: 0.75rem;
   }
 }
 /* Player-card preview used by the Backoffice: same block and buttons, inert, on a card surface. */

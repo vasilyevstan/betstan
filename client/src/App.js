@@ -13,7 +13,7 @@ import Slip from './pages/Slip';
 import Statistics from './pages/account/Statistics';
 import Telemetry from './pages/Telemetry';
 import getRouteIdentity from './routeIdentity';
-import BackofficeMarkets from './pages/account/BackofficeMarkets';
+import BackofficeMarkets, { BackofficeMarketDesigner } from './pages/account/BackofficeMarkets';
 import './styles/markets.css';
 
 const allowedVariants = new Set(['v1', 'v2', 'v3']);
@@ -149,6 +149,7 @@ const App = () => {
                 />}
               />
               <Route path="/signup" element={<NewUser callback={handleAuthChange} />} />
+              <Route path="/backoffice/markets" element={<BackofficeMarketDesigner />} />
               <Route path="/backoffice/events/:eventId/markets" element={<BackofficeMarkets />} />
               <Route path="/logout" element={<LogOut callback={handleAuthChange} />} />
               <Route path="/login" element={<LogIn callback={handleAuthChange} />} />

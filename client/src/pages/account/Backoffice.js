@@ -376,8 +376,12 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
 
   return <div className="backoffice-board">
     <header className="backoffice-header">
-      <h1 className="h3 mb-1">Backoffice</h1>
-      <p className="mb-0">Manage event creation, visibility, and final results.</p>
+      <div>
+        <h1 className="h3 mb-1">Backoffice</h1>
+        <p className="mb-0">Manage event creation, visibility, and final results.</p>
+      </div>
+      <a className="btn backoffice-control backoffice-action backoffice-header__action"
+        href={`/backoffice/markets${window.location.search}`}>Market designer</a>
     </header>
     <div className="card backoffice-create">
       <div className="card-body">
