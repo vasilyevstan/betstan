@@ -9,6 +9,7 @@ import {
   CashBackUnavailableReason,
 } from "./CashBack";
 import { CashBackSourceSnapshot } from "./ICashBackSourceEvent";
+import { BetAccountingEvidence } from "../accounting/BetAccounting";
 
 /** Internal offer proof; never forward this wholesale as a public HTTP DTO. */
 export interface CashBackQuoteEvidence {
@@ -40,6 +41,7 @@ export interface ICashBackOutcomeEvent extends IEvent {
     | {
         readonly outcome: "ACCEPTED";
         readonly receipt: CashBackAcceptedReceipt;
+        readonly accounting?: BetAccountingEvidence;
         readonly receiptFingerprint: string;
         readonly quote?: never;
       }

@@ -247,7 +247,7 @@ cash-back-history completeness flag is introduced, and existing live-history
 attestations are unchanged.
 
 Tests use actual npm aliases for `1.0.54` and the immediate published
-`1.1.0-rc.2`, plus shared type-checked/runtime fixtures. They prove old
+`1.1.0-rc.3`, plus shared type-checked/runtime fixtures. They prove old
 payload assignability, optional-field tolerance and envelope compatibility,
 **not** database/broker race safety or safe mixed writers after activation.
 Cash-back production must remain inactive until coordinated compatible
@@ -333,6 +333,59 @@ Feature-off must keep settlement and history readers running; reader-unaware
 rollback images are unsafe after new exposures exist.
 
 ## Change and validation workflow
+
+### Risk accounting candidate (1.1.0-rc.4)
+
+Source candidate is `1.1.0-rc.4`; the inspected service manifests/locks consume
+published `1.1.0-rc.3`. Publication and coordinated consumer repins are separate.
+
+Moderation adds `RISK_POLICY` and `RISK_EVIDENCE_UNAVAILABLE` decline values
+without changing existing wire values. New risk writers must wait for
+compatible readers: older enum-backed readers may reject the new values.
+Legacy decisions omit the optional `ModerationDecisionMetadata`; new risk
+decisions supply all five fields: immutable `decisionId`, persisted terminal
+`occurredAt`, positive safe-integer `policyRevision`, canonical placement
+SHA-256 `placementFingerprint`, and at most 32 unique typed `reasonCodes`.
+An approval has no reasons. Publication replay preserves this metadata.
+`ModerationDecisionReasonCode` is a closed union; unavailable evidence and
+policy restrictions must not masquerade as invalid selections or closed
+markets. Runtime producers/consumers validate completeness and bounds.
+
+`ISettleSlipEvent.data.accounting` and accepted
+`ICashBackOutcomeEvent.data.accounting` are optional `BetAccountingEvidence`.
+Old messages remain readable; absent evidence means unavailable history.
+`COMPLETE` contains the complete ordered movement prefix for **one ticket**,
+not an attestation that the book or any historical time window is complete.
+`UNAVAILABLE` carries an explicit precision, missing-history, authority or amount
+reason. Readers must not silently replace it with zero.
+
+Each immutable `BetAccountingMovement` contains schema version 1, movement ID,
+slip/user IDs, contiguous accounting-only revision, economic `occurredAt`, closed
+principal, return, remaining/original principal (safe integer nominal cents),
+source `SETTLEMENT`/`CASH_BACK`, and placement fingerprint. It closes ticket
+principal once, never once per row. A complete newer prefix recovers missing
+partials; deduplicate by movement ID, verify equal identities agree, and do not
+rewind a newer prefix when an older one arrives. Returns and timestamps are
+immutable. Windows use each movement's economic time, not delivery time; signed
+closed principal minus return allows wins to offset losses.
+
+`fixedOddsReturnMinor` floors only the final exact accepted-odds product.
+Builders supply **one composite price**, not prices for their internal
+conditions; voided exposures contribute factor 1. Unsupported high-precision
+legacy stakes are not rounded. `nominalStakeMinor` and `realisedLossMinor` provide
+bounded conversions and signed BigInt arithmetic. These are nominal simulation
+returns, not wallet transfers. Existing cash-back settlement evidence still
+describes the remaining settlement basis and **is not a normal payout contract**.
+
+`BetPayoutBound` exposes only a standalone fixed-odds maximum return and original
+principal, bound to placement identity. No semantic netting domain is invented
+from a name or label. Exact hedge credit requires separate source-proven domain
+authority and cannot govern admission when independent closure invalidates it.
+
+Source writers must persist movements with canonical transitions and confirmed
+outbox obligations, preserve them in archives and provide bounded source-owned
+reconciliation. This package alone supplies none of those persistence guarantees,
+activates no risk rule and introduces no settlement permission RPC.
 
 1. Read this file, the installed package declarations, every affected
    producer and consumer, and the exact service pins.
