@@ -32,7 +32,8 @@ brokerTests("durable moderation publication with a real broker", () => {
     const deadline = Date.now() + 60000;
     for (;;) {
       try {
-        await docker(["exec", name, "rabbitmq-diagnostics", "-q", "check_running"], 5000);
+        // Root probes can create the shared cookie before the server drops privileges.
+        await docker(["exec", "--user", "rabbitmq", name, "rabbitmq-diagnostics", "-q", "check_running"], 5000);
         return;
       } catch (error) {
         const state = await docker([
