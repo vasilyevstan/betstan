@@ -16,6 +16,8 @@ export * from "./event/ISettleSlipRowEvent";
 export * from "./event/IEventVisibilityEvent";
 export * from "./event/ILiveEventUpdateEvent";
 export * from "./event/CashBack";
+export * from "./accounting/BetAccounting";
+export * from "./accounting/ExactMoney";
 export * from "./event/ICashBackRequestEvent";
 export * from "./event/ICashBackOutcomeEvent";
 export * from "./event/ICashBackSourceEvent";

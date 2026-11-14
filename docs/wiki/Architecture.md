@@ -304,6 +304,30 @@ visibility or invent a final result. Manual market void is the explicit
 supported operator action. Automated live/player-stat markets and wallets are
 outside this release.
 
+### Risk accounting contracts
+
+The `1.1.0-rc.4` Common candidate adds optional accounting evidence to final
+slip settlement and accepted cash-back outcomes. Its `COMPLETE` value is one
+ticket's complete ordered movement prefix, not proof of book or window
+completeness. `UNAVAILABLE` and absent legacy evidence are never zero exposure.
+Movements bind immutable ticket/owner identity, a contiguous accounting
+revision, economic occurrence time, closed/original/remaining principal and
+confirmed nominal return. Readers deduplicate movements and keep confirmed
+returns immutable across reordered delivery.
+
+Exact-money helpers operate on bounded nominal cents and decimal odds, floor
+once after the complete price product, and preserve signed realised loss.
+Builders contribute one composite price. Unsupported legacy precision is not
+silently rounded into eligibility. Standalone payout bounds do not invent
+hedge domains from labels or authorize unsafe netting credit.
+
+These additive contracts alone enable no new gateway or public rule. Service
+writers still need atomic canonical transitions, replayable publication,
+archive preservation and source-owned history reconciliation. Compatible
+readers and coordinated exact published service pins precede activation; old
+messages remain readable, but cannot manufacture missing accounting history.
+See the [Common contract reference](https://github.com/vasilyevstan/betstan/blob/master/common/README.md).
+
 ### Cash-back runtime - deployment-gated
 
 The runtime implements the published `@betstan/common`

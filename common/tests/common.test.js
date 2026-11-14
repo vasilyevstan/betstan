@@ -153,7 +153,7 @@ test("preserves every legacy runtime export and enum member", () => {
 });
 
 test("preserves the actual published predecessor exports and every enum wire member", () => {
-  assert.equal(require("predecessor-common/package.json").version, "1.1.0-rc.2");
+  assert.equal(require("predecessor-common/package.json").version, "1.1.0-rc.3");
   assert.equal(require("legacy-common/package.json").version, "1.0.54");
   for (const [name, value] of Object.entries(predecessorCommon)) {
     assert.ok(Object.hasOwn(common, name), `missing predecessor export ${name}`);
