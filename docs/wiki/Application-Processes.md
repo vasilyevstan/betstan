@@ -274,64 +274,63 @@ an existing event ID when older stored data needs product completion.
 
 ## Reusable markets
 
-The **Markets** button sits beside the visibility button on each compact
-Backoffice event and opens `/backoffice/events/:eventId/markets`; it does not
-expand the score controls. Authoring remains public, consistent with the
-existing Backoffice. `EXTENSIBLE_MARKETS_ENABLED` is on in the deployed
-Backoffice, Event, Slip and Moderation manifests.
+Markets are designed once and reused. **Market designer**, at the top of the
+Backoffice page, opens `/backoffice/markets`, where templates are created and
+edited independently of any event. The **Markets** button beside the
+visibility button on each compact Backoffice event opens
+`/backoffice/events/:eventId/markets`, where the operator only picks which
+templates the event offers; it does not expand the score controls. Authoring
+remains public, consistent with the existing Backoffice.
+`EXTENSIBLE_MARKETS_ENABLED` is on in the deployed Backoffice, Event, Slip and
+Moderation manifests.
 
-The page has two tabs. **Event markets** puts the market count, Refresh and
-Add market in a compact top toolbar. Existing markets form a horizontal
-selector below it; the selected editor or design gallery uses the full width.
-**Add market** starts from **Free draw**, a blank manual market
-(the default), a saved template version or a starter. Each choice shows a
-small preview of the block players will see on the match card, and the form
-shows a live player preview of the name, bound values and outcomes. **Create draft**
-saves the template and the event draft together; a retry reuses the saved
-template. Every starter remains selectable on legacy events without a pricing
-model. **Use template** opens an independent copy to rename and design;
-**Save template only** keeps an automatic definition reusable without attaching
-it to that event. To use the copy on a model-less event, explicitly choose
-**Manual** in **Result**: the operator sets or generates assumed odds and
-declares the outcome. Automatic pricing and publication still require the
-event's retained model. One banner explains why
-authoring is unavailable (feature off, kickoff passed, resulted, or load
-failure). **Template library** creates custom definitions or new versions,
-optionally starting from a starter, and archives or restores templates.
-Library rows and the template editor show the same player preview using
-default values. Outcome and parameter keys are derived from their labels unless edited. The guided rule editor supports full-time score conditions or explicit
-operator-declared outcomes, not executable formulas. Versions already used by
-events and accepted bets never follow later library edits.
+An event's Markets page puts the market count, Refresh and Add market in a
+compact top toolbar. Existing markets form a horizontal selector below it; the
+selected editor uses the full width. **Add market** lists **Your templates**
+(the latest version of each saved, unarchived template) and **Built-in
+templates** (1X2 and Correct Score, unless an unchanged copy is already saved).
+Each choice shows a small preview of the block players will see on the match
+card; the chosen one shows its settings and a live player preview. **Add to
+event** creates the event's draft market; a retry reuses a built-in template
+that was already saved, so nothing is created twice. On a legacy event without
+a pricing model, automatic-result templates are shown but disabled with the
+reason, and a banner explains that a copy set to **Manual** in **Result** can
+be used instead. One banner explains why authoring is unavailable (feature
+off, kickoff passed, resulted, or load failure).
 
-**1X2**, **Correct Score** and **Free draw** are starting points in both the
-chooser and library. Source starters stay unchanged, but their copies can have
-new names, layouts, outcomes and rules. Existing standard products are not
-modified. Correct Score starts with ten listed scores and partial coverage:
-an unlisted final score wins none of the listed outcomes. Saved templates also
-offer **Copy** for an independent template or **New version** for a revision.
-Score-based starters include totals, both teams to score, double chance,
-match result & both teams to score, winning margin and total-goals bands.
-Only facts supported by the full-time score model settle automatically; player
-awards or other externally declared results remain manual.
+The Market designer starts new templates from **Free draw**, **1X2**,
+**Correct Score** or the other built-in designs. Built-in sources stay
+unchanged; **Use template** opens an independent copy that can be renamed and
+given new layouts, outcomes and rules. Saved templates offer **Copy** for an
+independent template, **New version** for a revision, and **Archive** or
+**Restore**. Library rows and the template editor show the same player preview
+using default values. Outcome and parameter keys are derived from their labels
+unless edited. The guided rule editor supports full-time score conditions or
+explicit operator-declared outcomes, not executable formulas. Correct Score
+starts with ten listed scores and partial coverage: an unlisted final score
+wins none of the listed outcomes. Score-based designs include totals, both
+teams to score, double chance, match result & both teams to score, winning
+margin and total-goals bands. Only facts supported by the full-time score
+model settle automatically; player awards or other externally declared results
+remain manual. Existing standard products are not modified.
 
 **Design the player view** arranges outcome tiles on a responsive grid of
 1-4 columns. Drag a tile, or select it and tap an empty cell; Up/Down/Left/Right
-also work with keyboard and touch. Width, height and corner shape control the
-tile's appearance. Empty cells create spacing. Changing the column count or
-choosing **Arrange evenly** explicitly reflows all tiles. Every outcome must
-appear exactly once; overlapping tiles, off-grid positions, arbitrary HTML,
-CSS and executable content are rejected. The canvas supports up to 64 rows
-and tiles up to four rows tall.
+also work with keyboard and touch and are disabled at the grid edge. Moving a
+tile onto another swaps them; when sizes differ, the covered tiles move to the
+nearest free cells and the status line names what moved. Width, height and
+corner shape control the tile's appearance. Empty cells create spacing.
+Changing the column count or choosing **Arrange evenly** explicitly reflows
+all tiles. Every outcome must appear exactly once; overlapping tiles, off-grid
+positions, arbitrary HTML, CSS and executable content are rejected. The canvas
+supports up to 64 rows and tiles up to four rows tall.
 
-Manual creation saves the design together with its reusable template.
-**Use template**, then **Save design and create draft**, creates a separate
-reusable template and event draft. **Use saved version** reuses a saved
-template unchanged with the chosen event parameters; **New version** in the
-library versions an existing template.
-The layout is frozen on the event instance, so library edits or archival
-cannot change already-created markets. Preview and player card use the same
-layout renderer. When presentation cannot load, the player gets a visible
-standard-layout notice; quote and settlement authority never comes from layout.
+Template versions already used by events and accepted bets never follow later
+designer edits. The layout is frozen on the event instance, so designer edits
+or archival cannot change already-created markets. Preview and player card use
+the same layout renderer. When presentation cannot load, the player gets a
+visible standard-layout notice; quote and settlement authority never comes
+from layout.
 
 **Generate odds** previews retained-model prices for score rules, or explicit
 equal-chance, probability and relative-weight assumptions for manual markets.

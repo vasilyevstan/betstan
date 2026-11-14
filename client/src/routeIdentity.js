@@ -3,7 +3,7 @@ const getRouteIdentity = (pathname) => {
     ? pathname.toLowerCase()
     : '/';
   const withoutTrailingSlashes = normalizedPathname.replace(/\/+$/, '');
-  if (/^\/backoffice\/events\/[^/]+\/markets$/.test(withoutTrailingSlashes)) return '/backoffice';
+  if (/^\/backoffice(\/events\/[^/]+)?\/markets$/.test(withoutTrailingSlashes)) return '/backoffice';
   if (/^\/events\/[^/]+\/markets$/.test(withoutTrailingSlashes)) return '/';
   return withoutTrailingSlashes || '/';
 };

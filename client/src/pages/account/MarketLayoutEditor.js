@@ -1,24 +1,32 @@
 import React, { useRef, useState } from 'react';
-import { gridLayout, layoutError, layoutRows, tileStyle } from '../../marketLayout';
+import { gridLayout, layoutError, layoutRows, placeTile, tileStyle } from '../../marketLayout';
 import { marketActionClass } from '../../marketUi';
 
 const MarketLayoutEditor = ({ outcomes, layout, onChange, onRename, disabled }) => {
   const identity = (outcome) => outcome?.localId ?? outcome?.key;
   const [selectedKey, setSelectedKey] = useState(identity(outcomes[0]));
   const [error, setError] = useState('');
+  const [moveNote, setMoveNote] = useState('');
   const [dropCell, setDropCell] = useState('');
   const drag = useRef(null);
   const skipClick = useRef(false);
   const selected = outcomes.find((outcome) => identity(outcome) === selectedKey) ?? outcomes[0];
   const tile = layout.tiles.find((item) => item.outcomeKey === selected?.key);
-  const update = (next) => {
+  const label = (outcome) => outcome?.label?.trim() || `Outcome ${outcomes.indexOf(outcome) + 1}`;
+  const update = (next, note = '') => {
     const problem = layoutError(next, outcomes);
     setError(problem);
+    setMoveNote(problem ? '' : note);
     if (!problem) onChange(next);
   };
-  const move = (key, changes) => update({
-    ...layout, tiles: layout.tiles.map((item) => item.outcomeKey === key ? { ...item, ...changes } : item),
-  });
+  const move = (key, changes) => {
+    const before = layout.tiles.find((item) => item.outcomeKey === key);
+    const { layout: next, displaced } = placeTile(layout, key, changes);
+    const names = displaced.map((outcomeKey) => label(outcomes.find((item) => item.key === outcomeKey)));
+    const swapped = displaced.length === 1 && next.tiles.some((item) => item.outcomeKey === displaced[0]
+      && item.row === before.row && item.column === before.column);
+    update(next, swapped ? `Swapped with ${names[0]}.` : names.length ? `Moved ${names.join(', ')} to make room.` : '');
+  };
   const rows = Math.min(64, layoutRows(layout) + 1);
   const cells = [];
   for (let row = 1; row <= rows; row += 1) {
@@ -28,7 +36,6 @@ const MarketLayoutEditor = ({ outcomes, layout, onChange, onRename, disabled }) 
       if (!item || (item.row === row && item.column === column)) cells.push({ row, column, tile: item });
     }
   }
-  const label = (outcome) => outcome?.label?.trim() || `Outcome ${outcomes.indexOf(outcome) + 1}`;
   const targetCell = (event) => {
     const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-layout-row]');
     if (!target || !event.currentTarget.closest('.market-designer__canvas')?.contains(target)) return null;
@@ -58,11 +65,12 @@ const MarketLayoutEditor = ({ outcomes, layout, onChange, onRename, disabled }) 
     if (skipClick.current) { skipClick.current = false; return; }
     setSelectedKey(identity(outcome));
     setError('');
+    setMoveNote('');
   };
   return <fieldset className="market-designer" disabled={disabled}>
     <legend>Design the player view</legend>
-    <p className="market-help">Drag a tile, or select it and tap an empty square. Change its width and height to build your layout.
-      Empty squares are spacing, not betting options.</p>
+    <p className="market-help">Drag a tile onto another to swap them, or select a tile and use the arrows or tap an empty square.
+      Change width and height to build your layout. Empty squares are spacing, not betting options.</p>
     <div className="market-designer__toolbar">
       <label>Grid columns<select className="form-select" value={layout.columns} onChange={(event) => {
         // Changing the grid is explicit: a denser grid must never silently discard outcomes.
@@ -107,7 +115,10 @@ const MarketLayoutEditor = ({ outcomes, layout, onChange, onRename, disabled }) 
           onChange={(event) => onRename(selected.key, event.target.value)} /></label>
         <div className="market-form-grid">
           <label>Tile width<select className="form-select" value={tile.width}
-            onChange={(event) => move(selected.key, { width: Number(event.target.value) })}>
+            onChange={(event) => {
+              const width = Number(event.target.value);
+              move(selected.key, { width, column: Math.min(tile.column, layout.columns - width + 1) });
+            }}>
             {Array.from({ length: layout.columns }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} {value === 1 ? 'column' : 'columns'}</option>)}
           </select></label>
           <label>Tile height<select className="form-select" value={tile.height}
@@ -117,12 +128,13 @@ const MarketLayoutEditor = ({ outcomes, layout, onChange, onRename, disabled }) 
         </div>
         <div className="market-designer__moves" role="group" aria-label="Move selected tile">
           {[
-            ['Up', { row: tile.row - 1 }], ['Down', { row: tile.row + 1 }],
-            ['Left', { column: tile.column - 1 }], ['Right', { column: tile.column + 1 }],
-          ].map(([name, changes]) => <button key={name} type="button" className={marketActionClass()}
-            onClick={() => move(selected.key, changes)}>{name}</button>)}
+            ['Up', { row: tile.row - 1 }, tile.row <= 1], ['Down', { row: tile.row + 1 }, tile.row + tile.height > 64],
+            ['Left', { column: tile.column - 1 }, tile.column <= 1],
+            ['Right', { column: tile.column + 1 }, tile.column + tile.width > layout.columns],
+          ].map(([name, changes, edge]) => <button key={name} type="button" className={marketActionClass()}
+            disabled={edge} onClick={() => move(selected.key, changes)}>{name}</button>)}
         </div>
-        <p className="market-help" role="status">{label(selected)}: row {tile.row}, column {tile.column}.</p>
+        <p className="market-help" role="status">{label(selected)}: row {tile.row}, column {tile.column}.{moveNote ? ` ${moveNote}` : ''}</p>
       </div> : null}
     </div>
     {error || layoutError(layout, outcomes) ? <p className="market-notice market-notice--danger" role="alert">

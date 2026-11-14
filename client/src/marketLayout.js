@@ -36,6 +36,39 @@ export const layoutError = (layout, outcomes) => {
   return '';
 };
 
+const overlaps = (a, b) => a.row < b.row + b.height && b.row < a.row + a.height
+  && a.column < b.column + b.width && b.column < a.column + a.width;
+const insideGrid = (layout, tile) => tile.row >= 1 && tile.column >= 1
+  && tile.column + tile.width - 1 <= layout.columns && tile.row + tile.height - 1 <= 64;
+
+// Move or resize one tile; tiles it lands on jump to the vacated spot (a swap) or the nearest free space.
+export const placeTile = (layout, outcomeKey, changes) => {
+  const current = layout.tiles.find((tile) => tile.outcomeKey === outcomeKey);
+  if (!current) return { layout, displaced: [] };
+  const moved = { ...current, ...changes };
+  const positions = new Map([[outcomeKey, moved]]);
+  const result = (displaced = []) => ({
+    layout: { ...layout, tiles: layout.tiles.map((tile) => positions.get(tile.outcomeKey) ?? tile) }, displaced,
+  });
+  if (!insideGrid(layout, moved)) return result();
+  const displaced = layout.tiles.filter((tile) => tile !== current && overlaps(tile, moved));
+  const placed = [...layout.tiles.filter((tile) => tile !== current && !displaced.includes(tile)), moved];
+  const cells = [];
+  for (let row = 1; row <= 64; row += 1) {
+    for (let column = 1; column <= layout.columns; column += 1) cells.push({ row, column });
+  }
+  for (const tile of displaced) {
+    const distance = (cell) => Math.abs(cell.row - tile.row) + Math.abs(cell.column - tile.column);
+    const spot = [{ row: current.row, column: current.column }, ...[...cells].sort((a, b) => distance(a) - distance(b))]
+      .map((cell) => ({ ...tile, ...cell }))
+      .find((candidate) => insideGrid(layout, candidate) && !placed.some((other) => overlaps(other, candidate)));
+    if (!spot) return result();
+    placed.push(spot);
+    positions.set(tile.outcomeKey, spot);
+  }
+  return result(displaced.map((tile) => tile.outcomeKey));
+};
+
 // Keep existing positions when labels/keys change, outcomes are added, or one is removed.
 export const reconcileLayout = (layout, outcomes, previous = outcomes) => {
   if (!layout) return gridLayout(outcomes);
