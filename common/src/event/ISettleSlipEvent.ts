@@ -1,6 +1,7 @@
 import { IEvent } from "./IEvent";
 import { BetKind } from "./status/BetKind";
 import { CashBackSettlementEvidence } from "./CashBack";
+import { BetAccountingEvidence } from "../accounting/BetAccounting";
 
 export interface ISettleSlipEvent extends IEvent {
   data: {
@@ -12,5 +13,7 @@ export interface ISettleSlipEvent extends IEvent {
      * legacy evidence, never permission to reset an already reduced remainder.
      */
     cashBack?: CashBackSettlementEvidence;
+    accounting?: BetAccountingEvidence;
+    occurredAt?: string;
   };
 }
