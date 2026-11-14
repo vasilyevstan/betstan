@@ -357,7 +357,10 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
       definition, layout, parameters: parameterDefaults(definition),
     })} />;
   return <form className="market-add" id="market-add-panel" aria-labelledby="market-add-heading" onSubmit={submit}>
-    <h2 className="market-editor__title" id="market-add-heading">Add a market</h2>
+    <div className="market-toolbar__header">
+      <h2 className="market-editor__title" id="market-add-heading">Add a market</h2>
+      {option ? <button type="submit" className={marketActionClass(true)} disabled={busy}>Use template</button> : null}
+    </div>
     <fieldset disabled={busy}>
       <legend className="market-subheading">Start from</legend>
       <ul className="market-choices">{[{ id: MANUAL_CHOICE }, ...options].map(choiceRow)}</ul>
@@ -396,9 +399,9 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
         note="odds are set after you create the draft" />
     </fieldset>
     <div className="market-form-actions">
-      <button type="submit" className={marketActionClass(true)} disabled={busy}>
-        {busy ? 'Creating...' : option ? 'Use template' : 'Create draft'}
-      </button>
+      {!option ? <button type="submit" className={marketActionClass(true)} disabled={busy}>
+        {busy ? 'Creating...' : 'Create draft'}
+      </button> : null}
       {option?.kind === 'template' ? <button type="button" className={marketActionClass()}
         disabled={busy || needsModel(option.definition)} onClick={(event) => {
           if (event.currentTarget.form.reportValidity()) void onCreate({ option, parameters: values, layout: option.layout });

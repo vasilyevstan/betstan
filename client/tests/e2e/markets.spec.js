@@ -221,6 +221,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.getByRole('button', { name: 'Add market' }).click();
     await page.getByRole('radio', { name: /^1X2 / }).check();
     await expect(page.getByRole('button', { name: 'Use template' })).toBeEnabled();
+    if (viewport.width > 1000) await expect(page.getByRole('button', { name: 'Use template' })).toBeInViewport();
     await expect(page.getByRole('radio', { name: /^Correct Score / })).toBeEnabled();
     await page.screenshot({ path: testInfo.outputPath('full-width-gallery.png'), fullPage: true });
     await page.getByRole('tab', { name: 'Template library' }).click();
@@ -321,6 +322,9 @@ for (const scenario of [
     await expect(page.getByRole('button', { name: /My match product.*Published/ })).toBeVisible();
     await page.getByRole('tab', { name: 'Template library' }).click();
     await expect(page.getByRole('button', { name: 'Use Free draw template' })).toBeVisible();
+    const gallery = await page.locator('.market-standard-designs .market-choices').boundingBox();
+    const library = await page.locator('.market-library').boundingBox();
+    expect(gallery.width).toBeGreaterThan(library.width - 40);
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: testInfo.outputPath('copyable-template-library.png'), fullPage: true });
     await page.getByRole('button', { name: `Use ${scenario.name} template` }).click();
