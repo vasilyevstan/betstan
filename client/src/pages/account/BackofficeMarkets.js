@@ -4,17 +4,14 @@ import { format } from 'date-fns';
 import { useParams } from 'react-router-dom';
 import useNow from '../../hook/useNow';
 import {
-  createMarketRequestId, describeMarketRule, marketActionClass, marketError, marketKeysFromLabels, numericMarketValues,
+  createMarketRequestId, describeMarketRule, marketActionClass, marketError, numericMarketValues,
 } from '../../marketUi';
 import MarketDefinitionEditor, { blankMarketDefinition } from './MarketDefinitionEditor';
 import MarketPreview, { PlayerPreview } from '../../components/MarketPreview';
-import MarketLayoutEditor from './MarketLayoutEditor';
-import { gridLayout, reconcileLayout } from '../../marketLayout';
 
 const TEMPLATES_PATH = '/api/backoffice/market-templates';
 const MIN_ODDS = 1.01;
 const MAX_ODDS = 1000;
-const TABS = [['event', 'Event markets'], ['library', 'Template library']];
 const PUBLISHING_MESSAGE = 'Publishing. The market goes live when pricing is confirmed.';
 const MANUAL_SAMPLE = { name: 'Your market', parameters: [], outcomes: [{ key: 'a', label: 'Outcome 1' }, { key: 'b', label: 'Outcome 2' }] };
 
@@ -56,24 +53,6 @@ export const marketStatus = (market) => {
 const StatusPill = ({ market }) => {
   const status = marketStatus(market);
   return <span className={`market-pill market-pill--${status.tone}`}>{status.label}</span>;
-};
-
-const MarketTabs = ({ active, onChange }) => {
-  const tabs = useRef({});
-  const move = (event, index) => {
-    const next = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: TABS.length - 1 }[event.key];
-    if (next === undefined) return;
-    event.preventDefault();
-    const [id] = TABS[(next + TABS.length) % TABS.length];
-    onChange(id);
-    tabs.current[id]?.focus();
-  };
-  return <div className="market-tabs" role="tablist" aria-label="Markets workspace">
-    {TABS.map(([id, label], index) => <button key={id} type="button" role="tab" className="market-tab"
-      ref={(node) => { tabs.current[id] = node; }} id={`market-tab-${id}`} aria-controls={`market-panel-${id}`}
-      aria-selected={active === id} tabIndex={active === id ? 0 : -1}
-      onClick={() => onChange(id)} onKeyDown={(event) => move(event, index)}>{label}</button>)}
-  </div>;
 };
 
 const ManualResult = ({ market, busy, onConfirm }) => {
@@ -282,130 +261,76 @@ const MarketEditor = ({
   </section>;
 };
 
-const MANUAL_CHOICE = 'manual';
-const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate, onSaveTemplate, onCancel }) => {
-  const options = useMemo(() => {
+const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate, onCancel }) => {
+  const groups = useMemo(() => {
     const saved = templates.filter((template) => !template.archived).map((template) => {
       const latest = latestVersion(template);
       return { id: `template:${template.templateId}`, kind: 'template', templateId: template.templateId,
         version: latest.version, definition: latest.definition, layout: latest.layout };
     });
+    // A built-in template already saved unchanged is offered once, as the saved template.
     const known = new Set(saved.map((option) => stableJson(option.definition)));
-    return [...starters.filter((starter) => ['1x2', 'correct-score'].includes(starter.id)
-      || !known.has(stableJson(starter.definition))).map((starter) => ({
+    const builtIn = starters.filter((starter) => !known.has(stableJson(starter.definition))).map((starter) => ({
       id: `starter:${starter.id}`, kind: 'starter', starterId: starter.id, definition: starter.definition, layout: starter.layout,
-    })), ...saved];
+    }));
+    return [['Your templates', saved], ['Built-in templates', builtIn]].filter(([, items]) => items.length);
   }, [templates, starters]);
-  const [choice, setChoice] = useState(MANUAL_CHOICE);
-  const [values, setValues] = useState({});
-  const [manual, setManual] = useState({ name: '', terms: '', outcomes: [{ key: 'manual-1', label: '' }, { key: 'manual-2', label: '' }] });
-  const [manualLayout, setManualLayout] = useState(() => gridLayout(manual.outcomes));
-  const manualSequence = useRef(2);
-  const [designing, setDesigning] = useState(false);
-  const option = options.find((item) => item.id === choice);
   const needsModel = (definition) => definition.settlementMode === 'FINAL_SCORE' && hasRetainedModel === false;
+  const options = groups.flatMap(([, items]) => items);
+  const [choice, setChoice] = useState(() => options.find((item) => !needsModel(item.definition))?.id ?? '');
+  const option = options.find((item) => item.id === choice);
+  const [values, setValues] = useState(() => (option ? parameterDefaults(option.definition) : {}));
+  const designer = <a href={`/backoffice/markets${window.location.search}`}>Market designer</a>;
   const choose = (next) => {
     setChoice(next.id);
-    setValues(next.definition ? parameterDefaults(next.definition) : {});
-  };
-  const setOutcome = (index, label) => setManual({
-    ...manual, outcomes: manual.outcomes.map((current, position) => position === index ? { ...current, label } : current),
-  });
-  const setManualOutcomes = (outcomes) => {
-    setManual({ ...manual, outcomes });
-    setManualLayout(reconcileLayout(manualLayout, outcomes));
+    setValues(parameterDefaults(next.definition));
   };
   const submit = (event) => {
     event.preventDefault();
-    if (option) { setDesigning(true); return; }
-    const labels = manual.outcomes.map((outcome) => outcome.label.trim());
-    const keys = marketKeysFromLabels(labels);
-    void onCreate({ definition: {
-      schemaVersion: 1, name: manual.name.trim(), settlementMode: 'MANUAL', outcomeMode: 'EXCLUSIVE', coverage: 'COMPLETE',
-      terms: manual.terms.trim(), parameters: [], outcomes: labels.map((label, index) => ({ key: keys[index], label })),
-    }, parameters: {}, layout: { ...manualLayout, tiles: manualLayout.tiles.map((tile) => ({
-      ...tile, outcomeKey: keys[manual.outcomes.findIndex((outcome) => outcome.key === tile.outcomeKey)],
-    })) } });
+    if (option && !needsModel(option.definition)) void onCreate({ option, parameters: values, layout: option.layout });
   };
   const choiceRow = (item) => {
-    const definition = item.definition;
+    const blocked = needsModel(item.definition);
     return <li key={item.id}>
       <label className={`market-choice${choice === item.id ? ' market-choice--selected' : ''}`}>
-        <input type="radio" name="market-choice" value={item.id} checked={choice === item.id}
+        <input type="radio" name="market-choice" value={item.id} checked={choice === item.id} disabled={blocked}
           onChange={() => choose(item)} />
         <span className="market-choice__body">
-          <span className="market-choice__name">{definition ? definition.name : 'Free draw'}</span>
+          <span className="market-choice__name">{item.definition.name}</span>
           <span className="market-choice__meta">
-            {definition ? <>
-              <span className="market-badge">{resultBadge(definition)}</span>
-              <span className="market-badge">{item.kind === 'starter' ? 'Starter template' : `Template v${item.version}`}</span>
-            </> : <span>Manual market: your outcomes, design, odds and result.</span>}
+            <span className="market-badge">{resultBadge(item.definition)}</span>
+            <span className="market-badge">{item.kind === 'starter' ? 'Built-in' : `Template v${item.version}`}</span>
           </span>
-          <MarketPreview compact definition={definition ?? MANUAL_SAMPLE} layout={item.layout}
-            parameters={definition ? parameterDefaults(definition) : {}} />
+          {blocked ? <span className="market-choice__reason">Needs a pricing model this event doesn't have.</span> : null}
+          <MarketPreview compact definition={item.definition} layout={item.layout} parameters={parameterDefaults(item.definition)} />
         </span>
       </label>
     </li>;
   };
-  if (designing && option) return <MarketDefinitionEditor
-    initial={{ ...copyDefinition(option.definition), parameters: option.definition.parameters.map((parameter) => ({
-      ...parameter, defaultValue: Number(values[parameter.key]),
-    })) }} initialLayout={option.layout} sourceName={option.definition.name} hasRetainedModel={hasRetainedModel}
-    disabled={busy} submitLabel="Save design and create draft"
-    onSaveTemplate={async (definition, layout) => { if (await onSaveTemplate(definition, layout)) onCancel(); }}
-    onCancel={() => setDesigning(false)} onSave={(definition, layout) => onCreate({
-      definition, layout, parameters: parameterDefaults(definition),
-    })} />;
   return <form className="market-add" id="market-add-panel" aria-labelledby="market-add-heading" onSubmit={submit}>
     <div className="market-toolbar__header">
       <h2 className="market-editor__title" id="market-add-heading">Add a market</h2>
-      {option ? <button type="submit" className={marketActionClass(true)} disabled={busy}>Use template</button> : null}
     </div>
-    <fieldset disabled={busy}>
-      <legend className="market-subheading">Start from</legend>
-      <ul className="market-choices">{[{ id: MANUAL_CHOICE }, ...options].map(choiceRow)}</ul>
-    </fieldset>
-    <fieldset className="market-section" disabled={busy}>
-      <legend className="market-subheading">{option ? 'Settings' : 'Free draw'}</legend>
-      {option ? (option.definition.parameters.length ? <div className="market-form-grid">
+    <p className="market-help">Choose a template for this event. To design a new market or change a template, use the {designer}.</p>
+    {groups.length ? groups.map(([title, items]) => <fieldset key={title} disabled={busy}>
+      <legend className="market-subheading">{title}</legend>
+      <ul className="market-choices">{items.map(choiceRow)}</ul>
+    </fieldset>) : <p className="market-empty">No templates yet. Create one in the {designer}.</p>}
+    {option ? <fieldset className="market-section" disabled={busy}>
+      <legend className="market-subheading">Settings</legend>
+      {option.definition.parameters.length ? <div className="market-form-grid">
         {option.definition.parameters.map((parameter) => <label key={parameter.key}>{parameter.label}
           <input className="form-control" type="number" step="any" required min={parameter.minimum} max={parameter.maximum}
             value={values[parameter.key] ?? ''} onChange={(event) => setValues({ ...values, [parameter.key]: event.target.value })} />
         </label>)}
-      </div> : <p className="market-help">Use this template to rename and design your own copy. The original stays unchanged.</p>) : <>
-        <label>Market name<input className="form-control" required maxLength={120} value={manual.name}
-          onChange={(event) => setManual({ ...manual, name: event.target.value })} /></label>
-        <div className="market-outcome-inputs" role="group" aria-label="Outcomes">
-          {manual.outcomes.map((outcome, index) => <div className="market-outcome-input" key={outcome.key}>
-            <label>Outcome {index + 1}<input className="form-control" required maxLength={120} value={outcome.label}
-              onChange={(event) => setOutcome(index, event.target.value)} /></label>
-            {manual.outcomes.length > 2 ? <button type="button" className={marketActionClass()}
-              aria-label={`Remove outcome ${index + 1}`} onClick={() => setManualOutcomes(
-                manual.outcomes.filter((_, position) => position !== index),
-              )}>Remove</button> : null}
-          </div>)}
-          <button type="button" className={marketActionClass()} disabled={manual.outcomes.length >= 64}
-            onClick={() => setManualOutcomes([...manual.outcomes, { key: `manual-${++manualSequence.current}`, label: '' }])}>Add outcome</button>
-        </div>
-        <label>How the result is decided<textarea className="form-control" rows={2} required maxLength={2000}
-          value={manual.terms} onChange={(event) => setManual({ ...manual, terms: event.target.value })} /></label>
-        <p className="market-help">Only one outcome can win. It is saved as a template so you can reuse it.</p>
-        <MarketLayoutEditor outcomes={manual.outcomes} layout={manualLayout} onChange={setManualLayout} disabled={busy}
-          onRename={(key, label) => setOutcome(manual.outcomes.findIndex((outcome) => outcome.key === key), label)} />
-      </>}
-      <PlayerPreview definition={option ? option.definition : {
-        name: manual.name, parameters: [], outcomes: manual.outcomes,
-      }} layout={option ? option.layout : manualLayout} parameters={option ? values : {}}
-        note="odds are set after you create the draft" />
-    </fieldset>
+      </div> : <p className="market-help">Nothing to set. You price it after adding it.</p>}
+      <PlayerPreview definition={option.definition} layout={option.layout} parameters={values}
+        note="odds are set after you add it" />
+    </fieldset> : null}
     <div className="market-form-actions">
-      {!option ? <button type="submit" className={marketActionClass(true)} disabled={busy}>
-        {busy ? 'Creating...' : 'Create draft'}
-      </button> : null}
-      {option?.kind === 'template' ? <button type="button" className={marketActionClass()}
-        disabled={busy || needsModel(option.definition)} onClick={(event) => {
-          if (event.currentTarget.form.reportValidity()) void onCreate({ option, parameters: values, layout: option.layout });
-        }}>Use saved version</button> : null}
+      <button type="submit" className={marketActionClass(true)} disabled={busy || !option || needsModel(option.definition)}>
+        {busy ? 'Adding...' : 'Add to event'}
+      </button>
       <button type="button" className={marketActionClass()} disabled={busy} onClick={onCancel}>Cancel</button>
     </div>
   </form>;
@@ -422,7 +347,8 @@ const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive }) => {
     <div className="market-library__header">
       <div>
         <h2 className="market-editor__title">Template library</h2>
-        <p className="market-help">Templates are shared by all events. Editing creates a new version; existing markets keep theirs.</p>
+        <p className="market-help">Templates are shared by all events; add one from an event's Markets page.
+          Editing creates a new version; markets already on events keep theirs.</p>
       </div>
       <button type="button" className={marketActionClass(true)} disabled={busy || !enabled || Boolean(draft)}
         onClick={() => open(blankMarketDefinition(), { start: '' })}>New template</button>
@@ -486,20 +412,14 @@ const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive }) => {
             onClick={() => onArchive(template)}>{template.archived ? 'Restore' : 'Archive'}</button>
         </div>
       </li>;
-    })}</ul> : <p className="market-empty">No saved templates yet. Adding a market saves its template here.</p>}
+    })}</ul> : <p className="market-empty">No saved templates yet. Start from a design above and save it.</p>}
   </div>;
 };
 
-const BackofficeMarketView = ({ eventId }) => {
+// Loads one Backoffice markets view and runs its writes one at a time, restoring focus afterwards.
+const useMarketWorkspace = (load) => {
   const [data, setData] = useState(null);
-  const [library, setLibrary] = useState(null);
-  const [hasRetainedModel, setHasRetainedModel] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [tab, setTab] = useState('event');
-  const [adding, setAdding] = useState(false);
-  const [selectedId, setSelectedId] = useState('');
-  const [editorVersion, setEditorVersion] = useState(0);
-  const [focusToken, setFocusToken] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [loadError, setLoadError] = useState('');
@@ -507,44 +427,22 @@ const BackofficeMarketView = ({ eventId }) => {
   const active = useRef(true);
   const acting = useRef(false);
   const sequence = useRef(0);
-  const templateRequest = useRef(null);
-  const marketRequest = useRef(null);
-  const createdTemplate = useRef(null);
   const feedback = useRef(null);
-  const now = useNow();
-  const path = `/api/backoffice/events/${encodeURIComponent(eventId)}/markets`;
   const reload = useCallback(async () => {
     const current = ++sequence.current;
     setRefreshing(true);
     try {
-      // The public catalog only tells whether automatic pricing exists; its failure leaves that unknown.
-      const retained = axios.get(`/api/event/events/${encodeURIComponent(eventId)}/markets`)
-        .then((response) => (typeof response.data?.hasRetainedModel === 'boolean' ? response.data.hasRetainedModel : null), () => null);
-      const [eventResponse, templates, model] = await Promise.all([axios.get(path), axios.get(TEMPLATES_PATH), retained]);
-      if (active.current && current === sequence.current) {
-        setData(eventResponse.data); setLibrary(templates.data); setHasRetainedModel(model); setLoadError('');
-      }
+      const next = await load();
+      if (active.current && current === sequence.current) { setData(next); setLoadError(''); }
     } catch (failure) {
       if (active.current && current === sequence.current) setLoadError(marketError(failure));
     } finally { if (active.current && current === sequence.current) setRefreshing(false); }
-  }, [eventId, path]);
+  }, [load]);
   useEffect(() => {
     active.current = true;
     void reload();
     return () => { active.current = false; sequence.current += 1; };
   }, [reload]);
-  const pending = data?.markets.some((market) => market.status === 'PUBLISHING' || market.resultPublicationPending);
-  useEffect(() => {
-    if (!pending) return undefined;
-    const timer = setInterval(() => { if (!acting.current) void reload(); }, 3000);
-    return () => clearInterval(timer);
-  }, [pending, reload]);
-  const selectedStatus = selectedMarketStatus(data, selectedId);
-  useEffect(() => {
-    // Replace the publish acknowledgement once polling shows the outcome.
-    if (pending || message !== PUBLISHING_MESSAGE) return;
-    setMessage(selectedStatus === 'PUBLISHED' ? 'Published. It now shows on the match card.' : '');
-  }, [pending, message, selectedStatus]);
   const run = async (action, success) => {
     if (acting.current) return null;
     acting.current = true;
@@ -573,6 +471,51 @@ const BackofficeMarketView = ({ eventId }) => {
       }
     }
   };
+  return { data, refreshing, busy, error, setError, loadError, message, setMessage, active, acting, feedback, reload, run };
+};
+
+const Feedback = ({ error, message, feedback }) => <>
+  {error ? <div className="market-notice market-notice--danger" role="alert"><p>{error}</p></div> : null}
+  <div ref={feedback} tabIndex={-1} role="status" className={message ? 'market-notice market-notice--positive' : 'visually-hidden'}>
+    {message ? <p>{message}</p> : null}
+  </div>
+</>;
+
+const BackofficeMarketView = ({ eventId }) => {
+  const path = `/api/backoffice/events/${encodeURIComponent(eventId)}/markets`;
+  const load = useCallback(async () => {
+    // The public catalog only tells whether automatic pricing exists; its failure leaves that unknown.
+    const retained = axios.get(`/api/event/events/${encodeURIComponent(eventId)}/markets`)
+      .then((response) => (typeof response.data?.hasRetainedModel === 'boolean' ? response.data.hasRetainedModel : null), () => null);
+    const [eventResponse, templates, model] = await Promise.all([axios.get(path), axios.get(TEMPLATES_PATH), retained]);
+    return { event: eventResponse.data, library: templates.data, hasRetainedModel: model };
+  }, [eventId, path]);
+  const {
+    data: loaded, refreshing, busy, error, setError, loadError, message, setMessage, active, acting, feedback, reload, run,
+  } = useMarketWorkspace(load);
+  const data = loaded?.event;
+  const library = loaded?.library;
+  const hasRetainedModel = loaded?.hasRetainedModel ?? null;
+  const [adding, setAdding] = useState(false);
+  const [selectedId, setSelectedId] = useState('');
+  const [editorVersion, setEditorVersion] = useState(0);
+  const [focusToken, setFocusToken] = useState(0);
+  const templateRequest = useRef(null);
+  const marketRequest = useRef(null);
+  const createdTemplate = useRef(null);
+  const now = useNow();
+  const pending = data?.markets.some((market) => market.status === 'PUBLISHING' || market.resultPublicationPending);
+  useEffect(() => {
+    if (!pending) return undefined;
+    const timer = setInterval(() => { if (!acting.current) void reload(); }, 3000);
+    return () => clearInterval(timer);
+  }, [pending, reload, acting]);
+  const selectedStatus = selectedMarketStatus(data, selectedId);
+  useEffect(() => {
+    // Replace the publish acknowledgement once polling shows the outcome.
+    if (pending || message !== PUBLISHING_MESSAGE) return;
+    setMessage(selectedStatus === 'PUBLISHED' ? 'Published. It now shows on the match card.' : '');
+  }, [pending, message, selectedStatus, setMessage]);
   const templates = library?.templates ?? [];
   const markets = data?.markets ?? [];
   const market = markets.find((item) => item.marketId === selectedId);
@@ -584,16 +527,16 @@ const BackofficeMarketView = ({ eventId }) => {
     : !data || !library ? null
       : !authoringOn ? { tone: 'warning', text: 'Market authoring is off. You can view markets and record results for published manual markets.' }
         : started ? { tone: 'warning', text: `${resulted ? 'This event has a final result.' : 'Kickoff has passed.'} Markets can't be added or changed. Record results for manual markets below.` }
-          : hasRetainedModel === false ? { tone: 'info', text: 'You can copy and design any template. This event has no pricing model: choose Manual result to use a copy here, or save an automatic template for another event.' }
+          : hasRetainedModel === false ? { tone: 'info', text: 'This event has no pricing model, so only manual-result templates can be added. To use an automatic design here, copy it in the Market designer and set Result to Manual.' }
             : null;
   const selectMarket = (marketId) => {
     setAdding(false); setSelectedId(marketId); setError(''); setMessage(''); setFocusToken((token) => token + 1);
   };
-  const createMarket = ({ option, definition, parameters, layout }) => run(async () => {
+  const createMarket = ({ option, parameters, layout }) => run(async () => {
     let reference;
-    if (option?.kind === 'template') reference = { templateId: option.templateId, templateVersion: option.version };
+    if (option.kind === 'template') reference = { templateId: option.templateId, templateVersion: option.version };
     else {
-      const templateBody = { ...(option ? { starterId: option.starterId } : { definition }), ...(layout ? { layout } : {}) };
+      const templateBody = { starterId: option.starterId, ...(layout ? { layout } : {}) };
       const fingerprint = stableJson(templateBody);
       // Reuse a template already created by an interrupted attempt instead of creating a duplicate.
       if (createdTemplate.current?.fingerprint === fingerprint) reference = createdTemplate.current.reference;
@@ -609,18 +552,6 @@ const BackofficeMarketView = ({ eventId }) => {
     if (active.current) selectMarket(response.data.marketId);
     return response.data;
   }, 'Draft created. Set the odds, then publish.');
-  const saveTemplate = (draft, definition, layout) => run(async () => {
-    const body = { definition, layout };
-    if (draft.templateId) {
-      return (await axios.put(`${TEMPLATES_PATH}/${draft.templateId}`, { revision: draft.revision, ...body })).data;
-    }
-    const saved = (await axios.post(TEMPLATES_PATH, { ...body, requestId: requestIdentity(templateRequest, body) })).data;
-    templateRequest.current = null;
-    return saved;
-  }, 'Template saved. Add it to an event from Event markets.');
-  const archiveTemplate = (template) => run(async () => (
-    await axios.put(`${TEMPLATES_PATH}/${template.templateId}`, { revision: template.revision, archived: !template.archived })
-  ).data, template.archived ? 'Template restored.' : 'Template archived. Existing markets and bets are unchanged.');
   const search = window.location.search;
   return <section className="markets-page backoffice-markets" aria-labelledby="backoffice-markets-title">
     <nav className="market-breadcrumb" aria-label="Breadcrumb">
@@ -643,60 +574,91 @@ const BackofficeMarketView = ({ eventId }) => {
     </div> : null}
     {!data && !loadError ? <p role="status" className="market-help">Loading markets...</p> : null}
     {data ? <>
-      <MarketTabs active={tab} onChange={setTab} />
-      {error ? <div className="market-notice market-notice--danger" role="alert"><p>{error}</p></div> : null}
-      <div ref={feedback} tabIndex={-1} role="status" className={message ? 'market-notice market-notice--positive' : 'visually-hidden'}>
-        {message ? <p>{message}</p> : null}
-      </div>
-      <div role="tabpanel" id="market-panel-event" aria-labelledby="market-tab-event" hidden={tab !== 'event'}>
-        <div className="market-workspace">
-          <div className="market-toolbar">
-            <div className="market-toolbar__header">
-              <h2 className="market-sidebar__title">Markets <span className="market-count">{markets.length}</span></h2>
-              <div className="market-toolbar__actions">
+      <Feedback error={error} message={message} feedback={feedback} />
+      <div className="market-workspace">
+        <div className="market-toolbar">
+          <div className="market-toolbar__header">
+            <h2 className="market-sidebar__title">Markets <span className="market-count">{markets.length}</span></h2>
+            <div className="market-toolbar__actions">
               <button type="button" className={`${marketActionClass()} market-quiet`} disabled={busy || refreshing}
                 onClick={reload}>{refreshing ? 'Refreshing...' : 'Refresh'}</button>
-            <button type="button" className={`${marketActionClass(true)} market-add-button`} disabled={busy || !writable}
-              aria-expanded={adding} aria-controls="market-add-panel"
-              onClick={() => { setAdding(true); setSelectedId(''); setError(''); setMessage(''); }}>Add market</button>
-              </div>
+              <button type="button" className={`${marketActionClass(true)} market-add-button`} disabled={busy || !writable}
+                aria-expanded={adding} aria-controls="market-add-panel"
+                onClick={() => { setAdding(true); setSelectedId(''); setError(''); setMessage(''); }}>Add market</button>
             </div>
-            {markets.length ? <ul className="market-list">{markets.map((item) => {
-              const summary = parameterSummary(item.template.definition, item.parameters);
-              return <li key={item.marketId}>
-                <button type="button" className="market-row" disabled={busy} aria-pressed={selectedId === item.marketId && !adding}
-                  onClick={() => selectMarket(item.marketId)}>
-                  <span className="market-row__text">
-                    <span className="market-row__name">{item.template.definition.name}</span>
-                    {summary ? <span className="market-row__meta">{summary}</span> : null}
-                    {item.status === 'REJECTED' && item.publicationError
-                      ? <span className="market-row__meta market-row__meta--danger">{item.publicationError}</span> : null}
-                  </span>
-                  <StatusPill market={item} />
-                </button>
-              </li>;
-            })}</ul> : null}
           </div>
-          <div className="market-detail">
-            {adding && writable ? <AddMarketPanel templates={templates} starters={library?.starters ?? []}
-              hasRetainedModel={hasRetainedModel} busy={busy} onCreate={createMarket}
-              onSaveTemplate={(definition, layout) => saveTemplate({}, definition, layout)} onCancel={() => setAdding(false)} />
-              : market ? <MarketEditor key={`${market.marketId}:${editorVersion}`} market={market} writable={writable}
-                hasRetainedModel={hasRetainedModel} busy={busy} focusToken={focusToken}
-                onReload={() => setEditorVersion((version) => version + 1)}
-                onUpdate={(body, success) => run(async () => (await axios.put(`${path}/${market.marketId}`, body())).data, success)}
-                onPreview={(body) => run(async () => (await axios.post(`/api/event/events/${encodeURIComponent(eventId)}/markets/preview`, body())).data)}
-                onResult={(body) => run(async () => (await axios.post(`${path}/${market.marketId}/result`, body)).data,
-                  'Result recorded. It is locked and will settle bets.')} />
-                : <p className="market-detail__hint">{markets.length ? 'Select a market to edit it.' : writable
-                  ? 'Add a market to start.' : 'No markets on this event.'}</p>}
-          </div>
+          {markets.length ? <ul className="market-list">{markets.map((item) => {
+            const summary = parameterSummary(item.template.definition, item.parameters);
+            return <li key={item.marketId}>
+              <button type="button" className="market-row" disabled={busy} aria-pressed={selectedId === item.marketId && !adding}
+                onClick={() => selectMarket(item.marketId)}>
+                <span className="market-row__text">
+                  <span className="market-row__name">{item.template.definition.name}</span>
+                  {summary ? <span className="market-row__meta">{summary}</span> : null}
+                  {item.status === 'REJECTED' && item.publicationError
+                    ? <span className="market-row__meta market-row__meta--danger">{item.publicationError}</span> : null}
+                </span>
+                <StatusPill market={item} />
+              </button>
+            </li>;
+          })}</ul> : null}
+        </div>
+        <div className="market-detail">
+          {adding && writable ? <AddMarketPanel templates={templates} starters={library?.starters ?? []}
+            hasRetainedModel={hasRetainedModel} busy={busy} onCreate={createMarket} onCancel={() => setAdding(false)} />
+            : market ? <MarketEditor key={`${market.marketId}:${editorVersion}`} market={market} writable={writable}
+              hasRetainedModel={hasRetainedModel} busy={busy} focusToken={focusToken}
+              onReload={() => setEditorVersion((version) => version + 1)}
+              onUpdate={(body, success) => run(async () => (await axios.put(`${path}/${market.marketId}`, body())).data, success)}
+              onPreview={(body) => run(async () => (await axios.post(`/api/event/events/${encodeURIComponent(eventId)}/markets/preview`, body())).data)}
+              onResult={(body) => run(async () => (await axios.post(`${path}/${market.marketId}/result`, body)).data,
+                'Result recorded. It is locked and will settle bets.')} />
+              : <p className="market-detail__hint">{markets.length ? 'Select a market to edit it.' : writable
+                ? 'Add a market to start.' : 'No markets on this event.'}</p>}
         </div>
       </div>
-      <div role="tabpanel" id="market-panel-library" aria-labelledby="market-tab-library" hidden={tab !== 'library'}>
-        <TemplateLibrary library={library} enabled={authoringOn && !loadError} busy={busy}
-          onSave={saveTemplate} onArchive={archiveTemplate} />
-      </div>
+    </> : null}
+  </section>;
+};
+
+const loadLibrary = async () => (await axios.get(TEMPLATES_PATH)).data;
+
+export const BackofficeMarketDesigner = () => {
+  const { data: library, refreshing, busy, error, loadError, message, feedback, reload, run } = useMarketWorkspace(loadLibrary);
+  const templateRequest = useRef(null);
+  const enabled = Boolean(library?.enabled) && !loadError;
+  const saveTemplate = (draft, definition, layout) => run(async () => {
+    const body = { definition, layout };
+    if (draft.templateId) {
+      return (await axios.put(`${TEMPLATES_PATH}/${draft.templateId}`, { revision: draft.revision, ...body })).data;
+    }
+    const saved = (await axios.post(TEMPLATES_PATH, { ...body, requestId: requestIdentity(templateRequest, body) })).data;
+    templateRequest.current = null;
+    return saved;
+  }, 'Template saved. Add it to an event from that event\'s Markets page.');
+  const archiveTemplate = (template) => run(async () => (
+    await axios.put(`${TEMPLATES_PATH}/${template.templateId}`, { revision: template.revision, archived: !template.archived })
+  ).data, template.archived ? 'Template restored.' : 'Template archived. Existing markets and bets are unchanged.');
+  const banner = loadError ? { tone: 'danger', text: library ? `Couldn't refresh templates. ${loadError}` : `Couldn't load templates. ${loadError}` }
+    : library && !library.enabled ? { tone: 'warning', text: 'Market authoring is off. You can view templates but not change them.' } : null;
+  return <section className="markets-page backoffice-markets" aria-labelledby="market-designer-title">
+    <nav className="market-breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href={`/backoffice${window.location.search}`}>Backoffice</a></li>
+        <li aria-current="page">Market designer</li>
+      </ol>
+    </nav>
+    <header className="market-page-heading">
+      <h1 className="h3" id="market-designer-title">Market designer</h1>
+    </header>
+    {banner ? <div className={`market-notice market-notice--${banner.tone}`} role={banner.tone === 'danger' ? 'alert' : 'status'}>
+      <p>{banner.text}</p>
+      {loadError ? <button type="button" className={marketActionClass()} disabled={refreshing} onClick={reload}>Try again</button> : null}
+    </div> : null}
+    {!library && !loadError ? <p role="status" className="market-help">Loading templates...</p> : null}
+    {library ? <>
+      <Feedback error={error} message={message} feedback={feedback} />
+      <TemplateLibrary library={library} enabled={enabled} busy={busy} onSave={saveTemplate} onArchive={archiveTemplate} />
     </> : null}
   </section>;
 };

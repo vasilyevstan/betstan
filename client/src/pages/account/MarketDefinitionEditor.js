@@ -79,9 +79,7 @@ const RuleEditor = ({ rule, parameters, onChange, depth = 1 }) => <div className
   </div> : null}
 </div>;
 
-const MarketDefinitionEditor = ({
-  initial, initialLayout, disabled, onSave, onSaveTemplate, onCancel, versioned, submitLabel, sourceName, hasRetainedModel,
-}) => {
+const MarketDefinitionEditor = ({ initial, initialLayout, disabled, onSave, onCancel, versioned, sourceName }) => {
   const [definition, setDefinition] = useState(() => {
     const outcomes = deriveKeys(withLocalIdentity(initial.outcomes), 'outcome');
     return { ...initial, parameters: withLocalIdentity(initial.parameters), outcomes, layout: reconcileLayout(initialLayout, outcomes) };
@@ -110,11 +108,10 @@ const MarketDefinitionEditor = ({
     return { ...previous, parameters, outcomes };
   });
   const automatic = definition.settlementMode === 'FINAL_SCORE';
-  const needsModel = automatic && hasRetainedModel === false;
-  const save = (onSubmit) => {
+  const save = () => {
     const { parameters, outcomes, layout, ...rest } = definition;
     if (layoutError(layout, outcomes)) return;
-    void onSubmit({
+    void onSave({
       ...rest,
       parameters: withoutLocalIdentity(parameters),
       outcomes: withoutLocalIdentity(outcomes).map(({ rule, ...outcome }) => automatic ? { ...outcome, rule } : outcome),
@@ -122,15 +119,12 @@ const MarketDefinitionEditor = ({
   };
   return <form className="market-definition-editor" onSubmit={(event) => {
     event.preventDefault();
-    if (!needsModel) save(onSave);
+    save();
   }}>
     <fieldset disabled={disabled}>
       <legend>{versioned ? `New version of ${initial.name}` : 'New template'}</legend>
       {sourceName ? <p className="market-help">Starting from {sourceName}. Rename and design your copy; the source template stays unchanged.</p>
         : <p className="market-help">Markets already on events keep their version. Keys are created from labels; edit one only if you need a specific identifier.</p>}
-      {needsModel ? <p className="market-notice" role="status">
-        This event has no pricing model. Choose Manual in Result to use your copy here, or save the template for another event.
-      </p> : null}
       <div className="market-form-grid">
         <label>Template name<input className="form-control" required maxLength={120} value={definition.name}
           onChange={(event) => change('name', event.target.value)} /></label>
@@ -208,12 +202,9 @@ const MarketDefinitionEditor = ({
       <PlayerPreview definition={definition} layout={definition.layout} note="default values; odds are set per event"
         parameters={Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, parameter.defaultValue]))} />
       <div className="market-form-actions">
-        <button className={marketActionClass(true)} type="submit" disabled={needsModel || Boolean(layoutError(definition.layout, definition.outcomes))}>
-          {submitLabel || (versioned ? 'Save new version' : 'Save template')}
+        <button className={marketActionClass(true)} type="submit" disabled={Boolean(layoutError(definition.layout, definition.outcomes))}>
+          {versioned ? 'Save new version' : 'Save template'}
         </button>
-        {onSaveTemplate ? <button className={marketActionClass()} type="button"
-          disabled={Boolean(layoutError(definition.layout, definition.outcomes))}
-          onClick={(event) => { if (event.currentTarget.form.reportValidity()) save(onSaveTemplate); }}>Save template only</button> : null}
         <button className={marketActionClass()} type="button" onClick={onCancel}>Cancel</button>
       </div>
     </fieldset>
