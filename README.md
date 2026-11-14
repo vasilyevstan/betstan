@@ -6,6 +6,27 @@ settlement, betting history, statistics, and a public simulation Backoffice.
 It is an engineering and product demonstration; it does not place real-money
 bets or consume real match feeds.
 
+## What this demonstrates
+
+- End-to-end product engineering across a React interface, TypeScript services,
+  event-driven workflows, and operational tooling.
+- Reliability design for duplicate and out-of-order messages, restart recovery,
+  and authoritative settlement.
+- Compatibility-first changes that separate presentation from domain authority
+  and preserve mixed-version behavior.
+- AI-assisted delivery with explicit ownership, independent verification where
+  boundaries change, and evidence-based acceptance.
+
+Evidence: [AI-assisted engineering: a BetStan case study](https://github.com/vasilyevstan/vasilyevstan/blob/main/articles/ai-assisted-engineering-betstan.md).
+
+[Explore the live simulation](https://betstan.xyz) and see the
+[architecture overview below](#how-it-works).
+
+![BetStan's public homepage showing simulated fixtures, a finished match, and pre-match markets](docs/betstan-homepage.png)
+
+Public homepage captured on 2026-11-14 at 1280 x 800; simulated events and
+availability change over time.
+
 [Read the complete BetStan wiki](https://github.com/vasilyevstan/betstan/wiki)
 
 ## Product at a glance
