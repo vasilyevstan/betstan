@@ -283,13 +283,18 @@ Backoffice, Event, Slip and Moderation manifests.
 The page has two tabs. **Event markets** puts the market count, Refresh and
 Add market in a compact top toolbar. Existing markets form a horizontal
 selector below it; the selected editor or design gallery uses the full width.
-**Add market** starts from a manual market
+**Add market** starts from **Free draw**, a blank manual market
 (the default), a saved template version or a starter. Each choice shows a
 small preview of the block players will see on the match card, and the form
 shows a live player preview of the name, bound values and outcomes. **Create draft**
 saves the template and the event draft together; a retry reuses the saved
-template. Automatic choices are disabled with "Needs a pricing model" on
-legacy events that have no retained model, and one banner explains why
+template. Every starter remains selectable on legacy events without a pricing
+model. **Use template** opens an independent copy to rename and design;
+**Save template only** keeps an automatic definition reusable without attaching
+it to that event. To use the copy on a model-less event, explicitly choose
+**Manual** in **Result**: the operator sets or generates assumed odds and
+declares the outcome. Automatic pricing and publication still require the
+event's retained model. One banner explains why
 authoring is unavailable (feature off, kickoff passed, resulted, or load
 failure). **Template library** creates custom definitions or new versions,
 optionally starting from a starter, and archives or restores templates.
@@ -298,9 +303,12 @@ default values. Outcome and parameter keys are derived from their labels unless 
 operator-declared outcomes, not executable formulas. Versions already used by
 events and accepted bets never follow later library edits.
 
-**1X2** and **Correct Score** appear as locked built-in designs in the chooser
-and library. They are already included on events, not editable templates or
-duplicate markets to add. Other starters and saved templates can be customized.
+**1X2**, **Correct Score** and **Free draw** are starting points in both the
+chooser and library. Source starters stay unchanged, but their copies can have
+new names, layouts, outcomes and rules. Existing standard products are not
+modified. Correct Score starts with ten listed scores and partial coverage:
+an unlisted final score wins none of the listed outcomes. Saved templates also
+offer **Copy** for an independent template or **New version** for a revision.
 Score-based starters include totals, both teams to score, double chance,
 match result & both teams to score, winning margin and total-goals bands.
 Only facts supported by the full-time score model settle automatically; player
@@ -316,8 +324,10 @@ CSS and executable content are rejected. The canvas supports up to 64 rows
 and tiles up to four rows tall.
 
 Manual creation saves the design together with its reusable template.
-**Customize design and outcomes** creates a separate reusable template and
-event draft; **New version** in the library versions an existing template.
+**Use template**, then **Save design and create draft**, creates a separate
+reusable template and event draft. **Use saved version** reuses a saved
+template unchanged with the chosen event parameters; **New version** in the
+library versions an existing template.
 The layout is frozen on the event instance, so library edits or archival
 cannot change already-created markets. Preview and player card use the same
 layout renderer. When presentation cannot load, the player gets a visible

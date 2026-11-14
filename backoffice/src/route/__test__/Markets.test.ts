@@ -146,17 +146,45 @@ it.each([
   expect(await MarketTemplate.countDocuments()).toBe(0);
 });
 
-it("keeps standard products non-authorable and supplies distinct, valid real-market starters", async () => {
-  for (const starterId of ["1x2", "correct-score"]) {
-    await request(app).post("/api/backoffice/market-templates").send({ requestId: starterId, starterId }).expect(400);
+it.each(["1x2", "correct-score"])("copies %s into independent versions without changing the starter", async starterId => {
+  const library = await request(app).get("/api/backoffice/market-templates").expect(200);
+  const original = library.body.starters.find((item: { id: string }) => item.id === starterId);
+  const created = await request(app).post("/api/backoffice/market-templates")
+    .send({ requestId: starterId, starterId }).expect(201);
+  const renamed = { ...original.definition, name: "My match market" };
+  const redesigned = { ...original.layout, tileShape: "pill" };
+  const updated = await request(app).put(`/api/backoffice/market-templates/${created.body.templateId}`)
+    .send({ revision: 1, definition: renamed, layout: redesigned }).expect(200);
+  expect(updated.body.versions[0].definition).toEqual(original.definition);
+  expect(updated.body.versions[1]).toMatchObject({ definition: renamed, layout: redesigned });
+  const unchanged = await request(app).get("/api/backoffice/market-templates").expect(200);
+  expect(unchanged.body.starters.find((item: { id: string }) => item.id === starterId)).toEqual(original);
+});
+
+it("settles exact-score copies only on their listed score and retains partial coverage", () => {
+  const parsed = parseMarketDefinition(marketStarters.find(item => item.id === "correct-score")!.definition);
+  expect(parsed.coverage).toBe("PARTIAL");
+  const outcomes = parsed.outcomes.map(outcome => ({ label: outcome.label, win: compileScoreRule(outcome.rule) }));
+  for (let home = 0; home <= 99; home += 1) {
+    for (let away = 0; away <= 99; away += 1) {
+      expect(outcomes.filter(outcome => outcome.win(home, away)).map(outcome => outcome.label))
+        .toEqual(parsed.outcomes.filter(outcome => outcome.label === `${home} - ${away}`).map(outcome => outcome.label));
+    }
   }
-  for (const id of ["result-both-score", "winning-margin", "total-goals-bands"]) {
+});
+
+it("supplies valid complete score starters, including full-time result copies", async () => {
+  for (const id of ["1x2", "result-both-score", "winning-margin", "total-goals-bands"]) {
     const starter = marketStarters.find(item => item.id === id)!;
     const parsed = parseMarketDefinition(starter.definition);
     expect(parseMarketLayout(starter.layout, parsed)).toEqual(starter.layout);
     const wins = parsed.outcomes.map(outcome => compileScoreRule(outcome.rule));
-    for (let home = 0; home <= 10; home += 1) {
-      for (let away = 0; away <= 10; away += 1) expect(wins.filter(win => win(home, away))).toHaveLength(1);
+    for (let home = 0; home <= 99; home += 1) {
+      for (let away = 0; away <= 99; away += 1) {
+        expect(wins.filter(win => win(home, away))).toHaveLength(1);
+        if (id === "1x2") expect(parsed.outcomes[wins.findIndex(win => win(home, away))].key)
+          .toBe(home > away ? "home" : home === away ? "draw" : "away");
+      }
     }
     await request(app).post("/api/backoffice/market-templates")
       .send({ requestId: id, starterId: id, layout: starter.layout }).expect(201);

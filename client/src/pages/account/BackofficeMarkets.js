@@ -9,7 +9,7 @@ import {
 import MarketDefinitionEditor, { blankMarketDefinition } from './MarketDefinitionEditor';
 import MarketPreview, { PlayerPreview } from '../../components/MarketPreview';
 import MarketLayoutEditor from './MarketLayoutEditor';
-import { gridLayout, reconcileLayout, standardMarketDesigns } from '../../marketLayout';
+import { gridLayout, reconcileLayout } from '../../marketLayout';
 
 const TEMPLATES_PATH = '/api/backoffice/market-templates';
 const MIN_ODDS = 1.01;
@@ -26,6 +26,7 @@ const requestIdentity = (reference, body) => {
 const stableJson = (value) => JSON.stringify(value, (_key, item) => (item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]])) : item));
 const latestVersion = (template) => template.versions[template.versions.length - 1];
+const copyDefinition = (definition) => ({ ...definition, name: `${definition.name.slice(0, 115)} copy` });
 const parameterDefaults = (definition) => Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, parameter.defaultValue]));
 const parameterSummary = (definition, values) => definition.parameters
   .map((parameter) => `${parameter.label} ${values?.[parameter.key] ?? parameter.defaultValue}`).join(', ');
@@ -282,7 +283,7 @@ const MarketEditor = ({
 };
 
 const MANUAL_CHOICE = 'manual';
-const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate, onCancel }) => {
+const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate, onSaveTemplate, onCancel }) => {
   const options = useMemo(() => {
     const saved = templates.filter((template) => !template.archived).map((template) => {
       const latest = latestVersion(template);
@@ -290,9 +291,10 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
         version: latest.version, definition: latest.definition, layout: latest.layout };
     });
     const known = new Set(saved.map((option) => stableJson(option.definition)));
-    return [...standardMarketDesigns, ...saved, ...starters.filter((starter) => !known.has(stableJson(starter.definition))).map((starter) => ({
+    return [...starters.filter((starter) => ['1x2', 'correct-score'].includes(starter.id)
+      || !known.has(stableJson(starter.definition))).map((starter) => ({
       id: `starter:${starter.id}`, kind: 'starter', starterId: starter.id, definition: starter.definition, layout: starter.layout,
-    }))];
+    })), ...saved];
   }, [templates, starters]);
   const [choice, setChoice] = useState(MANUAL_CHOICE);
   const [values, setValues] = useState({});
@@ -301,7 +303,6 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
   const manualSequence = useRef(2);
   const [designing, setDesigning] = useState(false);
   const option = options.find((item) => item.id === choice);
-  const standard = option?.kind === 'standard';
   const needsModel = (definition) => definition.settlementMode === 'FINAL_SCORE' && hasRetainedModel === false;
   const choose = (next) => {
     setChoice(next.id);
@@ -316,8 +317,7 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
   };
   const submit = (event) => {
     event.preventDefault();
-    if (standard) return;
-    if (option) { void onCreate({ option, parameters: values, layout: option.layout }); return; }
+    if (option) { setDesigning(true); return; }
     const labels = manual.outcomes.map((outcome) => outcome.label.trim());
     const keys = marketKeysFromLabels(labels);
     void onCreate({ definition: {
@@ -329,21 +329,17 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
   };
   const choiceRow = (item) => {
     const definition = item.definition;
-    const unavailable = definition ? needsModel(definition) : false;
     return <li key={item.id}>
-      <label className={`market-choice${choice === item.id ? ' market-choice--selected' : ''}${unavailable ? ' market-choice--disabled' : ''}`}>
-        <input type="radio" name="market-choice" value={item.id} checked={choice === item.id} disabled={unavailable}
+      <label className={`market-choice${choice === item.id ? ' market-choice--selected' : ''}`}>
+        <input type="radio" name="market-choice" value={item.id} checked={choice === item.id}
           onChange={() => choose(item)} />
         <span className="market-choice__body">
-          <span className="market-choice__name">{definition ? definition.name : 'Manual market'}</span>
+          <span className="market-choice__name">{definition ? definition.name : 'Free draw'}</span>
           <span className="market-choice__meta">
             {definition ? <>
-              {item.kind === 'standard' ? <span className="market-badge">Locked · included on events</span> : <>
-                <span className="market-badge">{resultBadge(definition)}</span>
-                <span className="market-badge">{item.kind === 'starter' ? 'Editable starter' : `Template v${item.version}`}</span>
-              </>}
-              {unavailable ? <span>Needs a pricing model</span> : null}
-            </> : <span>You name the outcomes, set the odds and declare the result.</span>}
+              <span className="market-badge">{resultBadge(definition)}</span>
+              <span className="market-badge">{item.kind === 'starter' ? 'Starter template' : `Template v${item.version}`}</span>
+            </> : <span>Manual market: your outcomes, design, odds and result.</span>}
           </span>
           <MarketPreview compact definition={definition ?? MANUAL_SAMPLE} layout={item.layout}
             parameters={definition ? parameterDefaults(definition) : {}} />
@@ -351,8 +347,12 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
       </label>
     </li>;
   };
-  if (designing && option && !standard) return <MarketDefinitionEditor
-    initial={option.definition} initialLayout={option.layout} disabled={busy} submitLabel="Save design and create draft"
+  if (designing && option) return <MarketDefinitionEditor
+    initial={{ ...copyDefinition(option.definition), parameters: option.definition.parameters.map((parameter) => ({
+      ...parameter, defaultValue: Number(values[parameter.key]),
+    })) }} initialLayout={option.layout} sourceName={option.definition.name} hasRetainedModel={hasRetainedModel}
+    disabled={busy} submitLabel="Save design and create draft"
+    onSaveTemplate={async (definition, layout) => { if (await onSaveTemplate(definition, layout)) onCancel(); }}
     onCancel={() => setDesigning(false)} onSave={(definition, layout) => onCreate({
       definition, layout, parameters: parameterDefaults(definition),
     })} />;
@@ -363,14 +363,13 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
       <ul className="market-choices">{[{ id: MANUAL_CHOICE }, ...options].map(choiceRow)}</ul>
     </fieldset>
     <fieldset className="market-section" disabled={busy}>
-      <legend className="market-subheading">{standard ? 'Built-in design' : option ? 'Settings' : 'Manual market'}</legend>
-      {standard ? <p className="market-help">This is the built-in {option.definition.name} design. It is already included on events.
-        Its layout, outcomes and rules cannot be changed here.</p> : option ? (option.definition.parameters.length ? <div className="market-form-grid">
+      <legend className="market-subheading">{option ? 'Settings' : 'Free draw'}</legend>
+      {option ? (option.definition.parameters.length ? <div className="market-form-grid">
         {option.definition.parameters.map((parameter) => <label key={parameter.key}>{parameter.label}
           <input className="form-control" type="number" step="any" required min={parameter.minimum} max={parameter.maximum}
             value={values[parameter.key] ?? ''} onChange={(event) => setValues({ ...values, [parameter.key]: event.target.value })} />
         </label>)}
-      </div> : <p className="market-help">No settings needed. You can set the odds after the draft is created.</p>) : <>
+      </div> : <p className="market-help">Use this template to rename and design your own copy. The original stays unchanged.</p>) : <>
         <label>Market name<input className="form-control" required maxLength={120} value={manual.name}
           onChange={(event) => setManual({ ...manual, name: event.target.value })} /></label>
         <div className="market-outcome-inputs" role="group" aria-label="Outcomes">
@@ -391,18 +390,19 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
         <MarketLayoutEditor outcomes={manual.outcomes} layout={manualLayout} onChange={setManualLayout} disabled={busy}
           onRename={(key, label) => setOutcome(manual.outcomes.findIndex((outcome) => outcome.key === key), label)} />
       </>}
-      {option && !standard ? <button className={marketActionClass()} type="button" onClick={() => setDesigning(true)}>
-        Customize design and outcomes
-      </button> : null}
       <PlayerPreview definition={option ? option.definition : {
         name: manual.name, parameters: [], outcomes: manual.outcomes,
       }} layout={option ? option.layout : manualLayout} parameters={option ? values : {}}
-        note={standard ? 'locked built-in design' : 'odds are set after you create the draft'} />
+        note="odds are set after you create the draft" />
     </fieldset>
     <div className="market-form-actions">
-      <button type="submit" className={marketActionClass(true)} disabled={busy || standard || Boolean(option && needsModel(option.definition))}>
-        {busy ? 'Creating...' : 'Create draft'}
+      <button type="submit" className={marketActionClass(true)} disabled={busy}>
+        {busy ? 'Creating...' : option ? 'Use template' : 'Create draft'}
       </button>
+      {option?.kind === 'template' ? <button type="button" className={marketActionClass()}
+        disabled={busy || needsModel(option.definition)} onClick={(event) => {
+          if (event.currentTarget.form.reportValidity()) void onCreate({ option, parameters: values, layout: option.layout });
+        }}>Use saved version</button> : null}
       <button type="button" className={marketActionClass()} disabled={busy} onClick={onCancel}>Cancel</button>
     </div>
   </form>;
@@ -428,20 +428,34 @@ const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive }) => {
       {draft.templateId ? null : <label className="market-library__start">Start from<select className="form-select" value={draft.start}
         disabled={busy} onChange={(event) => {
           const starter = starters.find((item) => item.id === event.target.value);
-          open(starter ? starter.definition : blankMarketDefinition(), { start: event.target.value, layout: starter?.layout });
+          open(starter ? copyDefinition(starter.definition) : blankMarketDefinition(), {
+            start: event.target.value, layout: starter?.layout, sourceName: starter?.definition.name,
+          });
         }}>
-        <option value="">Blank manual market</option>
+        <option value="">Free draw</option>
+        {draft.start === 'copy' ? <option value="copy">{draft.sourceName}</option> : null}
         {starters.map((starter) => <option key={starter.id} value={starter.id}>{starter.definition.name}</option>)}
       </select></label>}
       <MarketDefinitionEditor key={draft.key} initial={draft.definition} initialLayout={draft.layout} disabled={busy || !enabled}
-        versioned={Boolean(draft.templateId)} onSave={save} onCancel={() => setDraft(null)} />
+        sourceName={draft.sourceName} versioned={Boolean(draft.templateId)} onSave={save} onCancel={() => setDraft(null)} />
     </div> : null}
-    {!draft ? <section className="market-standard-designs" aria-label="Locked built-in designs">
-      <h3 className="market-subheading">Built-in designs</h3>
-      <p className="market-help">1X2 and Correct Score are included on events. These designs and their outcomes are locked.</p>
-      <div className="market-choices">{standardMarketDesigns.map((design) => <div key={design.id}>
-        <MarketPreview definition={design.definition} layout={design.layout} compact />
-      </div>)}</div>
+    {!draft ? <section className="market-standard-designs" aria-label="Starter templates">
+      <h3 className="market-subheading">Choose a starting point</h3>
+      <p className="market-help">Every starter can become your own named, editable template. Originals and existing event markets stay unchanged.</p>
+      <ul className="market-choices">
+        {[{ id: '', definition: MANUAL_SAMPLE }, ...starters].map((starter) => <li key={starter.id}>
+          <button type="button" className="market-choice" disabled={busy || !enabled}
+            aria-label={`Use ${starter.id ? starter.definition.name : 'Free draw'} template`}
+            onClick={() => open(starter.id ? copyDefinition(starter.definition) : blankMarketDefinition(), {
+              start: starter.id, layout: starter.layout, sourceName: starter.id ? starter.definition.name : undefined,
+            })}>
+            <span className="market-choice__body">
+              <span className="market-choice__name">{starter.id ? starter.definition.name : 'Free draw'}</span>
+              <MarketPreview definition={starter.definition} layout={starter.layout} compact />
+            </span>
+          </button>
+        </li>)}
+      </ul>
     </section> : null}
     {templates.length ? <ul className="market-template-list">{templates.map((template) => {
       const latest = latestVersion(template);
@@ -456,6 +470,11 @@ const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive }) => {
           <MarketPreview compact definition={latest.definition} layout={latest.layout} parameters={parameterDefaults(latest.definition)} />
         </div>
         <div className="market-template-row__actions">
+          <button type="button" className={marketActionClass()} disabled={busy || !enabled || Boolean(draft)}
+            aria-label={`Copy ${latest.definition.name}`}
+            onClick={() => open(copyDefinition(latest.definition), {
+              start: 'copy', layout: latest.layout, sourceName: latest.definition.name,
+            })}>Copy</button>
           <button type="button" className={marketActionClass()} disabled={busy || !enabled || template.archived || Boolean(draft)}
             aria-label={`New version of ${latest.definition.name}`}
             onClick={() => open(latest.definition, { templateId: template.templateId, revision: template.revision, layout: latest.layout })}>New version</button>
@@ -562,7 +581,7 @@ const BackofficeMarketView = ({ eventId }) => {
     : !data || !library ? null
       : !authoringOn ? { tone: 'warning', text: 'Market authoring is off. You can view markets and record results for published manual markets.' }
         : started ? { tone: 'warning', text: `${resulted ? 'This event has a final result.' : 'Kickoff has passed.'} Markets can't be added or changed. Record results for manual markets below.` }
-          : hasRetainedModel === false ? { tone: 'info', text: 'This event has no pricing model, so automatic markets are unavailable. Add a manual market: you set the odds and declare the result.' }
+          : hasRetainedModel === false ? { tone: 'info', text: 'You can copy and design any template. This event has no pricing model: choose Manual result to use a copy here, or save an automatic template for another event.' }
             : null;
   const selectMarket = (marketId) => {
     setAdding(false); setSelectedId(marketId); setError(''); setMessage(''); setFocusToken((token) => token + 1);
@@ -657,7 +676,8 @@ const BackofficeMarketView = ({ eventId }) => {
           </div>
           <div className="market-detail">
             {adding && writable ? <AddMarketPanel templates={templates} starters={library?.starters ?? []}
-              hasRetainedModel={hasRetainedModel} busy={busy} onCreate={createMarket} onCancel={() => setAdding(false)} />
+              hasRetainedModel={hasRetainedModel} busy={busy} onCreate={createMarket}
+              onSaveTemplate={(definition, layout) => saveTemplate({}, definition, layout)} onCancel={() => setAdding(false)} />
               : market ? <MarketEditor key={`${market.marketId}:${editorVersion}`} market={market} writable={writable}
                 hasRetainedModel={hasRetainedModel} busy={busy} focusToken={focusToken}
                 onReload={() => setEditorVersion((version) => version + 1)}
