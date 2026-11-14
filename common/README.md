@@ -339,6 +339,18 @@ rollback images are unsafe after new exposures exist.
 Source candidate is `1.1.0-rc.4`; the inspected service manifests/locks consume
 published `1.1.0-rc.3`. Publication and coordinated consumer repins are separate.
 
+Moderation adds `RISK_POLICY` and `RISK_EVIDENCE_UNAVAILABLE` decline values
+without changing existing wire values. New risk writers must wait for
+compatible readers: older enum-backed readers may reject the new values.
+Legacy decisions omit the optional `ModerationDecisionMetadata`; new risk
+decisions supply all five fields: immutable `decisionId`, persisted terminal
+`occurredAt`, positive safe-integer `policyRevision`, canonical placement
+SHA-256 `placementFingerprint`, and at most 32 unique typed `reasonCodes`.
+An approval has no reasons. Publication replay preserves this metadata.
+`ModerationDecisionReasonCode` is a closed union; unavailable evidence and
+policy restrictions must not masquerade as invalid selections or closed
+markets. Runtime producers/consumers validate completeness and bounds.
+
 `ISettleSlipEvent.data.accounting` and accepted
 `ICashBackOutcomeEvent.data.accounting` are optional `BetAccountingEvidence`.
 Old messages remain readable; absent evidence means unavailable history.

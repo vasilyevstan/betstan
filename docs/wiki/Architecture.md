@@ -307,7 +307,14 @@ outside this release.
 ### Risk accounting contracts
 
 The `1.1.0-rc.4` Common candidate adds optional accounting evidence to final
-slip settlement and accepted cash-back outcomes. Its `COMPLETE` value is one
+slip settlement and accepted cash-back outcomes, plus typed risk decision
+metadata and explicit policy/evidence-unavailable decline values. New risk
+decisions bind an immutable decision ID, economic time, pinned policy,
+placement fingerprint and bounded reason codes. Older enum-backed readers
+may reject the new decline values, so compatible readers must precede risk
+writer activation; unchanged legacy messages remain valid.
+
+Accounting's `COMPLETE` value is one
 ticket's complete ordered movement prefix, not proof of book or window
 completeness. `UNAVAILABLE` and absent legacy evidence are never zero exposure.
 Movements bind immutable ticket/owner identity, a contiguous accounting
