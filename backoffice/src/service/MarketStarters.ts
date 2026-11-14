@@ -19,6 +19,24 @@ const bothScore: ScoreRule = {
 };
 
 const starters: Array<{ id: string; definition: MarketDefinition }> = [
+  { id: "1x2", definition: {
+    schemaVersion: 1, name: "1X2", settlementMode: "FINAL_SCORE", outcomeMode: "EXCLUSIVE",
+    coverage: "COMPLETE", terms: "Full-time result: 1 is a home win, X is a draw, and 2 is an away win.", parameters: [],
+    outcomes: [
+      { key: "home", label: "1", rule: compare("GOAL_DIFFERENCE", "GT", 0) },
+      { key: "draw", label: "X", rule: compare("GOAL_DIFFERENCE", "EQ", 0) },
+      { key: "away", label: "2", rule: compare("GOAL_DIFFERENCE", "LT", 0) },
+    ],
+  } },
+  { id: "correct-score", definition: {
+    schemaVersion: 1, name: "Correct Score", settlementMode: "FINAL_SCORE", outcomeMode: "EXCLUSIVE",
+    coverage: "PARTIAL", terms: "Exact full-time score. If the score is not listed, no listed outcome wins.", parameters: [],
+    outcomes: [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [2, 0], [2, 1], [2, 2], [3, 0], [3, 1]].map(([home, away]) => ({
+      key: `score-${home}-${away}`, label: `${home} - ${away}`, rule: {
+        kind: "ALL", rules: [compare("HOME_GOALS", "EQ", home), compare("AWAY_GOALS", "EQ", away)],
+      },
+    })),
+  } },
   { id: "total-goals", definition: total("TOTAL_GOALS", "Total goals", 197.5) },
   { id: "home-total", definition: total("HOME_GOALS", "Home team total", 98.5) },
   { id: "away-total", definition: total("AWAY_GOALS", "Away team total", 98.5) },
@@ -89,7 +107,7 @@ const starters: Array<{ id: string; definition: MarketDefinition }> = [
 ];
 
 export const marketStarters: Array<{ id: string; definition: MarketDefinition; layout: MarketLayout }> = starters.map(starter => {
-  const layout = gridLayout(starter.definition, starter.id === "double-chance" ? 3 : starter.id === "total-goals-bands" ? 1 : 2);
+  const layout = gridLayout(starter.definition, ["1x2", "double-chance"].includes(starter.id) ? 3 : starter.id === "total-goals-bands" ? 1 : 2);
   if (starter.id === "winning-margin") layout.tiles[4].width = 2;
   return { ...starter, layout };
 });

@@ -110,9 +110,6 @@
 .market-standard-designs {
   margin-block: 1.5rem;
 }
-.market-standard-designs .market-choices {
-  max-width: 36rem;
-}
 .market-preview--compact .market-layout {
   grid-auto-rows: minmax(1.75rem, auto);
 }

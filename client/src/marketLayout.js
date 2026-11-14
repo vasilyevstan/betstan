@@ -60,14 +60,3 @@ export const reconcileLayout = (layout, outcomes, previous = outcomes) => {
   }
   return { ...layout, tiles };
 };
-
-const fixedDesign = (id, name, labels, columns) => {
-  const definition = { name, parameters: [], outcomes: labels.map((label, index) => ({ key: `${id}-${index}`, label })) };
-  return { id: `standard:${id}`, kind: 'standard', definition, layout: gridLayout(definition.outcomes, columns) };
-};
-
-// These are previews of the existing products, not authorable settlement definitions.
-export const standardMarketDesigns = [
-  fixedDesign('1x2', '1X2', ['1', 'X', '2'], 3),
-  fixedDesign('correct-score', 'Correct Score', ['0 - 0', '0 - 1', '1 - 0', '1 - 1', '1 - 2', '2 - 0', '2 - 1', '2 - 2', '3 - 0', '3 - 1'], 2),
-];

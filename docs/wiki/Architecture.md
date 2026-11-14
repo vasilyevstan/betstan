@@ -208,6 +208,14 @@ authority. Configuration and manual-decision sends retain durable publication
 obligations and coalesce concurrent local sends without claiming exactly-once
 transport.
 
+The Backoffice starter catalogue supplies copyable 1X2 and Correct Score
+definitions with declarative final-score rules. Copies get independent template
+identities and versions; editing them never changes the source starters or
+legacy standard products. Correct Score declares partial coverage for its
+listed scores. Template selection and design do not require an event pricing
+model; automatic publication still does. A model-less event requires an
+explicit manual-result copy rather than inferred prices or silent rule changes.
+
 Visual layouts are optional Backoffice-owned presentation metadata, stored in
 a top-level version-keyed `layouts` map and copied to the event market on
 creation. Persisted template `versions` remain byte-shape compatible with
