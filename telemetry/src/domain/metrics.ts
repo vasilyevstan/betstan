@@ -1,4 +1,4 @@
-export const METRICS = [
+export const METRICS_V1 = [
   "MAIN_PAGE_VISIT",
   "ADMIN_PAGE_VISIT",
   "SLIP_CREATED",
@@ -7,6 +7,12 @@ export const METRICS = [
   "GAMECENTER_EVENT_EMITTED",
   "USER_CREATED",
   "USER_LOGGED_IN",
+] as const;
+
+export const METRICS = [
+  ...METRICS_V1,
+  "MARKET_TEMPLATE_PAGE_VISIT",
+  "RISK_CENTRE_PAGE_VISIT",
 ] as const;
 
 export type MetricName = (typeof METRICS)[number];

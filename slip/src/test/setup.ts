@@ -5,6 +5,11 @@ import { currentUser, errorHandler, messengerWrapper } from "@betstan/common";
 jest.mock("@betstan/common", () => {
   const mocked = jest.createMockFromModule<typeof import("@betstan/common")>("@betstan/common");
   const actual = jest.requireActual<typeof import("@betstan/common")>("@betstan/common");
+  (mocked.AListener.prototype.init as jest.Mock).mockImplementation(async function(this: any) {
+    if (!this.channel) Object.defineProperty(this, "channel", { configurable: true, writable: true, value: {
+      prefetch: jest.fn(async () => undefined), nack: jest.fn(), ack: jest.fn(), close: jest.fn(async () => undefined),
+    } });
+  });
   return {
     ...mocked,
     marketKey: actual.marketKey,

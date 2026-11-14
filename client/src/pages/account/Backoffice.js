@@ -382,6 +382,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       </div>
       <a className="btn backoffice-control backoffice-action backoffice-header__action"
         href={`/backoffice/markets${window.location.search}`}>Market designer</a>
+      <a className="btn backoffice-control backoffice-action backoffice-header__action"
+        href={`/backoffice/risk-centre${window.location.search}`}>Risk Centre</a>
     </header>
     <div className="card backoffice-create">
       <div className="card-body">

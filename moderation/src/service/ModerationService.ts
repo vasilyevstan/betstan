@@ -1,5 +1,4 @@
 import { randomUUID } from "crypto";
-import { isDeepStrictEqual } from "util";
 import {
   BetKind,
   BettingStatus,
@@ -22,6 +21,15 @@ import { LiveEventMirror } from "../model/LiveEventMirror";
 import { ParkedPlaceBet, ParkedPlaceBetStatus } from "../model/ParkedPlaceBet";
 import { Resulted } from "../model/Resulted";
 import { verifyMarketQuote } from "./MarketQuoteVerifier";
+import { placementFingerprint, receiveRisk, terminalRisk } from "../risk/Gateway";
+import { riskEnabled, RiskBaseline, RiskPosition, RiskState, transaction } from "../risk/Store";
+import { replayAccounting } from "../risk/Accounting";
+import { verifyRiskSource } from "../risk/SourceVerifier";
+import { RiskError } from "../risk/Policy";
+import { decisionMetadata, declineForRisk, ModerationDecision, parseDecisionReason } from "../risk/Decision";
+import { matching } from "../risk/Evaluation";
+import { timingFailures } from "../risk/Timing";
+import type { Rule } from "../risk/Policy";
 
 interface NormalizedSlipRow extends SlipRow {
   betKind: BetKind;
@@ -39,6 +47,10 @@ type NormalizedPlaceBetEvent = Omit<IPlaceBetEvent, "data"> & {
 };
 
 interface StoredBetRecord {
+  riskPolicyRevision?: number;
+  riskReason?: string;
+  decisionId?: string;
+  placementFingerprint?: string;
   userId: string;
   slipId: string;
   status: ModerationStatus;
@@ -144,14 +156,6 @@ export interface ParkedPlaceBetRecord {
   exhaustedAt?: string;
   createdAt: Date;
   updatedAt: Date;
-}
-
-interface ModerationDecision {
-  status: ModerationStatus;
-  betKind?: BetKind;
-  declineReason?: ModerationDeclineReason;
-  affectedRows: IModerationAffectedRow[];
-  moderationTimestamp: string;
 }
 
 type EvaluationResult =
@@ -298,13 +302,52 @@ class ModerationService {
   }
 
   async handlePlaceBet(event: IPlaceBetEvent): Promise<PlaceBetProcessingResult> {
-    return this.processPlaceBet(event, false);
+    return this.coalescedPlaceBet(event, false);
   }
 
   async replayParkedPlaceBet(
     parkedPlaceBet: ParkedPlaceBetRecord
   ): Promise<PlaceBetProcessingResult> {
-    return this.processPlaceBet(parkedPlaceBet.event, true);
+    return this.coalescedPlaceBet(parkedPlaceBet.event, true);
+  }
+
+  private static readonly inFlight = new Map<string, { fingerprint: string; work: Promise<PlaceBetProcessingResult> }>();
+  private async coalescedPlaceBet(event: IPlaceBetEvent, replay: boolean): Promise<PlaceBetProcessingResult> {
+    const id = event.data.slipId;
+    const fingerprint = placementFingerprint(this.normalizePlaceBet(event).event.data);
+    const running = ModerationService.inFlight.get(id);
+    if (running) {
+      if (running.fingerprint !== fingerprint) throw new RiskError("PLACEMENT_CONFLICT", "Immutable submission conflicts with in-flight slip", 409);
+      return running.work;
+    }
+    const work = this.processPlaceBet(event, replay);
+    ModerationService.inFlight.set(id, { fingerprint, work });
+    try { return await work; } finally { ModerationService.inFlight.delete(id); }
+  }
+
+  async recoverDecisionsAndReceipts(limit = 25): Promise<number> {
+    const now = new Date().toISOString();
+    if (riskEnabled() || await RiskPosition.exists({}) || await RiskBaseline.exists({})) await replayAccounting(limit);
+    // Independent of parking attempts: broker outages cannot exhaust a committed
+    // decision's publication obligation.
+    const terminal = await Bet.find({
+      status: { $ne: ModerationStatus.RECEIVED }, moderationTimestamp: { $nin: ["", null] },
+      $or: [{ publishedAt: "" }, { publishedAt: null }, { publishedAt: { $exists: false } }],
+    }).sort({ moderationTimestamp: 1 }).limit(limit).lean();
+    let count = 0;
+    for (const bet of terminal) {
+      try { await this.publishStoredDecisionIfNeeded(bet as unknown as StoredBetRecord); count++; }
+      catch { /* marker remains; retry next tick independently of parked budget */ }
+    }
+    const due = await RiskPosition.find({ state: "PENDING", decisionDueAt: { $lte: now },
+      $or: [{ recoveryAt: { $exists: false } }, { recoveryAt: { $lte: now } }],
+    }).sort({ recoveryAt: 1, decisionDueAt: 1 }).limit(limit).lean() as any[];
+    for (const position of due) {
+      try { await this.coalescedPlaceBet(position.event, true); count++; }
+      catch { /* immutable receipt is the recovery authority */ }
+      await RiskPosition.updateOne({ _id: position._id, state: "PENDING" }, { $set: { recoveryAt: new Date(Date.now() + 1000).toISOString() } });
+    }
+    return count;
   }
 
   async upsertLiveEventMirror(event: ILiveEventUpdateEvent): Promise<boolean> {
@@ -703,12 +746,19 @@ class ModerationService {
   }
 
   async upsertResulted(eventId: string, timestamp: string): Promise<void> {
+    if (riskEnabled() || await RiskPosition.exists({ state: "PENDING" })) {
+      await transaction(async session => {
+        await Resulted.updateOne({ eventId }, { $setOnInsert: { eventId, timestamp, __v: 0 } }, { upsert: true, session });
+      });
+      return;
+    }
     await Resulted.findOneAndUpdate(
       { eventId },
       {
-        $set: {
+        $setOnInsert: {
           eventId,
           timestamp,
+          __v: 0,
         },
       },
       { upsert: true }
@@ -870,22 +920,37 @@ class ModerationService {
     event: IPlaceBetEvent,
     fromParkedReplay: boolean
   ): Promise<PlaceBetProcessingResult> {
-    const evaluatedAt = new Date();
+    let evaluatedAt = new Date();
     const normalized = this.normalizePlaceBet(event);
-    const storedBet = await this.ensureStoredBet(
-      normalized.event,
-      evaluatedAt.toISOString()
-    );
+    const priorRisk = await RiskPosition.findById(event.data.slipId).lean() as any;
+    const usesRisk = riskEnabled() || Boolean(priorRisk);
+    if (!usesRisk && !await Bet.exists({ slipId: event.data.slipId })) {
+      // Feature-off intake creates a coverage gap, not permission to keep a
+      // previously certified book active after a later re-enable.
+      await RiskState.updateOne({ _id: "active" },
+        { $set: { "accountingCoverage.valid": false, "activityCoverage.tracking": false } });
+    }
+    const receipt = usesRisk ? await receiveRisk(normalized.event, evaluatedAt, event.data) : undefined;
+    const storedBet = usesRisk
+      ? (await this.findStoredBet(event.data.slipId))!
+      : await this.ensureStoredBet(normalized.event, evaluatedAt.toISOString());
+    if (!storedBet) throw new Error("Missing immutable moderation receipt");
 
     if (this.hasFinalDecision(storedBet)) {
       await this.publishStoredDecisionIfNeeded(storedBet);
       return { type: "decision" };
     }
 
+    evaluatedAt = new Date();
+    if (receipt && evaluatedAt.toISOString() < receipt.decisionDueAt) {
+      return { type: "park", pendingEventIds: [] };
+    }
+
     const parkedPlaceBet = await this.findParkedPlaceBet(event.data.slipId);
 
     if (
       !fromParkedReplay
+      && !receipt
       && parkedPlaceBet?.status === ParkedPlaceBetStatus.EXHAUSTED
     ) {
       return {
@@ -895,7 +960,8 @@ class ModerationService {
       };
     }
 
-    const evaluation: EvaluationResult = normalized.mixed
+    const expiredEvidence = receipt?.evidencePending && evaluatedAt.toISOString() >= receipt.evidenceDeadline;
+    let evaluation: EvaluationResult = normalized.mixed
       ? {
           type: "decision",
           decision: this.buildDecision(
@@ -907,9 +973,25 @@ class ModerationService {
             evaluatedAt.toISOString()
           ),
         }
-      : await this.evaluate(normalized.event, evaluatedAt);
+      : receipt?.reason || expiredEvidence
+        ? { type: "decision", decision: this.buildDecision(normalized.event.data.rows, {
+          betKind: normalized.event.data.betKind, declineReason: expiredEvidence
+            ? ModerationDeclineReason.RISK_EVIDENCE_UNAVAILABLE : declineForRisk(parseDecisionReason(receipt.reason)),
+        }, ModerationStatus.DECLINED, evaluatedAt.toISOString()) }
+        : await this.evaluate(normalized.event, evaluatedAt, Boolean(receipt), receipt ? matching(receipt.policy, normalized.event.data) : []);
+    if (expiredEvidence && evaluation.type === "decision") evaluation.decision.riskReason = "RISK_EVIDENCE_UNAVAILABLE";
+
+    if (evaluation.type === "park" && receipt && evaluatedAt.toISOString() >= receipt.evidenceDeadline) {
+      evaluation = { type: "decision", decision: this.buildDecision(normalized.event.data.rows, {
+        betKind: normalized.event.data.betKind, declineReason: ModerationDeclineReason.RISK_EVIDENCE_UNAVAILABLE,
+      }, ModerationStatus.DECLINED, evaluatedAt.toISOString()) };
+      evaluation.decision.riskReason = "RISK_EVIDENCE_UNAVAILABLE";
+    }
 
     if (evaluation.type === "park") {
+      if (receipt) {
+        await RiskPosition.updateOne({ _id: event.data.slipId, state: "PENDING" }, { $set: { evidencePending: true } });
+      }
       if (!fromParkedReplay) {
         await this.parkSlip(
           event,
@@ -924,10 +1006,9 @@ class ModerationService {
       };
     }
 
-    const decidedBet = await this.persistDecision(
-      normalized.event,
-      evaluation.decision
-    );
+    const decidedBet = receipt
+      ? await terminalRisk(event.data.slipId, evaluation.decision, new Date())
+      : await this.persistDecision(normalized.event, evaluation.decision);
     await this.publishStoredDecisionIfNeeded(decidedBet);
 
     return { type: "decision" };
@@ -935,7 +1016,9 @@ class ModerationService {
 
   private async evaluate(
     event: NormalizedPlaceBetEvent,
-    evaluatedAt: Date
+    evaluatedAt: Date,
+    currentSafety = false,
+    rules: Rule[] = []
   ): Promise<EvaluationResult> {
     try { assertMarketSlipCompatibility(event.data.rows); }
     catch (error) {
@@ -961,6 +1044,17 @@ class ModerationService {
     );
     const pendingEventIds = new Set<string>();
     const affectedRows: IModerationAffectedRow[] = [];
+    const timingEvidence = { kickoffs: {} as Record<string, string> };
+    if (currentSafety) {
+      for (const eventId of eventIds) {
+        const rows = event.data.rows.filter(row => row.eventId === eventId);
+        try {
+          const source = await verifyRiskSource(eventId, rows, evaluatedAt);
+          timingEvidence.kickoffs[eventId] = source.kickoffAt;
+          affectedRows.push(...source.affectedRows);
+        } catch { pendingEventIds.add(eventId); }
+      }
+    }
 
     for (const row of event.data.rows) {
       if (resultedIds.has(row.eventId)) {
@@ -1058,6 +1152,15 @@ class ModerationService {
 
       if (!mirror) {
         pendingEventIds.add(row.eventId);
+        continue;
+      }
+
+      if (currentSafety && (!this.isLiveOpen(mirror) || !currentMarket || currentMarket.status !== LiveMarketStatus.OPEN
+        || currentMarket.marketVersion !== row.marketVersion || !currentSelection || currentSelection.odds !== row.oddsValue
+        || !row.quoteValidUntil || evaluatedAt.getTime() >= Date.parse(row.quoteValidUntil))) {
+        affectedRows.push(this.buildAffectedRow(row,
+          !this.isLiveOpen(mirror) ? ModerationDeclineReason.EVENT_NOT_LIVE : ModerationDeclineReason.STALE_QUOTE,
+          currentMarket, currentSelection));
         continue;
       }
 
@@ -1194,18 +1297,21 @@ class ModerationService {
     }
 
     if (affectedRows.length > 0) {
+      const uniqueRows = affectedRows.filter((row, index) => affectedRows.findIndex(other => other.rowId === row.rowId) === index)
+        .sort((a, b) => event.data.rows.findIndex(row => row.id === a.rowId) - event.data.rows.findIndex(row => row.id === b.rowId));
       return {
         type: "decision",
-        decision: this.buildDecision(
+        decision: { ...this.buildDecision(
           event.data.rows,
           {
             betKind: event.data.betKind,
             declineReason: affectedRows[0].declineReason,
-            affectedRows,
+            affectedRows: uniqueRows,
           },
           ModerationStatus.DECLINED,
           evaluatedAt.toISOString()
-        ),
+        ), ...(affectedRows[0].declineReason === ModerationDeclineReason.RISK_POLICY
+          ? { riskReason: "RISK_CURRENT_SOURCE_UNSAFE" as const } : {}) },
       };
     }
 
@@ -1216,16 +1322,25 @@ class ModerationService {
       };
     }
 
+    const timing = currentSafety ? timingFailures(rules, event.data, evaluatedAt, timingEvidence) : [];
+    if (timing.length) {
+      const decision = this.buildDecision(event.data.rows, {
+        betKind: event.data.betKind, declineReason: declineForRisk(timing[0].reason),
+        affectedRows: timing.map(failure => ({ rowId: failure.rowId, declineReason: declineForRisk(failure.reason) })),
+      }, ModerationStatus.DECLINED, evaluatedAt.toISOString());
+      decision.riskReason = timing[0].reason;
+      return { type: "decision", decision };
+    }
     return {
       type: "decision",
-      decision: this.buildDecision(
+      decision: { ...this.buildDecision(
         event.data.rows,
         {
           betKind: event.data.betKind,
         },
         ModerationStatus.APPROVED,
         evaluatedAt.toISOString()
-      ),
+      ), ...(currentSafety ? { timingEvidence } : {}) },
     };
   }
 
@@ -1302,7 +1417,7 @@ class ModerationService {
         userId: event.data.userId,
         slipId: event.data.slipId,
         wager: event.data.wager,
-        timestamp: event.timestamp ?? fallbackTimestamp,
+        timestamp: event.data.submittedAt ?? event.timestamp ?? fallbackTimestamp,
         rows: event.data.rows,
       },
       $setOnInsert: {
@@ -1323,11 +1438,10 @@ class ModerationService {
       update.$set.submittedAt = event.data.submittedAt;
     }
 
-    const hasMarkets = event.data.rows.some(row => row.marketBet !== undefined);
     try {
       await Bet.findOneAndUpdate({
-        slipId: event.data.slipId, ...(hasMarkets ? {} : { "rows.marketBet": { $exists: false } }),
-      }, hasMarkets ? { $setOnInsert: { ...update.$setOnInsert, ...update.$set } } : update, {
+        slipId: event.data.slipId,
+      }, { $setOnInsert: { ...update.$setOnInsert, ...update.$set, __v: 0 } }, {
         upsert: true,
       });
     } catch (error) {
@@ -1341,15 +1455,8 @@ class ModerationService {
     if (!stored) {
       throw new Error(`Missing moderation record for slip ${event.data.slipId}`);
     }
-    if (hasMarkets || stored.rows.some(row => row.marketBet !== undefined)) {
-      const identity = (value: Pick<StoredBetRecord, "userId" | "slipId" | "wager" | "rows" | "betKind" | "submittedAt">) =>
-        JSON.parse(JSON.stringify({
-          userId: value.userId, slipId: value.slipId, wager: value.wager, rows: value.rows,
-          betKind: value.betKind, submittedAt: value.submittedAt,
-        }));
-      if (!isDeepStrictEqual(identity(stored), identity(event.data))) {
-        throw new Error("Immutable market submission conflicts with the stored slip");
-      }
+    if (placementFingerprint(stored) !== placementFingerprint(event.data)) {
+      throw new RiskError("PLACEMENT_CONFLICT", "Immutable submission conflicts with the stored slip", 409);
     }
 
     return stored;
@@ -1364,11 +1471,6 @@ class ModerationService {
       $unset?: Record<string, number>;
     } = {
       $set: {
-        userId: event.data.userId,
-        slipId: event.data.slipId,
-        wager: event.data.wager,
-        timestamp: event.timestamp ?? decision.moderationTimestamp,
-        rows: event.data.rows,
         status: decision.status,
         moderationTimestamp: decision.moderationTimestamp,
         affectedRows: decision.affectedRows,
@@ -1398,7 +1500,7 @@ class ModerationService {
 
     await Bet.findOneAndUpdate({
       slipId: event.data.slipId,
-      ...(event.data.rows.some(row => row.marketBet !== undefined) ? { status: ModerationStatus.RECEIVED } : {}),
+      status: ModerationStatus.RECEIVED,
     }, update);
 
     const stored = await this.findStoredBet(event.data.slipId);
@@ -1550,6 +1652,9 @@ class ModerationService {
 
     if (bet.affectedRows && bet.affectedRows.length > 0) {
       resultEvent.data.affectedRows = bet.affectedRows;
+    }
+    if (bet.riskPolicyRevision) {
+      resultEvent.data = { ...resultEvent.data, ...decisionMetadata(bet) };
     }
 
     return resultEvent;

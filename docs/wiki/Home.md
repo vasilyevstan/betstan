@@ -34,6 +34,7 @@ point-in-time service health.
 
 ## Feature and UX guidance
 
+- [[Risk Centre]]
 - [[Live Betting Production]]
 - [[User Interface]]
 - [[UI UX Consistency]]

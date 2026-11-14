@@ -1,6 +1,6 @@
 import request from "supertest";
 import { createApp, telemetryErrorHandler } from "../app";
-import { METRICS, SERVICES } from "../domain/metrics";
+import { METRICS as ALL_METRICS, METRICS_V1 as METRICS, SERVICES } from "../domain/metrics";
 
 const now = new Date("2026-09-10T12:34:56.789Z");
 const uuid = "9a6b8a5f-d9ea-4f4c-8c0a-7d39b9a55c12";
@@ -22,10 +22,34 @@ const expectRateLimited = (response: request.Response) => {
   expect(response.headers["retry-after"]).toBe("1");
 };
 
+it("opts into ten metrics while preserving the exact cached v1 response", async () => {
+  const deps = dependencies();
+  deps.summaryStore.aggregate.mockResolvedValue([
+    { _id: { metric: "RISK_CENTRE_PAGE_VISIT", date: "2026-09-10" }, count: 3 },
+  ]);
+  const app = createApp(deps);
+  const v2 = await request(app).get("/api/telemetry/summary?metricsVersion=2").expect(200);
+  const v1 = await request(app).get("/api/telemetry/summary").expect(200);
+  expect(Object.keys(v1.body)).toEqual(["generatedAt", "dates", "metrics", "health"]);
+  expect(v1.body).toEqual({ ...v2.body, metrics: v2.body.metrics.slice(0, 8) });
+  expect(v1.body.metrics.map((entry: any) => entry.metric)).toEqual(METRICS);
+  expect(v2.body.metrics.map((entry: any) => entry.metric)).toEqual(ALL_METRICS);
+  expect(v2.body.metrics[9].values[13]).toBe(3);
+  expect(deps.summaryStore.aggregate).toHaveBeenCalledTimes(1);
+});
+
+it.each(["metricsVersion=1", "metricsVersion=3", "metricsVersion=2&metricsVersion=2", "metricsVersion=2&user=x", "__proto__=x"])(
+  "rejects unsupported summary selector %s", async (query) => {
+    await request(createApp(dependencies())).get(`/api/telemetry/summary?${query}`).expect(400);
+  }
+);
+
 describe("POST /api/telemetry/page-view", () => {
   it.each([
     ["main", "MAIN_PAGE_VISIT"],
     ["admin", "ADMIN_PAGE_VISIT"],
+    ["market-template", "MARKET_TEMPLATE_PAGE_VISIT"],
+    ["risk-centre", "RISK_CENTRE_PAGE_VISIT"],
   ])("records %s directly and returns exact 202", async (page, metric) => {
     const deps = dependencies();
     const response = await request(createApp(deps))
@@ -45,6 +69,9 @@ describe("POST /api/telemetry/page-view", () => {
   it.each([
     [{}, "empty"],
     [{ page: "other" }, "unknown"],
+    [{ page: "/backoffice/markets" }, "raw path"],
+    [{ page: "risk-centre", userId: "private" }, "identity"],
+    [{ page: "RISK-CENTRE" }, "alias"],
     [{ page: "main", timestamp: now.toISOString() }, "extra"],
     [[], "array"],
     [null, "null"],
@@ -466,7 +493,7 @@ describe("unmatched telemetry requests", () => {
 });
 
 describe("GET /api/telemetry/metrics/:metric/days/:date", () => {
-  it.each(METRICS)("returns the exact hourly DTO for %s without health or daily reads", async (metric) => {
+  it.each(ALL_METRICS)("returns the exact hourly DTO for %s without health or daily reads", async (metric) => {
     const deps = dependencies();
     deps.hourlyStore.aggregateHourly.mockResolvedValue([
       { _id: 23, count: Number.MAX_SAFE_INTEGER },

@@ -125,6 +125,12 @@ it("replays an early manual result after placement and moderation without publis
   const archived = await BetArchive.findOne({ slipId: input.data.slipId });
   expect(archived?.status).toBe(ResultingStatus.BET_WIN);
   expect(archived?.rows[0].marketBet).toEqual(input.data.rows[0].marketBet);
+  expect(archived?.accounting).toMatchObject({
+    status: "COMPLETE", movements: [{
+      closedStakeMinor: 1000, returnMinor: 2000, remainingStakeMinor: 0, source: "SETTLEMENT",
+      occurredAt: "2025-01-01T01:00:00.000Z",
+    }],
+  });
   expect(SettleSlipPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
 });
 
@@ -140,6 +146,12 @@ it("retains a voided custom exposure and its original odds instead of deleting i
   expect(archived?.rows[0].result).toBe(ResultingStatus.ROW_VOID);
   expect(archived?.rows[0].oddsValue).toBe(2);
   expect(archived?.rows[0].marketBet).toEqual(input.data.rows[0].marketBet);
+  expect(archived?.accounting).toMatchObject({
+    status: "COMPLETE", movements: [{
+      closedStakeMinor: 1000, returnMinor: 1000, remainingStakeMinor: 0, source: "SETTLEMENT",
+      occurredAt: "2025-01-01T01:00:00.000Z",
+    }],
+  });
 });
 
 it("settles a Builder as one frozen exposure from the first authoritative final score", async () => {
@@ -164,6 +176,14 @@ it("settles a Builder as one frozen exposure from the first authoritative final 
   expect(archived?.status).toBe(ResultingStatus.BET_WIN);
   expect(archived?.rows).toHaveLength(1);
   expect(archived?.rows[0].oddsValue).toBe(3.75);
+  expect(archived?.accounting).toMatchObject({
+    status: "COMPLETE", movements: [{
+      closedStakeMinor: 1000, returnMinor: 3750, remainingStakeMinor: 0, source: "SETTLEMENT",
+    }],
+  });
+  expect(archived?.accountingPayoutBound).toMatchObject({
+    method: "STANDALONE_FIXED_ODDS", originalStakeMinor: 1000, maximumReturnMinor: 3750,
+  });
 });
 
 it("preserves the manual ledger after a failed settlement publication and rejects conflicting decisions", async () => {

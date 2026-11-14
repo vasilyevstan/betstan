@@ -21,6 +21,11 @@ class PlaceBetListener extends AListener<IModerationResultEvent> {
   }
 
   async onMessage(event: IModerationResultEvent, msg: ConsumeMessage) {
+    try { await this.applyMessage(event, msg); }
+    catch { this.channel.nack(msg, false, true); }
+  }
+
+  private async applyMessage(event: IModerationResultEvent, msg: ConsumeMessage) {
     const { data } = event;
 
     // Loads, applies and saves under optimistic-concurrency retry so a

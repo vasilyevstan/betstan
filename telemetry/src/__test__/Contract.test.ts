@@ -1,4 +1,4 @@
-import { METRICS, SERVICES } from "../domain/metrics";
+import { METRICS, METRICS_V1, SERVICES } from "../domain/metrics";
 import { EXCHANGES } from "../event/validator";
 
 it("literal-pins the complete exchange, metric, and service order contracts", () => {
@@ -33,8 +33,9 @@ it("literal-pins the complete exchange, metric, and service order contracts", ()
 
   expect([...EXCHANGES]).toEqual(expectedExchanges);
   expect(EXCHANGES).toHaveLength(4);
-  expect([...METRICS]).toEqual(expectedMetrics);
-  expect(METRICS).toHaveLength(8);
+  expect([...METRICS_V1]).toEqual(expectedMetrics);
+  expect(METRICS_V1).toHaveLength(8);
+  expect([...METRICS]).toEqual([...expectedMetrics, "MARKET_TEMPLATE_PAGE_VISIT", "RISK_CENTRE_PAGE_VISIT"]);
   expect([...SERVICES]).toEqual(expectedServices);
   expect(SERVICES).toHaveLength(10);
 });

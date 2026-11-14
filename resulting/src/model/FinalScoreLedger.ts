@@ -1,6 +1,7 @@
 import { Schema, model } from "mongoose";
 
 const finalScoreLedgerSchema = new Schema({
+  timeBasis: { type: String, required: false },
   eventId: {
     type: String,
     required: true,

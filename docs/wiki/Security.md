@@ -57,6 +57,15 @@ The separate administrator role is retained for narrow production-acceptance
 access to explicitly scoped offline synthetic events. That path is
 server-verified against current Auth state.
 
+Risk Centre intentionally shares this public-write model for global
+simulation rules. It is not regulated gambling administration or a
+role-protected production risk desk. Anonymous changes have bounded
+validation, expected-revision conflicts and stable operation receipts, but no
+claimed authenticated attribution. Public responses do not expose player
+records. Correctness safeguards and deployment capabilities are read-only;
+the editor cannot enable unsupported wallets, identity checks or settlement
+products. See [[Risk Centre]].
+
 ## Public Telemetry boundary
 
 Telemetry exposes only aggregate operational counts and coarse service states.

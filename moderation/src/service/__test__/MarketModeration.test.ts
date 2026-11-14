@@ -56,7 +56,7 @@ it("does not overwrite a decided frozen submission with conflicting redelivery",
   await service.handlePlaceBet(input);
   await expect(service.handlePlaceBet({
     ...input, data: { ...input.data, rows: [{ ...input.data.rows[0], oddsValue: 20 }] },
-  })).rejects.toThrow("Immutable market submission");
+  })).rejects.toThrow("Immutable submission");
   const saved = await Bet.findOne({ slipId: input.data.slipId }).lean();
   expect(saved?.rows[0].oddsValue).toBe(2);
   expect(saved?.status).toBe(ModerationStatus.APPROVED);
@@ -98,8 +98,11 @@ it("does not let a racing later decision replace an already approved market expo
     bothEntered.resolve();
     return second.promise;
   });
-  const earlier = service.handlePlaceBet(input);
-  const later = service.handlePlaceBet(input);
+  // Simulate two processes by bypassing only the local singleflight, so this
+  // test still proves the database terminal CAS rather than coalescing.
+  const processPlacement = Reflect.get(service, "processPlaceBet").bind(service);
+  const earlier = processPlacement(input, false);
+  const later = processPlacement(input, false);
   await bothEntered.promise;
   first.resolve(true);
   await Promise.race([earlier, later]);

@@ -20,6 +20,7 @@ contain a deposit, withdrawal, card-payment, or external-wallet integration.
 | Countdown markets | Ten minutes before kickoff, the next event exposes a countdown and the Kickoff Team and Goal in First Minute products. |
 | Betting slips | Signed-in users can keep independent `PRE_MATCH` and `LIVE` slips open at the same time. A submitted slip can contain only one kind. |
 | Moderation | Every submitted slip is checked against current event phase, market status, selection identity, quote version, and quote lifetime. |
+| Risk Centre | Deployment-gated public rule management beside Market designer: acceptance delays, stake/product restrictions and accounting-backed admission controls inside Moderation; see [[Risk Centre]]. |
 | Settlement | Pre-match and live rows are settled from authoritative match and market outcomes, then rolled up into the final bet result. |
 | Bet history | My Bets distinguishes live from pre-match bets and shows moderation and settlement outcomes without exposing internal identifiers. |
 | Statistics | Public aggregate statistics provide a privacy-limited leaderboard view. |

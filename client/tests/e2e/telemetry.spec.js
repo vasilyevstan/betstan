@@ -543,7 +543,7 @@ const expectMixedState = async (page) => {
   await expect(first.getByText(/In progress/)).toBeVisible();
   await expect(cards.nth(1).locator('rect')).toHaveCount(14);
   await expect(first.locator('ol button')).toHaveCount(0);
-  await expect(page.locator('.telemetry-metric__values .telemetry-metric__pair')).toHaveCount(122);
+  await expect(page.locator('.telemetry-metric__values .telemetry-metric__pair')).toHaveCount(150);
   await expectMetricContentsInsideCards(cards);
   await expectSiblingBoxesDoNotIntersect(cards, 'mixed metric cards');
   await expectRequiredLabelsNotClipped(page);
@@ -959,7 +959,7 @@ const expectContrast = async (page) => {
   expect(evidence.healthyIndicators).toHaveLength(4);
   evidence.healthyBorders.forEach((border) => expect(border).toEqual(evidence.accent));
   evidence.healthyIndicators.forEach((indicator) => expect(indicator).toEqual(evidence.positive));
-  expect(evidence.graphs).toHaveLength(112);
+  expect(evidence.graphs).toHaveLength(140);
   expect(Math.min(...evidence.graphs)).toBeGreaterThanOrEqual(3);
   expect(evidence.focus.width).toBe('3px');
   expect(evidence.focus.style).toBe('solid');
@@ -972,9 +972,9 @@ const expectTelemetryLayout = async (page, viewport) => {
     name: 'Telemetry and service health',
     level: 1,
   })).toBeVisible();
-  await expect(page.locator('.telemetry-metric')).toHaveCount(8);
+  await expect(page.locator('.telemetry-metric')).toHaveCount(10);
   await expect(page.locator('.telemetry-health__item')).toHaveCount(10);
-  await expect(page.locator('.telemetry-metric__values .telemetry-metric__pair')).toHaveCount(112);
+  await expect(page.locator('.telemetry-metric__values .telemetry-metric__pair')).toHaveCount(140);
   await expect(page.locator('.scoreboard')).toHaveCount(0);
   await expect(page.locator('.slip-boards')).toHaveCount(0);
 
@@ -1120,7 +1120,7 @@ test('compact frame remains stable at breakpoints, intermediate widths and 200% 
   ]) {
     await page.setViewportSize({ width: scenario.width, height: 1000 });
     await page.goto('/telemetry?ui=v2&theme=light');
-    await expect(page.locator('.telemetry-metric')).toHaveCount(8);
+    await expect(page.locator('.telemetry-metric')).toHaveCount(10);
     if (scenario.textZoom) {
       // Hold the unrelated raster wordmark's geometry constant. Its rem-based
       // width otherwise overflows the shell before any local card is involved.
@@ -1149,7 +1149,7 @@ test.describe('compact frame at 200% zoom-equivalent viewport', () => {
     const state = createShellMockState();
     await installAppApiMocks(page, state);
     await page.goto('/telemetry?ui=v3&theme=dark');
-    await expect(page.locator('.telemetry-metric')).toHaveCount(8);
+    await expect(page.locator('.telemetry-metric')).toHaveCount(10);
     await expectStableCardStates(page, state, '800x500-css/200%-zoom-equivalent');
     await expectMetricContentsInsideCards(page.locator('.telemetry-metric'));
     await expectRequiredLabelsNotClipped(page.locator('.telemetry-metrics'));
@@ -1254,8 +1254,8 @@ test('exact tooltip date/time bucket identity and amount in both modes preserve 
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto('/telemetry?ui=v3&theme=dark');
   const cards = page.locator('.telemetry-metric');
-  await expect(cards).toHaveCount(8);
-  for (let index = 0; index < 8; index += 1) {
+  await expect(cards).toHaveCount(10);
+  for (let index = 0; index < 10; index += 1) {
     await expectTooltipGeometry(page, cards.nth(index), cards.nth(index).locator('rect').first(),
       state.telemetrySummary.dates[0], state.telemetrySummary.metrics[index].values[0]);
   }

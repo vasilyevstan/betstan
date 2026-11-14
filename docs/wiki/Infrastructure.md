@@ -72,7 +72,7 @@ flowchart TB
 | Ingress | Routes the SPA and `/api/*` paths; disables buffering for SSE |
 | k3s | Runs the ten application workloads plus MongoDB and RabbitMQ |
 | MongoDB | Persistent state for nine service-owned logical databases |
-| RabbitMQ | Internal fanout broker with a generation-bound queue inventory; current releases require 31 queues derived from source listeners (see [[Release Orchestration]]) |
+| RabbitMQ | Internal fanout broker with a generation-bound queue inventory; Risk Centre generations require 33 queues derived from source listeners (see [[Release Orchestration]]) |
 | GHCR | Public application image registry; runtime pulls without a long-lived registry secret |
 | GitHub Actions | Builds, validates, deploys, activates, rolls back, and records provenance |
 
@@ -83,6 +83,33 @@ exposes public ports.
 
 MongoDB is the durable system of record and uses persistent block storage.
 Each backend service owns its logical database and migrations.
+
+The OCI MongoDB overlay uses a single-member replica set for transactional
+Risk Centre writes. It preserves the existing service addresses, logical
+databases and persistent volume; it is not a high-availability deployment.
+The configured oplog size is 256 MB (MongoDB may temporarily exceed this to
+preserve required history). Standalone local-development manifests remain
+unchanged; transaction-dependent risk writers require a replica set and an
+explicit deployment capability switch.
+
+The existing protected deployment sequence freezes application writers
+before converting a standalone instance, even when its binary and
+feature-compatibility version already match. It initializes only the
+reviewed single-member topology and waits for a writable primary before
+continuing. An unexpected set identity, membership or command failure stops
+the conversion; it never forces a reconfiguration. Ping probes deliberately
+permit the uninitialized process to start, while deployment finalization and
+Risk Centre readiness enforce transaction availability.
+
+Conversion must use the existing exact-source, maintenance, backup and
+shared-Mongo ownership controls; these repository changes do not authorize a
+live migration. Preserve backup/recovery evidence before conversion. An
+application rollback normally retains the replica set. Removing replication
+is a separate protected storage operation, allowed only after
+transaction-dependent writers are stopped and durable pending decisions,
+accounting and outboxes have a compatible recovery path. Do not remove the
+volume, reset replication history, downgrade the binary or discard risk
+records to make an older application start.
 
 RabbitMQ is treated as transport rather than the sole source of truth.
 Critical operations persist enough state to retry publication after broker or

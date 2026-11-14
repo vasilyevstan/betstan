@@ -8,6 +8,7 @@ import ParkedPlaceBetReplayWorker, {
 import { createDeferred, createPlaceBetEvent } from "../../event/listener/__test__/helpers";
 
 type MockService = {
+  recoverDecisionsAndReceipts: jest.Mock;
   claimParkedPlaceBet: jest.Mock;
   replayParkedPlaceBet: jest.Mock;
   rescheduleClaimedParkedPlaceBet: jest.Mock;
@@ -15,6 +16,7 @@ type MockService = {
 };
 
 const createService = (overrides: Partial<MockService> = {}): MockService => ({
+  recoverDecisionsAndReceipts: jest.fn(async () => 0),
   claimParkedPlaceBet: jest.fn(async () => null),
   replayParkedPlaceBet: jest.fn(),
   rescheduleClaimedParkedPlaceBet: jest.fn(

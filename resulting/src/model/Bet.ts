@@ -152,6 +152,17 @@ const manifestSchema = new Schema<CashBackOriginalManifest>({
 }, { _id: false });
 
 const betSchema = new Schema({
+  accounting: { type: Schema.Types.Mixed, required: false },
+  accountingRevision: { type: Number, required: false },
+  accountingCumulativeReturnMinor: { type: Number, required: false },
+  accountingLastMovement: { type: Schema.Types.Mixed, required: false },
+  accountingPrefixTruncated: { type: Boolean, required: false },
+  accountingTimeUnavailable: { type: Boolean, required: false },
+  accountingBasis: { type: Schema.Types.Mixed, required: false },
+  accountingScope: { type: Schema.Types.Mixed, required: false },
+  accountingPayoutBound: { type: Schema.Types.Mixed, required: false },
+  accountingLatestResolvedAt: { type: String, required: false },
+  accountingRemovedVoidRowIds: { type: [String], default: undefined },
   cashBackFinancial: { type: financialSchema, required: false },
   cashBackOriginalManifest: { type: manifestSchema, required: false },
   cashBackAnySelectionResolved: { type: Boolean, required: false },

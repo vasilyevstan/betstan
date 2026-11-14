@@ -134,6 +134,10 @@ const betRowSchema = new Schema(
 );
 
 const betSchema = new Schema({
+  riskPolicyRevision: Number,
+  riskReason: String,
+  decisionId: String,
+  placementFingerprint: String,
   userId: {
     type: String,
     required: true,

@@ -157,6 +157,7 @@ export const createFinalScoreEvent = (
   overrides: Partial<IEventResultEvent["data"]> = {}
 ): IEventResultEvent => ({
   data: {
+    occurredAt: overrides.occurredAt ?? new Date().toISOString(),
     eventId: overrides.eventId ?? objectId(),
     homeScore: overrides.homeScore ?? 1,
     awayScore: overrides.awayScore ?? 0,

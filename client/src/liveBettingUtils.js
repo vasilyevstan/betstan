@@ -89,6 +89,8 @@ const DECLINE_REASON_LABELS = Object.freeze({
   STALE_QUOTE: 'Quote changed',
   INVALID_SELECTION: 'Selection no longer exists',
   EVENT_RESULTED: 'Event already resulted',
+  RISK_POLICY: 'Risk policy restriction',
+  RISK_EVIDENCE_UNAVAILABLE: 'Risk evidence unavailable',
 });
 
 const SETTLEMENT_REASON_LABELS = Object.freeze({

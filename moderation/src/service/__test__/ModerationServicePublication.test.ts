@@ -176,7 +176,9 @@ it("heartbeats slow confirms so competing services cannot steal the decision", a
   const firstPublish = serviceOne.handlePlaceBet(event);
   await publishStarted.promise;
   await sleep(120);
-  await serviceTwo.handlePlaceBet(event);
+  // The independent recovery path exercises the persisted lease rather than
+  // intentionally joining the first call's new process-wide singleflight.
+  await serviceTwo.recoverDecisionsAndReceipts();
 
   expect(publisherOne.publishWithConfirm).toHaveBeenCalledTimes(1);
   expect(publisherTwo.publishWithConfirm).not.toHaveBeenCalled();

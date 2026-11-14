@@ -99,6 +99,9 @@ patches:
       name: gaming-auth-mongo-depl
     patch: |-
       - op: add
+        path: /spec/template/spec/containers/0/args
+        value: ["--replSet", "betstan", "--bind_ip_all", "--oplogSize", "256"]
+      - op: add
         path: /spec/template/spec/nodeSelector
         value:
           kubernetes.io/arch: arm64
