@@ -16,6 +16,7 @@ import {
 } from "./helpers";
 
 const setup = async () => {
+  await LiveEventMirror.init();
   const placeBetListener = new PlaceBetListener(messengerWrapper.connection);
   await placeBetListener.init();
   const liveEventListener = new LiveEventUpdateListener(
