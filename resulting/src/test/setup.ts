@@ -14,6 +14,10 @@ jest.mock("@betstan/common", () => {
   }
   return {
     ...mocked, AListener,
+    assertBetAccountingEvidence: actual.assertBetAccountingEvidence,
+    fixedOddsReturnMinor: actual.fixedOddsReturnMinor,
+    nominalStakeMinor: actual.nominalStakeMinor,
+    realisedLossMinor: actual.realisedLossMinor,
     assertMarketScore: actual.assertMarketScore,
     evaluateMarketBetResult: actual.evaluateMarketBetResult,
     marketDomainTime: actual.marketDomainTime,

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+node --test "$ROOT_DIR/infra/oci/tests/test-mongo-replica-set.js"
 UPGRADE="$ROOT_DIR/infra/oci/scripts/upgrade-mongo.sh"
 WORK_DIR="$ROOT_DIR/infra/oci/tests/.mongo-upgrade-work"
 STATE="$WORK_DIR/state.json"
@@ -156,7 +157,22 @@ case "${1:-}" in
     esac
     ;;
   exec)
-    if [[ "$*" == *betstan-mongo-storage-inspector* ]]; then
+    if [[ "$*" == *BETSTAN_MONGO_REPLICA_ACTION=* ]]; then
+      replica_state="$(jq -r '.replica_state // "ready"' "$state")"
+      [[ "$replica_state" != "invalid" ]] || exit 1
+      if [[ "$*" == *BETSTAN_MONGO_REPLICA_ACTION=initialize* ]]; then
+        [[ "$replica_state" != "standalone" ]] || exit 1
+        if [[ "$replica_state" == "uninitialized" ]]; then
+          update_state '.replica_state="ready"'
+          if [[ "$(jq -r '.fcv_error // 0' "$state")" == "258" ]]; then
+            update_state '.fcv="8.2" | .fcv_error=0'
+          fi
+          replica_state=ready
+        fi
+      fi
+      jq -cn --arg state "$replica_state" \
+        '{schema:"betstan.mongo-topology.v1",state:$state,replicaSet:"betstan"}'
+    elif [[ "$*" == *betstan-mongo-storage-inspector* ]]; then
       [[ "$(jq -r .storage_empty "$state")" == "true" ]]
     elif [[ "$*" == *setFeatureCompatibilityVersion* ]]; then
       if [[ "$*" == *"'8.0'"* ]]; then
@@ -172,7 +188,13 @@ case "${1:-}" in
     elif [[ "$*" == *listDatabases* ]]; then
       printf 'true\n'
     else
-      jq -c '{version,majorMinor:.major,fcv}' "$state"
+      fcv_error="$(jq -r '.fcv_error // 0' "$state")"
+      if [[ "$fcv_error" == "258" && "$*" == *BETSTAN_MONGO_ALLOW_UNINITIALIZED_FCV=true* ]]; then
+        jq -c '{version,majorMinor:.major,fcv:"uninitialized"}' "$state"
+      else
+        [[ "$fcv_error" == "0" ]] || exit 1
+        jq -c '{version,majorMinor:.major,fcv}' "$state"
+      fi
     fi
     ;;
   *)
@@ -283,6 +305,43 @@ run_upgrade finalize >/dev/null
 run_upgrade resume >/dev/null
 
 write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+jq '.replica_state="standalone"' "$STATE" > "$STATE.tmp"
+mv "$STATE.tmp" "$STATE"
+run_upgrade prepare >/dev/null
+grep -Fq 'maintenance=true' "$UPGRADE_STATE" ||
+  fail "standalone Mongo did not enter maintenance for replica-set conversion"
+jq -e '.ingress == 0 and .apps == 0' "$STATE" >/dev/null ||
+  fail "standalone conversion did not freeze writers"
+if run_upgrade finalize >"$WORK_DIR/standalone-finalize.out" 2>&1; then
+  fail "finalize accepted a Mongo process without replica-set arguments"
+fi
+jq '.replica_state="uninitialized"' "$STATE" > "$STATE.tmp"
+mv "$STATE.tmp" "$STATE"
+run_upgrade finalize >/dev/null
+jq -e '.replica_state == "ready" and .apps == 0' "$STATE" >/dev/null ||
+  fail "replica-set initialization failed or thawed writers"
+
+write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+jq '.replica_state="configured"' "$STATE" > "$STATE.tmp"
+mv "$STATE.tmp" "$STATE"
+run_upgrade prepare >/dev/null
+if run_upgrade finalize >"$WORK_DIR/not-primary.out" 2>&1; then
+  fail "finalize accepted a configured replica set without a writable primary"
+fi
+jq -e '.ingress == 0 and .apps == 0' "$STATE" >/dev/null ||
+  fail "primary wait failure thawed writers"
+
+write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+jq '.replica_state="invalid"' "$STATE" > "$STATE.tmp"
+mv "$STATE.tmp" "$STATE"
+if run_upgrade prepare >"$WORK_DIR/foreign-replica.out" 2>&1; then
+  fail "foreign replica-set configuration was accepted"
+fi
+if grep -Eq '^scale |^set image ' "$LOG"; then
+  fail "foreign replica-set configuration mutated workloads"
+fi
+
+write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
 jq '.exists=false | .storage_empty=true' "$STATE" > "$STATE.tmp"
 mv "$STATE.tmp" "$STATE"
 run_upgrade prepare >/dev/null
@@ -290,6 +349,36 @@ grep -Fq 'maintenance=true' "$UPGRADE_STATE" ||
   fail "fresh Mongo installation did not preserve maintenance fencing"
 jq -e '.ingress == 0 and .apps == 0' "$STATE" >/dev/null ||
   fail "fresh Mongo installation did not freeze existing writers"
+jq '.exists=true | .replica_state="uninitialized" | .fcv_error=258 | .fcv=null' \
+  "$STATE" > "$STATE.tmp"
+mv "$STATE.tmp" "$STATE"
+run_upgrade finalize >/dev/null
+jq -e '.replica_state == "ready" and .fcv == "8.2" and .apps == 0' "$STATE" >/dev/null ||
+  fail "fresh installation could not initialize before its first FCV became known"
+
+write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+jq '.replica_state="uninitialized" | .fcv_error=258 | .fcv=null' \
+  "$STATE" > "$STATE.tmp"
+mv "$STATE.tmp" "$STATE"
+run_upgrade prepare >/dev/null
+run_upgrade finalize >/dev/null
+jq -e '.replica_state == "ready" and .fcv == "8.2" and .apps == 0' "$STATE" >/dev/null ||
+  fail "interrupted fresh initialization did not recover safely"
+
+for replica_state in standalone configured ready; do
+  write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+  jq --arg state "$replica_state" '.replica_state=$state | .fcv_error=258' "$STATE" > "$STATE.tmp"
+  mv "$STATE.tmp" "$STATE"
+  if run_upgrade prepare >"$WORK_DIR/unexpected-fcv-$replica_state.out" 2>&1; then
+    fail "unknown FCV was accepted outside an uninitialized replica set"
+  fi
+done
+write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+jq '.replica_state="uninitialized" | .fcv_error=13' "$STATE" > "$STATE.tmp"
+mv "$STATE.tmp" "$STATE"
+if run_upgrade prepare >"$WORK_DIR/unexpected-fcv-error.out" 2>&1; then
+  fail "unrelated FCV command failure was mistaken for fresh storage"
+fi
 
 write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
 jq '.exists=false | .storage_empty=false' "$STATE" > "$STATE.tmp"

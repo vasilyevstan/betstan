@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { METRICS } from "../../domain/metrics";
+import { METRICS, METRICS_V1 } from "../../domain/metrics";
 import { TelemetryRecordModel } from "../../model/TelemetryRecord";
 import {
   buildHourlyMetricSummary,
@@ -32,7 +32,7 @@ it("aggregates the exact ascending UTC 14-day window and zero-fills in metric or
   expect(summary.dates).toHaveLength(14);
   expect(summary.dates[0]).toBe("2026-08-28");
   expect(summary.dates[13]).toBe("2026-09-10");
-  expect(summary.metrics.map(({ metric }) => metric)).toEqual(METRICS);
+  expect(summary.metrics.map(({ metric }) => metric)).toEqual(METRICS_V1);
   expect(summary.metrics[0].values[0]).toBe(2);
   expect(summary.metrics[3].values[13]).toBe(7);
   expect(
@@ -183,7 +183,7 @@ describe("retained real Mongo hourly data", () => {
     });
     const store = new MongoSummaryStore();
     const snapshotTime = new Date(start.getTime() + 1);
-    const daily = await buildMetricSummary(snapshotTime, store);
+    const daily = await buildMetricSummary(snapshotTime, store, METRICS);
     for (const metric of METRICS) {
       const hourly = await buildHourlyMetricSummary(
         snapshotTime, metric, date, store

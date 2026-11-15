@@ -41,6 +41,8 @@ import {
   recoverPendingModerationForSlip,
 } from "./pendingModeration";
 import { cashBackHash, CashBackBet, cashBackPlacementState, mutateCashBackBet } from "./cashBackState";
+import { accountingEvidenceForBet, accountingPlacementState, unavailableAccounting } from "./betAccounting";
+import { retainAccountingHistory } from "./accountingHistory";
 
 const PRE_MATCH_PRODUCTS = new Set(["1X2", "Correct Score"]);
 const SETTLED_BET_STATUS_VALUES = [
@@ -94,6 +96,7 @@ interface StoredLiveSettlement {
 interface StoredFinalScore {
   eventId: string;
   occurredAt: string;
+  timeBasis?: string;
   homeScore: number;
   awayScore: number;
   home: string;
@@ -103,6 +106,8 @@ interface StoredFinalScore {
 }
 
 interface RowDecision {
+  occurredAt?: string;
+  economicTimeAvailable?: boolean;
   result:
     | ResultingStatus.ROW_WIN
     | ResultingStatus.ROW_LOSS
@@ -146,7 +151,11 @@ function buildStoredFinalScore(event: IEventResultEvent): StoredFinalScore {
 
   return {
     eventId: event.data.eventId,
-    occurredAt: event.timestamp ?? new Date().toISOString(),
+    // Legacy ordering/settlement compatibility only. This first-receipt fallback
+    // is explicitly NOT economic time and cannot authorize accounting credits.
+    occurredAt: event.data.occurredAt
+      ? marketDomainTime(event.data.occurredAt, "Final score occurrence") : new Date().toISOString(),
+    timeBasis: event.data.occurredAt ? "SOURCE" : "LEGACY_FIRST_RECEIPT",
     homeScore: event.data.homeScore,
     awayScore: event.data.awayScore,
     home: event.data.home,
@@ -277,6 +286,8 @@ function evaluatePreMatchDecision(
   switch (row.productName) {
     case "1X2":
       return {
+        occurredAt: result.occurredAt,
+        economicTimeAvailable: result.timeBasis === "SOURCE",
         result:
           row.oddsName === result.oneCrossTwoResult
             ? ResultingStatus.ROW_WIN
@@ -285,6 +296,8 @@ function evaluatePreMatchDecision(
       };
     case "Correct Score":
       return {
+        occurredAt: result.occurredAt,
+        economicTimeAvailable: result.timeBasis === "SOURCE",
         result:
           row.oddsName === result.correctScoreResult
             ? ResultingStatus.ROW_WIN
@@ -302,6 +315,8 @@ function evaluateLiveDecision(
 ): RowDecision {
   if (settlement.settlementReason === LiveSettlementReason.MANUAL_VOID) {
     return {
+      occurredAt: settlement.occurredAt,
+      economicTimeAvailable: true,
       result: ResultingStatus.ROW_VOID,
       removeRow: true,
       winningSelection: settlement.winningSelection ?? "",
@@ -328,6 +343,8 @@ function evaluateLiveDecision(
       : normalizedOddsName === settlement.winningSide;
 
   return {
+    occurredAt: settlement.occurredAt,
+    economicTimeAvailable: true,
     result:
       matchesSelection || matchesSide
         ? ResultingStatus.ROW_WIN
@@ -344,7 +361,7 @@ async function applyWinningDecision(
   row: any,
   decision: RowDecision
 ): Promise<boolean> {
-  const resultingTimestamp = new Date().toISOString();
+  const resultingTimestamp = decision.occurredAt ?? new Date().toISOString();
   const setFields: Record<string, unknown> = {
     "rows.$[target].result": ResultingStatus.ROW_WIN,
     "rows.$[target].winningSelection": decision.winningSelection ?? "",
@@ -399,11 +416,12 @@ async function applyLossDecision(
   row: any,
   decision: RowDecision
 ): Promise<boolean> {
-  const resultingTimestamp = new Date().toISOString();
+  const resultingTimestamp = decision.occurredAt ?? new Date().toISOString();
   const setFields: Record<string, unknown> = {
     status: ResultingStatus.BET_LOSS,
     resultingTimestamp,
     terminalPublicationState: PUBLICATION_STATE_PENDING,
+    accounting: unavailableAccounting(),
     "rows.$[target].result": ResultingStatus.ROW_LOSS,
     "rows.$[target].winningSelection": decision.winningSelection ?? "",
     "rows.$[target].resultingTimestamp": resultingTimestamp,
@@ -469,7 +487,7 @@ async function applyVoidDecision(
   row: any,
   decision: RowDecision
 ): Promise<boolean> {
-  const resultingTimestamp = new Date().toISOString();
+  const resultingTimestamp = decision.occurredAt ?? new Date().toISOString();
   const setFields: Record<string, unknown> = {
     "rows.$[target].result": ResultingStatus.ROW_VOID,
     "rows.$[target].winningSelection": decision.winningSelection ?? "",
@@ -524,13 +542,13 @@ async function applyRowDecision(
   row: any,
   decision: RowDecision
 ): Promise<boolean> {
-  if (bet.cashBackFinancial) {
+  if (bet.cashBackFinancial || bet.accounting) {
     return mutateCashBackBet(
       bet._id,
       current => current.status === ResultingStatus.BET_APPROVED
         && current.rows.some(candidate => candidate.id === row.id && candidate.result === ResultingStatus.ROW_NO_RESULT),
       current => {
-        const resultingTimestamp = new Date().toISOString();
+        const resultingTimestamp = decision.occurredAt ?? new Date().toISOString();
         const loss = decision.result === ResultingStatus.ROW_LOSS;
         const rows = current.rows.map(candidate => {
           const original = candidate.toObject();
@@ -555,6 +573,9 @@ async function applyRowDecision(
           resolved: true,
           fields: {
             rows,
+            accountingTimeUnavailable: current.accountingTimeUnavailable || decision.economicTimeAvailable !== true,
+            accountingLatestResolvedAt: [current.accountingLatestResolvedAt, resultingTimestamp]
+              .filter((time): time is string => Boolean(time)).sort().pop(),
             ...(loss ? { resultingTimestamp, terminalPublicationState: PUBLICATION_STATE_PENDING } : {}),
           },
         };
@@ -665,17 +686,24 @@ async function publishPendingRowSettlements(
 
 async function cleanupPublishedManualVoidRows(slipId: string): Promise<boolean> {
   const current = await Bet.findOne({ slipId });
-  if (current?.cashBackFinancial) {
+  if (current && (current.cashBackFinancial || current.accounting)) {
     return mutateCashBackBet(
       current._id,
-      bet => bet.status === ResultingStatus.BET_APPROVED && bet.rows.some(
+      bet => ACTIVE_SETTLEMENT_STATUS_VALUES.includes(bet.status as typeof ACTIVE_SETTLEMENT_STATUS_VALUES[number]) && bet.rows.some(
         row => row.pendingRemoval && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED
       ),
       bet => ({
         status: bet.status, resolved: true,
-        fields: { rows: bet.rows.filter(
-          row => !(row.pendingRemoval && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED)
-        ).map(row => row.toObject()) },
+        fields: {
+          accountingRemovedVoidRowIds: [...new Set([
+            ...(bet.accountingRemovedVoidRowIds ?? []),
+            ...bet.rows.filter(row => row.pendingRemoval && row.result === ResultingStatus.ROW_VOID
+              && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED).map(row => row.id),
+          ])],
+          rows: bet.rows.filter(
+            row => !(row.pendingRemoval && row.settlementPublicationState === PUBLICATION_STATE_PUBLISHED)
+          ).map(row => row.toObject()),
+        },
       })
     );
   }
@@ -683,7 +711,7 @@ async function cleanupPublishedManualVoidRows(slipId: string): Promise<boolean> 
     {
       slipId,
       cashBackFinancial: { $exists: false },
-      status: ResultingStatus.BET_APPROVED,
+      status: { $in: [...ACTIVE_SETTLEMENT_STATUS_VALUES] },
       rows: {
         $elemMatch: {
           pendingRemoval: true,
@@ -733,7 +761,7 @@ async function finalizeApprovedSlipIfReady(slipId: string): Promise<boolean> {
       ? ResultingStatus.BET_VOID
       : ResultingStatus.BET_WIN;
 
-  if (bet.cashBackFinancial) {
+  if (bet.cashBackFinancial || bet.accounting) {
     return mutateCashBackBet(
       bet._id,
       current => current.status === ResultingStatus.BET_APPROVED && current.rows.every(
@@ -745,7 +773,7 @@ async function finalizeApprovedSlipIfReady(slipId: string): Promise<boolean> {
           ? ResultingStatus.BET_WIN : ResultingStatus.BET_VOID,
         resolved: true,
         fields: {
-          resultingTimestamp: new Date().toISOString(),
+          resultingTimestamp: current.accountingLatestResolvedAt || new Date().toISOString(),
           terminalPublicationState: PUBLICATION_STATE_PENDING,
         },
       })
@@ -762,6 +790,7 @@ async function finalizeApprovedSlipIfReady(slipId: string): Promise<boolean> {
         status: nextStatus,
         resultingTimestamp: new Date().toISOString(),
         terminalPublicationState: PUBLICATION_STATE_PENDING,
+        accounting: unavailableAccounting(),
       },
     },
     { new: true }
@@ -849,6 +878,7 @@ async function confirmTerminalSettlement(
   const data: ResultingSettleSlipEvent["data"] = {
     slipId: claimedBet.slipId,
     result: claimedBet.status,
+    accounting: accountingEvidenceForBet(claimedBet, true),
   };
   const financial = claimedBet.cashBackFinancial;
   if (financial) {
@@ -880,6 +910,7 @@ async function confirmTerminalSettlement(
   }
 
   try {
+    await retainAccountingHistory(data.accounting, claimedBet.accountingLastMovement);
     await publishers.settleSlipPublisher.publishWithConfirm({
       data,
     });
@@ -929,7 +960,15 @@ async function confirmTerminalSettlement(
 
 export async function archiveBet(finalizedBet: any): Promise<boolean> {
   if (finalizedBet.cashBackPending) return false;
-  if (finalizedBet.cashBackFinancial && !finalizedBet.cashBackArchiving) {
+  if ((finalizedBet.cashBackFinancial || finalizedBet.accounting) && finalizedBet.__v == null) {
+    await Bet.updateOne(
+      { _id: finalizedBet._id, $or: [{ __v: { $exists: false } }, { __v: null }] },
+      { $set: { __v: 0 } }
+    );
+    finalizedBet = await Bet.findById(finalizedBet._id);
+    if (!finalizedBet || finalizedBet.cashBackPending) return false;
+  }
+  if ((finalizedBet.cashBackFinancial || finalizedBet.accounting) && !finalizedBet.cashBackArchiving) {
     const sealed = await Bet.findOneAndUpdate(
       {
         _id: finalizedBet._id, __v: finalizedBet.__v,
@@ -943,6 +982,7 @@ export async function archiveBet(finalizedBet: any): Promise<boolean> {
     finalizedBet = sealed;
   }
   const jsonBet = finalizedBet.toObject();
+  jsonBet.__v = finalizedBet.__v ?? 0;
   delete jsonBet._id;
   delete jsonBet.cashBackArchiving;
 
@@ -963,7 +1003,7 @@ export async function archiveBet(finalizedBet: any): Promise<boolean> {
     status: finalizedBet.status,
     terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
     cashBackPending: { $exists: false },
-    ...(finalizedBet.cashBackFinancial ? { cashBackArchiving: true, __v: finalizedBet.__v } : {}),
+    ...(finalizedBet.cashBackFinancial || finalizedBet.accounting ? { cashBackArchiving: true, __v: finalizedBet.__v } : {}),
   });
   return deleted.deletedCount === 1;
 }
@@ -1300,11 +1340,15 @@ async function replayCustomSettlementsForSlip(slipId: string): Promise<void> {
     }
     const manual = quote.selections.find(selection => selection.settlementMode === "MANUAL");
     let result: ReturnType<typeof evaluateMarketBetResult>;
+    let occurredAt: string;
+    let economicTimeAvailable: boolean;
     if (manual) {
       const ledger = await ManualMarketLedger.findOne({
         eventId: quote.eventId, marketId: manual.marketId, rulesRevision: manual.rulesRevision,
       }).lean();
       if (!ledger) continue;
+      occurredAt = ledger.decision.decidedAt;
+      economicTimeAvailable = true;
       const definition = parseMarketDefinition(ledger.template.definition);
       const outcome = definition.outcomes.find(item => item.key === manual.outcomeKey);
       if (ledger.template.id !== manual.templateId || ledger.template.version !== manual.templateVersion
@@ -1317,12 +1361,16 @@ async function replayCustomSettlementsForSlip(slipId: string): Promise<void> {
     } else {
       const score = await FinalScoreLedger.findOne({ eventId: quote.eventId }).lean();
       if (!score) continue;
+      occurredAt = score.occurredAt;
+      economicTimeAvailable = score.timeBasis === "SOURCE";
       result = evaluateMarketBetResult(quote, {
         eventId: quote.eventId, finalScore: { home: score.homeScore, away: score.awayScore },
       });
     }
     if (result === null) continue;
     const decision: RowDecision = {
+      occurredAt,
+      economicTimeAvailable,
       result: result === "WIN" ? ResultingStatus.ROW_WIN
         : result === "LOSS" ? ResultingStatus.ROW_LOSS : ResultingStatus.ROW_VOID,
       winningSelection: result === "WIN" ? row.oddsName : "",
@@ -1404,6 +1452,7 @@ export async function upsertPlaceBet(
     {
       $setOnInsert: {
         ...cashBackPlacementState(data),
+        ...accountingPlacementState(data),
         __v: 0,
         status: ResultingStatus.BET_PENDING,
         userId: data.userId,
@@ -1549,7 +1598,7 @@ export async function processFinalScore(
 
   const authoritativeScore = await FinalScoreLedger.findOneAndUpdate(
     { eventId: storedFinalScore.eventId },
-    { $setOnInsert: storedFinalScore },
+    { $setOnInsert: { ...storedFinalScore, __v: 0 } },
     {
       upsert: true,
       new: true,
@@ -1607,13 +1656,13 @@ export async function processLiveUpdate(
 
     const storedSettlement = buildStoredLiveSettlement(event.data, settlement);
 
-    await LiveSettlementLedger.findOneAndUpdate(
+    const authoritativeSettlement = await LiveSettlementLedger.findOneAndUpdate(
       {
         marketId: storedSettlement.marketId,
         marketVersion: storedSettlement.marketVersion,
       },
       {
-        $setOnInsert: storedSettlement,
+        $setOnInsert: { ...storedSettlement, __v: 0 },
       },
       {
         upsert: true,
@@ -1622,6 +1671,7 @@ export async function processLiveUpdate(
         setDefaultsOnInsert: true,
       }
     );
+    if (!authoritativeSettlement) throw new Error("Live settlement authority was not persisted");
 
     const bets = await Bet.find({
       status: {
@@ -1642,7 +1692,7 @@ export async function processLiveUpdate(
         continue;
       }
 
-      await settleApprovedLiveRows(bet, storedSettlement);
+      await settleApprovedLiveRows(bet, authoritativeSettlement.toObject());
     }
   }
 

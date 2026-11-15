@@ -7,6 +7,7 @@ import NewUser from './pages/auth/NewUser';
 import LogOut from './pages/auth/LogOut';
 import LogIn from './pages/auth/LogIn';
 import Backoffice from './pages/account/Backoffice';
+import RiskCentre from './pages/account/RiskCentre';
 import MyBets from './pages/account/MyBets';
 import Profile from './pages/account/Profile';
 import Slip from './pages/Slip';
@@ -30,9 +31,13 @@ const getTheme = (search) => getParam(search, 'theme', 'dark', allowedThemes);
 const App = () => {
   const location = useLocation();
   const lastReportedPath = useRef(null);
+  const lastReportedSpecificPage = useRef(null);
   const authRequestSequence = useRef(0);
   const mainContent = useRef(null);
   const routeIdentity = getRouteIdentity(location.pathname);
+  const telemetryPath = location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+  const specificPage = telemetryPath === '/backoffice/markets'
+    ? 'market-template' : telemetryPath === '/backoffice/risk-centre' ? 'risk-centre' : null;
   const uiVariant = useMemo(() => getUiVariant(location.search), [location.search]);
   const theme = useMemo(() => getTheme(location.search), [location.search]);
   const isTelemetryRoute = routeIdentity === '/telemetry';
@@ -121,6 +126,14 @@ const App = () => {
     }
   }, [routeIdentity]);
 
+  useEffect(() => {
+    if (lastReportedSpecificPage.current === specificPage) return;
+    lastReportedSpecificPage.current = specificPage;
+    if (specificPage) {
+      axios.post('/api/telemetry/page-view', { page: specificPage }).catch(() => undefined);
+    }
+  }, [specificPage]);
+
   return <div className={`app-shell ui-variant-${uiVariant} ui-theme-${theme}`}>
     <a className="skip-link" href="#main-content" onClick={focusMainContent}>
       Skip to main content
@@ -150,6 +163,7 @@ const App = () => {
               />
               <Route path="/signup" element={<NewUser callback={handleAuthChange} />} />
               <Route path="/backoffice/markets" element={<BackofficeMarketDesigner />} />
+              <Route path="/backoffice/risk-centre" element={<RiskCentre />} />
               <Route path="/backoffice/events/:eventId/markets" element={<BackofficeMarkets />} />
               <Route path="/logout" element={<LogOut callback={handleAuthChange} />} />
               <Route path="/login" element={<LogIn callback={handleAuthChange} />} />

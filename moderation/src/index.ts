@@ -1,14 +1,19 @@
 import { createServer, Server } from "http";
 import { createDefaultModerationRuntime } from "./runtime/ModerationRuntime";
+import { handleRiskHttp } from "./risk/Http";
 
 export const startWorkerProbeServer = async (
   port = Number(process.env.PORT ?? 3000)
 ): Promise<{ close(): Promise<void>; server: Server }> =>
   new Promise((resolve, reject) => {
-    const server = createServer((_request, response) => {
-      response.statusCode = 204;
-      response.end();
+    const server = createServer((request, response) => {
+      void handleRiskHttp(request, response).catch(() => {
+        response.statusCode = 503;
+        response.end();
+      });
     });
+    server.requestTimeout = 10000;
+    server.headersTimeout = 10000;
     server.once("error", reject);
     server.listen(port, () => {
       resolve({

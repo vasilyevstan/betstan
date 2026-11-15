@@ -20,6 +20,8 @@ import {
   CashBackUnavailable, combinedOdds, originalStakeMinor, priceCashBack, validateFinancialSnapshot,
 } from "./cashBackPricing";
 import { archiveBet } from "./resulting";
+import { cashBackAccountingFields } from "./betAccounting";
+import { retainAccountingHistory } from "./accountingHistory";
 
 class SourcePublisher extends APublisher<ICashBackSourceRequestEvent> {
   queue = QueueNames.CASH_BACK_SOURCE_REQUEST;
@@ -561,6 +563,7 @@ export class CashBackCoordinator {
       cumulativeReturnMinor: financial.cumulativeReturnMinor + quote.returnMinor,
     };
     validateFinancialSnapshot(nextFinancial);
+    const accounting = cashBackAccountingFields(root.bet, quote.closedStakeMinor, quote.returnMinor, mongoDecisionTime);
     const result = await root.model.updateOne(
       {
         _id: root.bet._id, status: ResultingStatus.BET_APPROVED,
@@ -580,6 +583,7 @@ export class CashBackCoordinator {
       [{ $set: {
         status: quote.mode === "FULL" ? ResultingStatus.BET_CASH_BACK : ResultingStatus.BET_APPROVED,
         cashBackFinancial: { $literal: nextFinancial },
+        ...accounting,
         "cashBackPending.state": "ACCEPTED",
         "cashBackPending.receipt": {
           outcome: "ACCEPTED", mode: quote.mode,
@@ -628,10 +632,16 @@ export class CashBackCoordinator {
     const pending = root.bet.cashBackPending;
     const receipt = pending?.receipt;
     if (!pending || pending.state === "UNDECIDED" || !receipt) throw new Error("Terminal slot lacks its canonical receipt");
+    if (receipt.outcome === "ACCEPTED") {
+      // The same canonical slot retains this obligation until publication and
+      // archival finish; a crash cannot lose a movement even after prefix spill.
+      await retainAccountingHistory(pending.accounting, pending.accountingMovement);
+    }
     const receiptFingerprint = cashBackHash(receipt);
     const operationId = pending.operation.operationId;
     const outcome: ICashBackOutcomeEvent["data"] = receipt.outcome === "ACCEPTED"
-      ? { outcome: "ACCEPTED", operation: pending.operation, receipt, receiptFingerprint }
+      ? { outcome: "ACCEPTED", operation: pending.operation, receipt, receiptFingerprint,
+        ...(pending.accounting ? { accounting: pending.accounting } : {}) }
       : { outcome: "REJECTED", operation: pending.operation, receipt, receiptFingerprint };
     const stored = await CashBackOperation.findOne({ operationId });
     if (!stored) throw new Error("Canonical cash-back receipt has no durable operation record");

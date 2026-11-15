@@ -120,6 +120,7 @@ it(
       data: {
         slipId: bet.slipId,
         result: ResultingStatus.BET_VOID,
+        accounting: { schemaVersion: 1, status: "UNAVAILABLE", reason: "HISTORY_MISSING" },
         occurredAt,
       },
     });
@@ -136,6 +137,7 @@ it(
       data: {
         slipId: bet.slipId,
         result: ResultingStatus.BET_VOID,
+        accounting: { schemaVersion: 1, status: "UNAVAILABLE", reason: "HISTORY_MISSING" },
         occurredAt,
       },
     });
@@ -249,6 +251,7 @@ it("publishes the exact persisted immutable terminal occurrence time", async () 
     data: {
       slipId: bet.slipId,
       result: ResultingStatus.BET_WIN,
+      accounting: { schemaVersion: 1, status: "UNAVAILABLE", reason: "HISTORY_MISSING" },
       occurredAt,
     },
   });
@@ -290,6 +293,7 @@ it("claims and publishes a legacy terminal bet with no publication state", async
     data: {
       slipId: bet.slipId,
       result: ResultingStatus.BET_WIN,
+      accounting: { schemaVersion: 1, status: "UNAVAILABLE", reason: "HISTORY_MISSING" },
     },
   });
   expect(await Bet.findOne({ slipId: bet.slipId })).toBeNull();

@@ -502,7 +502,7 @@ it("wires default runtime helpers for messaging, database, worker, and listeners
     expect(disconnectSpy).toHaveBeenCalledTimes(1);
     expect(replayPublisher).toBeInstanceOf(BetModerationResultPublisher);
     expect(worker).toBeInstanceOf(ParkedPlaceBetReplayWorker);
-    expect(listeners).toHaveLength(3);
+    expect(listeners).toHaveLength(5);
     expect(listeners[0]).toBeInstanceOf(PlaceBetListener);
     expect(listeners[1]).toBeInstanceOf(LiveEventUpdateListener);
     expect(listeners[2]).toBeInstanceOf(EventResultListener);

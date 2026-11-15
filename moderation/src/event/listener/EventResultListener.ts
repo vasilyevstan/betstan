@@ -12,6 +12,7 @@ class EventResultListener extends AListener<IEventResultEvent> {
 
   async init() {
     await super.init();
+    await this.channel.prefetch(1);
     this.publisher = new BetModerationResultPublisher(this.connection);
     await this.publisher.init();
     await this.publisher.initConfirmChannel();
@@ -19,13 +20,15 @@ class EventResultListener extends AListener<IEventResultEvent> {
   }
 
   async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
-    await this.moderationService.upsertResulted(
-      event.data.eventId,
-      event.timestamp ?? new Date().toISOString()
-    );
-    await this.moderationService.replayParkedForEvent(event.data.eventId);
-
-    this.ack(msg);
+    try {
+      await this.moderationService.upsertResulted(
+        event.data.eventId,
+        (event.data as IEventResultEvent["data"] & { occurredAt?: string }).occurredAt
+          ?? event.timestamp ?? new Date().toISOString()
+      );
+      await this.moderationService.replayParkedForEvent(event.data.eventId);
+      this.ack(msg);
+    } catch { this.channel.nack(msg, false, true); }
   }
 
   async close(): Promise<void> {

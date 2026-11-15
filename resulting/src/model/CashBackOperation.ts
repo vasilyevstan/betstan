@@ -1,5 +1,5 @@
 import {
-  CashBackOperationIdentity, CashBackQuote, CashBackQuoteEvidence, CashBackReceipt,
+  BetAccountingEvidence, BetAccountingMovement, CashBackOperationIdentity, CashBackQuote, CashBackQuoteEvidence, CashBackReceipt,
   CashBackSourceReleaseRequest, CashBackSourceReply, CashBackSourceReserveRequest,
   CashBackSourceSnapshotRequest, ICashBackOutcomeEvent, ICashBackRequestEvent,
 } from "@betstan/common";
@@ -19,6 +19,8 @@ export interface CashBackPending {
   evidence: CashBackQuoteEvidence;
   obligations: CashBackObligation[];
   receipt?: CashBackReceipt;
+  accounting?: BetAccountingEvidence;
+  accountingMovement?: BetAccountingMovement;
   receiptFingerprint?: string;
   historyPersisted: boolean;
   outcomePublished: boolean;
@@ -38,6 +40,8 @@ export const cashBackPendingSchema = new Schema<CashBackPending>({
   evidence: { type: Schema.Types.Mixed, required: true },
   obligations: { type: [obligationSchema], required: true },
   receipt: { type: Schema.Types.Mixed, required: false },
+  accounting: { type: Schema.Types.Mixed, required: false },
+  accountingMovement: { type: Schema.Types.Mixed, required: false },
   receiptFingerprint: { type: String, required: false },
   historyPersisted: { type: Boolean, required: true, default: false },
   outcomePublished: { type: Boolean, required: true, default: false },

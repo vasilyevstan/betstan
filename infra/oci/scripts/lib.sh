@@ -338,6 +338,8 @@ gamemaster_result_set
 moderation_event_result
 moderation_live_event_update
 moderation_place_bet
+moderation_risk_cash_back_outcome
+moderation_risk_settle_slip
 resulting_cash_back_request
 resulting_cash_back_source_reply
 resulting_live_event_update

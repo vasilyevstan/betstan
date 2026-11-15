@@ -20,6 +20,11 @@ jest.mock('./pages/account/Statistics', () => () => (
   <div data-testid="leaderboard">Leaderboard sidebar</div>
 ));
 jest.mock('./pages/account/Backoffice', () => () => <div>Backoffice page</div>);
+jest.mock('./pages/account/BackofficeMarkets', () => ({
+  __esModule: true,
+  default: () => <div>Event markets</div>,
+  BackofficeMarketDesigner: () => <div>Market designer</div>,
+}));
 jest.mock('./pages/account/MyBets', () => () => <div>My bets page</div>);
 jest.mock('./pages/auth/NewUser', () => () => <div>Signup page</div>);
 jest.mock('./pages/auth/LogIn', () => () => <div>Login page</div>);
@@ -40,6 +45,11 @@ const NavigationControls = () => {
     <button type="button" onClick={() => navigate('/BACKOFFICE')}>Backoffice case alias</button>
     <button type="button" onClick={() => navigate('/backoffice/')}>Backoffice slash alias</button>
     <button type="button" onClick={() => navigate('/profile')}>Profile route</button>
+    <button type="button" onClick={() => navigate('/backoffice/markets')}>Templates route</button>
+    <button type="button" onClick={() => navigate('/BACKOFFICE/MARKETS/?theme=light')}>Templates alias</button>
+    <button type="button" onClick={() => navigate('/backoffice/events/example/markets')}>Event markets route</button>
+    <button type="button" onClick={() => navigate('/backoffice/risk-centre')}>Risk route</button>
+    <button type="button" onClick={() => navigate('/BACKOFFICE/RISK-CENTRE/?theme=light')}>Risk alias</button>
   </div>;
 };
 
@@ -51,6 +61,29 @@ const renderApp = (path, withControls = false) => render(
 );
 
 describe('App telemetry routing and page-view reporting', () => {
+  it.each([
+    ['/BACKOFFICE/MARKETS/', ['admin', 'market-template']],
+    ['/BACKOFFICE/RISK-CENTRE/', ['admin', 'risk-centre']],
+    ['/backoffice/events/example/markets', ['admin']],
+    ['/backoffice/markets/preview', []],
+  ])('classifies the raw direct route %s without counting event editors or previews as templates', async (path, expected) => {
+    await act(async () => { renderApp(path); });
+    expect(axios.post.mock.calls.map(([, { page }]) => page)).toEqual(expected);
+  });
+
+  it('deduplicates specific page aliases independently of the broad admin stream', async () => {
+    await act(async () => { renderApp('/backoffice/markets', true); });
+    const pages = () => axios.post.mock.calls.map(([, { page }]) => page);
+    expect(pages()).toEqual(['admin', 'market-template']);
+    for (const name of ['Templates alias', 'Event markets route', 'Templates route', 'Risk route', 'Risk alias']) {
+      await act(async () => { fireEvent.click(screen.getByText(name)); });
+    }
+    expect(pages()).toEqual(['admin', 'market-template', 'market-template', 'risk-centre']);
+    await act(async () => { fireEvent.click(screen.getByText('Other route')); });
+    await act(async () => { fireEvent.click(screen.getByText('Risk route')); });
+    expect(pages()).toEqual(['admin', 'market-template', 'market-template', 'risk-centre', 'admin', 'risk-centre']);
+  });
+
   beforeEach(() => {
     axios.get.mockReset();
     axios.post.mockReset();

@@ -1456,9 +1456,11 @@ proves consistency only within the observed window, not UTC/NTP accuracy,
 physical commit time, perpetual monotonicity, or behavior between samples or
 after the probe.
 
-The current queue catalog contains **31 queues**: 22 existing static queues,
-five cash-back queues, three market queues, and one pod-scoped Event fanout
-queue. The OCI contract test derives the expected set from source listeners, so
+Risk Centre generations contain **33 queues**: 22 existing static queues,
+five cash-back queues, three market queues, two risk-accounting readers, and
+one pod-scoped Event fanout queue. The two risk readers consume existing
+settlement and cash-back outcome events; settlement does not wait for them.
+The OCI contract test derives the expected set from source listeners, so
 a new consumer cannot merge without its catalog entry.
 Readiness verifies names and consumers for every queue, not count alone.
 Only the current catalog permits the known Event dynamic prefix; authenticated
@@ -1469,6 +1471,26 @@ count override to make a mismatch pass.
 ## Activation
 
 User-facing live behavior is activated separately from image deployment.
+
+### Risk Centre prerequisites
+
+Risk Centre starts with `RISK_CENTRE_ENABLED=false`. Deploy compatible readers
+and Resulting accounting first, including the protected single-member Mongo
+conversion. Transactional history import cannot run against the preceding
+standalone generation's pre-deployment data stage.
+
+A separately authorized reconciliation holds the existing physical writer
+fence and shared-Mongo lease while Resulting captures and seals its source
+snapshot. Moderation imports bounded hash-chained pages, reconciles its own
+durable intake and live overlap, and atomically records the bound final
+handoff before readiness is usable. Source export alone is insufficient.
+Open-position, customer-loss-window and activity-history readiness remain
+distinct; no empty-book assumption or synthetic receipt date fills a gap.
+Enable prepared controls only after their applicable readiness and end-to-end
+admission evidence pass. These prerequisites do not authorize a production
+operation or relax the canonical exact-source controls.
+
+### Existing live-betting activation
 
 `DEPLOYMENT_PROVENANCE_FILE` and `LIVE_SCHEMA_EVIDENCE_FILE` are the two
 shared evidence-path bindings inherited from activation job scope by direct

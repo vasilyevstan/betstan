@@ -8,12 +8,13 @@ import {
 import { Bet, BetArchive } from "../../model/Bet";
 import { CashBackOperation } from "../../model/CashBackOperation";
 import FinalScoreLedger from "../../model/FinalScoreLedger";
-import { createFinalScoreEvent, createLiveRow, createModerationEvent, createPlaceBetEvent, createPreMatchRow } from "../../test/resultingTestUtils";
+import { createFinalScoreEvent, createLiveRow, createLiveSettlement, createLiveUpdateEvent, createModerationEvent, createPlaceBetEvent, createPreMatchRow } from "../../test/resultingTestUtils";
 import SettleSlipPublisher from "../../event/publisher/SettleSlipPublisher";
 import SettleSlipRowPublisher from "../../event/publisher/SettleSlipRowPublisher";
 import { applyModerationResult, processFinalScore, processLiveUpdate, upsertPlaceBet } from "../resulting";
 import { CashBackCoordinator } from "../CashBackCoordinator";
 import { cashBackBeforeDeadline, cashBackHash } from "../cashBackState";
+import { AccountingMovement } from "../accountingHistory";
 
 const publishers = () => ({
   settleSlipPublisher: new SettleSlipPublisher(messengerWrapper.connection),
@@ -360,9 +361,52 @@ it("settles an accepted partial remainder normally while cash-back admission is 
   expect((await BetArchive.findOne({ slipId: "slip" }))?.cashBackFinancial).toMatchObject({
     status: BetStatus.WIN, remainingStakeMinor: 6000, cumulativeClosedStakeMinor: 4000, cumulativeReturnMinor: 4000,
   });
+
+  expect((await BetArchive.findOne({ slipId: "slip" }))?.accounting).toMatchObject({
+    status: "COMPLETE", movements: [
+      { revision: 1, source: "CASH_BACK", closedStakeMinor: 4000, returnMinor: 4000, remainingStakeMinor: 6000 },
+      { revision: 2, source: "SETTLEMENT", closedStakeMinor: 6000, returnMinor: 18000, remainingStakeMinor: 0 },
+    ],
+  });
   expect(state.settlementPublishers.settleSlipPublisher.publishWithConfirm).toHaveBeenCalledWith({
     data: expect.objectContaining({ cashBack: expect.objectContaining({ settlementBasisStakeMinor: 6000 }) }),
   });
+});
+
+it.each(["LOSS", "VOID"] as const)("accounts partial cash-back then live %s without re-closing ticket principal", async result => {
+  const state = await setup(1, 60_000, BetKind.LIVE);
+  const quote = await state.quote("partial-terminal", 4000);
+  await state.confirm("partial-terminal", quote.quoteId);
+  await state.pump();
+  const partial = (await CashBackOperation.findOne({ operationId: "partial-terminal" }))!.outcome;
+  if (partial?.outcome !== "ACCEPTED" || partial.accounting?.status !== "COMPLETE") throw new Error("Missing accepted evidence");
+  const row = state.rows[0];
+  const occurredAt = new Date(Date.now() + 1).toISOString();
+  const update = createLiveUpdateEvent({
+    eventId: row.eventId, occurredAt,
+    settlements: [createLiveSettlement({
+      eventId: row.eventId, marketId: row.marketId, marketVersion: row.marketVersion,
+      winningSide: TeamSide.AWAY,
+      settlementReason: result === "VOID" ? LiveSettlementReason.MANUAL_VOID : LiveSettlementReason.INCIDENT,
+    })],
+  });
+  process.env.CASH_BACK_ENABLED = "false";
+  await processLiveUpdate(update, state.settlementPublishers);
+  const archived = await BetArchive.findOne({ slipId: "slip" });
+  expect(archived?.accounting).toMatchObject({
+    status: "COMPLETE", movements: [
+      { revision: 1, closedStakeMinor: 4000, returnMinor: 2000, remainingStakeMinor: 6000, source: "CASH_BACK" },
+      { revision: 2, closedStakeMinor: 6000, returnMinor: result === "VOID" ? 6000 : 0,
+        remainingStakeMinor: 0, source: "SETTLEMENT", occurredAt },
+    ],
+  });
+  expect(archived!.accounting.movements[0]).toEqual(partial.accounting.movements[0]);
+  if (result === "VOID") {
+    expect(archived!.rows).toHaveLength(0);
+    expect(archived!.accountingRemovedVoidRowIds).toEqual([row.id]);
+  }
+  await processLiveUpdate({ ...update, data: { ...update.data, occurredAt: "2099-01-01T00:00:00.000Z" } }, state.settlementPublishers);
+  expect((await BetArchive.findOne({ slipId: "slip" }))!.accounting).toEqual(archived!.accounting);
 });
 
 const prepareTerminalRelease = async () => {
@@ -415,6 +459,20 @@ it("coordinates both owners in deterministic event order and conserves repeated 
   });
   expect(await Bet.countDocuments()).toBe(0);
   expect(await CashBackOperation.countDocuments({ stage: "TERMINAL", "outcome.outcome": "ACCEPTED" })).toBe(3);
+  expect(bet?.accounting).toMatchObject({
+    status: "COMPLETE", movements: [
+      { revision: 1, source: "CASH_BACK", closedStakeMinor: 4000, returnMinor: 4000, remainingStakeMinor: 6000 },
+      { revision: 2, source: "CASH_BACK", closedStakeMinor: 1000, returnMinor: 1000, remainingStakeMinor: 5000 },
+      { revision: 3, source: "CASH_BACK", closedStakeMinor: 5000, returnMinor: 5000, remainingStakeMinor: 0 },
+    ],
+  });
+  for (const [index, operationId] of ["first", "second", "full"].entries()) {
+    const stored = await CashBackOperation.findOne({ operationId });
+    const outcome = stored!.outcome;
+    if (outcome?.outcome !== "ACCEPTED" || outcome.accounting?.status !== "COMPLETE") throw new Error("Missing monetary evidence");
+    expect(outcome.accounting.movements).toEqual(bet!.accounting.movements.slice(0, index + 1));
+    expect(outcome.accounting.movements[index].occurredAt).toBe(outcome.receipt.decisionTime);
+  }
 });
 
 it("replays one immutable terminal receipt on concurrent exact confirmation retries", async () => {
@@ -515,7 +573,9 @@ it("gives distinct operations opaque quote identities that cannot be derived fro
 });
 
 it("replays a lost confirmation after quote expiry without replacing its persisted identity or closing twice", async () => {
-  const state = await setup(1, 1000);
+  // Acquisition uses the real supported window; replay still occurs after
+  // the immutable quote deadline, without rewriting clocks or receipt data.
+  const state = await setup();
   const quote = await state.quote("late-confirmation", 1000);
   await state.confirm("late-confirmation", quote.quoteId);
   await state.pump();
@@ -598,7 +658,9 @@ it("settles only the remainder and keeps the original selection manifest", async
 });
 
 it("expires a held operation canonically and cancels the participant whose grant ACK was lost", async () => {
-  const state = await setup(1, 1_000);
+  // Use the supported seven-second quote window to acquire holds under load;
+  // the assertion still waits for and exercises real Mongo deadline expiry.
+  const state = await setup();
   const quote = await state.quote("lost-ack", 1000);
   await state.confirm("lost-ack", quote.quoteId);
   await state.pump(request => request.action === "RESERVE" && request.participant.owner === "GAMEMASTER");
@@ -696,6 +758,10 @@ it("recovers publication from the canonical winner after a failed confirm send",
   await expect(state.pump()).rejects.toThrow("outcome unavailable");
   const canonical = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending?.receipt;
   expect(canonical?.outcome).toBe("ACCEPTED");
+  const pendingAccounting = (await Bet.findOne({ slipId: "slip" }))?.cashBackPending?.accounting;
+  expect(pendingAccounting).toMatchObject({
+    status: "COMPLETE", movements: [{ revision: 1, closedStakeMinor: 1000, returnMinor: 1000, remainingStakeMinor: 9000 }],
+  });
   const restarted = new CashBackCoordinator(messengerWrapper.connection, {
     source: { initConfirmChannel: async () => {}, publishWithConfirm: state.source },
     outcome: { initConfirmChannel: async () => {}, publishWithConfirm: state.outcome },
@@ -703,8 +769,32 @@ it("recovers publication from the canonical winner after a failed confirm send",
   await restarted.runOnce();
   await state.pump();
   expect((await CashBackOperation.findOne({ operationId: "publication" }))?.outcome)
-    .toMatchObject({ outcome: "ACCEPTED", receipt: canonical });
+    .toMatchObject({ outcome: "ACCEPTED", receipt: canonical, accounting: pendingAccounting });
   expect((await Bet.findOne({ slipId: "slip" }))?.cashBackFinancial?.remainingStakeMinor).toBe(9000);
+});
+
+it("retains an accepted canonical movement when history projection fails before outcome publication", async () => {
+  const state = await setup();
+  const quote = await state.quote("history-failure", 1000);
+  await state.confirm("history-failure", quote.quoteId);
+  const failure = jest.spyOn(AccountingMovement, "updateOne").mockRejectedValueOnce(new Error("history unavailable"));
+  await expect(state.pump()).rejects.toThrow("history unavailable");
+  failure.mockRestore();
+  const canonical = await Bet.findOne({ slipId: "slip" });
+  expect(canonical!.cashBackPending!.state).toBe("ACCEPTED");
+  expect(canonical!.cashBackPending!.outcomePublished).toBe(false);
+  expect(canonical!.cashBackPending!.accountingMovement).toEqual(canonical!.accountingLastMovement);
+  const restarted = new CashBackCoordinator(messengerWrapper.connection, {
+    source: { initConfirmChannel: async () => {}, publishWithConfirm: state.source },
+    outcome: { initConfirmChannel: async () => {}, publishWithConfirm: state.outcome },
+  });
+  await restarted.runOnce();
+  await state.pump(undefined, restarted);
+  expect(await AccountingMovement.countDocuments({ slipId: "slip" })).toBe(1);
+  expect((await Bet.findOne({ slipId: "slip" }))!.accountingLastMovement).toEqual(canonical!.accountingLastMovement);
+  expect((await CashBackOperation.findOne({ operationId: "history-failure" }))!.outcome).toMatchObject({
+    outcome: "ACCEPTED", accounting: canonical!.accounting,
+  });
 });
 
 it("recovers published-but-unarchived full closure without republishing or reopening it", async () => {
@@ -724,6 +814,10 @@ it("recovers published-but-unarchived full closure without republishing or reope
   const archived = await BetArchive.findOne({ slipId: "slip" });
   expect(archived?.cashBackFinancial?.remainingStakeMinor).toBe(0);
   expect(archived?.cashBackArchiving).toBeUndefined();
+  expect(archived?.accounting).toEqual(active?.accounting);
+  expect(archived?.accounting).toMatchObject({
+    status: "COMPLETE", movements: [{ closedStakeMinor: 10000, remainingStakeMinor: 0, source: "CASH_BACK" }],
+  });
 });
 
 it("retains removed-void original legs and denies a new offer despite surviving unresolved rows", async () => {

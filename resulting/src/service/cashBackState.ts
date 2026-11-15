@@ -1,4 +1,3 @@
-import { createHash } from "crypto";
 import {
   BetKind, BetStatus, CashBackAcceptedSelection, CashBackFinancialSnapshot,
   CashBackOriginalManifest, CashBackUnavailableReason, IPlaceBetEvent,
@@ -6,18 +5,11 @@ import {
 } from "@betstan/common";
 import { Bet } from "../model/Bet";
 import { canonicalOdds, CashBackUnavailable, originalStakeMinor, validateFinancialSnapshot } from "./cashBackPricing";
+import { terminalAccountingState } from "./betAccounting";
+import { cashBackHash } from "./cashBackIdentity";
+export { cashBackHash } from "./cashBackIdentity";
 
 export type CashBackBet = ReturnType<typeof Bet.hydrate>;
-
-export const cashBackHash = (value: unknown): string => {
-  const stable = (input: unknown): string => {
-    if (input === null || typeof input !== "object") return JSON.stringify(input) ?? "null";
-    if (Array.isArray(input)) return `[${input.map(stable).join(",")}]`;
-    return `{${Object.entries(input).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stable(entry)}`).join(",")}}`;
-  };
-  return createHash("sha256").update(stable(value)).digest("hex");
-};
 
 export const publicBetStatus = (status: ResultingStatus): BetStatus => {
   switch (status) {
@@ -135,33 +127,44 @@ export const mutateCashBackBet = async (
       if (bet.status === ResultingStatus.BET_CASH_BACK || !eligible(bet)) return false;
     }
     const old = bet.cashBackFinancial;
-    if (!old) throw new Error("Cash-back financial evidence is missing");
-    validateFinancialSnapshot(old);
-    if (old.revision >= Number.MAX_SAFE_INTEGER) throw new Error("Cash-back revision exhausted");
+    if (old) {
+      validateFinancialSnapshot(old);
+      if (old.revision >= Number.MAX_SAFE_INTEGER) throw new Error("Cash-back revision exhausted");
+    }
     const change = changes(bet);
-    const financial: CashBackFinancialSnapshot = {
+    const financial: CashBackFinancialSnapshot | undefined = old ? {
       revision: old.revision + 1, status: publicBetStatus(change.status),
       originalStakeMinor: old.originalStakeMinor, remainingStakeMinor: old.remainingStakeMinor,
       cumulativeClosedStakeMinor: old.cumulativeClosedStakeMinor,
       cumulativeReturnMinor: old.cumulativeReturnMinor,
-    };
+    } : undefined;
     const set: Record<string, unknown> = {
       ...Object.fromEntries(Object.entries(change.fields)
         .filter(([, value]) => value !== undefined)
         .map(([key, value]) => [key, { $literal: value }])),
       status: change.status,
-      cashBackFinancial: { $literal: financial },
+      ...(financial ? { cashBackFinancial: { $literal: financial } } : {}),
       __v: bet.__v + 1,
       ...(change.resolved ? { cashBackAnySelectionResolved: true } : {}),
     };
+    if ([ResultingStatus.BET_WIN, ResultingStatus.BET_LOSS, ResultingStatus.BET_VOID].includes(change.status)
+      && bet.status !== change.status) {
+      const accounting = terminalAccountingState(
+        change.fields.accountingTimeUnavailable ? { ...bet.toObject(), accountingTimeUnavailable: true } : bet, change.status,
+        (change.fields.rows ?? bet.rows) as { id: string; result: string; oddsValue: number }[],
+        String(change.fields.resultingTimestamp)
+      );
+      for (const [key, value] of Object.entries(accounting)) set[key] = { $literal: value };
+    }
     if (bet.cashBackPending?.state === "UNDECIDED") {
+      if (!financial) throw new Error("Cash-back financial evidence is missing");
       set["cashBackPending.state"] = "REJECTED";
       set["cashBackPending.receipt"] = rejectionReceiptExpression(bet, financial, rejectionReason);
     }
     const result = await Bet.updateOne(
       {
         _id: bet._id, __v: bet.__v, status: bet.status,
-        "cashBackFinancial.revision": old.revision,
+        ...(old ? { "cashBackFinancial.revision": old.revision } : { cashBackFinancial: { $exists: false } }),
       },
       [{ $set: set }]
     );

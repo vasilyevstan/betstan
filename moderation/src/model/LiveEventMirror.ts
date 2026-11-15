@@ -237,6 +237,7 @@ const liveEventMirrorSchema = new Schema({
     required: true,
     default: 0,
   },
+  riskAdmissionRevision: { type: Number, default: 0 },
   settlements: {
     type: [settlementSchema],
     required: true,

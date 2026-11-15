@@ -1,4 +1,4 @@
-import { METRICS, MetricName } from "../domain/metrics";
+import { METRICS_V1, MetricName } from "../domain/metrics";
 import { TelemetryRecordModel } from "../model/TelemetryRecord";
 
 interface AggregateBucket {
@@ -99,7 +99,8 @@ const dateKey = (date: Date): string => date.toISOString().slice(0, 10);
 
 export const buildMetricSummary = async (
   generatedAt: Date,
-  store: SummaryStore
+  store: SummaryStore,
+  inventory: readonly MetricName[] = METRICS_V1
 ): Promise<MetricSummary> => {
   const currentDay = Date.UTC(
     generatedAt.getUTCFullYear(),
@@ -112,8 +113,8 @@ export const buildMetricSummary = async (
     dateKey(new Date(start.getTime() + index * 24 * 60 * 60 * 1000))
   );
   const dateIndexes = new Map(dates.map((date, index) => [date, index]));
-  const metricIndexes = new Map(METRICS.map((metric, index) => [metric, index]));
-  const metrics = METRICS.map((metric) => ({
+  const metricIndexes = new Map(inventory.map((metric, index) => [metric, index]));
+  const metrics = inventory.map((metric) => ({
     metric,
     values: Array<number>(14).fill(0),
   }));

@@ -44,6 +44,8 @@ Primary routes are:
 | `/bets` | User betting history and settlement state |
 | `/profile` | Private display-name editing and personal betting statistics |
 | `/backoffice` | Public event simulation controls |
+| `/backoffice/markets` | Public Market designer and reusable templates |
+| `/backoffice/risk-centre` | Public risk-rule catalogue and editor; readiness is deployment-gated |
 | `/telemetry` | Fourteen-day activity graphs and current service health |
 | `/signup` | Account creation |
 | `/login` | Login |
@@ -84,6 +86,18 @@ odds, and outcome, plus accepted total odds and relevant financial context.
 The **Bet details** control shares a naturally wrapping row with position
 metadata where space permits; opened details stay inline and readable without
 replacing the recognizable card summary.
+
+## Risk Centre
+
+**Risk Centre** sits beside **Market designer** in Backoffice. The editor
+distinguishes optional rules, shipped defaults, locked integrity safeguards
+and unavailable integrations. Explicit Save affects new durable Moderation
+receipts; restoring defaults never clears usage or pending policy pins.
+Conflicts and ambiguous saves must preserve unsaved input and resolve against
+the server's operation result rather than silently overwrite another edit.
+Accounting readiness is explicit, and informational netting is not presented
+as spendable admission capacity. See [[Risk Centre]] for the rules and
+public-write limitations.
 
 ## Private player profile
 

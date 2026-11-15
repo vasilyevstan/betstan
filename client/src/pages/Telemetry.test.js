@@ -26,6 +26,8 @@ const METRIC_NAMES = [
   'GAMECENTER_EVENT_EMITTED',
   'USER_CREATED',
   'USER_LOGGED_IN',
+  'MARKET_TEMPLATE_PAGE_VISIT',
+  'RISK_CENTRE_PAGE_VISIT',
 ];
 
 const METRIC_LABELS = [
@@ -37,6 +39,8 @@ const METRIC_LABELS = [
   'Gamecenter events emitted',
   'Users created',
   'User logins',
+  'Market Template visits',
+  'Risk Centre visits',
 ];
 
 const SERVICES = [
@@ -148,6 +152,30 @@ const overviewTime = () => document.querySelector('.telemetry-page__generated ti
 const expectOverviewTime = (value) => waitFor(() => expect(overviewTime()).toHaveTextContent(value));
 
 describe('Telemetry', () => {
+  it('labels verified v1 compatibility and never invents new counters', async () => {
+    const v1 = createSummary();
+    v1.metrics = v1.metrics.slice(0, 8);
+    axios.get.mockReset();
+    axios.get.mockRejectedValueOnce({ response: { status: 400, data: { error: 'Invalid request' } } })
+      .mockResolvedValueOnce({ data: v1 });
+    renderTelemetry();
+    expect(await screen.findByText(/Version 1 compatibility/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Unavailable — requires/)).toHaveLength(2);
+    expect(document.querySelectorAll('.telemetry-metric__graph')).toHaveLength(8);
+    expect(axios.get.mock.calls.map(([url]) => url)).toEqual([
+      '/api/telemetry/summary?metricsVersion=2', '/api/telemetry/summary',
+    ]);
+  });
+
+  it.each(['malformed', '503', 'unrelated400'])('does not fall back for %s', async (failure) => {
+    axios.get.mockReset();
+    if (failure === 'malformed') axios.get.mockResolvedValue({ data: { ...createSummary(), metrics: [] } });
+    else axios.get.mockRejectedValue({ response: { status: failure === '503' ? 503 : 400, data: { error: 'Unavailable' } } });
+    renderTelemetry();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Telemetry is unavailable');
+    expect(axios.get).toHaveBeenCalledTimes(1);
+  });
+
   beforeEach(() => {
     axios.get.mockReset();
   });
@@ -196,7 +224,7 @@ describe('Telemetry', () => {
     });
 
     const cards = document.querySelectorAll('.telemetry-metric');
-    expect(cards).toHaveLength(8);
+    expect(cards).toHaveLength(10);
     cards.forEach((card, metricIndex) => {
       const pairs = card.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair');
       expect(pairs).toHaveLength(14);
@@ -206,7 +234,7 @@ describe('Telemetry', () => {
         expect(values.getByText(String((metricIndex * 100) + valueIndex))).toBeInTheDocument();
       });
     });
-    expect(document.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair')).toHaveLength(112);
+    expect(document.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair')).toHaveLength(140);
 
     METRIC_NAMES.forEach((metric) => {
       expect(screen.queryByText(metric, { exact: true })).not.toBeInTheDocument();
@@ -219,25 +247,25 @@ describe('Telemetry', () => {
     });
 
     const figures = screen.getAllByRole('figure');
-    expect(figures).toHaveLength(8);
+    expect(figures).toHaveLength(10);
     document.querySelectorAll('.telemetry-metric__graph').forEach((graph) => {
       expect(graph).toHaveAttribute('aria-hidden', 'true');
       expect(graph).toHaveAttribute('focusable', 'false');
     });
-    expect(document.querySelectorAll('.telemetry-metric__bar')).toHaveLength(112);
+    expect(document.querySelectorAll('.telemetry-metric__bar')).toHaveLength(140);
     document.querySelectorAll('.telemetry-metric__bar').forEach((bar) => {
       expect(bar).not.toHaveAttribute('tabindex');
     });
   });
 
-  it('renders all-zero snapshots with finite graph geometry and 112 visible zero values', async () => {
+  it('renders all-zero snapshots with finite graph geometry and 140 visible zero values', async () => {
     axios.get.mockResolvedValueOnce({ data: createSummary() });
 
     renderTelemetry();
     await screen.findByRole('heading', { name: 'Service health' });
 
     const values = document.querySelectorAll('.telemetry-metric__values .telemetry-metric__value');
-    expect(values).toHaveLength(112);
+    expect(values).toHaveLength(140);
     values.forEach((value) => expect(value).toHaveTextContent('0'));
     document.querySelectorAll('.telemetry-metric__bar').forEach((bar) => {
       for (const attribute of ['x', 'y', 'width', 'height']) {
@@ -252,7 +280,7 @@ describe('Telemetry', () => {
     await screen.findByRole('heading', { name: 'Service health' });
 
     expect(axios.get).toHaveBeenCalledTimes(1);
-    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary', {
+    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary?metricsVersion=2', {
       timeout: 10000, signal: expect.any(AbortSignal),
     });
 
@@ -261,7 +289,7 @@ describe('Telemetry', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(2));
-    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary', {
+    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary?metricsVersion=2', {
       timeout: 10000, signal: expect.any(AbortSignal),
     });
     expect(await screen.findByText('Telemetry refreshed.')).toBeInTheDocument();
@@ -362,7 +390,7 @@ describe('Telemetry', () => {
     });
 
     it.each(['2026-09-10', '2027-01-10'])(
-      'pairs date/time bucket identity and amount for all eight metrics and every daily/hourly bucket across the boundary ending %s',
+      'pairs date/time bucket identity and amount for all ten metrics and every daily/hourly bucket across the boundary ending %s',
       async (lastDay) => {
         const summary = createSummary({
           generatedAt: `${lastDay}T04:30:00.000Z`,
@@ -398,7 +426,7 @@ describe('Telemetry', () => {
           expect([...listValues].map((value) => value.textContent)).toEqual(summary.metrics[metricIndex].values.map(String));
         }
 
-        // Eight adjacent selections spanning Aug/Sep or Dec/Jan stay card-local.
+        // Adjacent selections spanning Aug/Sep or Dec/Jan stay card-local.
         for (let metricIndex = 0; metricIndex < METRIC_NAMES.length; metricIndex += 1) {
           const day = summary.dates[3 + metricIndex];
           const values = Array.from({ length: 24 }, (_, hour) => hour === 0 ? 0 : hour === 23 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + hour);
@@ -429,7 +457,7 @@ describe('Telemetry', () => {
             { timeout: 10000, signal: expect.any(AbortSignal) },
           );
         }
-        expect(axios.get).toHaveBeenCalledTimes(9);
+        expect(axios.get).toHaveBeenCalledTimes(11);
       },
       30000,
     );
@@ -565,7 +593,7 @@ describe('Telemetry', () => {
       expect(within(card).queryByRole('region')).not.toBeInTheDocument();
     });
 
-    it('opens all eight metrics independently with exact native identities and 24 UTC pairs', async () => {
+    it('opens all ten metrics independently with exact native identities and 24 UTC pairs', async () => {
       await renderSummary();
       expect(screen.queryByRole('button', { name: 'Back to 14 days' })).not.toBeInTheDocument();
       for (let index = 0; index < METRIC_NAMES.length; index += 1) {
@@ -596,11 +624,11 @@ describe('Telemetry', () => {
         fireEvent.click(bars[0]);
         expect(axios.get).toHaveBeenCalledTimes(index + 2);
       }
-      expect(screen.getAllByRole('button', { name: 'Back to 14 days' })).toHaveLength(8);
+      expect(screen.getAllByRole('button', { name: 'Back to 14 days' })).toHaveLength(10);
       userEvent.click(within(cardAt(3)).getByRole('button', { name: 'Back to 14 days' }));
       expect(cardAt(3).querySelectorAll('rect')).toHaveLength(14);
       expect(cardAt(2).querySelectorAll('rect')).toHaveLength(24);
-      expect(axios.get).toHaveBeenCalledTimes(9);
+      expect(axios.get).toHaveBeenCalledTimes(11);
     });
 
     it.each(['{enter}', ' '])('uses native keyboard %s, focuses Back during load and restores the exact date', async (key) => {
@@ -730,8 +758,8 @@ describe('Telemetry', () => {
       userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
       expect(cardAt().querySelectorAll('rect')).toHaveLength(24);
       expect(axios.get.mock.calls.map(([path]) => path)).toEqual([
-        '/api/telemetry/summary', hourlyPath(), hourlyPath(1, 1),
-        '/api/telemetry/summary', hourlyPath(), hourlyPath(1, 1),
+        '/api/telemetry/summary?metricsVersion=2', hourlyPath(), hourlyPath(1, 1),
+        '/api/telemetry/summary?metricsVersion=2', hourlyPath(), hourlyPath(1, 1),
       ]);
       const later = createDeferred();
       axios.get.mockReturnValueOnce(later.promise);
@@ -1025,7 +1053,7 @@ describe('Telemetry', () => {
       );
       expect(overviewTime()).toHaveTextContent(initial.generatedAt);
       expect(screen.getByRole('heading', { name: 'Service health' })).toBeInTheDocument();
-      expect(document.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair')).toHaveLength(112);
+      expect(document.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair')).toHaveLength(140);
     },
   );
 });

@@ -947,6 +947,7 @@ export const applyModerationResult = (
   }
 
   if (
+    bet.status === BetStatus.CONFIRMED ||
     bet.status === BetStatus.WIN ||
     bet.status === BetStatus.LOSS ||
     bet.status === BetStatus.VOID

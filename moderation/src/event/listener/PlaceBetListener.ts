@@ -2,6 +2,8 @@ import { ConsumeMessage } from "amqplib";
 import { AListener, IPlaceBetEvent, QueueNames } from "@betstan/common";
 import BetModerationResultPublisher from "../publisher/BetModerationResultPublisher";
 import ModerationService from "../../service/ModerationService";
+import { RiskError } from "../../risk/Policy";
+import mongoose from "mongoose";
 
 class PlaceBetListener extends AListener<IPlaceBetEvent> {
   serviceName: string = "moderation_place_bet";
@@ -12,6 +14,7 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
 
   async init() {
     await super.init();
+    await this.channel.prefetch(1);
     this.publisher = new BetModerationResultPublisher(this.connection);
     await this.publisher.init();
     await this.publisher.initConfirmChannel();
@@ -19,8 +22,12 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
   }
 
   async onMessage(event: IPlaceBetEvent, msg: ConsumeMessage) {
-    await this.moderationService.handlePlaceBet(event);
-    this.ack(msg);
+    try {
+      await this.moderationService.handlePlaceBet(event);
+      this.ack(msg);
+    } catch (error) {
+      this.channel.nack(msg, false, !(error instanceof RiskError && error.status < 500) && !(error instanceof mongoose.Error.ValidationError));
+    }
   }
 
   async close(): Promise<void> {

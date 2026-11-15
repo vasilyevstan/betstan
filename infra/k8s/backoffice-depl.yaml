@@ -41,6 +41,8 @@ spec:
             # Preserve image-only rollback compatibility with protected Backoffice releases.
             - name: AUTH_SERVICE_URL
               value: "http://gaming-auth-srv:3000"
+            - name: MODERATION_SERVICE_URL
+              value: "http://gaming-moderation-srv:3000"
             - name: JWT_KEY
               valueFrom:
                 secretKeyRef:

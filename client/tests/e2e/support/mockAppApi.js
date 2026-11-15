@@ -98,6 +98,8 @@ const createTelemetrySummary = () => {
     'GAMECENTER_EVENT_EMITTED',
     'USER_CREATED',
     'USER_LOGGED_IN',
+    'MARKET_TEMPLATE_PAGE_VISIT',
+    'RISK_CENTRE_PAGE_VISIT',
   ];
   const services = [
     'auth',
@@ -858,6 +860,9 @@ const installAppApiMocks = async (page, state) => {
     if (key === 'GET /api/telemetry/summary') {
       const response = state.telemetrySummaryResponse;
       const snapshot = deepClone(response?.body ?? state.telemetrySummary);
+      if (!response && new URL(route.request().url()).searchParams.get('metricsVersion') !== '2') {
+        snapshot.metrics = snapshot.metrics.slice(0, 8);
+      }
       if (response?.wait) await response.wait;
       await fulfillJson(route, snapshot, response?.status || 200);
       return;

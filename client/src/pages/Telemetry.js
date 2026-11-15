@@ -10,6 +10,8 @@ const METRICS = [
   ['GAMECENTER_EVENT_EMITTED', 'Gamecenter events emitted'],
   ['USER_CREATED', 'Users created'],
   ['USER_LOGGED_IN', 'User logins'],
+  ['MARKET_TEMPLATE_PAGE_VISIT', 'Market Template visits'],
+  ['RISK_CENTRE_PAGE_VISIT', 'Risk Centre visits'],
 ];
 
 const SERVICES = [
@@ -80,7 +82,7 @@ const isValidDateInventory = (dates, generatedAt) => {
   return dates[dates.length - 1] === new Date(generatedAt).toISOString().slice(0, 10);
 };
 
-const isValidSummary = (value) => {
+const isValidSummary = (value, version = 2) => {
   if (!hasExactKeys(value, ['generatedAt', 'dates', 'metrics', 'health'])) {
     return false;
   }
@@ -94,7 +96,7 @@ const isValidSummary = (value) => {
 
   if (
     !Array.isArray(value.metrics)
-    || value.metrics.length !== METRICS.length
+    || value.metrics.length !== (version === 1 ? 8 : METRICS.length)
     || !value.metrics.every((entry, index) => (
       hasExactKeys(entry, ['metric', 'values'])
       && entry.metric === METRICS[index][0]
@@ -519,13 +521,23 @@ const Telemetry = () => {
     summaryOperation.current = operation;
     const isCurrent = () => isMounted.current && summaryOperation.current === operation;
     try {
-      const response = await axios.get('/api/telemetry/summary', {
-        signal: operation.controller.signal, timeout: 10000,
-      });
+      const options = { signal: operation.controller.signal, timeout: 10000 };
+      let response;
+      let version = 2;
+      try {
+        response = await axios.get('/api/telemetry/summary?metricsVersion=2', options);
+      } catch (error) {
+        // The prior service explicitly rejects every summary query with this response.
+        if (error.response?.status !== 400 || error.response?.data?.error !== 'Invalid request') throw error;
+        if (!isCurrent()) return 'neutral';
+        version = 1;
+        response = await axios.get('/api/telemetry/summary', options);
+      }
       if (!isCurrent()) return 'neutral';
-      if (!isValidSummary(response.data)) throw new Error('Invalid telemetry summary');
-      snapshotRef.current = response.data;
-      setSnapshot(response.data);
+      if (!isValidSummary(response.data, version)) throw new Error('Invalid telemetry summary');
+      const accepted = { ...response.data, metricsVersion: version };
+      snapshotRef.current = accepted;
+      setSnapshot(accepted);
       Object.entries(recordsRef.current).forEach(([metric, record]) => {
         // An older cached overview may omit a newer UTC day without proving expiry.
         if (record.mode !== 'overview' && record.day < response.data.dates[0]) {
@@ -666,6 +678,11 @@ const Telemetry = () => {
 
     {snapshot ? (
       <>
+        {snapshot.metricsVersion === 1 ? (
+          <p className="telemetry-notice" role="status">
+            Version 1 compatibility: this service does not support the new visit metrics.
+          </p>
+        ) : null}
         <section className="telemetry-section" aria-labelledby="telemetry-health-heading">
           <h2 className="h4 mb-0" id="telemetry-health-heading">Service health</h2>
           <ul className="telemetry-health">
@@ -684,6 +701,7 @@ const Telemetry = () => {
 
         <section className="telemetry-section" aria-labelledby="telemetry-activity-heading">
           <h2 className="h4 mb-0" id="telemetry-activity-heading">Activity</h2>
+          <p>Backoffice visits overlap with the specific page visits; these are not unique visitor totals.</p>
           <div className="telemetry-metrics">
             {snapshot.metrics.map((metric, metricIndex) => (
               <MetricCard
@@ -701,6 +719,12 @@ const Telemetry = () => {
                 key={metric.metric}
               />
             ))}
+            {snapshot.metricsVersion === 1 ? METRICS.slice(8).map(([metric, label]) => (
+              <section className="card telemetry-metric" key={metric} aria-label={label}>
+                <h3 className="h5">{label}</h3>
+                <p>Unavailable — requires telemetry metrics version 2.</p>
+              </section>
+            )) : null}
           </div>
         </section>
       </>

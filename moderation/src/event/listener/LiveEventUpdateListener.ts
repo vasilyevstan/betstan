@@ -22,13 +22,11 @@ class LiveEventUpdateListener extends AListener<ILiveEventUpdateEvent> {
   }
 
   async onMessage(event: ILiveEventUpdateEvent, msg: ConsumeMessage) {
-    const updated = await this.moderationService.upsertLiveEventMirror(event);
-
-    if (updated) {
-      await this.moderationService.replayParkedForEvent(event.data.eventId);
-    }
-
-    this.ack(msg);
+    try {
+      const updated = await this.moderationService.upsertLiveEventMirror(event);
+      if (updated) await this.moderationService.replayParkedForEvent(event.data.eventId);
+      this.ack(msg);
+    } catch { this.channel.nack(msg, false, true); }
   }
 
   async close(): Promise<void> {
