@@ -75,19 +75,23 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByRole('heading', { name: 'Risk Centre', exact: true })).toBeVisible();
       await page.getByRole('button', { name: /Maximum stake Disabled/ }).click();
       await expect(page.getByRole('heading', { name: 'Maximum stake', exact: true })).toBeFocused();
-      await page.getByLabel('Limit (minor units)', { exact: true }).fill('2400');
+      await expect(page.getByLabel('Event IDs', { exact: true })).toBeHidden();
+      await page.getByLabel('Limit (Stanbucks)', { exact: true }).fill('24');
       await page.getByRole('combobox', { name: 'Structure', exact: true }).selectOption('SINGLE');
       const previous = mutations.length;
       await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
       expect(mutations).toHaveLength(previous);
       await page.getByRole('button', { name: 'Save', exact: true }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
+      expect(mutations.at(-1).body.rule.parameters.limit).toBe(2400);
+      await page.screenshot({ path: testInfo.outputPath(`risk-stake-${theme}-${viewport.width}.png`), fullPage: true });
       await page.getByLabel('Add a rule').selectOption('DELAY_MS');
-      await page.getByRole('button', { name: 'Configure new rule' }).click();
+      await expect(page.getByRole('heading', { name: 'Acceptance delay', exact: true })).toBeFocused();
       await expect(page.getByLabel('Enabled', { exact: true })).not.toBeChecked();
-      await page.getByLabel('Limit (milliseconds)', { exact: true }).fill('500');
+      await page.getByLabel('Limit (seconds)', { exact: true }).fill('0.5');
       await page.getByRole('button', { name: 'Save', exact: true }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
+      expect(mutations.at(-1).body.rule.parameters.limit).toBe(500);
       await page.getByRole('button', { name: 'Remove', exact: true }).click();
       await page.getByRole('button', { name: 'Confirm remove' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
@@ -95,11 +99,12 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByText('Factory policy preview')).toBeVisible();
       await page.getByRole('button', { name: 'Confirm restore' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
-      await page.getByRole('button', { name: /Operator exposure Disabled/ }).click();
+      await page.getByRole('button', { name: /Operator exposure limit Disabled/ }).click();
       await expect(page.getByLabel('Enabled', { exact: true })).toBeDisabled();
       await expect(page.getByText(/Exact hedge credit is not spendable/)).toBeVisible();
       const geometry = await page.locator('.risk-centre').evaluate(root => {
-        const targets = [...root.querySelectorAll('button, input:not([type="checkbox"]), select')];
+        const targets = [...root.querySelectorAll('button, input:not([type="checkbox"]), select, summary')]
+          .filter(node => node.getBoundingClientRect().height > 0);
         return {
           overflow: document.documentElement.scrollWidth > innerWidth,
           narrow: targets.filter(node => !node.disabled && node.getBoundingClientRect().height < 43.5).map(node => node.textContent),
@@ -116,10 +121,10 @@ test('uncertain Save reuses its operation identity and updates only once', async
   const { mutations } = await installRiskApi(page, { uncertain: true });
   await page.goto('/backoffice/risk-centre');
   await page.getByRole('button', { name: /Maximum stake Disabled/ }).click();
-  await page.getByLabel('Limit (minor units)', { exact: true }).fill('3200');
+  await page.getByLabel('Limit (Stanbucks)', { exact: true }).fill('32');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('uncertain');
-  await expect(page.getByLabel('Limit (minor units)', { exact: true })).toHaveValue('3200');
+  await expect(page.getByLabel('Limit (Stanbucks)', { exact: true })).toHaveValue('32');
   await page.getByRole('button', { name: 'Retry same save' }).click();
   await expect(page.getByText(/Revision 2 saved/)).toBeVisible();
   expect(mutations[1]).toEqual(mutations[0]);
