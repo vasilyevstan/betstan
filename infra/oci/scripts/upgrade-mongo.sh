@@ -83,17 +83,25 @@ mongo_pod() {
 }
 
 mongo_runtime() {
-  local pod runtime
+  local pod runtime allow_uninitialized_fcv="${1:-false}"
   pod="$(mongo_pod)"
   runtime="$(
     kubectl exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+      env "BETSTAN_MONGO_ALLOW_UNINITIALIZED_FCV=$allow_uninitialized_fcv" \
       mongosh --quiet --eval '
-        const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
-        if (result.ok !== 1) throw new Error("FCV read failed");
+        let fcv;
+        try {
+          const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
+          if (result.ok !== 1) throw Object.assign(new Error("FCV read failed"), result);
+          fcv=result.featureCompatibilityVersion.version;
+        } catch (error) {
+          if (process.env.BETSTAN_MONGO_ALLOW_UNINITIALIZED_FCV !== "true" || error.code !== 258) throw error;
+          fcv="uninitialized";
+        }
         print(JSON.stringify({
           version:db.version(),
           majorMinor:db.version().split(".").slice(0,2).join("."),
-          fcv:result.featureCompatibilityVersion.version
+          fcv
         }));
       '
   )"
@@ -109,6 +117,32 @@ mongo_runtime() {
 
 runtime_signature() {
   jq -r '.majorMinor + "|" + .fcv' <<<"$1"
+}
+
+mongo_replica_state() {
+  local action="$1" response
+  [[ "$action" == "status" || "$action" == "initialize" ]] ||
+    oci_die "Mongo replica-set action is invalid"
+  response="$(
+    kubectl exec -n "$OCI_K8S_NAMESPACE" "$(mongo_pod)" -- \
+      env "BETSTAN_MONGO_REPLICA_ACTION=$action" \
+      mongosh --quiet --eval "$(cat "$SCRIPT_DIR/mongo-replica-set.js")"
+  )" || oci_die "Mongo replica-set inspection or initialization failed"
+  jq -er '
+    select(.schema == "betstan.mongo-topology.v1" and .replicaSet == "betstan") |
+    .state | select(. == "standalone" or . == "uninitialized" or . == "configured" or . == "ready")
+  ' <<<"$response" || oci_die "Mongo replica-set response is invalid"
+}
+
+initialize_replica_set() {
+  local state
+  state="$(mongo_replica_state initialize)"
+  for _ in $(seq 1 "$MONGO_UPGRADE_WAIT_ATTEMPTS"); do
+    [[ "$state" == "ready" ]] && return 0
+    sleep "$MONGO_UPGRADE_SLEEP_SECONDS"
+    state="$(mongo_replica_state status)"
+  done
+  oci_die "Mongo replica set did not become writable; application writers remain stopped"
 }
 
 wait_for_mongo() {
@@ -284,6 +318,7 @@ set_fcv() {
 validate_runtime_for_image() {
   local image="$1"
   local runtime="$2"
+  local allow_uninitialized_fcv="${3:-false}"
   local version signature
   version="$(jq -r '.version' <<<"$runtime")"
   signature="$(runtime_signature "$runtime")"
@@ -299,7 +334,8 @@ validate_runtime_for_image() {
       ;;
     "$MONGO_REVIEWED_TARGET_IMAGE")
       [[ "$version" == "$MONGO_TARGET_VERSION" &&
-        ( "$signature" == "8.2|8.0" || "$signature" == "8.2|8.2" ) ]] ||
+        ( "$signature" == "8.2|8.0" || "$signature" == "8.2|8.2" ||
+          ( "$allow_uninitialized_fcv" == "true" && "$signature" == "8.2|uninitialized" ) ) ]] ||
         oci_die "reviewed Mongo 8.2 target image has an unexpected runtime or FCV"
       ;;
     *)
@@ -309,7 +345,7 @@ validate_runtime_for_image() {
 }
 
 prepare_upgrade() {
-  local statefulset_identity current_image runtime signature
+  local statefulset_identity current_image runtime signature replica_state allow_uninitialized_fcv=false
   statefulset_identity="$(
     kubectl get statefulset "$MONGO_STATEFULSET" -n "$OCI_K8S_NAMESPACE" \
       --ignore-not-found -o name
@@ -333,12 +369,16 @@ prepare_upgrade() {
     *) oci_die "live Mongo image is outside the reviewed staged upgrade path" ;;
   esac
   wait_for_mongo
-  runtime="$(mongo_runtime)"
-  validate_runtime_for_image "$current_image" "$runtime"
+  replica_state="$(mongo_replica_state status)"
+  if [[ "$current_image" == "$MONGO_REVIEWED_TARGET_IMAGE" && "$replica_state" == "uninitialized" ]]; then
+    allow_uninitialized_fcv=true
+  fi
+  runtime="$(mongo_runtime "$allow_uninitialized_fcv")"
+  validate_runtime_for_image "$current_image" "$runtime" "$allow_uninitialized_fcv"
   signature="$(runtime_signature "$runtime")"
 
   if [[ "$current_image" == "$MONGO_REVIEWED_TARGET_IMAGE" &&
-        "$signature" == "8.2|8.2" ]] && workloads_are_active; then
+        "$signature" == "8.2|8.2" && "$replica_state" == "ready" ]] && workloads_are_active; then
     write_upgrade_state false
     oci_log "oci_mongo_upgrade_prepare=PASS state=already-aligned"
     return
@@ -372,7 +412,7 @@ prepare_upgrade() {
 }
 
 finalize_upgrade() {
-  local current_image runtime signature image_id target_digest
+  local current_image runtime signature image_id target_digest replica_state allow_uninitialized_fcv=false
   current_image="$(
     kubectl get statefulset "$MONGO_STATEFULSET" -n "$OCI_K8S_NAMESPACE" \
       -o jsonpath='{.spec.template.spec.containers[0].image}'
@@ -380,6 +420,20 @@ finalize_upgrade() {
   [[ "$current_image" == "$MONGO_REVIEWED_TARGET_IMAGE" ]] ||
     oci_die "Mongo StatefulSet did not apply the reviewed 8.2.12 image"
   wait_for_mongo
+  replica_state="$(mongo_replica_state status)"
+  [[ "$replica_state" != "uninitialized" ]] || allow_uninitialized_fcv=true
+  runtime="$(mongo_runtime "$allow_uninitialized_fcv")"
+  validate_runtime_for_image "$current_image" "$runtime" "$allow_uninitialized_fcv"
+
+  image_id="$(
+    kubectl get pod "$(mongo_pod)" -n "$OCI_K8S_NAMESPACE" \
+      -o jsonpath='{.status.containerStatuses[0].imageID}'
+  )"
+  target_digest="${MONGO_REVIEWED_TARGET_IMAGE##*@}"
+  [[ "$image_id" == *"@$target_digest" ||
+    "$image_id" == *"@$MONGO_TARGET_ARM64_MANIFEST" ]] ||
+    oci_die "running Mongo image digest differs from the reviewed 8.2.12 index"
+  initialize_replica_set
   runtime="$(mongo_runtime)"
   validate_runtime_for_image "$current_image" "$runtime"
   signature="$(runtime_signature "$runtime")"
@@ -390,16 +444,7 @@ finalize_upgrade() {
   [[ "$(jq -r '.version' <<<"$runtime")" == "$MONGO_TARGET_VERSION" &&
     "$(runtime_signature "$runtime")" == "8.2|8.2" ]] ||
     oci_die "Mongo runtime did not converge to exact version 8.2.12 and FCV 8.2"
-
-  image_id="$(
-    kubectl get pod "$(mongo_pod)" -n "$OCI_K8S_NAMESPACE" \
-      -o jsonpath='{.status.containerStatuses[0].imageID}'
-  )"
-  target_digest="${MONGO_REVIEWED_TARGET_IMAGE##*@}"
-  [[ "$image_id" == *"@$target_digest" ||
-    "$image_id" == *"@$MONGO_TARGET_ARM64_MANIFEST" ]] ||
-    oci_die "running Mongo image digest differs from the reviewed 8.2.12 index"
-  oci_log "oci_mongo_upgrade_finalize=PASS version=8.2.12 fcv=8.2"
+  oci_log "oci_mongo_upgrade_finalize=PASS version=8.2.12 fcv=8.2 replica_set=betstan"
 }
 
 resume_ingress() {

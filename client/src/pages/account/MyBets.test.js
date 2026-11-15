@@ -147,6 +147,21 @@ describe('MyBets', () => {
     expect(screen.getByText('Pending result')).toBeInTheDocument();
   });
 
+  it.each([
+    ['RISK_POLICY', 'Risk policy restriction'],
+    ['RISK_EVIDENCE_UNAVAILABLE', 'Risk evidence unavailable'],
+  ])('explains a %s rejection without blaming the selected market', async (reason, label) => {
+    axios.get.mockResolvedValue({ data: [bet({
+      status: 'DECLINED',
+      rows: [{ ...bet().rows[0], declineReason: reason }],
+    })] });
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
+    await screen.findByRole('heading', { name: 'Northern Falcons - Southern Owls' });
+    fireEvent.click(screen.getByRole('button', { name: /^Bet details/ }));
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.queryByText(/^(Market closed|Selection no longer exists)$/)).toBeNull();
+  });
+
   it('normalizes a legacy raw live-selection identifier into a human label instead of rendering it verbatim', async () => {
     const rawIdentifier = 'event-77:NEXT_CORNER:1:HOME';
     axios.get.mockResolvedValue({

@@ -173,11 +173,8 @@ describe("optimistic concurrency guards for bet moderation/settlement consumers"
     );
     expect(settlementSaved).toBe(true);
 
-    // The moderation consumer, still holding its stale pre-settlement
-    // snapshot, now tries to apply a late DECLINED result. Its first save
-    // attempt must conflict (optimistic concurrency) and recover by
-    // reloading + reapplying against the fresh (already-WIN) document,
-    // where the guard correctly no-ops instead of overwriting WIN.
+    // A confirmed snapshot already makes a conflicting decline a no-op.
+    // No save means no version conflict or reload of this local snapshot.
     const declineEvent: IModerationResultEvent = {
       timestamp: new Date().toISOString(),
       data: {
@@ -193,12 +190,14 @@ describe("optimistic concurrency guards for bet moderation/settlement consumers"
       );
 
     expect(moderationSaved).toBe(false);
-    expect(recoveredBet.status).toEqual(BetStatus.WIN);
+    expect(recoveredBet).toBe(staleModerationView);
+    expect(recoveredBet.status).toEqual(BetStatus.CONFIRMED);
     expect(recoveredBet.declineReason).toBeUndefined();
 
     const persistedBet = await Bet.findOne({ slipId });
     expect(persistedBet!.status).toEqual(BetStatus.WIN);
     expect(persistedBet!.declineReason).toBeUndefined();
+    expect(persistedBet!.rows.every(row => row.declineReason === undefined)).toBe(true);
   });
 
   it("does not let a stale settlement update regress a concurrently written terminal settlement", async () => {

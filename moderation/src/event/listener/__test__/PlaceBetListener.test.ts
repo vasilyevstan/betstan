@@ -745,7 +745,9 @@ it("confirm failures keep the decision retryable until publish succeeds", async 
 
   publishMock.mockRejectedValueOnce(new Error("nack"));
 
-  await expect(listener.onMessage(data, createMessage())).rejects.toThrow("nack");
+  const failedMessage = createMessage();
+  await listener.onMessage(data, failedMessage);
+  expect(Reflect.get(listener, "channel").nack).toHaveBeenCalledWith(failedMessage, false, true);
 
   let savedBet = await Bet.findOne({ slipId: data.data.slipId });
 

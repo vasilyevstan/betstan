@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
+import { initializeRisk, riskEnabled } from "../risk/Store";
 import { messengerWrapper } from "@betstan/common";
 import EventResultListener from "../event/listener/EventResultListener";
+import { RiskCashBackListener, RiskSettlementListener } from "../event/listener/RiskAccountingListeners";
 import LiveEventUpdateListener from "../event/listener/LiveEventUpdateListener";
 import PlaceBetListener from "../event/listener/PlaceBetListener";
 import BetModerationResultPublisher from "../event/publisher/BetModerationResultPublisher";
@@ -314,6 +316,7 @@ export const createDefaultModerationRuntime = (
     closeMessaging,
     connectDatabase: async (uri: string) => {
       await mongoose.connect(uri);
+      if (riskEnabled()) await initializeRisk();
       logger.log("Connected to database");
     },
     closeDatabase,
@@ -328,6 +331,8 @@ export const createDefaultModerationRuntime = (
       new PlaceBetListener(messengerWrapper.connection),
       new LiveEventUpdateListener(messengerWrapper.connection),
       new EventResultListener(messengerWrapper.connection),
+      new RiskSettlementListener(messengerWrapper.connection),
+      new RiskCashBackListener(messengerWrapper.connection),
     ],
     startProbeListener,
   });

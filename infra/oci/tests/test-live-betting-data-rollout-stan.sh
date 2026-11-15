@@ -2067,8 +2067,10 @@ if run_phase dry-run reschedule-blocked 4009 "$blocked_output" \
 fi
 grep -Fq \
   'event reschedule is blocked; sanitized failure evidence recorded' \
-  "$blocked_log" ||
+  "$blocked_log" || {
+  cat "$blocked_log" >&2
   fail "structured blocked reschedule did not report retained sanitized evidence"
+}
 blocked_report="$blocked_output/reports/preflight-event-reschedule.json"
 blocked_failure="$blocked_output/reschedule-blocker-failure.json"
 [[ -f "$blocked_report" && -f "$blocked_failure" &&

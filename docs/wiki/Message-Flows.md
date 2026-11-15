@@ -19,7 +19,7 @@ sessions and odds calculation, see [[Application Processes]].
 | Visibility changed | `backoffice:event:visibility` | Backoffice | Event |
 | Live state advanced | `gamemaster:event:live` | Gamemaster | Event, Moderation, Resulting |
 | Bet row settled | `resulting:sliprow:settle` | Resulting | Bet |
-| Bet settled | `resulting:slip:settle` | Resulting | Bet |
+| Bet settled | `resulting:slip:settle` | Resulting | Bet, Moderation risk accounting |
 | Operational activity observed | `telemetry:event:v1` | Auth or Slip | Telemetry |
 
 The topic names are stable contracts. Consumer queue names and runtime
@@ -27,6 +27,14 @@ instances are implementation details and may evolve independently.
 Telemetry also observes `slip:bet`, `resulting:slip:settle`, and
 `gamemaster:event:live`; these stable topics are distinct from its
 `telemetry:events:v1` consumer queue name.
+
+Risk Centre consumes confirmed settlement and cash-back accounting evidence
+through independent queues on the existing topics. Resulting records the
+monetary movement with its own canonical transition/publication obligation;
+Moderation deduplicates it when updating principal and realised windows.
+Missing evidence retains conservative exposure. Neither settlement nor
+cash-back waits for risk permission, and row results never each close a
+ticket's full stake. See [[Risk Centre]].
 
 ### Cash-back flow - deployment-gated
 

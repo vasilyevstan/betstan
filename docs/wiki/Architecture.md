@@ -47,6 +47,7 @@ flowchart TB
     Moderation["moderation"] <--> Broker
     Resulting["resulting"] <--> Broker
     Broker --> Telemetry
+    Backoffice -->|Internal risk management HTTP| Moderation
 
     Auth --> Mongo
     Event --> Mongo
@@ -71,8 +72,8 @@ flowchart TB
 | `backoffice` | HTTP, AMQP | Public event creation, visibility, manual result controls, and durable publication replay | Operational event records and publication markers |
 | `telemetry` | HTTP, inbound AMQP | Best-effort bounded operational summaries and application service health snapshots | Telemetry metric records |
 | `gamemaster` | AMQP worker | Deterministic accelerated football simulation, incidents, score, quotes, market versions, and final result | Simulation state and completed archives |
-| `moderation` | AMQP worker | Slip, phase, market, quote, and mixed-kind validation | Mirrored authority, parked requests, and moderation records |
-| `resulting` | AMQP worker | Pre-match and live row settlement, final slip result, retries, and replay | Settlement ledgers, archives, and retry state |
+| `moderation` | Internal HTTP, AMQP worker | Risk Centre policy, delayed whole-ticket admission, source safety and conservative limits | Policy revisions, immutable receipts, risk ledger, mirrored authority and replayable decisions |
+| `resulting` | AMQP worker, private maintenance export | Pre-match/live settlement, cash-back and authoritative monetary movements | Settlement ledgers, accounting history, archives, retry state and fenced snapshots |
 
 ## Data ownership
 
@@ -303,6 +304,27 @@ wire an authoritative cancellation feed; do not infer cancellation from
 visibility or invent a final result. Manual market void is the explicit
 supported operator action. Automated live/player-stat markets and wallets are
 outside this release.
+
+### Risk Centre ownership
+
+Moderation owns the Risk Centre registry, active revisions, pinned receipts,
+delays, reservations and terminal decision publication. Backoffice is a bounded
+public facade to Moderation's existing internal HTTP listener, not another
+policy database or a new service. The deployment switch defaults to off;
+transaction-capable storage and compatible readers precede activation.
+
+Resulting records monetary movements alongside its own settlement and
+cash-back transitions. It exports retained original scope, payout bounds and
+hash-bound snapshot pages through a private, maintenance-fenced CLI.
+Moderation imports that evidence and reconciles its own intake before claiming
+readiness. Neither service reads the other's database, and Resulting never
+requests Moderation's permission to close an owed position.
+
+Historical exposure is not a new submission. Unknown economic time supplies no
+newly dated credit, and incomplete history cannot be initialized as a zero-risk
+book. Open-exposure readiness and individual customer-loss windows are separate
+capabilities. See [[Risk Centre]] for rule composition, accounting bounds and
+rollout limitations.
 
 ### Risk accounting contracts
 

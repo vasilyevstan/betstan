@@ -88,6 +88,7 @@ class ParkedPlaceBetReplayWorker {
     this.running = true;
     this.currentRun = (async () => {
       let processed = 0;
+      await this.moderationService.recoverDecisionsAndReceipts(this.options.batchSize);
 
       while (!this.stopping && processed < this.options.batchSize) {
         const claimed = await this.moderationService.claimParkedPlaceBet(

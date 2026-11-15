@@ -93,6 +93,16 @@ it("sets bet status to CONFIRMED when moderation approves", async () => {
   expect(updatedBet!.status).toEqual(BetStatus.CONFIRMED);
 });
 
+it("never changes an accepted ordinary bet to declined on a conflicting terminal delivery", async () => {
+  const slipId = new mongoose.Types.ObjectId().toHexString();
+  await createBet(slipId);
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+  await listener.onMessage({ data: { slipId, result: ModerationStatus.APPROVED } }, buildMessage());
+  await listener.onMessage({ data: { slipId, result: ModerationStatus.DECLINED } }, buildMessage());
+  expect((await Bet.findOne({ slipId }))?.status).toBe(BetStatus.CONFIRMED);
+});
+
 it("propagates live decline reasons and row metadata when moderation declines", async () => {
   const slipId = new mongoose.Types.ObjectId().toHexString();
   const rowIds = [

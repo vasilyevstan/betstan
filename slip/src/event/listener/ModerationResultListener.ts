@@ -7,6 +7,7 @@ import {
   SlipStatus,
 } from "@betstan/common";
 import { SlipArchive } from "../../model/Slip";
+import { ModerationDecision } from "../../model/ModerationDecision";
 import {
   applyAffectedRows,
   clearSubmittedAttemptState,
@@ -79,12 +80,31 @@ class ModerationResultListener extends AListener<IModerationResultEvent> {
   serviceName: string = "slip_moderation_result";
   queue: QueueNames.MODERATION_RESULT = QueueNames.MODERATION_RESULT;
 
+  async init() { await super.init(); await this.channel.prefetch(1); await ModerationDecision.init(); }
+
   async onMessage(event: IModerationResultEvent, msg: ConsumeMessage) {
+    try { await this.applyMessage(event, msg); }
+    catch { this.channel.nack(msg, false, true); }
+  }
+
+  private async applyMessage(event: IModerationResultEvent, msg: ConsumeMessage) {
     const { data } = event;
 
     if (!isValidSlipId(data.slipId)) {
       this.ack(msg);
       return;
+    }
+    if (![ModerationStatus.APPROVED, ModerationStatus.DECLINED].includes(data.result as ModerationStatus)) { this.ack(msg); return; }
+    const evidence = data as typeof data & { decisionId?: string; occurredAt?: string };
+    try {
+      await ModerationDecision.updateOne({ _id: data.slipId }, { $setOnInsert: {
+        slipId: data.slipId, result: data.result, decisionId: evidence.decisionId, occurredAt: evidence.occurredAt, __v: 0,
+      } }, { upsert: true });
+    } catch (error: any) { if (error?.code !== 11000) throw error; }
+    const winner = await ModerationDecision.findById(data.slipId).lean();
+    if (!winner) throw new Error("Moderation decision receipt missing");
+    if (winner.result !== data.result || (winner.decisionId && evidence.decisionId && winner.decisionId !== evidence.decisionId)) {
+      this.channel.nack(msg, false, false); return;
     }
 
     const betKind = normalizeBetKind(data.betKind);

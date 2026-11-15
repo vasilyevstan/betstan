@@ -1071,8 +1071,8 @@ fi
 if oci_rabbitmq_queue_rows <<<$'name messages_ready messages_unacknowledged consumers\nname messages_ready messages_unacknowledged consumers' >/dev/null; then
   fail "duplicate RabbitMQ queue headers were accepted"
 fi
-[[ "$(oci_application_rabbitmq_queue_count)" == "31" ]] ||
-  fail "current RabbitMQ application queue count omits cash-back or market consumers"
+[[ "$(oci_application_rabbitmq_queue_count)" == "33" ]] ||
+  fail "current RabbitMQ application queue count omits cash-back, market or risk consumers"
 expected_queues="$(oci_application_rabbitmq_queue_names)"
 current_queue_rows="$(
   sed 's/^event_live_update\.\*$/event_live_update.fixture-pod/' <<<"$expected_queues" |
@@ -1107,7 +1107,7 @@ if oci_rabbitmq_queue_inventory_matches \
     "$(printf '%s\nevent_live_update.second-pod\t0\t0\t1\n' "$current_queue_rows")" "$expected_queues"; then
   fail "unexpected second pod-scoped Event queue was accepted"
 fi
-historical_queues="$(grep -vE '_cash_back_|_market_(published|configured|settled)$' <<<"$expected_queues" |
+historical_queues="$(grep -vE '_cash_back_|_market_(published|configured|settled)$|^moderation_risk_' <<<"$expected_queues" |
   sed 's/^event_live_update\.\*$/event_live_update.historical-pod/')"
 [[ "$(awk 'END {print NR}' <<<"$historical_queues")" == "23" ]] ||
   fail "cash-back compatibility baseline changed historical queue names"
@@ -1367,6 +1367,9 @@ abort "Moderation rollout must prevent consumer overlap" unless moderation.dig(
 abort "single Mongo StatefulSet required" unless by_kind.fetch("StatefulSet").map {
   |item| item.dig("metadata", "name")
 } == ["gaming-auth-mongo-depl"]
+mongo_container = by_kind.fetch("StatefulSet").first.dig("spec", "template", "spec", "containers").first
+abort "Mongo must retain the reviewed transaction-capable topology" unless mongo_container["args"] ==
+  ["--replSet", "betstan", "--bind_ip_all", "--oplogSize", "256"]
 abort "single Mongo PVC required" unless by_kind.fetch("PersistentVolumeClaim").length == 1
 abort "Mongo PVC must start at 50Gi" unless by_kind["PersistentVolumeClaim"][0].dig(
   "spec", "resources", "requests", "storage"

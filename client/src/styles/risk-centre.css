@@ -1,0 +1,60 @@
+.risk-layout {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+}
+.risk-rule-list {
+  list-style: none;
+  padding: 0;
+  margin-block: 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.risk-centre .risk-rule-list button {
+  width: 100%;
+  text-align: start;
+  white-space: normal;
+  display: grid;
+  gap: 0.25rem;
+}
+.risk-centre .risk-rule-list button[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+.risk-rule-list small {
+  font-size: 0.8125rem;
+}
+.risk-centre :is(p, dd, li, small) {
+  overflow-wrap: anywhere;
+}
+.risk-centre fieldset {
+  min-width: 0;
+}
+.risk-values {
+  display: grid;
+  gap: 0.25rem 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.risk-values dd {
+  margin-bottom: 0.75rem;
+}
+.risk-scope-title,
+.risk-support {
+  margin-block-start: 1.5rem;
+}
+.risk-centre [tabindex='-1'] {
+  scroll-margin-block: 6rem;
+}
+.risk-centre [tabindex='-1']:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+.risk-centre .market-notice {
+  margin-block: 0.75rem;
+}
+@media (min-width: 1200px) {
+  .risk-layout {
+    grid-template-columns: minmax(15rem, 0.8fr) minmax(0, 1.2fr);
+  }
+}

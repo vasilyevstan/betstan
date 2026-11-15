@@ -26,6 +26,8 @@ spec:
               value: "http://gaming-event-srv:3000"
             - name: EXTENSIBLE_MARKETS_ENABLED
               value: "true"
+            - name: RISK_CENTRE_ENABLED
+              value: "false"
             - name: CLIENT_ID
               valueFrom:
                 fieldRef:

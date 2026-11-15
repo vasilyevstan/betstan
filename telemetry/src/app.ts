@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import express, { NextFunction, Request, Response } from "express";
-import { METRICS, MetricName } from "./domain/metrics";
+import { METRICS, METRICS_V1, MetricName } from "./domain/metrics";
 import { HealthService, ServiceHealth } from "./service/Health";
 import { MetricRecorder, MongoMetricRecorder } from "./service/Recorder";
 import {
@@ -160,7 +160,7 @@ export const createApp = (
     const refresh = Promise.resolve().then(async () => {
       const generatedAt = dependencies.clock.now();
       const [summary, health] = await Promise.all([
-        buildMetricSummary(generatedAt, dependencies.summaryStore),
+        buildMetricSummary(generatedAt, dependencies.summaryStore, METRICS),
         dependencies.health.check(),
       ]);
       const response: SummaryResponse = {
@@ -194,7 +194,7 @@ export const createApp = (
         || Array.isArray(req.body)
         || Object.keys(req.body).length !== 1
         || !Object.prototype.hasOwnProperty.call(req.body, "page")
-        || (req.body.page !== "main" && req.body.page !== "admin")
+        || !["main", "admin", "market-template", "risk-centre"].includes(req.body.page)
       ) {
         return invalidRequest(res);
       }
@@ -204,8 +204,12 @@ export const createApp = (
       try {
         await dependencies.recorder.record({
           _id: eventId,
-          metric:
-            req.body.page === "main" ? "MAIN_PAGE_VISIT" : "ADMIN_PAGE_VISIT",
+          metric: ({
+            main: "MAIN_PAGE_VISIT",
+            admin: "ADMIN_PAGE_VISIT",
+            "market-template": "MARKET_TEMPLATE_PAGE_VISIT",
+            "risk-centre": "RISK_CENTRE_PAGE_VISIT",
+          } as Record<string, MetricName>)[req.body.page],
           occurredAt,
         });
         return res.status(202).send({ accepted: true });
@@ -221,12 +225,17 @@ export const createApp = (
     "/api/telemetry/summary",
     rateLimit(takeSummaryToken),
     async (req, res) => {
-      if (Object.keys(req.query).length !== 0) {
+      const query = req.originalUrl.split("?")[1];
+      if (query !== undefined && query !== "metricsVersion=2") {
         return invalidRequest(res);
       }
 
       try {
-        return res.send(await getSummary());
+        const summary = await getSummary();
+        return res.send(query === "metricsVersion=2" ? summary : {
+          ...summary,
+          metrics: summary.metrics.slice(0, METRICS_V1.length),
+        });
       } catch {
         return res
           .status(503)

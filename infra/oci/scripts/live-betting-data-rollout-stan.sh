@@ -969,13 +969,15 @@ project_reschedule_report() {
             ["database", "collection", "count", "reason"];
             []
           )) and
-          ($blocker.database | service) as $service |
-          ($blocker.reason | reason_code) as $reason_code |
-          ($service != null) and
-          ($reason_code != null) and
-          allowed_collection($service; $blocker.collection) and
-          ($blocker.count | nonnegative_integer) and
-          ($blocker.count > 0)
+          (
+            ($blocker.database | service) as $service |
+            ($blocker.reason | reason_code) as $reason_code |
+            ($service != null) and
+            ($reason_code != null) and
+            allowed_collection($service; $blocker.collection) and
+            ($blocker.count | nonnegative_integer) and
+            ($blocker.count > 0)
+          )
         ] | all) and
         (
           (

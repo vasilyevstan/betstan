@@ -497,6 +497,12 @@ user-visible record, and Resulting activates or rejects its settlement state.
 All three consumers use idempotent processing so redelivery cannot apply the
 same decision twice.
 
+The deployment-gated [[Risk Centre]] extends this authority with public,
+versioned policy management, durable acceptance delays and accounting-backed
+limits. It pins policy at first durable receipt, while rechecking current
+safety and accounting before the terminal decision. Save/reset affects new
+receipts and never clears historical usage or reprices pending bets.
+
 ## Resulting and settlement
 
 Resulting tracks accepted rows until the authoritative outcome is known.
@@ -730,7 +736,7 @@ HTTP. Auth and Slip send small activity reports through RabbitMQ; Telemetry
 also consumes existing submission, final-slip settlement, and live-update
 facts without changing their business consumers.
 
-### What the eight counters mean
+### Counter meanings and version compatibility
 
 | Metric | Counted observation |
 | --- | --- |
@@ -742,22 +748,29 @@ facts without changing their business consumers.
 | `GAMECENTER_EVENT_EMITTED` | A distinct Gamemaster live-update sequence, not one match or one football incident |
 | `USER_CREATED` | A successful Auth account creation |
 | `USER_LOGGED_IN` | A successful explicit Auth login, not current-user lookup or session refresh |
+| `MARKET_TEMPLATE_PAGE_VISIT` (v2) | Entry to `/backoffice/markets`, not an event-specific editor or preview |
+| `RISK_CENTRE_PAGE_VISIT` (v2) | Entry to `/backoffice/risk-centre` |
 
-The Client reports only the two page categories above. Changing theme or UI
+The Client reports only the four allowlisted page categories. Changing theme or UI
 query parameters on the same route does not add a visit; leaving and
-re-entering does. Reports contain no visitor identity, so counts cannot
+re-entering does. Specific Template/Risk Centre entries and the independent
+broad Backoffice stream overlap, rather than being additive unique visitors.
+Reports contain no visitor identity, so counts cannot
 measure unique people, sessions, or conversion. Reporting failures do not
 block navigation, signup, login, or draft creation.
 
 ### Public API and dashboard
 
 - `POST /api/telemetry/page-view` accepts JSON with exactly one `page` field:
-  `main` or `admin`. The server supplies the observation ID and time and
+  `main`, `admin`, `market-template` or `risk-centre`. The server supplies the observation ID and time and
   returns `202` with `{ "accepted": true }` after recording it.
-- `GET /api/telemetry/summary` accepts no query parameters. It returns
+- `GET /api/telemetry/summary` retains its default v1 response. It returns
   `generatedAt`, fourteen ascending UTC `dates`, eight ordered `metrics`
   entries with `metric` and fourteen integer `values`, and ten ordered
   `health` entries with `service` and `status`.
+- Opting into `?metricsVersion=2` adds the two new page metrics, for ten ordered
+  metrics. Verified v1 compatibility labels those metrics unavailable, never
+  zero; genuine failures and malformed summaries remain errors.
 - Missing daily observations are zero-filled. A successful all-zero summary
   is not an error or evidence that no business activity occurred.
 - Both routes are public and have separate global, process-local request
