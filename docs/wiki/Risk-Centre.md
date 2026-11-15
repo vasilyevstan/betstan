@@ -15,7 +15,9 @@ player records or identifiers.
 
 The transaction-dependent gateway requires the exact deployment capability
 `RISK_CENTRE_ENABLED=true` and transaction-capable MongoDB. An unavailable
-capability or incomplete accounting is shown explicitly. The switch is not
+capability is shown explicitly. Basic admission controls do not require
+historical accounting reconciliation; readiness for exposure, loss and
+activity controls is shown only when working with those controls. The switch is not
 an editable public rule. Source implementation is not proof of live
 activation; see [[Infrastructure]] and [[Release Orchestration]].
 
@@ -50,7 +52,27 @@ licensing/geolocation, device fraud and unsupported bet products are
 unavailable. They are not simulated successful checks or claims of regulated
 customer protection.
 
+Existing pre-match closure at kickoff and rejection of resulted events are
+listed explicitly as locked safeguards. A positive pre-match cutoff closes
+earlier; it never permits a pre-match bet after kickoff. There is no current
+configurable post-event grace period. Match simulation duration belongs to
+Gamemaster (`LIVE_MATCH_DURATION_MS`), not bet admission.
+
+Zero configured acceptance delay does not promise an instantaneous response:
+transport and missing-event-evidence retries can keep a bet pending. The
+editor does not mislabel those retries as an active delay rule.
+
 ## Saving and restoring
+
+The editor shows readable rule names and saved values in the rule list.
+Money is entered in Stanbucks and time in seconds; transport and enforcement
+retain integer minor units and milliseconds. Choose a rule, enter its value,
+select pre-match/live and bet type, then Save. Selecting a new rule opens its
+form directly. Specific event/product/market/template IDs and the full saved
+settings/default comparison remain available under expandable details.
+
+The unrelated unavailable-integrations panel is omitted. This does not
+enable those integrations or remove any backend safeguard.
 
 **Save** activates one complete validated revision for subsequent durable
 receipts. It is not a draft/publish workflow. Stale revisions conflict instead

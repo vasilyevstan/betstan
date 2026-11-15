@@ -6,15 +6,29 @@ import '../../styles/risk-centre.css';
 const API = '/api/backoffice/risk-centre';
 const control = 'form-control backoffice-control';
 const action = 'btn backoffice-control backoffice-action';
+const ruleNames = {
+  MIN_STAKE: 'Minimum stake', MAX_STAKE: 'Maximum stake', DELAY_MS: 'Acceptance delay',
+  MIN_ODDS: 'Minimum odds', MAX_ODDS: 'Maximum odds', MAX_RETURN: 'Maximum return',
+  MAX_LEGS: 'Maximum selections', MAX_EVENTS: 'Maximum events', MAX_BUILDER_SELECTIONS: 'Maximum Builder selections',
+  DENY: 'Block bets', MAX_SUBMISSIONS: 'Bet frequency', MAX_TURNOVER: 'Turnover limit',
+  MAX_OPEN_STAKE: 'Open stake limit', MAX_OPEN_RETURN: 'Open return limit',
+  MAX_OPERATOR_EXPOSURE: 'Operator exposure limit', MAX_CUSTOMER_LOSS: 'Customer loss limit',
+  REPEAT_BET_COOLDOWN_MS: 'Repeat bet cooldown', PRE_KICKOFF_CUTOFF_MS: 'Pre-match betting cutoff',
+  MAX_QUOTE_AGE_MS: 'Maximum quote age', MAX_NET_WIN: 'Maximum net win',
+};
+const ruleName = entry => ruleNames[entry?.type] || entry?.label;
+const inputScale = definition => definition?.unit === 'minor units' ? 100 : definition?.unit === 'milliseconds' ? 1000 : 1;
+const inputUnit = definition => definition?.unit === 'minor units' ? 'Stanbucks' : definition?.unit === 'milliseconds' ? 'seconds' : definition?.unit;
+const wireNumber = (raw, definition) => {
+  const scale = inputScale(definition);
+  if (raw === '' || raw === null || raw === undefined) return NaN;
+  if (scale > 1 && !(scale === 100 ? /^\d+(\.\d{1,2})?$/ : /^\d+(\.\d{1,3})?$/).test(String(raw))) return NaN;
+  return scale > 1 ? Math.round(Number(raw) * scale) : Number(raw);
+};
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,95}$/;
 const scopeLists = [
   ['eventIds', 'Event IDs'], ['productIds', 'Product IDs'],
   ['marketIds', 'Market IDs'], ['templateIds', 'Template IDs'],
-];
-const unavailable = [
-  'Wallet, balance, deposit and withdrawal limits', 'KYC, AML and self-exclusion registries',
-  'Geolocation and licence checks', 'Device and multi-account fraud checks',
-  'External confidence scores', 'System and banker bets',
 ];
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hasReadinessField = (accounting, field) => Object.prototype.hasOwnProperty.call(accounting, field);
@@ -73,8 +87,10 @@ const validSnapshot = data => validRevision(data) && Array.isArray(data.catalogu
   && validAccounting(data.readiness.accounting, data.catalogue)
   && (!hasReadinessField(data.readiness, 'activity') || validActivity(data.readiness.activity, data.catalogue))
   && plain(data.readiness.capabilities) && typeof data.readiness.capabilities.extensibleMarkets === 'boolean';
-const draftFor = rule => ({
-  ...rule, parameters: { ...rule.parameters },
+const draftFor = (rule, entry) => ({
+  ...rule, parameters: Object.fromEntries(Object.entries(rule.parameters).map(([key, value]) => (
+    [key, typeof value === 'number' ? value / inputScale(entry?.parameterDefinitions.find(field => field.name === key)) : value]
+  ))),
   scope: Object.fromEntries(Object.entries(rule.scope).map(([key, value]) => (
     [key, Array.isArray(value) ? value.join(', ') : value]
   ))),
@@ -82,9 +98,12 @@ const draftFor = rule => ({
 const describeScope = scope => Object.entries(scope).map(([key, value]) => (
   `${key}: ${Array.isArray(value) ? value.join(', ') : value}`
 )).join('; ') || 'Global';
-const describeParameters = parameters => Object.entries(parameters).map(([key, value]) => (
-  `${key}: ${String(value)}`
-)).join(' · ') || 'Deny new receipts';
+const describeParameters = (parameters, entry) => Object.entries(parameters).map(([key, value]) => {
+  const definition = entry?.parameterDefinitions.find(field => field.name === key);
+  return typeof value === 'number'
+    ? `${value / inputScale(definition)} ${inputUnit(definition) || key}`
+    : `${definition?.label || key}: ${String(value)}`;
+}).join(' · ') || 'Block matching bets';
 const newId = prefix => `${prefix}:${window.crypto.randomUUID()}`;
 const requestOptions = { timeout: 10000 };
 
@@ -93,12 +112,13 @@ function prepareRule(draft, catalogue) {
   catalogue.parameterDefinitions.forEach(definition => {
     const raw = draft.parameters[definition.name];
     if (definition.type === 'number') {
-      const value = typeof raw === 'string' && raw.trim() === '' ? NaN : Number(raw);
+      const value = typeof raw === 'string' && raw.trim() === '' ? NaN : wireNumber(raw, definition);
       const odds = definition.unit === 'decimal odds';
       if (!Number.isFinite(value) || value < definition.min || value > definition.max
         || (!odds && !Number.isSafeInteger(value))
         || (odds && !/^\d+(\.\d{1,2})?$/.test(String(raw)))) {
-        throw new Error(`${definition.label} must be between ${definition.min} and ${definition.max}${odds ? ', with at most two decimal places' : ', in whole units'}.`);
+        const scale = inputScale(definition);
+        throw new Error(`${definition.label} must be between ${definition.min / scale} and ${definition.max / scale}${odds || scale === 100 ? ', with at most two decimal places' : scale === 1000 ? ', with at most three decimal places' : ', in whole units'}.`);
       }
       parameters[definition.name] = value;
     } else if (definition.type === 'select') {
@@ -196,9 +216,12 @@ export default function RiskCentre() {
   const select = item => {
     setSelected(item);
     const rule = snapshot.rules.find(candidate => candidate.id === item.id);
-    setDraft(rule ? draftFor(rule) : null);
+    const definition = snapshot.catalogue.find(candidate => candidate.type === item.type);
+    const creating = !item.id && definition && !definition.locked;
+    setDraft(rule ? draftFor(rule, definition) : creating
+      ? draftFor({ id: newId('rule'), type: item.type, enabled: false, scope: {}, parameters: definition.defaultParameters }, definition) : null);
     setBaseRevision(snapshot.revision);
-    setDirty(false);
+    setDirty(Boolean(creating));
     setStale(false);
     setError('');
     setMessage('');
@@ -229,7 +252,10 @@ export default function RiskCentre() {
   const activity = snapshot?.readiness.activity;
   const activityControl = activityTypes.includes(entry?.type);
   const activityUnavailable = activityControl
-    && !activityReadyFor(activity, entry.type, draft?.parameters ?? entry.defaultParameters);
+    && !activityReadyFor(activity, entry.type, draft ? {
+      ...draft.parameters,
+      limit: wireNumber(draft.parameters.limit, entry.parameterDefinitions.find(field => field.name === 'limit')),
+    } : entry.defaultParameters);
   const accountingNotice = !accounting ? null
     : hasReadinessField(accounting, 'openPositionsReady')
       ? !accounting.openPositionsReady
@@ -256,7 +282,7 @@ export default function RiskCentre() {
     acceptSnapshot(accepted);
     const rule = accepted.rules.find(item => item.id === pending.ruleId);
     focusEditor.current = false;
-    setDraft(rule ? draftFor(rule) : null);
+    setDraft(rule ? draftFor(rule, accepted.catalogue.find(item => item.type === rule.type)) : null);
     setSelected(rule ? { id: rule.id, type: rule.type } : null);
     setBaseRevision(accepted.revision);
     setDirty(false);
@@ -359,10 +385,10 @@ export default function RiskCentre() {
   };
   const items = snapshot ? [
     ...snapshot.rules.map(rule => ({ ...rule, catalogue: snapshot.catalogue.find(item => item.type === rule.type) })),
-    ...snapshot.catalogue.filter(item => item.locked).map(item => ({ id: item.type, type: item.type, catalogue: item })),
+    ...snapshot.catalogue.filter(item => item.locked && item.category !== 'unavailable').map(item => ({ id: item.type, type: item.type, catalogue: item })),
   ] : [];
   const visible = items.filter(item => (!category || item.catalogue?.category === category)
-    && `${item.catalogue?.label} ${item.id} ${item.catalogue?.description}`.toLowerCase().includes(query.toLowerCase()));
+    && `${ruleName(item.catalogue)} ${item.catalogue?.label} ${item.id} ${item.catalogue?.description}`.toLowerCase().includes(query.toLowerCase()));
 
   return <section className="markets-page backoffice-markets risk-centre" aria-labelledby="risk-title">
     <nav className="market-breadcrumb" aria-label="Breadcrumb"><ol>
@@ -370,8 +396,8 @@ export default function RiskCentre() {
     </ol></nav>
     <header className="market-page-heading">
       <h1 className="h3" id="risk-title">Risk Centre</h1>
-      <p>Public simulation rules. Anyone can save changes globally. Save takes effect immediately for new receipts, not already pending bets.</p>
-      <p className="market-help">All matching restrictions apply: the lowest ceiling, highest floor and longest delay win. A scoped rule cannot relax a global restriction. A failure rejects the whole wager.</p>
+      <p>Choose a rule, set its value and save. Changes apply to new bets, not bets already waiting.</p>
+      <p className="market-help">This simulation's rules are public: anyone can edit them. When rules overlap, the stricter limit applies.</p>
       <div className="market-form-actions">
         <button type="button" className={action} disabled={loading || busy} onClick={reload}>Refresh rules</button>
         {snapshot ? <span>{snapshot.readiness.transactions === 'READY' ? 'Active' : 'Read-only policy'} revision {snapshot.revision} · Defaults version {snapshot.defaultsVersion}</span> : null}
@@ -389,27 +415,10 @@ export default function RiskCentre() {
       {busy ? <span role="status">Saving or checking the same operation…</span> : null}
     </div> : null}
     {snapshot ? <>
-      {readOnly ? <p className="market-notice market-notice--warning" role="status">Rule changes are unavailable until the Risk authority and transaction-capable storage are ready. These are not active protection guarantees.</p> : null}
-      {accountingNotice ? <p className="market-notice market-notice--warning" role="status">{accountingNotice}</p> : null}
+      {snapshot.readiness.transactions !== 'READY' ? <p className="market-notice market-notice--warning" role="status">Rule editing is not enabled in this deployment. Existing bet validation continues to run.</p> : null}
       <div className="risk-layout">
         <section className="market-library" aria-labelledby="risk-list-title">
           <h2 className="h5" id="risk-list-title">Rules and safeguards</h2>
-          <div className="market-form-grid">
-            <label>Search rules<input className={control} type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
-            <label>Category<select className={control} value={category} onChange={event => setCategory(event.target.value)}>
-              <option value="">All categories</option>
-              {[...new Set(snapshot.catalogue.map(item => item.category))].map(value => <option key={value}>{value}</option>)}
-            </select></label>
-          </div>
-          <p className="market-help">{snapshot.rules.filter(rule => !rule.id.startsWith('default:')).length || 'No'} custom rules. Optional new rules start disabled.</p>
-          {!visible.length ? <p role="status">No rules match these filters.</p> : null}
-          <ul className="risk-rule-list">{visible.map(item => <li key={item.id}>
-            <button type="button" className={action} aria-pressed={selected?.id === item.id}
-              disabled={frozen} onClick={() => choose({ id: item.id, type: item.type })}>
-              <span>{item.catalogue?.label || item.type}</span>
-              <small>{item.catalogue?.locked ? 'Locked safeguard' : `${item.enabled ? 'Enabled' : 'Disabled'} · ${describeScope(item.scope)}`}</small>
-            </button>
-          </li>)}</ul>
           <div className="market-form-actions">
             <label>Add a rule<select className={control} value="" disabled={frozen || readOnly}
               onChange={event => {
@@ -418,14 +427,33 @@ export default function RiskCentre() {
                 choose({ id: null, type });
               }}>
               <option value="">Choose a supported control</option>
-              {snapshot.catalogue.filter(item => !item.locked).map(item => <option key={item.type} value={item.type}>{item.label}</option>)}
+              {snapshot.catalogue.filter(item => !item.locked).map(item => <option key={item.type} value={item.type}>{ruleName(item)}</option>)}
             </select></label>
+          </div>
+          <div className="market-form-grid">
+            <label>Search rules<input className={control} type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
+            <label>Category<select className={control} value={category} onChange={event => setCategory(event.target.value)}>
+              <option value="">All categories</option>
+              {[...new Set(snapshot.catalogue.filter(item => item.category !== 'unavailable').map(item => item.category))].map(value => <option key={value}>{value}</option>)}
+            </select></label>
+          </div>
+          <p className="market-help">{snapshot.rules.filter(rule => !rule.id.startsWith('default:')).length || 'No'} custom rules. Optional new rules start disabled.</p>
+          {!visible.length ? <p role="status">No rules match these filters.</p> : null}
+          <ul className="risk-rule-list">{visible.map(item => <li key={item.id}>
+            <button type="button" className={action} aria-pressed={selected?.id === item.id}
+              disabled={frozen} onClick={() => choose({ id: item.id, type: item.type })}>
+              <span>{ruleName(item.catalogue) || item.type}</span>
+              <small>{item.catalogue?.locked ? 'Locked safeguard' : `${item.enabled ? 'Enabled' : 'Disabled'} · ${describeScope(item.scope)}`}</small>
+              {!item.catalogue?.locked ? <small>{describeParameters(item.parameters, item.catalogue)}</small> : null}
+            </button>
+          </li>)}</ul>
+          <div className="market-form-actions">
             <button type="button" className={action} disabled={frozen || readOnly}
               onClick={() => requestConfirmation('all')}>Restore all defaults</button>
           </div>
         </section>
         <section className="market-detail" aria-labelledby="risk-editor-title">
-          <h2 className="h5" id="risk-editor-title" tabIndex="-1" ref={editorHeading}>{entry?.label || 'Choose a rule'}</h2>
+          <h2 className="h5" id="risk-editor-title" tabIndex="-1" ref={editorHeading}>{ruleName(entry) || 'Choose a rule'}</h2>
           {pendingSelection ? <div className="market-notice market-notice--warning" role="alert">
             <p>Discard your unsaved input to select another rule?</p>
             <div className="market-form-actions">
@@ -436,18 +464,17 @@ export default function RiskCentre() {
           {!entry ? <p>Select a rule to inspect its active value, factory default and scope.</p> : <>
             <p>{entry.description}</p>
             {entry.locked ? <p>Locked — this correctness safeguard cannot be disabled, edited or removed.</p> : <>
-              {!draft ? <button type="button" className={action} disabled={readOnly || frozen} onClick={() => {
-                focusEditor.current = true;
-                setDraft(draftFor({ id: newId('rule'), type: entry.type, enabled: false, scope: {}, parameters: entry.defaultParameters }));
-                setBaseRevision(snapshot.revision);
-                setDirty(true);
-              }}>Configure new rule</button> : <>
-                <dl className="risk-values">
-                  <dt>{snapshot.readiness.transactions === 'READY' ? 'Active' : 'Stored settings — authority unavailable'}</dt><dd>{currentRule ? `${currentRule.enabled ? 'Enabled' : 'Disabled'} · ${describeParameters(currentRule.parameters)}` : 'Not saved; no effect yet'}</dd>
-                  <dt>Active scope</dt><dd>{currentRule ? describeScope(currentRule.scope) : 'Not saved'}</dd>
-                  <dt>Factory parameters</dt><dd>{describeParameters(entry.defaultParameters)}</dd>
-                  <dt>Factory activation and scope</dt><dd>{entry.defaultEnabled ? 'Enabled' : 'Disabled'} · {describeScope(entry.defaultScope)}</dd>
-                </dl>
+              {draft ? <>
+                <details className="risk-secondary">
+                  <summary>Current settings and defaults</summary>
+                  <dl className="risk-values">
+                    <dt>Saved value</dt><dd>{currentRule ? `${currentRule.enabled ? 'Enabled' : 'Disabled'} · ${describeParameters(currentRule.parameters, entry)}` : 'Not saved; no effect yet'}</dd>
+                    <dt>Active scope</dt><dd>{currentRule ? describeScope(currentRule.scope) : 'Not saved'}</dd>
+                    <dt>Default value</dt><dd>{describeParameters(entry.defaultParameters, entry)}</dd>
+                    <dt>Factory activation and scope</dt><dd>{entry.defaultEnabled ? 'Enabled' : 'Disabled'} · {describeScope(entry.defaultScope)}</dd>
+                  </dl>
+                </details>
+                {entry.category === 'accounting' && accountingNotice ? <p className="market-help">{accountingNotice}</p> : null}
                 {accountingUnavailable ? <p className="market-help">
                   {draft.type === 'MAX_CUSTOMER_LOSS'
                     ? 'Unavailable for activation: open-position accounting and the selected loss window must be ready.'
@@ -462,7 +489,7 @@ export default function RiskCentre() {
                   {draft.type === 'REPEAT_BET_COOLDOWN_MS' ? 'A zero cooldown is a no-op, not active protection. ' : ''}
                   The server rechecks activity completeness on Save.
                 </p> : null}
-                {draft.type === 'DELAY_MS' ? <p className="market-help">The shipped product delay is 0 ms. Delay never renews a quote; expired consent may cause rejection.</p> : null}
+                {draft.type === 'DELAY_MS' ? <p className="market-help">Default: no added delay. Transport and missing-event-data retries can still keep a bet pending. Waiting does not extend a quote's expiry.</p> : null}
                 {draft.type === 'MAX_OPERATOR_EXPOSURE' ? <p className="market-help">The enforced closure-safe conservative bound differs from informational exact liability. Exact hedge credit is not spendable admission capacity.</p> : null}
                 {baseRevision !== snapshot.revision ? <div className="market-notice market-notice--warning" role="alert">
                   <p>Your input is based on revision {baseRevision}; active revision is {snapshot.revision}. Review the active values above before saving over this revision.</p>
@@ -476,31 +503,36 @@ export default function RiskCentre() {
                     <label className="market-check-label"><input type="checkbox" checked={draft.enabled}
                       disabled={(accountingUnavailable || activityUnavailable) && !draft.enabled} onChange={event => edit({ enabled: event.target.checked })} />Enabled</label>
                     <div className="market-form-grid">{entry.parameterDefinitions.map(definition => <label key={definition.name}>
-                      {definition.label}{definition.unit ? ` (${definition.unit})` : ''}
+                      {definition.label}{definition.unit ? ` (${inputUnit(definition)})` : ''}
                       {definition.type === 'boolean' ? <input type="checkbox" checked={Boolean(draft.parameters[definition.name])}
                         onChange={event => edit({ parameters: { ...draft.parameters, [definition.name]: event.target.checked } })} />
                         : definition.type === 'select' ? <select className={control} value={draft.parameters[definition.name]}
                           onChange={event => edit({ parameters: { ...draft.parameters, [definition.name]: event.target.value } })}>
                           {definition.options.map(option => <option key={option}>{option}</option>)}
                         </select> : <input className={control} type="number" value={draft.parameters[definition.name]}
-                          min={definition.min} max={definition.max} step={definition.unit === 'decimal odds' ? '0.01' : '1'}
+                          min={definition.min / inputScale(definition)} max={definition.max / inputScale(definition)}
+                          step={definition.unit === 'decimal odds' || inputScale(definition) === 100 ? '0.01' : inputScale(definition) === 1000 ? '0.001' : '1'}
                           aria-describedby={error ? 'risk-input-error' : undefined}
                           onChange={event => edit({ parameters: { ...draft.parameters, [definition.name]: event.target.value } })} />}
                     </label>)}</div>
-                    <h3 className="h6 risk-scope-title">Scope</h3>
-                    <p className="market-help">Blank means all. Fields combine with AND; IDs within one field match any. Use trusted IDs, not display names. No player identity is exposed.</p>
+                    <h3 className="h6 risk-scope-title">Applies to</h3>
                     <div className="market-form-grid">
                       <label>Bet kind<select className={control} value={draft.scope.betKind || ''} onChange={event => edit({ scope: { ...draft.scope, betKind: event.target.value } })}>
-                        <option value="">All supported kinds</option><option>PRE_MATCH</option><option>LIVE</option>
+                        <option value="">Pre-match and live</option><option value="PRE_MATCH">Pre-match</option><option value="LIVE">Live</option>
                       </select></label>
                       <label>Structure<select className={control} value={draft.scope.structure || ''} onChange={event => edit({ scope: { ...draft.scope, structure: event.target.value } })}>
-                        <option value="">All supported structures</option><option>SINGLE</option><option>ACCUMULATOR</option><option>BUILDER</option>
+                        <option value="">All bet types</option><option value="SINGLE">Single</option><option value="ACCUMULATOR">Accumulator</option><option value="BUILDER">Bet Builder</option>
                       </select></label>
-                      {scopeLists.map(([key, label]) => <label key={key}>{label}<input className={control} value={draft.scope[key] || ''} maxLength={3103}
-                        onChange={event => edit({ scope: { ...draft.scope, [key]: event.target.value } })} /></label>)}
                     </div>
+                    <details className="risk-secondary" open={scopeLists.some(([key]) => Boolean(currentRule?.scope[key])) || undefined}>
+                      <summary>Specific events, products or markets</summary>
+                      <p className="market-help">Optional. Leave blank to apply to all. Enter comma-separated IDs only when targeting a specific event, product, market or template.</p>
+                      <div className="market-form-grid">{scopeLists.map(([key, label]) => <label key={key}>{label}<input className={control} value={draft.scope[key] || ''} maxLength={3103}
+                        onChange={event => edit({ scope: { ...draft.scope, [key]: event.target.value } })} /></label>)}
+                      </div>
+                    </details>
                   </fieldset>
-                  <p className="market-help" id="risk-save-help">Only explicit Save activates these settings globally for new receipts. No drafts or publish step.</p>
+                  <p className="market-help" id="risk-save-help">Save applies the enabled rule to new bets. Disabled rules are saved without being applied.</p>
                   <div className="market-form-actions">
                     <button className={`${action} backoffice-action--primary`} type="submit" disabled={readOnly || frozen || conflict || !dirty}>Save</button>
                     {currentRule ? <button type="button" className={action} disabled={readOnly || frozen || conflict}
@@ -509,18 +541,18 @@ export default function RiskCentre() {
                     </button> : null}
                   </div>
                 </form>
-              </>}
+              </> : null}
             </>}
           </>}
           {confirmation ? <div className="market-notice market-notice--warning" role="alert">
             <h3 className="h6" tabIndex="-1" ref={confirmationHeading}>{confirmation === 'all' ? 'Restore the complete factory policy?' : confirmation === 'remove' ? 'Remove this custom rule?' : 'Restore this factory rule?'}</h3>
             <p>{confirmation === 'all' ? `Replace all ${snapshot.rules.length} active rules with shipped defaults and remove every custom override.`
-              : confirmation === 'remove' ? 'Remove this restriction from new receipts.' : `Restore ${entry.defaultEnabled ? 'enabled' : 'disabled'} activation, ${describeScope(entry.defaultScope)} scope and shipped parameters: ${describeParameters(entry.defaultParameters)}.`}
+              : confirmation === 'remove' ? 'Remove this restriction from new receipts.' : `Restore ${entry.defaultEnabled ? 'enabled' : 'disabled'} activation, ${describeScope(entry.defaultScope)} scope and shipped parameters: ${describeParameters(entry.defaultParameters, entry)}.`}
               {' '}Unsaved input will be discarded. Exposure, usage history and pending policies are not reset.</p>
             {confirmation === 'all' ? <details open>
               <summary>Factory policy preview</summary>
               <ul>{snapshot.catalogue.filter(item => !item.locked).map(item => <li key={item.type}>
-                {item.label}: {item.defaultEnabled ? 'Enabled' : 'Disabled'} · {describeScope(item.defaultScope)} · {describeParameters(item.defaultParameters)}
+                {ruleName(item)}: {item.defaultEnabled ? 'Enabled' : 'Disabled'} · {describeScope(item.defaultScope)} · {describeParameters(item.defaultParameters, item)}
               </li>)}</ul>
             </details> : null}
             {confirmationRevision !== snapshot.revision ? <p>Policy changed while this confirmation was open. Cancel and review a new preview before continuing.</p> : null}
@@ -531,12 +563,6 @@ export default function RiskCentre() {
           </div> : null}
         </section>
       </div>
-      <section className="risk-support" aria-labelledby="risk-unavailable-title">
-        <h2 className="h5" id="risk-unavailable-title">Unavailable integrations</h2>
-        <p>These controls have no authoritative integration and are not active protection.</p>
-        <ul>{unavailable.map(label => <li key={label}>{label} — unavailable</li>)}</ul>
-        <p>Extensible market writer: {snapshot.readiness.capabilities?.extensibleMarkets ? 'enabled' : 'disabled'}. This deployment capability is read-only.</p>
-      </section>
       <section className="risk-support" aria-labelledby="risk-history-title">
         <h2 className="h5" id="risk-history-title">Revision history</h2>
         <p className="market-help">Anonymous changes are unattributed. No customer records or exposure details are shown.</p>

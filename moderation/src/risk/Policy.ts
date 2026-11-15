@@ -80,7 +80,7 @@ export const catalogue = () => [
       description: type === "MAX_OPERATOR_EXPOSURE"
         ? "Closure-safe bound; unsupported outcome domains use standalone upper bounds. Exact hedge credit is not admission capacity."
         : type === "PRE_KICKOFF_CUTOFF_MS"
-          ? "Pre-match closes at authoritative kickoff minus this interval; live tickets are unaffected."
+          ? "Close pre-match betting before kickoff by the configured interval. The existing cutoff is kickoff itself (zero offset); live tickets are unaffected."
         : type === "MAX_QUOTE_AGE_MS"
           ? "Maximum age from authenticated quote issue time; never extends expiry. Legacy quotes without issue-time authority are unavailable."
         : type === "MAX_NET_WIN"
@@ -102,6 +102,8 @@ export const catalogue = () => [
     ["IDENTITY_BOARD", "Owner and board", "Authenticated owner, immutable attempt, board revision and fingerprint."],
     ["INPUT_INTEGRITY", "Input integrity", "Positive finite stake, nonempty rows and exact selection identity."],
     ["KIND_SEPARATION", "Separate bet kinds", "No mixed pre-match/live tickets."],
+    ["PRE_MATCH_WINDOW", "Pre-match closes at kickoff", "The existing cutoff is kickoff itself: zero offset. Use Pre-match betting cutoff to close earlier; it cannot permit a pre-match bet after kickoff."],
+    ["EVENT_RESULT_GATE", "Resulted events reject bets", "Resulted events cannot accept bets. The active Risk Centre also rechecks current live phase and open market state at acceptance. There is no configurable grace period after an event ends."],
     ["QUOTE_AUTHORITY", "Quote authority", `Original consent, unchanged quote integrity and current source safety. Custom quotes expire within ${MARKET_QUOTE_MAX_AGE_MS / 1000}s; accepted custom odds ${MIN_MARKET_ODDS}-${MAX_MARKET_ODDS}, at most 2 decimal places.`],
     ["MARKET_CAPABILITY", "Market compatibility", `Supported settlement and enabled writer capability required. Builder: 2-${MAX_BUILDER_SELECTIONS} selections; manual-settlement selections are ineligible. Same-event compatibility remains locked.`],
     ["RESOURCE_BOUNDS", "Resource limits", `Custom placement payload at most ${MAX_MARKET_PLACEMENT_BYTES / 1024}KiB. Definition: 16 parameters, ${MAX_MARKET_OUTCOMES} outcomes, ${MAX_MARKET_RULE_NODES} rule nodes, depth ${MAX_MARKET_RULE_DEPTH}; scores 0-${MAX_MARKET_SCORE}.`],

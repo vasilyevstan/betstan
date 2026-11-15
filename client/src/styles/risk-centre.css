@@ -25,6 +25,14 @@
 .risk-rule-list small {
   font-size: 0.8125rem;
 }
+.risk-secondary {
+  margin-block: 1rem;
+}
+.risk-secondary summary {
+  cursor: pointer;
+  padding-block: 0.5rem;
+  min-height: 44px;
+}
 .risk-centre :is(p, dd, li, small) {
   overflow-wrap: anywhere;
 }

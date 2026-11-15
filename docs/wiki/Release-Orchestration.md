@@ -1483,12 +1483,20 @@ User-facing live behavior is activated separately from image deployment.
 
 ### Risk Centre prerequisites
 
-Risk Centre starts with `RISK_CENTRE_ENABLED=false`. Deploy compatible readers
-and Resulting accounting first, including the protected single-member Mongo
-conversion. Transactional history import cannot run against the preceding
-standalone generation's pre-deployment data stage.
+The OCI overlay enables basic Risk Centre admission with
+`RISK_CENTRE_ENABLED=true`; the generic manifest remains disabled for
+environments without transactional storage. The existing protected deployment
+finalizes and verifies the single-member Mongo replica set before starting
+Moderation. Startup proves a transaction before starting consumers; failure
+must block rollout, never silently fall back to legacy admission.
 
-A separately authorized reconciliation holds the existing physical writer
+Basic stake, odds, delay and ticket controls can be saved and enforced without
+historical accounting import. Activation retains any stored policy; inspect it
+before release rather than assuming factory defaults. Factory settings add no
+delay and keep optional restrictions disabled. A flag-off policy response is
+not a test of the live Mongo topology.
+
+For historical exposure and loss controls, a separately authorized reconciliation holds the existing physical writer
 fence and shared-Mongo lease while Resulting captures and seals its source
 snapshot. Moderation imports bounded hash-chained pages, reconciles its own
 durable intake and live overlap, and atomically records the bound final
