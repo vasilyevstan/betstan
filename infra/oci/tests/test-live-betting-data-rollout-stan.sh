@@ -75,6 +75,71 @@ for step in steps:
     assert len(step.get("run", "")) <= 21000, (
         step.get("name"), "exceeds GitHub Actions' native run-script limit",
     )
+exclusivity = next(step for step in steps if step["name"] == "Reject competing production activity")
+state_cases = [
+    ({}, True, True),
+    ({"states": ["active", "disabled_manually"]}, True, True),
+    ({"states": ["active"]}, False, False),
+    ({"states": ["disabled_inactivity"]}, False, False),
+    ({"path": ".github/workflows/unrelated.yml"}, False, False),
+    ({"states": ["api-failure"]}, False, False),
+    ({"master": "2" * 40}, False, False),
+    ({"master_status": 1}, False, False),
+    ({"master_status": 124}, False, False),
+    ({"guard_status": 1}, False, True),
+]
+for changes, passed, guard_called in state_cases:
+    with tempfile.TemporaryDirectory(dir=work) as directory:
+        root = Path(directory)
+        case = dict(states=["disabled_manually"], master="1" * 40, master_status=0,
+                    path=".github/workflows/oci-live-data-rollout.yml", guard_status=0)
+        case.update(changes)
+        (root / "case.json").write_text(json.dumps(case))
+        binary = root / "bin"
+        binary.mkdir()
+        gh = binary / "gh"
+        gh.write_text("""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+case = json.loads(Path("case.json").read_text())
+endpoint = sys.argv[2]
+if endpoint.endswith("/actions/workflows/oci-live-data-rollout.yml"):
+    calls = Path("workflow-reads")
+    count = len(calls.read_text().splitlines()) if calls.exists() else 0
+    with calls.open("a") as stream:
+        stream.write("read\\n")
+    state = case["states"][min(count, len(case["states"]) - 1)]
+    if state == "api-failure":
+        raise SystemExit(1)
+    print(case["path"] + "\\t" + state)
+elif endpoint.endswith("/git/ref/heads/master"):
+    print(case["master"])
+    raise SystemExit(case["master_status"])
+else:
+    raise SystemExit("unexpected API request")
+""")
+        gh.chmod(0o755)
+        guard = root / "infra/azure/agents/production-run-exclusivity-stan.sh"
+        guard.parent.mkdir(parents=True)
+        guard.write_text("#!/usr/bin/env bash\ntouch guard-called\nexit "
+                         + str(case["guard_status"]) + "\n")
+        guard.chmod(0o755)
+        clock = """SECONDS=0
+sleep() { SECONDS=$((SECONDS + $1)); }
+timeout() { [[ "$1" =~ ^[1-9][0-9]*s$ ]] || return 1; shift; "$@"; }
+"""
+        env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+                   SOURCE_SHA="1" * 40, REPO="vasilyevstan/betstan", EXCLUDE_RUN_ID="42")
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", clock + exclusivity["run"] + "\ntouch mutation"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert (result.returncode == 0) == passed, (changes, result.stderr)
+        assert (root / "guard-called").exists() == guard_called, changes
+        assert (root / "mutation").exists() == passed, changes
+        if case["states"][0] == "active":
+            assert len((root / "workflow-reads").read_text().splitlines()) > 1
+print("PASS workflow-state wait precedes exclusivity and fails closed on timeout or drift")
 barrier_name = "Require complete read-only preflight before lock mutation"
 barrier = next(step for step in steps if step["name"] == barrier_name)
 resume = next(step for step in steps if step.get("id") == "resume_preflight")

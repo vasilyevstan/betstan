@@ -5154,6 +5154,37 @@ assert blob(
     (root / "infra/azure/agents/copilot_cli_authority_stan.py").read_text()
 ) != m.CURRENT_READER_AUTHORITY_BLOB
 current_workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+state_wait_workflow = current_workflow
+current_workflow = m.without_workflow_state_wait(state_wait_workflow, "workflow state wait")
+assert current_workflow != state_wait_workflow
+assert m.without_workflow_state_wait(current_workflow, "historical state") == current_workflow
+state_wait_inverse = m.current_reader_workflow_v5(current_workflow, "historical state inverse", inverse=True)
+assert m.current_reader_workflow_v5(state_wait_workflow, "current state inverse", inverse=True) == state_wait_inverse
+before_wait, after_wait = m.CURRENT_READER_WORKFLOW_STATE_WAIT_EDITS[0]
+state_wait_mutations = [
+    state_wait_workflow.replace(after_wait, after_wait + after_wait),
+    state_wait_workflow.replace(after_wait, before_wait + after_wait),
+]
+for before, after in (
+    ("SECONDS + 180", "SECONDS + 181"),
+    ('timeout "${remaining}s" gh api', "gh api"),
+    ("workflow-state wait", "changed source wait"),
+    ('if ! current_master="$(timeout 30s gh api', 'if current_master="$(timeout 30s gh api'),
+    ('if [ "$SOURCE_SHA" != "$current_master" ]; then', "if false; then"),
+    ('                sleep 5', "                break"),
+    ('        if: inputs.phase != \'incident-restore\'', "        if: false"),
+    ('          EXCLUDE_RUN_ID: ${{ github.run_id }}', "          EXCLUDE_RUN_ID: 999"),
+    ('          ./infra/azure/agents/production-run-exclusivity-stan.sh', "          true"),
+):
+    assert before in after_wait
+    state_wait_mutations.append(state_wait_workflow.replace(after_wait, after_wait.replace(before, after)))
+for candidate in state_wait_mutations:
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            inverse = m.current_reader_workflow_v5(candidate, "changed state wait", inverse=True)
+        except SystemExit:
+            continue
+    assert inverse != state_wait_inverse, "changed state wait escaped frozen source qualification"
 credentialed_workflow = current_workflow
 current_workflow = m.without_checkpoint_read_auth(credentialed_workflow, "checkpoint auth")
 assert credentialed_workflow != current_workflow
