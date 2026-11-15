@@ -24,6 +24,24 @@ images:
     newName: docker.io/library/rabbitmq
     digest: sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b
 patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: gaming-moderation-depl
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: gaming-moderation-depl
+      spec:
+        template:
+          spec:
+            containers:
+              - name: gaming-moderation
+                env:
+                  - name: RISK_CENTRE_ENABLED
+                    value: "true"
   - path: ../patches/mongo-storage.yaml
     target:
       group: apps

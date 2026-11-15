@@ -3,7 +3,7 @@ import { Bet } from "../../model/Bet";
 import { ParkedPlaceBet } from "../../model/ParkedPlaceBet";
 import ModerationService from "../../service/ModerationService";
 import { createPlaceBetEvent } from "../../event/listener/__test__/helpers";
-import { defaults, matches, parseRule, validatePolicy, windowStart } from "../Policy";
+import { defaults, matches, parseRule, Rule, validatePolicy, windowStart } from "../Policy";
 import { exactMinor, ledgerReason, money, staticReason } from "../Evaluation";
 import { receiveRisk, terminalRisk } from "../Gateway";
 import { getHistory, getOperation, getPolicy, initializeRisk, mutatePolicy, RiskAccountingInbox, RiskMovement, RiskPosition, RiskState } from "../Store";
@@ -73,6 +73,35 @@ it("commits one revision under parallel Save and replays stable operation result
   const loserId = winner.value.requestId === "save-one" ? "save-two" : "save-one";
   await expect(getOperation(loserId)).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
   await expect(mutatePolicy("CREATE", { ...request, requestId: loserId, expectedRevision: 2 })).rejects.toMatchObject({ code: "OPERATION_CONFLICT" });
+});
+
+it("saves, enforces and restores a basic stake rule without accounting or activity history", async () => {
+  await RiskState.updateOne({ _id: "active" }, { $unset: { accountingCoverage: 1, activityCoverage: 1 } });
+  const initial = await getPolicy();
+  expect(initial.readiness.transactions).toBe("READY");
+  expect(initial.readiness.accounting.ready).toBe(false);
+  expect(initial.readiness.activity.tracking).toBe(false);
+  const maximum = initial.rules.find((item: Rule) => item.type === "MAX_STAKE")!;
+  await mutatePolicy("UPDATE", {
+    expectedRevision: 1, requestId: "basic-stake", rule: { ...maximum, enabled: true, parameters: { limit: 100 } },
+  }, maximum.id);
+  expect((await getPolicy()).rules.find((item: Rule) => item.id === maximum.id)).toMatchObject({
+    enabled: true, parameters: { limit: 100 },
+  });
+  const service = new ModerationService({ publishWithConfirm: jest.fn(async () => undefined) });
+  const rejected = event();
+  rejected.data.wager = 2;
+  await service.handlePlaceBet(rejected);
+  expect(await Bet.findOne({ slipId: rejected.data.slipId })).toMatchObject({
+    status: ModerationStatus.DECLINED, riskReason: "RISK_MAX_STAKE",
+  });
+  await mutatePolicy("RESET", { expectedRevision: 2, requestId: "restore-stake", ruleId: maximum.id });
+  expect((await getPolicy()).rules.find((item: Rule) => item.id === maximum.id)).toEqual(maximum);
+  const accepted = event();
+  accepted.data.wager = 2;
+  await service.handlePlaceBet(accepted);
+  expect((await Bet.findOne({ slipId: accepted.data.slipId }))?.status).toBe(ModerationStatus.APPROVED);
+  expect((await Bet.findOne({ slipId: rejected.data.slipId }))?.status).toBe(ModerationStatus.DECLINED);
 });
 
 it("pins cutoff policy and rechecks authoritative time in the terminal transaction with exact affected IDs", async () => {
