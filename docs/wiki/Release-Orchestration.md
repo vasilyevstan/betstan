@@ -323,6 +323,9 @@ read-only wait has a fixed deadline, rejects unexpected identity/state or API
 failure, and rechecks current source afterward. This prevents execution from
 racing the dispatcher's external disablement; it grants no approval, retires
 no authority, and cannot skip exclusivity or access production data.
+Historical-source comparison recognizes only the complete reviewed wait block
+through the existing exact-edit mechanism; frozen source hashes remain unchanged.
+Recovery that qualifies this workflow variant must retain that exact reader support.
 
 **Aggregated read-only preflight.** Failed-deploy resumes collect independent
 baseline, fence, runtime-image and inherited-lock failures before producing
