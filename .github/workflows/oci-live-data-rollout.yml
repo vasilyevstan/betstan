@@ -571,7 +571,42 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EXCLUDE_RUN_ID: ${{ github.run_id }}
-        run: ./infra/azure/agents/production-run-exclusivity-stan.sh
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 180))
+          while true; do
+            remaining=$((deadline - SECONDS))
+            if [ "$remaining" -le 0 ]; then
+              echo "Live-data workflow did not return to disabled state" >&2
+              exit 1
+            fi
+            workflow="$(
+              timeout "${remaining}s" gh api \
+                "repos/$REPO/actions/workflows/oci-live-data-rollout.yml" \
+                --jq '[.path,.state] | @tsv'
+            )"
+            case "$workflow" in
+              $'.github/workflows/oci-live-data-rollout.yml\tdisabled_manually')
+                break
+                ;;
+              $'.github/workflows/oci-live-data-rollout.yml\tactive')
+                sleep 5
+                ;;
+              *)
+                echo "Unexpected live-data workflow identity or state" >&2
+                exit 1
+                ;;
+            esac
+          done
+          if ! current_master="$(timeout 30s gh api "repos/$REPO/git/ref/heads/master" --jq '.object.sha')"; then
+            echo "Current master is unavailable after workflow-state wait" >&2
+            exit 1
+          fi
+          if [ "$SOURCE_SHA" != "$current_master" ]; then
+            echo "Current master changed during workflow-state wait" >&2
+            exit 1
+          fi
+          ./infra/azure/agents/production-run-exclusivity-stan.sh
 
       - name: Download exact OCI image provenance
         if: inputs.phase != 'incident-restore'
