@@ -95,9 +95,15 @@ const draftFor = (rule, entry) => ({
     [key, Array.isArray(value) ? value.join(', ') : value]
   ))),
 });
+const scopeValueNames = {
+  betKind: { PRE_MATCH: 'Pre-match', LIVE: 'Live' },
+  structure: { SINGLE: 'Singles', ACCUMULATOR: 'Accumulators', BUILDER: 'Bet Builder' },
+};
 const describeScope = scope => Object.entries(scope).map(([key, value]) => (
-  `${key}: ${Array.isArray(value) ? value.join(', ') : value}`
-)).join('; ') || 'Global';
+  scopeValueNames[key]?.[value]
+    || `${scopeLists.find(([name]) => name === key)?.[1] || key}: ${Array.isArray(value) ? value.join(', ') : value}`
+)).join('; ') || 'All bets';
+const onOff = enabled => (enabled ? 'On' : 'Off');
 const describeParameters = (parameters, entry) => Object.entries(parameters).map(([key, value]) => {
   const definition = entry?.parameterDefinitions.find(field => field.name === key);
   return typeof value === 'number'
@@ -264,11 +270,15 @@ export default function RiskCentre() {
           ? `Accounting partially ready: open-position exposure controls are available. Customer-loss controls require a ready selected window. Ready loss windows: ${accounting.readyLossWindows.join(', ') || 'none'}. The server rechecks readiness on Save.`
           : null
       : !accounting.ready
-        ? 'Accounting unavailable: complete authoritative history is required before enabling exposure or customer-loss controls. Missing history is not a zero balance.'
+        ? 'Accounting unavailable: complete authoritative history is required before exposure or customer-loss controls can be turned on. Missing history is not a zero balance.'
         : null;
   const readOnly = !snapshot || loading || snapshot.readiness.transactions !== 'READY' || Boolean(loadError);
   const conflict = draft && (stale || baseRevision !== snapshot?.revision);
   const frozen = busy || Boolean(operation);
+  const actionsLocked = readOnly || frozen || conflict;
+  const activationBlocked = Boolean(accountingUnavailable || activityUnavailable);
+  const savedOn = Boolean(currentRule?.enabled);
+  const changed = dirty || selected?.id === null;
 
   const completed = (result, pending) => {
     if (!validRevision(result) || result.requestId !== pending.body.requestId
@@ -281,6 +291,16 @@ export default function RiskCentre() {
     const accepted = result.revision >= previous.revision ? { ...previous, ...result } : previous;
     acceptSnapshot(accepted);
     const rule = accepted.rules.find(item => item.id === pending.ruleId);
+    const ruleEntry = rule && accepted.catalogue.find(item => item.type === rule.type);
+    const name = ruleName(ruleEntry) || 'Rule';
+    const saved = `Revision ${result.revision} saved.`;
+    const outcome = pending.kind === 'all' ? `All rules restored to defaults. ${saved}`
+      : pending.kind === 'remove' ? `${ruleName(snapshotRef.current.catalogue.find(item => item.type === pending.ruleType)) || 'Rule'} removed. ${saved}`
+        : !rule ? saved
+          : pending.kind === 'restore' ? `${name} restored to its default (${onOff(rule.enabled).toLowerCase()}). ${saved}`
+            : rule.enabled ? `${name} is on: ${describeParameters(rule.parameters, ruleEntry)} · ${describeScope(rule.scope)}. Applies to new bets. ${saved}`
+              : pending.wasOn ? `${name} is off — it no longer affects new bets. ${saved}`
+                : `${name} saved as off — it has no effect on bets. ${saved}`;
     focusEditor.current = false;
     setDraft(rule ? draftFor(rule, accepted.catalogue.find(item => item.type === rule.type)) : null);
     setSelected(rule ? { id: rule.id, type: rule.type } : null);
@@ -290,8 +310,8 @@ export default function RiskCentre() {
     setConfirmation(null);
     setError('');
     setMessage(accepted.revision > result.revision
-      ? `Revision ${result.revision} saved. A newer revision ${accepted.revision} is now active; review the displayed policy. Existing pending receipts keep their pinned policy.`
-      : `Revision ${result.revision} saved. New receipts use the updated rules; existing pending receipts keep their pinned policy.`);
+      ? `Revision ${result.revision} saved, but revision ${accepted.revision} is now active. Check this rule's status.`
+      : outcome);
     operationRef.current = null;
     setOperation(null);
     setHistory(null);
@@ -326,22 +346,27 @@ export default function RiskCentre() {
       if (mounted.current) setBusy(false);
     }
   };
-  const save = event => {
-    event.preventDefault();
+  // The pressed action, never a separate checkbox, decides whether the rule is on.
+  const save = enable => {
     if (readOnly || frozen || conflict || !draft || entry.locked) return;
     try {
-      const rule = prepareRule(draft, entry);
-      if (rule.enabled && accountingUnavailable) throw new Error('Accounting history is not ready. This control cannot be enabled.');
-      if (rule.enabled && activityUnavailable) throw new Error('Activity history is not ready for this window or cooldown. Keep the rule disabled or choose supported settings.');
+      const rule = { ...prepareRule(draft, entry), enabled: enable };
+      if (enable && accountingUnavailable) throw new Error("Can't turn on yet: accounting history is not ready. Save it as off instead.");
+      if (enable && activityUnavailable) throw new Error("Can't turn on yet: activity history is not ready for this window or cooldown. Save it as off or choose supported settings.");
       const creating = selected.id === null;
       if (!creating && !currentRule) throw new Error('This rule was removed in the active revision. Your input is preserved; create a new rule explicitly rather than restoring a removed rule implicitly.');
       execute({
         method: creating ? 'POST' : 'PUT',
         url: creating ? `${API}/rules` : `${API}/rules/${rule.id}`,
-        ruleId: rule.id,
+        ruleId: rule.id, kind: 'save', wasOn: Boolean(currentRule?.enabled),
         body: { expectedRevision: baseRevision, requestId: newId('save'), rule },
       });
     } catch (failure) { setError(failure.message); }
+  };
+  const submit = event => {
+    event.preventDefault();
+    // Enter only performs the visible primary save; it never turns a rule off.
+    if (changed) save(true);
   };
   const confirmMutation = () => {
     if (confirmationRevision !== snapshot.revision || readOnly || frozen) return;
@@ -351,6 +376,7 @@ export default function RiskCentre() {
       method: remove ? 'DELETE' : 'POST',
       url: remove ? `${API}/rules/${draft.id}` : `${API}/reset`,
       ruleId: resetAll ? undefined : draft.id,
+      kind: remove ? 'remove' : resetAll ? 'all' : 'restore', ruleType: draft?.type,
       body: {
         expectedRevision: confirmationRevision, requestId: newId('save'),
         ...(!remove && !resetAll ? { ruleId: draft.id } : {}),
@@ -396,7 +422,7 @@ export default function RiskCentre() {
     </ol></nav>
     <header className="market-page-heading">
       <h1 className="h3" id="risk-title">Risk Centre</h1>
-      <p>Choose a rule, set its value and save. Changes apply to new bets, not bets already waiting.</p>
+      <p>Choose a rule, set its value, then turn it on. Changes apply to new bets, not bets already waiting.</p>
       <p className="market-help">This simulation's rules are public: anyone can edit them. When rules overlap, the stricter limit applies.</p>
       <div className="market-form-actions">
         <button type="button" className={action} disabled={loading || busy} onClick={reload}>Refresh rules</button>
@@ -415,7 +441,7 @@ export default function RiskCentre() {
       {busy ? <span role="status">Saving or checking the same operation…</span> : null}
     </div> : null}
     {snapshot ? <>
-      {snapshot.readiness.transactions !== 'READY' ? <p className="market-notice market-notice--warning" role="status">Rule editing is not enabled in this deployment. Existing bet validation continues to run.</p> : null}
+      {snapshot.readiness.transactions !== 'READY' ? <p className="market-notice market-notice--warning" role="status">Rule editing is not available in this deployment. Existing bet validation continues to run.</p> : null}
       <div className="risk-layout">
         <section className="market-library" aria-labelledby="risk-list-title">
           <h2 className="h5" id="risk-list-title">Rules and safeguards</h2>
@@ -437,13 +463,13 @@ export default function RiskCentre() {
               {[...new Set(snapshot.catalogue.filter(item => item.category !== 'unavailable').map(item => item.category))].map(value => <option key={value}>{value}</option>)}
             </select></label>
           </div>
-          <p className="market-help">{snapshot.rules.filter(rule => !rule.id.startsWith('default:')).length || 'No'} custom rules. Optional new rules start disabled.</p>
+          <p className="market-help">{snapshot.rules.filter(rule => !rule.id.startsWith('default:')).length || 'No'} custom rules. New rules stay off until you turn them on.</p>
           {!visible.length ? <p role="status">No rules match these filters.</p> : null}
           <ul className="risk-rule-list">{visible.map(item => <li key={item.id}>
             <button type="button" className={action} aria-pressed={selected?.id === item.id}
               disabled={frozen} onClick={() => choose({ id: item.id, type: item.type })}>
               <span>{ruleName(item.catalogue) || item.type}</span>
-              <small>{item.catalogue?.locked ? 'Locked safeguard' : `${item.enabled ? 'Enabled' : 'Disabled'} · ${describeScope(item.scope)}`}</small>
+              <small>{item.catalogue?.locked ? 'Locked safeguard · Always on' : `${onOff(item.enabled)} · ${describeScope(item.scope)}`}</small>
               {!item.catalogue?.locked ? <small>{describeParameters(item.parameters, item.catalogue)}</small> : null}
             </button>
           </li>)}</ul>
@@ -462,16 +488,20 @@ export default function RiskCentre() {
             </div>
           </div> : null}
           {!entry ? <p>Select a rule to inspect its active value, factory default and scope.</p> : <>
+            {!entry.locked && draft ? <p className="risk-status">
+              {currentRule ? <><strong>{onOff(currentRule.enabled)}</strong> — {currentRule.enabled
+                ? `checked on new bets · ${describeScope(currentRule.scope)}` : 'has no effect on bets'}</> : <><strong>Not saved</strong> — no effect yet</>}
+            </p> : null}
             <p>{entry.description}</p>
-            {entry.locked ? <p>Locked — this correctness safeguard cannot be disabled, edited or removed.</p> : <>
+            {entry.locked ? <p>Locked — always on. This correctness safeguard cannot be turned off, edited or removed.</p> : <>
               {draft ? <>
                 <details className="risk-secondary">
                   <summary>Current settings and defaults</summary>
                   <dl className="risk-values">
-                    <dt>Saved value</dt><dd>{currentRule ? `${currentRule.enabled ? 'Enabled' : 'Disabled'} · ${describeParameters(currentRule.parameters, entry)}` : 'Not saved; no effect yet'}</dd>
+                    <dt>Saved value</dt><dd>{currentRule ? `${onOff(currentRule.enabled)} · ${describeParameters(currentRule.parameters, entry)}` : 'Not saved; no effect yet'}</dd>
                     <dt>Active scope</dt><dd>{currentRule ? describeScope(currentRule.scope) : 'Not saved'}</dd>
                     <dt>Default value</dt><dd>{describeParameters(entry.defaultParameters, entry)}</dd>
-                    <dt>Factory activation and scope</dt><dd>{entry.defaultEnabled ? 'Enabled' : 'Disabled'} · {describeScope(entry.defaultScope)}</dd>
+                    <dt>Default status and scope</dt><dd>{onOff(entry.defaultEnabled)} · {describeScope(entry.defaultScope)}</dd>
                   </dl>
                 </details>
                 {entry.category === 'accounting' && accountingNotice ? <p className="market-help">{accountingNotice}</p> : null}
@@ -479,13 +509,13 @@ export default function RiskCentre() {
                   {draft.type === 'MAX_CUSTOMER_LOSS'
                     ? 'Unavailable for activation: open-position accounting and the selected loss window must be ready.'
                     : 'Unavailable for activation until the required accounting evidence is ready.'}
-                  {' '}Disabled settings can still be saved. The server rechecks readiness on Save.
+                  {' '}You can still save it as off. The server rechecks readiness on Save.
                 </p> : null}
                 {activityControl ? <p className="market-help">
                   {activity?.tracking
                     ? `Activity tracking is on. Ready windows: ${activity.readyWindows.join(', ') || 'none'}. Available cooldown history: ${activity.readyCooldownMs} ms.`
                     : 'Activity history unavailable: authoritative tracking evidence is absent or tracking is off.'}
-                  {' '}{activityUnavailable ? 'This selected window or cooldown is unavailable for activation. You can edit the settings or save the rule disabled. ' : ''}
+                  {' '}{activityUnavailable ? 'This selected window or cooldown is unavailable for activation. Change the settings or save it as off. ' : ''}
                   {draft.type === 'REPEAT_BET_COOLDOWN_MS' ? 'A zero cooldown is a no-op, not active protection. ' : ''}
                   The server rechecks activity completeness on Save.
                 </p> : null}
@@ -497,11 +527,9 @@ export default function RiskCentre() {
                     setBaseRevision(snapshot.revision); setStale(false); setError('');
                   }}>Use refreshed revision</button>
                 </div> : null}
-                <form onSubmit={save} noValidate aria-describedby="risk-save-help">
+                <form onSubmit={submit} noValidate>
                   <fieldset disabled={readOnly || frozen}>
                     <legend className="h6">Rule settings</legend>
-                    <label className="market-check-label"><input type="checkbox" checked={draft.enabled}
-                      disabled={(accountingUnavailable || activityUnavailable) && !draft.enabled} onChange={event => edit({ enabled: event.target.checked })} />Enabled</label>
                     <div className="market-form-grid">{entry.parameterDefinitions.map(definition => <label key={definition.name}>
                       {definition.label}{definition.unit ? ` (${inputUnit(definition)})` : ''}
                       {definition.type === 'boolean' ? <input type="checkbox" checked={Boolean(draft.parameters[definition.name])}
@@ -532,9 +560,22 @@ export default function RiskCentre() {
                       </div>
                     </details>
                   </fieldset>
-                  <p className="market-help" id="risk-save-help">Save applies the enabled rule to new bets. Disabled rules are saved without being applied.</p>
+                  {activationBlocked ? <p className="market-help" id="risk-activation-reason">
+                    Can't turn on yet: {accountingUnavailable ? 'accounting history is not ready' : 'activity history is not ready for this window or cooldown'}. You can save it as off.
+                  </p> : null}
                   <div className="market-form-actions">
-                    <button className={`${action} backoffice-action--primary`} type="submit" disabled={readOnly || frozen || conflict || !dirty}>Save</button>
+                    {changed ? <>
+                      <button className={`${action} backoffice-action--primary`} type="submit"
+                        disabled={actionsLocked || activationBlocked} aria-describedby={activationBlocked ? 'risk-activation-reason' : undefined}>
+                        {savedOn ? 'Save changes' : 'Save and turn on'}
+                      </button>
+                      <button className={action} type="button" disabled={actionsLocked} onClick={() => save(false)}>
+                        {savedOn ? 'Save and turn off' : 'Save as off'}
+                      </button>
+                    </> : savedOn
+                      ? <button className={`${action} backoffice-action--primary`} type="button" disabled={actionsLocked} onClick={() => save(false)}>Turn off</button>
+                      : <button className={`${action} backoffice-action--primary`} type="button" disabled={actionsLocked || activationBlocked}
+                        aria-describedby={activationBlocked ? 'risk-activation-reason' : undefined} onClick={() => save(true)}>Turn on</button>}
                     {currentRule ? <button type="button" className={action} disabled={readOnly || frozen || conflict}
                       onClick={() => requestConfirmation(draft.id.startsWith('default:') ? 'default' : 'remove')}>
                       {draft.id.startsWith('default:') ? 'Restore default' : 'Remove'}
@@ -547,12 +588,12 @@ export default function RiskCentre() {
           {confirmation ? <div className="market-notice market-notice--warning" role="alert">
             <h3 className="h6" tabIndex="-1" ref={confirmationHeading}>{confirmation === 'all' ? 'Restore the complete factory policy?' : confirmation === 'remove' ? 'Remove this custom rule?' : 'Restore this factory rule?'}</h3>
             <p>{confirmation === 'all' ? `Replace all ${snapshot.rules.length} active rules with shipped defaults and remove every custom override.`
-              : confirmation === 'remove' ? 'Remove this restriction from new receipts.' : `Restore ${entry.defaultEnabled ? 'enabled' : 'disabled'} activation, ${describeScope(entry.defaultScope)} scope and shipped parameters: ${describeParameters(entry.defaultParameters, entry)}.`}
+              : confirmation === 'remove' ? 'Remove this restriction from new receipts.' : `Restore ${onOff(entry.defaultEnabled).toLowerCase()} status, ${describeScope(entry.defaultScope)} scope and default value: ${describeParameters(entry.defaultParameters, entry)}.`}
               {' '}Unsaved input will be discarded. Exposure, usage history and pending policies are not reset.</p>
             {confirmation === 'all' ? <details open>
               <summary>Factory policy preview</summary>
               <ul>{snapshot.catalogue.filter(item => !item.locked).map(item => <li key={item.type}>
-                {ruleName(item)}: {item.defaultEnabled ? 'Enabled' : 'Disabled'} · {describeScope(item.defaultScope)} · {describeParameters(item.defaultParameters, item)}
+                {ruleName(item)}: {onOff(item.defaultEnabled)} · {describeScope(item.defaultScope)} · {describeParameters(item.defaultParameters, item)}
               </li>)}</ul>
             </details> : null}
             {confirmationRevision !== snapshot.revision ? <p>Policy changed while this confirmation was open. Cancel and review a new preview before continuing.</p> : null}

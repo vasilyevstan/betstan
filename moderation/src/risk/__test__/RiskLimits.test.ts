@@ -80,6 +80,20 @@ it("does not turn unsupported precision or overflowing returns into monetary cap
   expect(money({ wager: 1, rows: [{ oddsValue: 1e100 }] }).moneyReady).toBe(false);
 });
 
+it("applies Builder-scoped rules to a Builder combined with another leg, alongside accumulator rules", () => {
+  const builder = { eventId: "a", oddsValue: 3, marketBet: { kind: "BUILDER", selections: [{ marketId: "m", templateId: "t" }] } };
+  const leg = { eventId: "b", oddsValue: 1.01 };
+  const deny = parseRule({ id: "test:DENY", type: "DENY", enabled: true, scope: { structure: "BUILDER" }, parameters: {} });
+  const accumulator = { ...rule("MAX_STAKE", 100), scope: { structure: "ACCUMULATOR" as const } };
+  const single = { ...rule("MAX_STAKE", 100), scope: { structure: "SINGLE" as const } };
+  const policy = { revision: 1, defaultsVersion: 1 as const, rules: [deny, accumulator, single] };
+  const combined = { wager: 1, rows: [builder, leg] };
+  expect(matching(policy, combined)).toEqual([deny, accumulator]);
+  expect(staticReason(matching(policy, combined), combined)).toBe("RISK_DENY");
+  expect(facts(combined).structure).toBe("ACCUMULATOR");
+  expect(matching(policy, { wager: 1, rows: [{ eventId: "b", oddsValue: 2 }, leg] })).toEqual([accumulator]);
+  expect(matching({ ...policy, rules: [{ ...deny, scope: { structure: "BUILDER", eventIds: ["z"] } }] }, combined)).toEqual([]);
+});
 it("matches Builder scope and repeat identity from selections, independently of row or selection order", () => {
   const selections = [
     { marketId: "market-b", templateId: "template-b", rulesRevision: 1, outcomeKey: "away" },
