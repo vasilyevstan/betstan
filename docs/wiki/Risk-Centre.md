@@ -41,8 +41,15 @@ Every matching restriction applies: the lowest ceiling, highest floor and
 longest delay win. A narrower rule cannot relax a global rule. Conflicting or
 unsupported policy values fail validation rather than being ignored.
 
-New optional restrictions start disabled or unbounded, and acceptance delay
-starts at zero. Existing hard safeguards cannot be disabled or widened beyond
+Price and stake rules apply to the complete ticket: accumulators use the
+combined price, not each leg. A rule scoped to Bet Builder also applies to a
+ticket that combines a Builder with other selections, together with any
+accumulator-scoped rules. History and exposure totals still classify such a
+ticket as an accumulator; scope those totals by template to include Builder
+legs in combined tickets.
+
+New optional restrictions start off or unbounded, and acceptance delay
+starts at zero. Existing hard safeguards cannot be turned off or widened beyond
 their supported capabilities. An absent optional override uses its explicit,
 versioned shipped default; a corrupt policy or missing required authority
 never substitutes permissive defaults.
@@ -67,14 +74,30 @@ editor does not mislabel those retries as an active delay rule.
 The editor shows readable rule names and saved values in the rule list.
 Money is entered in Stanbucks and time in seconds; transport and enforcement
 retain integer minor units and milliseconds. Choose a rule, enter its value,
-select pre-match/live and bet type, then Save. Selecting a new rule opens its
-form directly. Specific event/product/market/template IDs and the full saved
+select pre-match/live and bet type, then use the button that names the
+outcome. Selecting a new rule opens its form directly. Specific event/product/market/template IDs and the full saved
 settings/default comparison remain available under expandable details.
 
 The unrelated unavailable-integrations panel is omitted. This does not
 enable those integrations or remove any backend safeguard.
 
-**Save** activates one complete validated revision for subsequent durable
+Each rule shows its saved status: **On** (checked on new bets, with its
+scope), **Off** (no effect on bets) or **Not saved**. There is no separate
+enabled checkbox. The buttons state the result:
+
+| Saved status | Without edits | With edits |
+| --- | --- | --- |
+| Off or new | Turn on | Save and turn on; Save as off |
+| On | Turn off | Save changes; Save and turn off |
+
+Enter performs only the primary save and never turns a rule off. When required
+history is not ready, turning on is unavailable with the reason shown, and the
+rule can still be saved as off. The confirmation names the rule, its value and
+whether it is on. A rule saved as off has no effect: for example, a minimum
+stake of 5 that was saved off still accepts a 1-Stanbuck bet until it is
+turned on.
+
+Every save activates one complete validated revision for subsequent durable
 receipts. It is not a draft/publish workflow. Stale revisions conflict instead
 of overwriting another visitor's changes. Stable operation identity lets an
 uncertain response be reconciled or retried without creating another edit.

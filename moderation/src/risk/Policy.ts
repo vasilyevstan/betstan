@@ -87,7 +87,7 @@ export const catalogue = () => [
           ? "Reject when exact fixed-odds maximum return minus stake exceeds this minor-unit limit. Never reduces payout."
         : type === "MAX_CUSTOMER_LOSS"
           ? "Signed confirmed closed principal minus returns in the window, plus all outstanding and pending principal."
-          : "Every matching enabled restriction applies to the whole ticket.",
+          : "Every matching rule that is on applies to the whole ticket.",
       category: financial(type) ? "accounting" : windowed(type) || type === "REPEAT_BET_COOLDOWN_MS" ? "activity" : "admission",
       defaultParameters: defaultParameters(type),
       defaultEnabled: type === "DELAY_MS", defaultScope: {},
