@@ -13,6 +13,15 @@ const createPolicy = () => {
     defaultParameters: { limit }, defaultEnabled, defaultScope: {}, locked: false,
     parameterDefinitions: [{ name: 'limit', label: 'Limit', type: 'number', required: true, min: 0, max: 1000000, unit }],
   }));
+  catalogue.push({
+    type: 'MAX_SUBMISSIONS', label: 'Bet frequency', category: 'activity', description: 'Limit bets in a named time window.',
+    defaultParameters: { limit: 10, window: 'UTC_DAY', perCustomer: false }, defaultEnabled: false, defaultScope: {}, locked: false,
+    parameterDefinitions: [
+      { name: 'limit', label: 'Limit', type: 'number', required: true, min: 1, max: 1000, unit: 'count' },
+      { name: 'window', label: 'Window', type: 'select', required: true, options: ['UTC_DAY', 'ROLLING_24H'] },
+      { name: 'perCustomer', label: 'Per customer', type: 'boolean', required: true },
+    ],
+  });
   return {
     revision: 1, defaultsVersion: 1,
     rules: catalogue.map(item => ({
@@ -73,7 +82,12 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByRole('link', { name: 'Market designer', exact: true })).toBeVisible();
       await page.getByRole('link', { name: 'Risk Centre', exact: true }).click();
       await expect(page.getByRole('heading', { name: 'Risk Centre', exact: true })).toBeVisible();
-      await page.getByRole('button', { name: /Maximum stake Off/ }).click();
+      const activity = page.getByRole('region', { name: 'Betting activity' });
+      await expect(activity).toContainText('10 bets · Calendar day (UTC) · Across all customers');
+      await expect(activity).not.toContainText(/UTC_DAY|false/);
+      await expect(page.locator('.risk-rule-list .market-pill--positive').first()).toHaveText('ON');
+      await expect(page.locator('.risk-rule-list .market-pill--danger').first()).toHaveText('OFF');
+      await page.getByRole('button', { name: /Maximum stake OFF/ }).click();
       await expect(page.getByRole('heading', { name: 'Maximum stake', exact: true })).toBeFocused();
       await expect(page.getByLabel('Event IDs', { exact: true })).toBeHidden();
       await page.getByLabel('Limit (Stanbucks)', { exact: true }).fill('24');
@@ -101,7 +115,7 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByText('Factory policy preview')).toBeVisible();
       await page.getByRole('button', { name: 'Confirm restore' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
-      await page.getByRole('button', { name: /Operator exposure limit Off/ }).click();
+      await page.getByRole('button', { name: /Operator exposure limit OFF/ }).click();
       await expect(page.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
       await expect(page.getByText(/Can't turn on yet/)).toBeVisible();
       await expect(page.getByText(/Exact hedge credit is not spendable/)).toBeVisible();
@@ -110,11 +124,15 @@ for (const theme of ['light', 'dark']) {
           .filter(node => node.getBoundingClientRect().height > 0);
         return {
           overflow: document.documentElement.scrollWidth > innerWidth,
+          titleLeftSpread: (() => {
+            const positions = [...root.querySelectorAll('.risk-rule-title strong')].map(node => node.getBoundingClientRect().left);
+            return Math.max(...positions) - Math.min(...positions);
+          })(),
           narrow: targets.filter(node => !node.disabled && node.getBoundingClientRect().height < 43.5).map(node => node.textContent),
           fieldOverflow: targets.filter(node => node.getBoundingClientRect().right > innerWidth + 1).length,
         };
       });
-      expect(geometry).toEqual({ overflow: false, narrow: [], fieldOverflow: 0 });
+      expect(geometry).toEqual({ overflow: false, narrow: [], fieldOverflow: 0, titleLeftSpread: 0 });
       await page.screenshot({ path: testInfo.outputPath(`risk-${theme}-${viewport.width}.png`), fullPage: true });
     }
   });
@@ -123,7 +141,7 @@ for (const theme of ['light', 'dark']) {
 test('uncertain Save reuses its operation identity and updates only once', async ({ page }) => {
   const { mutations } = await installRiskApi(page, { uncertain: true });
   await page.goto('/backoffice/risk-centre');
-  await page.getByRole('button', { name: /Maximum stake Off/ }).click();
+  await page.getByRole('button', { name: /Maximum stake OFF/ }).click();
   await page.getByLabel('Limit (Stanbucks)', { exact: true }).fill('32');
   await page.getByRole('button', { name: 'Save and turn on', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('uncertain');

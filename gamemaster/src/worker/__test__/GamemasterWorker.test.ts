@@ -401,6 +401,31 @@ async function createEvent(eventTime = baseKickoff) {
   return event;
 }
 
+it("settles a pre-match-only event at kickoff without publishing countdown markets or a live game", async () => {
+  const event = await createEvent();
+  event.liveEnabled = false;
+  await event.save();
+  const simulation = buildSimulationResult(event.eventId);
+  const simulate = jest.fn(() => simulation);
+  let now = new Date(baseKickoff.getTime() - 60_000);
+  const worker = new GamemasterWorker({
+    clock: { ...createStaticClock(now), now: () => now },
+    simulate, liveKickoffsEnabled: () => true,
+  });
+  await worker.checkEventsOnce();
+  expect(simulate).not.toHaveBeenCalled();
+  now = baseKickoff;
+  await worker.checkEventsOnce();
+  expect(simulate).toHaveBeenCalledTimes(1);
+  expect(LiveEventUpdatePublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
+  expect(ResultSetPublisher.prototype.publishWithConfirm).toHaveBeenCalledWith(expect.objectContaining({
+    data: expect.objectContaining({ eventId: event.eventId, homeScore: 1, awayScore: 0 }),
+  }));
+  expect(await EventArchive.findOne({ eventId: event.eventId })).toMatchObject({ liveEnabled: false, status: EventStatus.RESULTED });
+  await worker.checkEventsOnce();
+  expect(ResultSetPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+});
+
 function nextTransitionAt(
   kickoffAt: Date,
   simulation: SimulationResult,

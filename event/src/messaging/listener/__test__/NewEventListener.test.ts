@@ -40,6 +40,19 @@ const buildMessage = (): ConsumeMessage => ({
   },
 });
 
+it("preserves pre-match-only metadata after an out-of-order visibility placeholder and predecessor replay", async () => {
+  const visibility = new EventVisibilityListener(messengerWrapper.connection);
+  await visibility.init();
+  await visibility.onMessage({ data: { eventId: "pre-match-only", visibility: EventVisibility.ONLINE } }, buildMessage());
+  const creation = new NewEventListener(messengerWrapper.connection);
+  await creation.init();
+  const legacy = { data: { id: "pre-match-only", name: "Home - Away", home: "Home", away: "Away", time: "2030-01-01T12:00:00.000Z" } };
+  const configured = { data: { ...legacy.data, liveEnabled: false } };
+  await creation.onMessage(configured, buildMessage());
+  await creation.onMessage(legacy, buildMessage());
+  expect((await Event.findOne({ eventId: "pre-match-only" }))?.liveEnabled).toBe(false);
+});
+
 it("defers market pricing for a visibility placeholder until its creation metadata and model arrive", async () => {
   const previous = process.env.EXTENSIBLE_MARKETS_ENABLED;
   process.env.EXTENSIBLE_MARKETS_ENABLED = "true";

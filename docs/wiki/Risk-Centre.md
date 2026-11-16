@@ -81,8 +81,14 @@ settings/default comparison remain available under expandable details.
 The unrelated unavailable-integrations panel is omitted. This does not
 enable those integrations or remove any backend safeguard.
 
-Each rule shows its saved status: **On** (checked on new bets, with its
-scope), **Off** (no effect on bets) or **Not saved**. There is no separate
+Rules are grouped under Bet acceptance, Betting activity, Exposure and loss,
+and Always-on safeguards. These are categories, not an override hierarchy.
+Rule titles and saved settings share consistent left alignment. Time windows
+and customer scope use readable labels rather than raw enum values or booleans.
+
+Each rule shows its saved status: green **ON** (checked on new bets, with its
+scope), red **OFF** (no effect on bets) or **Not saved**. Text accompanies
+color, and locked safeguards stay ON. There is no separate
 enabled checkbox. The buttons state the result:
 
 | Saved status | Without edits | With edits |
@@ -119,6 +125,14 @@ and time-window membership. A delay never renews a quote, changes an accepted
 price, removes a selection or converts pre-match to live. A bet either
 confirms as submitted or is rejected as a whole; row reasons explain the
 failure rather than authorizing partial acceptance.
+
+For risk-policy declines, Slip and My Bets name the rule types recorded in
+that decision, for example **Declined: Minimum stake**. The rule title is not
+inferred from today's policy; changing a limit does not relabel an old bet.
+Older records without recognized reason codes retain the generic risk-policy
+explanation. Per-selection metadata stays with its affected selection when
+declined selections return to a draft; a new submission clears the previous
+attempt's explanation.
 
 Receipts, scheduling, reservations, terminal decisions and publication
 obligations are durable. Duplicate delivery consumes no new allowance.

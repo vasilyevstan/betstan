@@ -18,6 +18,8 @@ const prepareShell = async (page, overrides = {}) => {
 test('approved blue header and compact Backoffice controls retain representative geometry and contrast', async ({ page }, testInfo) => {
   const state = await prepareShell(page);
   state.backofficeEvents = createBackofficeEvents();
+  state.backofficeEvents[0].liveEnabled = false;
+  state.backofficeEvents[0].cashBackEnabled = false;
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const evidence = [];
   for (const [index, viewport] of [
@@ -33,6 +35,9 @@ test('approved blue header and compact Backoffice controls retain representative
       await page.setViewportSize(viewport);
       await page.goto(`/backoffice?ui=${ui}&theme=${theme}&acceptanceEventIds=event-1%2Cevent-2&review=header`);
       await expect(page.getByText('Showing 5 of 5 events')).toBeVisible();
+      await expect(page.getByLabel('Event mode', { exact: true })).toHaveValue('live');
+      await expect(page.getByLabel('Cash back', { exact: true })).toHaveValue('on');
+      await expect(page.getByRole('button', { name: /Allow cash back/ }).first()).toBeVisible();
       const header = page.getByRole('navigation', { name: 'Primary navigation' });
       await expect(header.getByRole('group', { name: 'Layout' })).toHaveCount(0);
       const toggle = header.getByRole('button', { name: 'Toggle navigation' });

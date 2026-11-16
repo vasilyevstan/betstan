@@ -20,6 +20,20 @@ const snapshot = (revision = 1) => ({
   }],
   readiness: { transactions: 'READY', accounting: { ready: false }, capabilities: { extensibleMarkets: false } },
 });
+
+it('groups rules by category with explicit status tags and readable activity settings', async () => {
+  const data = activitySnapshot('MAX_SUBMISSIONS', { tracking: false, readyWindows: [], readyCooldownMs: 0 });
+  data.catalogue[0].parameterDefinitions[0].unit = 'count';
+  data.rules[0].parameters.perCustomer = false;
+  axios.get.mockResolvedValue({ data });
+  mount();
+  const entry = await screen.findByRole('button', { name: /Bet frequency OFF All bets/ });
+  expect(entry.closest('section')).toHaveAccessibleName('Betting activity');
+  expect(entry.querySelector('.market-pill--danger')).toHaveTextContent('OFF');
+  expect(entry).toHaveTextContent('10000 bets · Calendar day (UTC) · Across all customers');
+  expect(entry).not.toHaveTextContent(/UTC_DAY|false/);
+  expect(screen.getByRole('button', { name: /Quote authority ON/ }).querySelector('.market-pill--positive')).toHaveTextContent('ON');
+});
 const accountingSnapshot = (type, accounting) => {
   const data = snapshot();
   data.readiness.accounting = accounting;
@@ -55,7 +69,7 @@ const activitySnapshot = (type, activity) => {
   return data;
 };
 const mount = () => render(<MemoryRouter><RiskCentre /></MemoryRouter>);
-const selectRule = async () => fireEvent.click(await screen.findByRole('button', { name: /Off · All bets/ }));
+const selectRule = async () => fireEvent.click(await screen.findByRole('button', { name: /OFF All bets/ }));
 const editLimit = value => fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: value === '' ? '' : String(Number(value) / 100) } });
 const result = config => ({
   data: { requestId: config.data.requestId, revision: config.data.expectedRevision + 1, defaultsVersion: 1,
@@ -72,7 +86,7 @@ it('omits the unavailable integrations panel without hiding existing safeguards'
   data.catalogue.push({ ...data.catalogue[1], type: 'WALLET', label: 'Wallet integration', category: 'unavailable' });
   axios.get.mockResolvedValue({ data });
   mount();
-  expect(await screen.findByRole('button', { name: /Quote authority Locked/ })).toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: /Quote authority ON Locked/ })).toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'Unavailable integrations' })).not.toBeInTheDocument();
   expect(screen.queryByText(/Wallet, balance, deposit and withdrawal limits/)).not.toBeInTheDocument();
   expect(screen.queryByText(/These controls have no authoritative integration/)).not.toBeInTheDocument();
@@ -104,7 +118,7 @@ it('opens new delay settings directly and saves seconds as exact milliseconds', 
   axios.get.mockResolvedValue({ data });
   mount();
   fireEvent.change(await screen.findByLabelText('Search rules'), { target: { value: 'Acceptance delay' } });
-  expect(screen.getByRole('button', { name: /Acceptance delay On/ })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Acceptance delay ON/ })).toBeInTheDocument();
   fireEvent.change(await screen.findByLabelText('Add a rule'), { target: { value: 'DELAY_MS' } });
   expect(screen.getByRole('heading', { name: 'Acceptance delay' })).toHaveFocus();
   expect(screen.queryByRole('button', { name: 'Configure new rule' })).not.toBeInTheDocument();
@@ -192,7 +206,7 @@ it('recovers an operation result rather than issuing a second mutation', async (
 
 it('creates custom rules off only when saved as off, guards unsaved switching and removes only after confirmation', async () => {
   mount(); await selectRule(); editLimit('600');
-  fireEvent.click(screen.getByRole('button', { name: /Quote authority Locked/ }));
+  fireEvent.click(screen.getByRole('button', { name: /Quote authority ON Locked/ }));
   expect(screen.getByRole('alert')).toHaveTextContent('Discard');
   fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
   expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(6);
@@ -218,7 +232,7 @@ it('previews factory restore and requires confirmation, with locked safeguards r
   fireEvent.click(screen.getByRole('button', { name: 'Confirm restore' }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.ruleId).toBe('default:MAX_STAKE');
-  fireEvent.click(screen.getByRole('button', { name: /Quote authority Locked/ }));
+  fireEvent.click(screen.getByRole('button', { name: /Quote authority ON Locked/ }));
   expect(screen.getByText(/cannot be turned off, edited or removed/)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /Save|Turn on|Turn off/ })).not.toBeInTheDocument();
 });
@@ -459,12 +473,12 @@ describe('explicit on/off activation', () => {
     axios.get.mockResolvedValue({ data: minStake() });
     mount(); await selectRule();
     expect(document.body).not.toHaveTextContent(/Enabled|Disabled/);
-    expect(screen.getByText('Off', { selector: '.risk-status strong' }).closest('p')).toHaveTextContent('Off — has no effect on bets');
+    expect(screen.getByText('OFF', { selector: '.risk-status .market-pill' }).closest('p')).toHaveTextContent('OFF — has no effect on bets');
     fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: '5' } });
     fireEvent.click(button('Save and turn on'));
     expect(await screen.findByText('Minimum stake is on: 5 Stanbucks · All bets. Applies to new bets. Revision 2 saved.')).toBeInTheDocument();
     expect(axios.request.mock.calls[0][0].data.rule).toMatchObject({ enabled: true, parameters: { limit: 500 } });
-    expect(screen.getByText('On', { selector: '.risk-status strong' }).closest('p')).toHaveTextContent('On — checked on new bets · All bets');
+    expect(screen.getByText('ON', { selector: '.risk-status .market-pill' }).closest('p')).toHaveTextContent('ON — checked on new bets · All bets');
     fireEvent.click(button('Turn off'));
     expect(await screen.findByText('Minimum stake is off — it no longer affects new bets. Revision 3 saved.')).toBeInTheDocument();
     expect(axios.request.mock.calls[1][0].data.rule).toMatchObject({ enabled: false, parameters: { limit: 500 } });

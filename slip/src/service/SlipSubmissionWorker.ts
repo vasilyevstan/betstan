@@ -230,7 +230,7 @@ export const submitDraftSlipAtomically = async (
       },
     },
     {
-      $unset: ["declineReason", "replacementSlipId"],
+      $unset: ["declineReason", "reasonCodes", "replacementSlipId"],
     },
   ];
 

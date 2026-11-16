@@ -316,6 +316,21 @@ describe('Slip', () => {
     expect(within(liveSection()).getByText('Awaiting live moderation and approval…')).toBeInTheDocument();
   });
 
+  it('keeps the recorded risk title through board normalization without attributing it to an unaffected row', async () => {
+    const affected = buildRow({ moderation: { rowId: 'risk-row', declineReason: 'RISK_POLICY', reasonCodes: ['RISK_MIN_STAKE'] } });
+    boardsResponse = getBoardsPayload({
+      [BET_KIND.PRE_MATCH]: buildBoard(BET_KIND.PRE_MATCH, {
+        declineReason: 'RISK_POLICY', reasonCodes: ['RISK_MIN_STAKE'],
+        rows: [affected, buildRow({ oddsName: 'Unaffected selection' })],
+      }),
+    });
+    await renderSlip();
+    expect(screen.getByText('Declined: Minimum stake')).toBeVisible();
+    expect(screen.getByText('Minimum stake')).toBeVisible();
+    expect(screen.getByText('1 declined selection')).toBeVisible();
+    expect(screen.queryByText('Risk policy restriction')).not.toBeInTheDocument();
+  });
+
   it('starts polling for server-submitted boards on mount and unlocks a declined replacement draft with a new id', async () => {
     boardsResponse = getBoardsPayload({
       [BET_KIND.LIVE]: getSubmittedBoard(BET_KIND.LIVE, {
@@ -323,6 +338,7 @@ describe('Slip', () => {
         rows: [buildRow({ betKind: BET_KIND.LIVE, oddsName: 'Home', oddsValue: 1.8, selectionId: 'home', quoteVersion: 1 })],
       }),
     });
+
     betsResponse = [{ slipId: 'live-submitted-1', status: BET_STATUS.PENDING }];
 
     await renderSlip();

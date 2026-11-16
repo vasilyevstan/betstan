@@ -15,6 +15,7 @@ import {
 } from "../compat/LiveContract";
 
 export interface BetRowRecord {
+  reasonCodes?: string[];
   marketBet?: MarketBet;
   id: string;
   eventId: string;
@@ -46,6 +47,7 @@ export interface BetRowRecord {
 }
 
 export interface BetRecord {
+  reasonCodes?: string[];
   userId: string;
   userName: string;
   slipId: string;
@@ -65,6 +67,7 @@ type SerializedBet = Partial<BetRecord> & {
 } & Record<string, unknown>;
 
 const betRowSchema = new Schema<BetRowRecord>({
+  reasonCodes: { type: [String], default: undefined },
   marketBet: { type: Schema.Types.Mixed },
   eventId: {
     type: String,
@@ -189,6 +192,7 @@ const betRowSchema = new Schema<BetRowRecord>({
 
 const betSchema = new Schema<BetRecord>(
   {
+    reasonCodes: { type: [String], default: undefined },
     cashBackFinancial: {
       type: new Schema<CashBackFinancialSnapshot>({
         revision: { type: Number, required: true },

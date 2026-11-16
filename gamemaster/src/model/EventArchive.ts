@@ -3,6 +3,7 @@ import { Schema, model } from "mongoose";
 import { liveStateFields } from "./liveStateFields";
 
 const eventArchiveSchema = new Schema({
+  liveEnabled: { type: Boolean, default: true },
   eventId: {
     type: String,
     required: true,

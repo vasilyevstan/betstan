@@ -539,13 +539,21 @@ const canAdvanceRowStatus = (current: SlipRowStatus, target: SlipRowStatus) => {
   return target !== SlipRowStatus.NOT_SETTLED;
 };
 
+const applyReasonCodes = (target: { reasonCodes?: string[] }, codes?: readonly string[]) => {
+  if (!codes || (target.reasonCodes?.length === codes.length
+    && codes.every((code, index) => target.reasonCodes?.[index] === code))) return false;
+  target.reasonCodes = [...codes];
+  return true;
+};
+
 const applyModerationAffectedRow = (
   row: BetRowRecord,
   affectedRow: IModerationAffectedRow,
   fallbackBetKind: BetKind,
-  defaultDeclineReason?: ModerationDeclineReason
+  defaultDeclineReason?: ModerationDeclineReason,
+  reasonCodes?: readonly string[]
 ) => {
-  let changed = false;
+  let changed = applyReasonCodes(row, reasonCodes);
 
   const nextBetKind = mergeBetKind(row.betKind, fallbackBetKind);
   if (row.betKind !== nextBetKind) {
@@ -962,6 +970,7 @@ export const applyModerationResult = (
 
   changed =
     setDefinedValue(bet, "declineReason", event.data.declineReason) || changed;
+  changed = applyReasonCodes(bet, event.data.reasonCodes) || changed;
 
   if ((event.data.affectedRows?.length ?? 0) > 0) {
     const betKind = normalizeBetKind(bet.betKind);
@@ -979,7 +988,8 @@ export const applyModerationResult = (
           row,
           affectedRow,
           betKind,
-          event.data.declineReason
+          event.data.declineReason,
+          event.data.reasonCodes
         ) || changed;
     }
 
@@ -1000,7 +1010,8 @@ export const applyModerationResult = (
           declineReason: event.data.declineReason,
         },
         betKind,
-        event.data.declineReason
+        event.data.declineReason,
+        event.data.reasonCodes
       ) || changed;
   }
 

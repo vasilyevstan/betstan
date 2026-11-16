@@ -13,6 +13,8 @@ const cashBackHoldSchema = new Schema<BackofficeCashBackHold>({
 }, { _id: false });
 
 const eventSchema = new Schema({
+  liveEnabled: { type: Boolean, default: true },
+  cashBackEnabled: { type: Boolean, default: true },
   customMarkets: { type: [eventMarketSchema], default: [], select: false },
   cashBackGeneration: { type: Number, required: false, select: false },
   cashBackAuthorityRevision: { type: Number, required: false, select: false },

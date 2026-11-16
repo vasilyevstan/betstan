@@ -190,6 +190,14 @@ const buildLiveUpdate = (
   },
 } as unknown as ILiveEventUpdateEvent);
 
+it("keeps pre-match-only capability through public normalization and SSE updates", () => {
+  const snapshot = createPublicEventSnapshot({ ...buildRawEventDocument(), liveEnabled: false });
+  expect(snapshot.liveEnabled).toBe(false);
+  expect(sanitizePublicEventSnapshot(snapshot).liveEnabled).toBe(false);
+  expect(createPublicEventSnapshotFromLiveUpdate(buildLiveUpdate(999, { eventId: snapshot.eventId }), snapshot).liveEnabled).toBe(false);
+  expect(createPublicEventSnapshot(buildRawEventDocument()).liveEnabled).toBeUndefined();
+});
+
 it("creates immutable public snapshots without mutating source documents", () => {
   const rawEventDocument = buildRawEventDocument();
   const before = JSON.parse(JSON.stringify(rawEventDocument));

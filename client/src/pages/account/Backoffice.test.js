@@ -141,7 +141,31 @@ describe('public Backoffice access', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'Team A - Team B was created.'
     );
-    expect(screen.getByText('Kickoff is scheduled 15 minutes after creation.')).toBeVisible();
+    expect(screen.getByText(/Kickoff is scheduled 15 minutes after creation\./)).toBeVisible();
+  });
+
+  it('creates pre-match-only events with cash back off through explicit creation settings', async () => {
+    renderBackoffice();
+    await screen.findByText('Home - Away');
+    fireEvent.change(screen.getByLabelText('Home team'), { target: { value: 'Home' } });
+    fireEvent.change(screen.getByLabelText('Away team'), { target: { value: 'Away' } });
+    fireEvent.change(screen.getByLabelText('Event mode'), { target: { value: 'pre-match' } });
+    fireEvent.change(screen.getByLabelText('Cash back'), { target: { value: 'off' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/backoffice/new_event',
+      expect.objectContaining({ liveEnabled: false, cashBackEnabled: false })));
+    expect(await screen.findByRole('status')).toHaveTextContent('Home - Away was created.');
+  });
+
+  it('sends the displayed cash-back state as the expected setting and reports authority conflicts', async () => {
+    axios.post.mockRejectedValueOnce({ response: { status: 409, data: { message: 'Cash back is currently reserved. Try again after it completes.' } } });
+    renderBackoffice();
+    const toggle = await screen.findByRole('button', { name: /Turn off cash back/ });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/backoffice/event_cash_back',
+      { eventId: event.eventId, enabled: false, expectedEnabled: true }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Cash back is currently reserved.');
+    expect(screen.getByRole('button', { name: /Turn off cash back/ })).toBeEnabled();
   });
 
   it('reuses the creation request id after an ambiguous network failure', async () => {
@@ -154,6 +178,7 @@ describe('public Backoffice access', () => {
     fireEvent.change(screen.getByLabelText('Home team'), {
       target: { value: 'Team A' },
     });
+
     fireEvent.change(screen.getByLabelText('Away team'), {
       target: { value: 'Team B' },
     });

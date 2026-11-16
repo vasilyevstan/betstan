@@ -2,7 +2,7 @@ import request from "supertest";
 import mongoose from "mongoose";
 import { app } from "../../app";
 import { Slip } from "../../model/Slip";
-import { BetKind, SlipStatus } from "@betstan/common";
+import { BetKind, ModerationDeclineReason, SlipStatus } from "@betstan/common";
 
 const userId = new mongoose.Types.ObjectId().toHexString();
 const otherUserId = new mongoose.Types.ObjectId().toHexString();
@@ -112,6 +112,19 @@ it("deletes the slip when only one row remains", async () => {
     .expect(200);
 
   expect(await Slip.findById(slip.id)).toBeNull();
+});
+
+it("clears the previous ticket's risk reason when removing a row from a declined draft", async () => {
+  const slip = await createSlipWithRows(2);
+  slip.declineReason = ModerationDeclineReason.RISK_POLICY;
+  slip.reasonCodes = ["RISK_MIN_STAKE"];
+  await slip.save();
+  await request(app).post("/api/slip/row").set("currentUser", currentUserHeader)
+    .send({ slipId: slip.id, slipRowId: slip.rows[0].id }).expect(200);
+  const updated = await Slip.findById(slip.id);
+  expect(updated?.rows).toHaveLength(1);
+  expect(updated?.declineReason).toBeUndefined();
+  expect(updated?.reasonCodes).toBeUndefined();
 });
 
 it("returns 409 without deleting when placement wins the one-row race", async () => {

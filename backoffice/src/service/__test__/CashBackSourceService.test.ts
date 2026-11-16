@@ -99,6 +99,48 @@ it("snapshots do not reserve and missing sources are never recreated", async () 
   expect(stored?.cashBackHold).toBeUndefined();
 });
 
+it("blocks cash-back quotes and old confirmations when an event is switched off, including after re-enabling", async () => {
+  await createEvent();
+  const reserve = await reserveRequest();
+  const toggle = { eventId: "event-one", enabled: false, expectedEnabled: true };
+  await request(app).post("/api/backoffice/event_cash_back").send(toggle).expect(200);
+  await request(app).post("/api/backoffice/event_cash_back").send(toggle).expect(200);
+  expect(await handleCashBackSourceRequest(snapshotRequest())).toMatchObject({ outcome: "DENIED", reason: "SUSPENDED" });
+  expect(await handleCashBackSourceRequest(reserve)).toMatchObject({ outcome: "DENIED", reason: "SUSPENDED" });
+  await request(app).post("/api/backoffice/event_cash_back")
+    .send({ eventId: "event-one", enabled: true, expectedEnabled: false }).expect(200);
+  expect(await handleCashBackSourceRequest(reserve)).toMatchObject({ outcome: "DENIED", reason: "AUTHORITY_CHANGED" });
+  expect(await handleCashBackSourceRequest(snapshotRequest("fresh"))).toMatchObject({ outcome: "SNAPSHOT" });
+});
+
+it("cannot switch cash-back off underneath a granted reservation, and permits it after release", async () => {
+  await createEvent();
+  const reserve = await reserveRequest();
+  const grant = await handleCashBackSourceRequest(reserve);
+  expect(grant.outcome).toBe("GRANTED");
+  const toggle = { eventId: "event-one", enabled: false, expectedEnabled: true };
+  await request(app).post("/api/backoffice/event_cash_back").send(toggle).expect(409);
+  expect(await handleCashBackSourceRequest(reserve)).toEqual(grant);
+  await handleCashBackSourceRequest(releaseRequest(reserve));
+  await request(app).post("/api/backoffice/event_cash_back").send(toggle).expect(200);
+});
+
+it("validates cash-back settings and does not recreate missing events", async () => {
+  await request(app).post("/api/backoffice/event_cash_back").send({ eventId: "missing", enabled: "false", expectedEnabled: true }).expect(400);
+  await request(app).post("/api/backoffice/event_cash_back").send({ eventId: "missing", enabled: false, expectedEnabled: true }).expect(404);
+  expect(await Event.countDocuments()).toBe(0);
+});
+
+it("keeps unchanged cash-back settings idempotent without invalidating quotes", async () => {
+  await createEvent();
+  const before = await Event.findOne({ eventId: "event-one" }).lean();
+  await request(app).post("/api/backoffice/event_cash_back")
+    .send({ eventId: "event-one", enabled: true, expectedEnabled: true }).expect(200);
+  const after = await Event.findOne({ eventId: "event-one" }).lean();
+  expect(after?.cashBackAuthorityRevision).toBe(before?.cashBackAuthorityRevision);
+  expect(after?.cashBackAuthorityAt).toEqual(before?.cashBackAuthorityAt);
+});
+
 it("persists the exact grant at b+1 and retries without extending its time", async () => {
   await createEvent();
   const reserve = await reserveRequest();

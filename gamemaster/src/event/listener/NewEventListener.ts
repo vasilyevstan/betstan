@@ -15,7 +15,11 @@ class NewEventListener extends AListener<INewEventEvent> {
   queue: QueueNames.NEW_EVENT = QueueNames.NEW_EVENT;
 
   async onMessage(event: INewEventEvent, msg: ConsumeMessage) {
-    const { data } = event;
+    // Additive Common candidate field; published predecessor producers omit it.
+    const data: INewEventEvent["data"] & { liveEnabled?: boolean } = event.data;
+    if (data.liveEnabled !== undefined && typeof data.liveEnabled !== "boolean") {
+      throw new Error("Invalid event live capability");
+    }
 
     if (await EventArchive.exists({ eventId: data.id })) {
       this.ack(msg);
@@ -34,6 +38,7 @@ class NewEventListener extends AListener<INewEventEvent> {
             away: data.away,
             status: EventStatus.NO_RESULT,
             phase: EventPhase.PRE_MATCH,
+            liveEnabled: data.liveEnabled !== false,
             liveSeed: createLiveSeed(),
           },
         },

@@ -59,6 +59,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
   const [visibilityFilter, setVisibilityFilter] = useState('ALL');
   const [newEventHome, setNewEventHome] = useState('');
   const [newEventAway, setNewEventAway] = useState('');
+  const [newEventLiveEnabled, setNewEventLiveEnabled] = useState(true);
+  const [newEventCashBackEnabled, setNewEventCashBackEnabled] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [busyAction, setBusyAction] = useState('');
   const [loadError, setLoadError] = useState('');
@@ -251,6 +253,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
         away,
         kickoffDelaySeconds: BACKOFFICE_KICKOFF_DELAY_SECONDS,
         requestId: creationRequestId.current,
+        ...(!newEventLiveEnabled ? { liveEnabled: false } : {}),
+        ...(!newEventCashBackEnabled ? { cashBackEnabled: false } : {}),
       }),
       `${home} - ${away} was created.`
     );
@@ -276,6 +280,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     const awayInputId = `backoffice-away-result-${event.eventId}`;
     const resultActionId = `result:${event.eventId}`;
     const visibilityActionId = `visibility:${event.eventId}`;
+    const cashBackEnabled = event.cashBackEnabled !== false;
+    const cashBackActionId = `cash-back:${event.eventId}`;
     const kickoffLabel = formatKickoff(event.time);
 
     return <article className="card backoffice-event" key={event.eventId} aria-labelledby={`backoffice-event-${event.eventId}`}>
@@ -288,6 +294,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               : 'Kickoff time unavailable'}
           </p>
           <div className="backoffice-states">
+            <span className="backoffice-state">{event.liveEnabled === false ? 'Pre-match only' : 'Pre-match and live'}</span>
+            <span className="backoffice-state">Cash back: <strong>{cashBackEnabled ? 'Allowed' : 'Off'}</strong></span>
             <span className={`backoffice-state${isResulted ? ' backoffice-state--recorded' : ''}`}>
               Final result: <strong>{resultLabel}</strong>
             </span>
@@ -368,6 +376,15 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             <a className="btn backoffice-control backoffice-action"
               href={`/backoffice/events/${encodeURIComponent(event.eventId)}/markets${window.location.search}`}
               aria-label={`Markets for ${eventName}`}>Markets</a>
+            <button type="button" className="btn backoffice-control backoffice-action"
+              disabled={isResulted || Boolean(busyAction)}
+              aria-label={`${cashBackEnabled ? 'Turn off' : 'Allow'} cash back for ${eventName}`}
+              onClick={() => runAction(cashBackActionId,
+                () => axios.post('/api/backoffice/event_cash_back', {
+                  eventId: event.eventId, enabled: !cashBackEnabled, expectedEnabled: cashBackEnabled,
+                }), `Cash back ${cashBackEnabled ? 'turned off' : 'allowed'} for ${eventName}.`)}>
+              {busyAction === cashBackActionId ? 'Changing...' : cashBackEnabled ? 'Turn off cash back' : 'Allow cash back'}
+            </button>
           </div>
         </div>
       </div>
@@ -420,6 +437,25 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               }}
             />
           </div>
+          <div className="backoffice-create__settings">
+            <div className="backoffice-field">
+              <label className="form-label" htmlFor="backoffice-new-live">Event mode</label>
+              <select id="backoffice-new-live" className="form-select backoffice-control"
+                value={newEventLiveEnabled ? 'live' : 'pre-match'} disabled={Boolean(busyAction)}
+                onChange={event => { creationRequestId.current = ''; setNewEventLiveEnabled(event.target.value === 'live'); }}>
+                <option value="live">Pre-match and live game</option>
+                <option value="pre-match">Pre-match only — no live game</option>
+              </select>
+            </div>
+            <div className="backoffice-field">
+              <label className="form-label" htmlFor="backoffice-new-cash-back">Cash back</label>
+              <select id="backoffice-new-cash-back" className="form-select backoffice-control"
+                value={newEventCashBackEnabled ? 'on' : 'off'} disabled={Boolean(busyAction)}
+                onChange={event => { creationRequestId.current = ''; setNewEventCashBackEnabled(event.target.value === 'on'); }}>
+                <option value="on">Allowed</option><option value="off">Off</option>
+              </select>
+            </div>
+          </div>
           <button
             type="submit"
             className="btn backoffice-control backoffice-action backoffice-action--primary"
@@ -428,7 +464,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             {busyAction === 'create' ? 'Creating...' : 'Create'}
           </button>
         </form>
-        <p className="backoffice-help">Kickoff is scheduled 15 minutes after creation.</p>
+        <p className="backoffice-help">Kickoff is scheduled 15 minutes after creation. Pre-match-only events receive an automatic final result at kickoff without a live game. Event mode is fixed at creation; cash back can be changed later.</p>
       </div>
     </div>
     <section className="backoffice-discovery" aria-label="Find events">

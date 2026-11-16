@@ -107,6 +107,17 @@ const preMatchProducts = [
   },
 ];
 
+it("refuses direct live selection for a pre-match-only event even if a stale live market exists", async () => {
+  const event = await createLiveEvent();
+  event.liveEnabled = false;
+  await event.save();
+  const response = await request(app).post("/api/event/odds").send({
+    eventId: event.eventId, marketId: "market-1", marketVersion: 2, quoteVersion: 4, selectionId: "home",
+  }).expect(400);
+  expect(response.body.errors[0].msg).toContain("pre-match only");
+  expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
+});
+
 it("publishes server-authoritative pre-match selections and ignores client kind/odds", async () => {
   const event = await createPreMatchEvent();
 
