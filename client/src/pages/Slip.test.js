@@ -326,9 +326,35 @@ describe('Slip', () => {
     });
     await renderSlip();
     expect(screen.getByText('Declined: Minimum stake')).toBeVisible();
-    expect(screen.getByText('Minimum stake')).toBeVisible();
+    expect(screen.getAllByText(/Minimum stake/)).toHaveLength(1);
     expect(screen.getByText('1 declined selection')).toBeVisible();
     expect(screen.queryByText('Risk policy restriction')).not.toBeInTheDocument();
+  });
+
+  it('shows a whole-ticket decline once on the slip instead of repeating it on every row', async () => {
+    const moderation = (rowId) => ({ rowId, declineReason: 'RISK_POLICY', reasonCodes: ['RISK_MIN_STAKE'] });
+    boardsResponse = getBoardsPayload({
+      [BET_KIND.PRE_MATCH]: buildBoard(BET_KIND.PRE_MATCH, {
+        declineReason: 'RISK_POLICY', reasonCodes: ['RISK_MIN_STAKE'],
+        rows: [buildRow({ moderation: moderation('a') }), buildRow({ oddsName: 'Draw', moderation: moderation('b') })],
+      }),
+    });
+    await renderSlip();
+    expect(screen.getAllByText(/Minimum stake/)).toHaveLength(1);
+    expect(screen.getByRole('note')).toHaveTextContent('Declined: Minimum stake');
+    expect(screen.queryByText(/declined selection/)).not.toBeInTheDocument();
+  });
+
+  it('keeps a selection-specific decline on its row even when every row is affected', async () => {
+    boardsResponse = getBoardsPayload({
+      [BET_KIND.PRE_MATCH]: buildBoard(BET_KIND.PRE_MATCH, {
+        declineReason: 'STALE_QUOTE',
+        rows: [buildRow({ moderation: buildModeration('a') }), buildRow({ oddsName: 'Draw', moderation: buildModeration('b') })],
+      }),
+    });
+    await renderSlip();
+    expect(screen.getAllByText('Declined: Quote changed')).toHaveLength(2);
+    expect(screen.getByText('2 declined selections')).toBeVisible();
   });
 
   it('starts polling for server-submitted boards on mount and unlocks a declined replacement draft with a new id', async () => {

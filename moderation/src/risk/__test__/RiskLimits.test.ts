@@ -47,6 +47,9 @@ it("adopts canonical reasons and emits all five immutable metadata fields withou
 
 it.each([
   ["MIN_STAKE", 100, { wager: 0.99, rows: [{ oddsValue: 2 }] }, { wager: 1, rows: [{ oddsValue: 2 }] }],
+  ["MAX_STAKE", 100, { wager: 1.01, rows: [{ oddsValue: 2 }] }, { wager: 1, rows: [{ oddsValue: 2 }] }],
+  ["MAX_RETURN", 200, { wager: 1, rows: [{ oddsValue: 2.01 }] }, { wager: 1, rows: [{ oddsValue: 2 }] }],
+  ["MAX_NET_WIN", 100, { wager: 1, rows: [{ oddsValue: 2.01 }] }, { wager: 1, rows: [{ oddsValue: 2 }] }],
   ["MIN_ODDS", 2, { wager: 1, rows: [{ oddsValue: 1.99 }] }, { wager: 1, rows: [{ oddsValue: 2 }] }],
   ["MAX_ODDS", 2, { wager: 1, rows: [{ oddsValue: 2.01 }] }, { wager: 1, rows: [{ oddsValue: 2 }] }],
   ["MAX_LEGS", 1, { wager: 1, rows: [{ oddsValue: 2 }, { oddsValue: 2 }] }, { wager: 1, rows: [{ oddsValue: 2 }] }],
@@ -58,6 +61,9 @@ it.each([
 ] as const)("enforces inclusive %s boundaries on the complete ticket", (type, limit, rejected, accepted) => {
   expect(staticReason([rule(type, limit)], accepted)).toBeUndefined();
   expect(staticReason([rule(type, limit)], rejected)).toBe(`RISK_${type}`);
+  const policy = (enabled: boolean) => ({ revision: 1, defaultsVersion: 1 as const, rules: [{ ...rule(type, limit), enabled }] });
+  expect(staticReason(matching(policy(true), rejected), rejected)).toBe(`RISK_${type}`);
+  expect(staticReason(matching(policy(false), rejected), rejected)).toBeUndefined();
 });
 
 it.each([

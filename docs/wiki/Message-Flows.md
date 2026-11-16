@@ -101,6 +101,13 @@ target generation is consumed, not that a different newer hold is absent or
 released. Generation state is retained rather than reset during recovery or
 archive. See the [source message contract](https://github.com/vasilyevstan/betstan/blob/master/common/src/event/ICashBackSourceEvent.ts).
 
+Backoffice also checks its global cash-back switch
+(`GET`/`PUT /api/backoffice/cash-back-setting`, changed from Risk Centre).
+While it is off, `SNAPSHOT` and new `RESERVE` requests are denied
+`SUSPENDED`. A `RESERVE` whose snapshot was observed at or before the latest
+switch change is denied `AUTHORITY_CHANGED`. `RELEASE` and replay of an
+already granted hold are unaffected, so outstanding operations still finish.
+
 Source-authority writers conflict with holds. Gamemaster records its exact
 authority-change intent before publication/cursor advancement, preventing a
 new grant while a transition's delivery is unresolved. An outstanding hold has

@@ -3,6 +3,7 @@ const { installFakeEventSource } = require('./support/fakeEventSource');
 const { createShellMockState, installAppApiMocks } = require('./support/mockAppApi');
 
 const API = '/api/backoffice/risk-centre';
+const TEMPLATE_ID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
 const createPolicy = () => {
   const catalogue = [
     ['MAX_STAKE', 'Maximum stake', 'admission', 10000, 'minor units', false],
@@ -29,6 +30,9 @@ const createPolicy = () => {
       scope: {}, parameters: { ...item.defaultParameters },
     })),
     catalogue: [...catalogue, {
+      type: 'DENY', label: 'Block bets', category: 'admission', description: 'Decline every matching bet.',
+      defaultEnabled: false, defaultScope: {}, defaultParameters: {}, parameterDefinitions: [], locked: false,
+    }, {
       type: 'QUOTE_AUTHORITY', label: 'Quote authority', category: 'integrity', description: 'Original quote consent remains mandatory.',
       defaultEnabled: true, defaultScope: {}, defaultParameters: {}, parameterDefinitions: [], locked: true,
     }],
@@ -70,6 +74,17 @@ async function installRiskApi(page, { uncertain = false } = {}) {
     if (uncertain) { uncertain = false; return route.abort(); }
     return reply(route, result);
   });
+  let cashBack = { enabled: true, revision: 0 };
+  await page.route('**/api/backoffice/cash-back-setting**', async route => {
+    if (route.request().method() === 'GET') return reply(route, cashBack);
+    const body = route.request().postDataJSON();
+    if (body.expectedEnabled !== cashBack.enabled) return reply(route, { message: 'Cash back changed' }, 409);
+    cashBack = { enabled: body.enabled, revision: cashBack.revision + 1, updatedAt: '2026-11-14T21:00:00.000Z' };
+    return reply(route, cashBack);
+  });
+  await page.route('**/api/backoffice/market-templates**', route => reply(route, { enabled: true, starters: [], templates: [
+    { templateId: TEMPLATE_ID, archived: false, versions: [{ version: 1, definition: { name: 'Total goals' } }] },
+  ] }));
   return { state, mutations };
 }
 
@@ -101,13 +116,13 @@ for (const theme of ['light', 'dark']) {
       expect(mutations.at(-1).body.rule).toMatchObject({ enabled: true, parameters: { limit: 2400 } });
       await expect(page.getByRole('button', { name: 'Turn off', exact: true })).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath(`risk-stake-${theme}-${viewport.width}.png`), fullPage: true });
-      await page.getByLabel('Add a rule').selectOption('DELAY_MS');
+      await page.getByLabel('Add live rule', { exact: true }).selectOption('DELAY_MS');
       await expect(page.getByRole('heading', { name: 'Acceptance delay', exact: true })).toBeFocused();
       await expect(page.locator('.risk-status')).toContainText('Not saved — no effect yet');
       await page.getByLabel('Limit (seconds)', { exact: true }).fill('0.5');
       await page.getByRole('button', { name: 'Save as off', exact: true }).click();
       await expect(page.getByText(/Acceptance delay saved as off/)).toBeVisible();
-      expect(mutations.at(-1).body.rule).toMatchObject({ enabled: false, parameters: { limit: 500 } });
+      expect(mutations.at(-1).body.rule).toMatchObject({ enabled: false, scope: { betKind: 'LIVE' }, parameters: { limit: 500 } });
       await page.getByRole('button', { name: 'Remove', exact: true }).click();
       await page.getByRole('button', { name: 'Confirm remove' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
@@ -115,6 +130,22 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByText('Factory policy preview')).toBeVisible();
       await page.getByRole('button', { name: 'Confirm restore' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
+      const cashBack = page.getByRole('region', { name: 'Cash back', exact: true });
+      await cashBack.getByRole('button', { name: 'Turn off cash back for all events' }).click();
+      await expect(page.getByText(/Cash back is off for all events/)).toBeVisible();
+      await expect(cashBack.locator('.market-pill--danger')).toHaveText('OFF');
+      await cashBack.getByRole('button', { name: 'Turn on cash back for all events' }).click();
+      await expect(cashBack.locator('.market-pill--positive')).toHaveText('ON');
+      const markets = page.getByRole('region', { name: 'Markets', exact: true });
+      await markets.getByRole('button', { name: 'Turn off Total goals for all events' }).click();
+      await expect(page.getByText(/Total goals is off for all events\. New bets on it are declined\. Revision \d+ saved/)).toBeVisible();
+      expect(mutations.at(-1).body.rule).toMatchObject({
+        id: `market:${TEMPLATE_ID}`, type: 'DENY', enabled: true, scope: { templateIds: [TEMPLATE_ID] },
+      });
+      await expect(page.getByRole('button', { name: /Block bets ON Market: Total goals/ })).toBeVisible();
+      await markets.getByRole('button', { name: 'Turn on Total goals for all events' }).click();
+      await expect(page.getByText(/Total goals is on for all events\. Revision \d+ saved/)).toBeVisible();
+      expect(mutations.at(-1)).toMatchObject({ method: 'DELETE', path: `${API}/rules/market:${TEMPLATE_ID}` });
       await page.getByRole('button', { name: /Operator exposure limit OFF/ }).click();
       await expect(page.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
       await expect(page.getByText(/Can't turn on yet/)).toBeVisible();

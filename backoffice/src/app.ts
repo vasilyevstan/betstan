@@ -9,6 +9,7 @@ import { publicBackofficeAccess } from "./middleware/PublicBackofficeAccess";
 import { Markets } from "./route/Markets";
 import { RiskCentre } from "./route/RiskCentre";
 import { EventCashBack } from "./route/EventCashBack";
+import { GlobalCashBackSetting } from "./route/CashBackSetting";
 
 const cors = require("cors");
 const app = express();
@@ -29,6 +30,7 @@ app.use(SetResult);
 app.use(NewEvent);
 app.use(EventVisibility);
 app.use(EventCashBack);
+app.use(GlobalCashBackSetting);
 app.use(Markets);
 app.use(RiskCentre);
 
