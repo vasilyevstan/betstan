@@ -40,7 +40,8 @@ const buildDeclinedArchivePayload = (
 
   archivedSlip.replacementSlipId = replacementSlipId ?? undefined;
   archivedSlip.declineReason = eventData.declineReason;
-  applyAffectedRows(archivedSlip, eventData.affectedRows ?? []);
+  archivedSlip.reasonCodes = eventData.reasonCodes ? [...eventData.reasonCodes] : undefined;
+  applyAffectedRows(archivedSlip, eventData.affectedRows ?? [], eventData.reasonCodes);
 
   return archivedSlip;
 };
@@ -60,11 +61,12 @@ const buildRestoredDraftPayload = (
     sourceSlipId,
     replacementSlipId: undefined,
     declineReason: eventData.declineReason,
+    reasonCodes: eventData.reasonCodes ? [...eventData.reasonCodes] : undefined,
     rows: sourceSlip.rows.map((row) => ({ ...row })),
   };
 
   clearSubmittedAttemptState(restoredDraft);
-  applyAffectedRows(restoredDraft, eventData.affectedRows ?? []);
+  applyAffectedRows(restoredDraft, eventData.affectedRows ?? [], eventData.reasonCodes);
   return normalizePlainSlip(restoredDraft, normalizeBetKind(sourceSlip.betKind));
 };
 

@@ -118,6 +118,7 @@ export class BackofficePublicationService {
         home: event.home,
         away: event.away,
         visibility: event.visibility,
+        liveEnabled: event.liveEnabled,
       },
     };
 

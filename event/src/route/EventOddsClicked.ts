@@ -190,6 +190,9 @@ router.post(
     }
 
     if (isLiveSelectionRequest(body)) {
+      if (event.liveEnabled === false) {
+        return next(new BadRequestError("This event is pre-match only"));
+      }
       if (
         !isNonEmptyString(marketId) ||
         !isNonEmptyString(selectionId) ||

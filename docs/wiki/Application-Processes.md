@@ -222,6 +222,14 @@ event, and publishes `event:new`. Repeating the same accepted request returns
 the same operation instead of creating duplicate matches. The API retains a
 bounded explicit-delay option for controlled automated validation.
 
+Creation optionally sets `liveEnabled` and `cashBackEnabled`; absent fields
+mean true, preserving scheduled and historical events. The creation identity
+binds both choices. Live mode is immutable: false keeps the event pre-match
+until kickoff, then uses Gamemaster's existing completed-simulation path to
+publish its final score, without countdown or live-market updates. Event
+selection and Moderation's current-source verification also deny live bets
+for this mode; hiding a UI control is not the enforcement boundary.
+
 Backoffice-created and scheduled events use the same downstream registration,
 simulation, projection, and settlement paths. The origin changes; the betting
 model does not.
@@ -538,6 +546,14 @@ For `PRE_MATCH`, eligibility ends strictly before the earliest trusted kickoff
 and cannot reopen as `LIVE`. For `LIVE`, every exact selected market version
 and selection must remain unresolved and available. Backoffice and Gamemaster
 both participate for every selected event.
+
+Backoffice owns each event's cash-back permission. Disabling it denies new
+source snapshots and reservations with `SUSPENDED`. Changing this permission
+compares the expected value, requires an unresolved event without a held
+reservation, and increments the source-authority revision. Previously quoted
+evidence stays invalid even after re-enabling. An unchanged value is a no-op.
+Exact granted-operation replay and release remain available; an operator
+cannot remove a hold or undo accepted cash-back by switching the setting.
 
 A quote expires strictly before or at the earliest of its seven-second
 lifetime, relevant price validity, and authority cutoffs: acceptance requires

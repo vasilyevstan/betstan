@@ -12,6 +12,7 @@ import {
 import ModerationResultListener from "../ModerationResultListener";
 import { Slip, SlipArchive } from "../../../model/Slip";
 import { SlipPublicationState } from "../../../model/SlipPublicationState";
+import { submitDraftSlipAtomically } from "../../../service/SlipSubmissionWorker";
 
 const buildMessage = (): ConsumeMessage => ({
   content: Buffer.alloc(5),
@@ -119,6 +120,40 @@ const buildEvent = (
     result: ModerationStatus.APPROVED,
     ...overrides,
   },
+});
+
+it("preserves recorded risk reasons on the archived attempt and restored board across replay", async () => {
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+  const slip = await createSubmittedSlip(new mongoose.Types.ObjectId().toHexString(), BetKind.PRE_MATCH);
+  const decision = buildEvent({
+    slipId: slip.id, result: ModerationStatus.DECLINED, declineReason: ModerationDeclineReason.RISK_POLICY,
+    reasonCodes: ["RISK_MIN_STAKE"],
+    affectedRows: [{ rowId: slip.rows[0].id, declineReason: ModerationDeclineReason.RISK_POLICY }],
+  });
+  await listener.onMessage(decision, buildMessage());
+  await listener.onMessage(decision, buildMessage());
+  const archived = await SlipArchive.findById(slip.id);
+  const restored = await Slip.findOne({ sourceSlipId: slip.id });
+  for (const record of [archived, restored]) {
+    expect(record?.reasonCodes).toEqual(["RISK_MIN_STAKE"]);
+    expect(record?.rows[0].moderation?.reasonCodes).toEqual(["RISK_MIN_STAKE"]);
+  }
+  expect(await Slip.countDocuments({ sourceSlipId: slip.id })).toBe(1);
+  const submitted = await submitDraftSlipAtomically({
+    slipId: restored!.id, userId: restored!.userId, userName: "simulation",
+    betKind: BetKind.PRE_MATCH, wager: 5, placementAttemptId: "new-risk-attempt",
+    expectedBoardRevision: restored!.boardRevision, expectedBoardFingerprint: restored!.boardFingerprint,
+  });
+  expect(submitted).not.toBeNull();
+  expect(submitted?.declineReason).toBeUndefined();
+  expect(submitted?.reasonCodes).toBeUndefined();
+  await listener.onMessage(buildEvent({ slipId: restored!.id, result: ModerationStatus.APPROVED }), buildMessage());
+  const approved = await SlipArchive.findById(restored!.id);
+  expect(approved).not.toBeNull();
+  expect(approved?.declineReason).toBeUndefined();
+  expect(approved?.reasonCodes).toBeUndefined();
+  expect(approved?.rows[0].moderation).toBeUndefined();
 });
 
 it("approves only the targeted submitted slip and normalizes legacy PRE_MATCH documents", async () => {

@@ -4,6 +4,19 @@ import { Event } from "../../model/Event";
 import { EventStatus, EventVisibility } from "@betstan/common";
 import NewEventPublisher from "../../event/publisher/NewEventPublisher";
 
+it("creates pre-match-only events with explicit cash-back settings and binds them to creation retries", async () => {
+  const input = { home: "Home", away: "Away", requestId: "capability-event", liveEnabled: false, cashBackEnabled: false };
+  const response = await request(app).post("/api/backoffice/new_event").send(input).expect(200);
+  expect(response.body.event).toMatchObject({ liveEnabled: false, cashBackEnabled: false });
+  expect(NewEventPublisher.prototype.publishWithConfirm).toHaveBeenCalledWith(expect.objectContaining({
+    data: expect.objectContaining({ liveEnabled: false }),
+  }));
+  await request(app).post("/api/backoffice/new_event").send(input).expect(200);
+  await request(app).post("/api/backoffice/new_event").send({ ...input, liveEnabled: true }).expect(409);
+  await request(app).post("/api/backoffice/new_event").send({ ...input, cashBackEnabled: true }).expect(409);
+  await request(app).post("/api/backoffice/new_event").send({ ...input, liveEnabled: "false" }).expect(400);
+});
+
 it("rejects a public create request when home or away is missing", async () => {
   const response = await request(app)
     .post("/api/backoffice/new_event")

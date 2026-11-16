@@ -9,5 +9,7 @@ export interface INewEventEvent extends IEvent {
     home: string;
     away: string;
     visibility?: EventVisibility;
+    /** Creation-time capability. Absent preserves live simulation; false publishes only the final result. */
+    liveEnabled?: boolean;
   };
 }

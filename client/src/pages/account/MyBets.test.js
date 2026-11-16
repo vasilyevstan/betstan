@@ -18,6 +18,17 @@ describe('MyBets', () => {
     axios.get.mockReset();
   });
 
+  it('shows the recorded triggering rule in the collapsed bet and row details', async () => {
+    axios.get.mockResolvedValue({ data: [bet({
+      status: 'DECLINED', declineReason: 'RISK_POLICY', reasonCodes: ['RISK_MIN_STAKE'],
+      rows: [{ ...bet().rows[0], declineReason: 'RISK_POLICY', reasonCodes: ['RISK_MIN_STAKE'] }],
+    })] });
+    render(<MyBets currentUser={{ id: 'test-owner' }} />);
+    expect(await screen.findByText('Declined: Minimum stake')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /^Bet details/ }));
+    expect(within(document.querySelector('.my-bets-details')).getByText('Minimum stake')).toBeVisible();
+  });
+
   it('shows the event start time in a collapsed single separately from row and placement timestamps', async () => {
     axios.get.mockResolvedValue({ data: [bet({
       timestamp: placedTime, rows: [{ ...bet().rows[0], eventTime, timestamp: rowTime }],

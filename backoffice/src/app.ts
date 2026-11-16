@@ -8,6 +8,7 @@ import { EventVisibility } from "./route/EventVisibility";
 import { publicBackofficeAccess } from "./middleware/PublicBackofficeAccess";
 import { Markets } from "./route/Markets";
 import { RiskCentre } from "./route/RiskCentre";
+import { EventCashBack } from "./route/EventCashBack";
 
 const cors = require("cors");
 const app = express();
@@ -27,6 +28,7 @@ app.use(ShowEvents);
 app.use(SetResult);
 app.use(NewEvent);
 app.use(EventVisibility);
+app.use(EventCashBack);
 app.use(Markets);
 app.use(RiskCentre);
 

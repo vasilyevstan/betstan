@@ -100,6 +100,7 @@ router.post("/api/slip/row", async (req: Request, res: Response) => {
         },
         $unset: {
           declineReason: 1,
+          reasonCodes: 1,
         },
       },
       { new: true }

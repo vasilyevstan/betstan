@@ -61,7 +61,7 @@ const BoardModeration = ({ row }) => {
   const moderation = row.moderation;
 
   return <div className="slip-row-card__moderation" role="note">
-    <div className="fw-semibold text-danger">Declined: {formatDeclineReason(moderation.declineReason)}</div>
+    <div className="fw-semibold text-danger">Declined: {formatDeclineReason(moderation.declineReason, moderation.reasonCodes)}</div>
     <div className="slip-row-card__moderation-meta">
       {typeof moderation.currentOdds === 'number' ? <span>Current quote {moderation.currentOdds}</span> : null}
       {typeof moderation.quoteVersion === 'number' ? <span>Quote v{moderation.quoteVersion}</span> : null}
@@ -125,10 +125,10 @@ const SlipBoardPanel = ({
         <div id={`slip-board-title-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
         <div className="slip-board__meta">
           <span className={`bet-kind-badge bet-kind-badge--${betKind.toLowerCase()}`}>{getBetKindLabel(betKind)}</span>
-          {moderationCount > 0 ? <span className="text-danger">{moderationCount} quote issue{moderationCount > 1 ? 's' : ''}</span> : null}
+          {moderationCount > 0 ? <span className="text-danger">{moderationCount} declined selection{moderationCount > 1 ? 's' : ''}</span> : null}
         </div>
       </div>
-      {board?.declineReason ? <span className="slip-board__status text-danger">{formatDeclineReason(board.declineReason)}</span> : null}
+      {board?.declineReason ? <span className="slip-board__status text-danger">{formatDeclineReason(board.declineReason, board.reasonCodes)}</span> : null}
     </div>
 
     {statusMessage ? <div className="slip-board__pending" aria-live="polite">{statusMessage}</div> : null}

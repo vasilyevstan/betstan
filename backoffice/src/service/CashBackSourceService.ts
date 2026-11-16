@@ -25,6 +25,7 @@ export const cashBackAuthorityWritable = {
 };
 
 interface SourceRecord {
+  cashBackEnabled?: boolean;
   _id: Types.ObjectId;
   eventId: string;
   time: string;
@@ -82,6 +83,7 @@ const sourceEvidence = (record: SourceRecord, betKind: BetKind): CashBackSourceE
 
 const eligible = (record: SourceRecord): CashBackSourceDenialReason | undefined => {
   if (record.status !== EventStatus.NO_RESULT) return "RESOLVED";
+  if (record.cashBackEnabled === false) return "SUSPENDED";
   if (
     !validCounter(record.cashBackGeneration)
     || !validCounter(record.cashBackAuthorityRevision)
@@ -232,6 +234,7 @@ export const handleCashBackSourceRequest = async (
       cashBackAuthorityRevision: record.cashBackAuthorityRevision,
       cashBackHold: { $exists: false },
       status: EventStatus.NO_RESULT,
+      cashBackEnabled: { $ne: false },
       newEventPublicationPending: { $ne: true },
       resultPublicationPending: { $ne: true },
       visibilityPublicationPending: { $ne: true },

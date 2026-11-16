@@ -52,7 +52,8 @@ export async function marketCatalog(eventId: string) {
   const projections = await availableMarketProjections(eventId);
   return {
     enabled: marketsEnabled(),
-    event: { eventId, name: event.name, time: event.time, status: event.status, visibility: event.visibility },
+    event: { eventId, name: event.name, time: event.time, status: event.status, visibility: event.visibility,
+      ...(event.liveEnabled === false ? { liveEnabled: false } : {}) },
     hasRetainedModel: Boolean(event.pricingModel),
     standardSelections: standardSelections(event),
     markets: projections.flatMap(record => record.publication?.kind === "MARKET_AVAILABLE" ? [{

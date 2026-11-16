@@ -1,3 +1,5 @@
+import { riskRuleNames } from './riskRuleLabels';
+
 export const BET_KIND = Object.freeze({
   PRE_MATCH: 'PRE_MATCH',
   LIVE: 'LIVE',
@@ -153,7 +155,7 @@ export const isLivePhase = (phase) => (
   typeof phase === 'string' && phase !== 'PRE_MATCH' && phase !== 'FULL_TIME'
 );
 
-export const isLiveEvent = (event) => isLivePhase(event?.live?.phase);
+export const isLiveEvent = (event) => event?.liveEnabled !== false && isLivePhase(event?.live?.phase);
 
 export const getLiveSequence = (event) => (
   typeof event?.live?.sequence === 'number' ? event.live.sequence : null
@@ -177,7 +179,7 @@ export const getScheduledKickoffTime = (event) => {
  * on authoritative market/event fields (see `isLiveMarketSelectable`).
  */
 export const isInCountdownWindow = (event, now = Date.now()) => {
-  if (isLiveEvent(event) || isFinishedLiveEvent(event) || event?.status === 'RESULTED') {
+  if (event?.liveEnabled === false || isLiveEvent(event) || isFinishedLiveEvent(event) || event?.status === 'RESULTED') {
     return false;
   }
 
@@ -602,9 +604,14 @@ export const buildFinishedMatchTimeline = (incidentHistory, event) => {
   };
 };
 
-export const formatDeclineReason = (reason) => (
-  DECLINE_REASON_LABELS[reason] ?? normalizeText(reason).replace(/_/g, ' ').toLowerCase()
-);
+export const formatDeclineReason = (reason, reasonCodes) => {
+  if (reason === 'RISK_POLICY' && Array.isArray(reasonCodes)) {
+    const names = reasonCodes.filter(code => typeof code === 'string' && code.startsWith('RISK_'))
+      .map(code => riskRuleNames[code.slice(5)]).filter(Boolean);
+    if (names.length) return [...new Set(names)].join(', ');
+  }
+  return DECLINE_REASON_LABELS[reason] ?? normalizeText(reason).replace(/_/g, ' ').toLowerCase();
+};
 
 export const formatLiveMarketType = (marketType) => (
   LIVE_MARKET_LABELS[marketType] ?? normalizeText(marketType).replace(/_/g, ' ').toLowerCase()

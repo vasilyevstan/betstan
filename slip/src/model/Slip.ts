@@ -23,6 +23,7 @@ const SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER = {
 
 const affectedRowSchema = new Schema(
   {
+    reasonCodes: { type: [String], default: undefined },
     rowId: {
       type: String,
       required: true,
@@ -334,6 +335,7 @@ const slipSchema = new Schema({
     type: String,
     enum: Object.values(ModerationDeclineReason),
   },
+  reasonCodes: { type: [String], default: undefined },
   sourceSlipId: {
     type: String,
   },

@@ -20,6 +20,13 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
   const away = typeof req.body.away === "string" ? req.body.away.trim() : "";
   const { kickoffDelaySeconds } = req.body;
   const visibility = req.body.visibility ?? EventVisibility.ONLINE;
+  const liveEnabled = req.body.liveEnabled ?? true;
+  const cashBackEnabled = req.body.cashBackEnabled ?? true;
+  if ((req.body.liveEnabled !== undefined && typeof req.body.liveEnabled !== "boolean")
+    || (req.body.cashBackEnabled !== undefined && typeof req.body.cashBackEnabled !== "boolean")) {
+    res.status(400).send({ message: "Live game and cash-back settings must be on or off" });
+    return;
+  }
   const suppliedRequestId =
     typeof req.body.requestId === "string" ? req.body.requestId.trim() : "";
 
@@ -64,6 +71,8 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
     away,
     delaySeconds,
     visibility,
+    ...(liveEnabled ? {} : { liveEnabled: false }),
+    ...(cashBackEnabled ? {} : { cashBackEnabled: false }),
   });
   const existingEvent = await Event.findOne({ creationRequestId }).select(
     "+creationRequestId +creationRequestFingerprint "
@@ -100,6 +109,8 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
     away,
     status: EventStatus.NO_RESULT,
     visibility,
+    liveEnabled,
+    cashBackEnabled,
     creationRequestId,
     creationRequestFingerprint,
     newEventPublicationPending: true,

@@ -13,7 +13,11 @@ class NewEventListener extends AListener<INewEventEvent> {
   queue: QueueNames.NEW_EVENT = QueueNames.NEW_EVENT;
 
   async onMessage(event: INewEventEvent, msg: ConsumeMessage) {
-    const { data } = event;
+    // Additive Common candidate field; published predecessor producers omit it.
+    const data: INewEventEvent["data"] & { liveEnabled?: boolean } = event.data;
+    if (data.liveEnabled !== undefined && typeof data.liveEnabled !== "boolean") {
+      throw new Error("Invalid event live capability");
+    }
     const requestedVisibility = (
       data as typeof data & { visibility?: EventVisibility }
     ).visibility;
@@ -44,6 +48,7 @@ class NewEventListener extends AListener<INewEventEvent> {
       home: newEvent.home,
       away: newEvent.away,
       products: newEvent.products,
+      liveEnabled: data.liveEnabled !== false,
       ...newEvent.pricingPersistenceFields(),
     };
 

@@ -157,6 +157,19 @@ The stable creation request identifier makes an ambiguous client retry
 idempotent. A reused identifier with different event content is a conflict,
 not a second event.
 
+`event:new` adds optional `liveEnabled`. Absence means the existing live-capable
+mode; false means an automatic final score at kickoff without a live game.
+Creation publication, placeholder repair, Gamemaster persistence and archives,
+and public Event snapshots preserve that choice. Replayed creation cannot
+change an already initialized event's mode. `cashBackEnabled` remains
+Backoffice-owned source authority rather than a second mirrored decision.
+
+Common source candidate `1.1.0-rc.5` declares the optional field; all eight
+backend consumers remain pinned to published `1.1.0-rc.4`. Event and Gamemaster
+use narrow additive type bridges until a coordinated package upgrade removes
+them. The wire reader still validates supplied booleans. This is not a
+local-package link or a claim that rc.5 has been published.
+
 ## Selecting odds and building a board
 
 ```mermaid

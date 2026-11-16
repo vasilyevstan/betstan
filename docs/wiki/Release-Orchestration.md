@@ -1408,6 +1408,19 @@ public validation must both pass.
 
 ### Compatibility-first producer changes
 
+Per-event live and cash-back permissions require the matching Backoffice,
+Event and Gamemaster readers before public writes reopen. Existing records
+without the fields retain true; no policy or existing event is changed by
+deployment. Current Client and Moderation provide the corresponding controls,
+display and admission veto.
+
+After an event has disabled live play or cash-back, do not roll back to
+readers that ignore those restrictions while affected unresolved events or
+creation-publication obligations remain. Use a compatible forward fix, or a
+separately authorized, evidence-backed drain before selecting an older
+rollback target. A previously healthy image is not by itself proof of this
+semantic compatibility.
+
 When a producer begins persisting or publishing a new additive enum value, the
 immediately previous production generation must already understand that value.
 Use two immutable releases:

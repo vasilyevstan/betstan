@@ -152,6 +152,24 @@ const buildModerationEvent = (
   },
 });
 
+it("persists the recorded risk rule on public bet and row history without changing it on legacy replay", async () => {
+  const bet = buildBet();
+  const decision = buildModerationEvent({
+    slipId: bet.slipId, result: ModerationStatus.DECLINED,
+    declineReason: ModerationDeclineReason.RISK_POLICY, reasonCodes: ["RISK_MIN_STAKE"],
+  });
+  expect(applyModerationResult(bet, decision)).toBe(true);
+  await bet.save();
+  const saved = await Bet.findById(bet.id);
+  expect(saved?.toJSON()).toMatchObject({
+    status: BetStatus.DECLINED, reasonCodes: ["RISK_MIN_STAKE"],
+    rows: [{ reasonCodes: ["RISK_MIN_STAKE"] }],
+  });
+  expect(applyModerationResult(saved!, decision)).toBe(false);
+  expect(applyModerationResult(saved!, { ...decision, data: { ...decision.data, reasonCodes: undefined } })).toBe(false);
+  expect(saved?.reasonCodes).toEqual(["RISK_MIN_STAKE"]);
+});
+
 const buildSettleSlipEvent = (
   overrides: Partial<ISettleSlipEvent["data"]> = {}
 ): ISettleSlipEvent => ({
