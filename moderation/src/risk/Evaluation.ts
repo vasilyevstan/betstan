@@ -62,7 +62,12 @@ export function selectionFingerprint(data: any): string {
 }
 export function matching(policy: Policy, data: any): Rule[] {
   const values = facts(data);
-  return policy.rules.filter(r => r.enabled && matches(r.scope, values));
+  // A Builder combined with other selections is still a Builder ticket for
+  // admission, so adding a leg cannot avoid a Builder-scoped rule. The stored
+  // scope facts keep their contract shape (ACCUMULATOR) for history totals.
+  const builder = data.rows.some((r: any) => r.marketBet?.kind === "BUILDER") ? { ...values, structure: "BUILDER" } : undefined;
+  return policy.rules.filter(r => r.enabled && (matches(r.scope, values)
+    || (builder !== undefined && r.scope.structure === "BUILDER" && matches(r.scope, builder))));
 }
 export function staticReason(rules: Rule[], data: any): ModerationDecisionReasonCode | undefined {
   if (!Number.isFinite(data.wager) || data.wager <= 0 || !data.rows.length

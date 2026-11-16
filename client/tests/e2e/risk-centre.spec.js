@@ -9,7 +9,7 @@ const createPolicy = () => {
     ['DELAY_MS', 'Acceptance delay', 'admission', 0, 'milliseconds', true],
     ['MAX_OPERATOR_EXPOSURE', 'Operator exposure', 'accounting', 10000, 'minor units', false],
   ].map(([type, label, category, limit, unit, defaultEnabled]) => ({
-    type, label, category, description: 'Every matching enabled restriction applies to the whole ticket.',
+    type, label, category, description: 'Every matching rule that is on applies to the whole ticket.',
     defaultParameters: { limit }, defaultEnabled, defaultScope: {}, locked: false,
     parameterDefinitions: [{ name: 'limit', label: 'Limit', type: 'number', required: true, min: 0, max: 1000000, unit }],
   }));
@@ -73,25 +73,27 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByRole('link', { name: 'Market designer', exact: true })).toBeVisible();
       await page.getByRole('link', { name: 'Risk Centre', exact: true }).click();
       await expect(page.getByRole('heading', { name: 'Risk Centre', exact: true })).toBeVisible();
-      await page.getByRole('button', { name: /Maximum stake Disabled/ }).click();
+      await page.getByRole('button', { name: /Maximum stake Off/ }).click();
       await expect(page.getByRole('heading', { name: 'Maximum stake', exact: true })).toBeFocused();
       await expect(page.getByLabel('Event IDs', { exact: true })).toBeHidden();
       await page.getByLabel('Limit (Stanbucks)', { exact: true }).fill('24');
       await page.getByRole('combobox', { name: 'Structure', exact: true }).selectOption('SINGLE');
       const previous = mutations.length;
-      await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+      await expect(page.locator('.risk-centre')).not.toContainText(/Enabled|Disabled/);
+      await expect(page.getByRole('button', { name: 'Save and turn on', exact: true })).toBeEnabled();
       expect(mutations).toHaveLength(previous);
-      await page.getByRole('button', { name: 'Save', exact: true }).click();
-      await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
-      expect(mutations.at(-1).body.rule.parameters.limit).toBe(2400);
+      await page.getByRole('button', { name: 'Save and turn on', exact: true }).click();
+      await expect(page.getByText(/Maximum stake is on: 24 Stanbucks/)).toBeVisible();
+      expect(mutations.at(-1).body.rule).toMatchObject({ enabled: true, parameters: { limit: 2400 } });
+      await expect(page.getByRole('button', { name: 'Turn off', exact: true })).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath(`risk-stake-${theme}-${viewport.width}.png`), fullPage: true });
       await page.getByLabel('Add a rule').selectOption('DELAY_MS');
       await expect(page.getByRole('heading', { name: 'Acceptance delay', exact: true })).toBeFocused();
-      await expect(page.getByLabel('Enabled', { exact: true })).not.toBeChecked();
+      await expect(page.locator('.risk-status')).toContainText('Not saved — no effect yet');
       await page.getByLabel('Limit (seconds)', { exact: true }).fill('0.5');
-      await page.getByRole('button', { name: 'Save', exact: true }).click();
-      await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
-      expect(mutations.at(-1).body.rule.parameters.limit).toBe(500);
+      await page.getByRole('button', { name: 'Save as off', exact: true }).click();
+      await expect(page.getByText(/Acceptance delay saved as off/)).toBeVisible();
+      expect(mutations.at(-1).body.rule).toMatchObject({ enabled: false, parameters: { limit: 500 } });
       await page.getByRole('button', { name: 'Remove', exact: true }).click();
       await page.getByRole('button', { name: 'Confirm remove' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
@@ -99,8 +101,9 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByText('Factory policy preview')).toBeVisible();
       await page.getByRole('button', { name: 'Confirm restore' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
-      await page.getByRole('button', { name: /Operator exposure limit Disabled/ }).click();
-      await expect(page.getByLabel('Enabled', { exact: true })).toBeDisabled();
+      await page.getByRole('button', { name: /Operator exposure limit Off/ }).click();
+      await expect(page.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
+      await expect(page.getByText(/Can't turn on yet/)).toBeVisible();
       await expect(page.getByText(/Exact hedge credit is not spendable/)).toBeVisible();
       const geometry = await page.locator('.risk-centre').evaluate(root => {
         const targets = [...root.querySelectorAll('button, input:not([type="checkbox"]), select, summary')]
@@ -120,9 +123,9 @@ for (const theme of ['light', 'dark']) {
 test('uncertain Save reuses its operation identity and updates only once', async ({ page }) => {
   const { mutations } = await installRiskApi(page, { uncertain: true });
   await page.goto('/backoffice/risk-centre');
-  await page.getByRole('button', { name: /Maximum stake Disabled/ }).click();
+  await page.getByRole('button', { name: /Maximum stake Off/ }).click();
   await page.getByLabel('Limit (Stanbucks)', { exact: true }).fill('32');
-  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.getByRole('button', { name: 'Save and turn on', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('uncertain');
   await expect(page.getByLabel('Limit (Stanbucks)', { exact: true })).toHaveValue('32');
   await page.getByRole('button', { name: 'Retry same save' }).click();

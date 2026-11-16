@@ -55,7 +55,7 @@ const activitySnapshot = (type, activity) => {
   return data;
 };
 const mount = () => render(<MemoryRouter><RiskCentre /></MemoryRouter>);
-const selectRule = async () => fireEvent.click(await screen.findByRole('button', { name: /Disabled · Global/ }));
+const selectRule = async () => fireEvent.click(await screen.findByRole('button', { name: /Off · All bets/ }));
 const editLimit = value => fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: value === '' ? '' : String(Number(value) / 100) } });
 const result = config => ({
   data: { requestId: config.data.requestId, revision: config.data.expectedRevision + 1, defaultsVersion: 1,
@@ -86,11 +86,11 @@ it('uses Stanbucks without rounding invalid precision and hides advanced fields 
   expect(screen.getByLabelText('Event IDs')).not.toBeVisible();
   expect(screen.queryByText(/^Accounting unavailable:/)).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: '0.001' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   expect(await screen.findByRole('alert')).toHaveTextContent('two decimal places');
   expect(axios.request).not.toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: '0.29' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.rule.parameters.limit).toBe(29);
   expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(0.29);
@@ -104,13 +104,13 @@ it('opens new delay settings directly and saves seconds as exact milliseconds', 
   axios.get.mockResolvedValue({ data });
   mount();
   fireEvent.change(await screen.findByLabelText('Search rules'), { target: { value: 'Acceptance delay' } });
-  expect(screen.getByRole('button', { name: /Acceptance delay Enabled/ })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Acceptance delay On/ })).toBeInTheDocument();
   fireEvent.change(await screen.findByLabelText('Add a rule'), { target: { value: 'DELAY_MS' } });
   expect(screen.getByRole('heading', { name: 'Acceptance delay' })).toHaveFocus();
   expect(screen.queryByRole('button', { name: 'Configure new rule' })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Limit (seconds)'), { target: { value: '2.125' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
-  await screen.findByText(/Revision 2 saved/);
+  fireEvent.click(screen.getByRole('button', { name: 'Save as off', exact: true }));
+  await screen.findByText('Acceptance delay saved as off — it has no effect on bets. Revision 2 saved.');
   expect(axios.request.mock.calls[0][0]).toMatchObject({
     method: 'POST', data: { rule: { type: 'DELAY_MS', enabled: false, parameters: { limit: 2125 } } },
   });
@@ -125,12 +125,12 @@ it('loads anonymously, focuses the editor, validates and explicitly saves comple
   fireEvent.change(screen.getByLabelText('Bet kind'), { target: { value: 'LIVE' } });
   fireEvent.change(screen.getByLabelText('Event IDs'), { target: { value: 'event:1, event:2' } });
   expect(axios.request).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
-  expect(await screen.findByText(/Revision 2 saved/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
+  expect(await screen.findByText('Maximum stake is on: 25 Stanbucks · Live; Event IDs: event:1, event:2. Applies to new bets. Revision 2 saved.')).toBeInTheDocument();
   expect(axios.request).toHaveBeenCalledWith(expect.objectContaining({
     method: 'PUT', url: `${API}/rules/default:MAX_STAKE`,
     data: { expectedRevision: 1, requestId: 'save:test-uuid',
-      rule: { ...rule, parameters: { limit: 2500 }, scope: { betKind: 'LIVE', eventIds: ['event:1', 'event:2'] } } },
+      rule: { ...rule, enabled: true, parameters: { limit: 2500 }, scope: { betKind: 'LIVE', eventIds: ['event:1', 'event:2'] } } },
   }));
   await waitFor(() => expect(screen.getByText(/Revision 2 saved/).closest('[role="status"]')).toHaveFocus());
 });
@@ -138,12 +138,12 @@ it('loads anonymously, focuses the editor, validates and explicitly saves comple
 it('rejects invalid scope and values without discarding input or calling the API', async () => {
   mount(); await selectRule();
   editLimit('');
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   expect(await screen.findByRole('alert')).toHaveTextContent('two decimal places');
   expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(null);
   editLimit('500');
   fireEvent.change(screen.getByLabelText('Event IDs'), { target: { value: 'bad id' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   expect(screen.getByRole('alert')).toHaveTextContent('stable IDs');
   expect(axios.request).not.toHaveBeenCalled();
 });
@@ -151,16 +151,16 @@ it('rejects invalid scope and values without discarding input or calling the API
 it('retains input on revision conflict and refresh until explicitly rebased', async () => {
   axios.request.mockRejectedValueOnce({ response: { status: 409, data: { code: 'REVISION_CONFLICT' } } });
   mount(); await selectRule(); editLimit('2000');
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Refresh');
   const latest = snapshot(2); latest.rules[0].parameters.limit = 3000;
   axios.get.mockResolvedValue({ data: latest });
   fireEvent.click(screen.getByRole('button', { name: 'Refresh rules' }));
   await screen.findByText(/active revision is 2/);
   expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(20);
-  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
   fireEvent.click(screen.getByRole('button', { name: 'Use refreshed revision' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   await screen.findByText(/Revision 3 saved/);
   expect(axios.request.mock.calls[1][0].data.expectedRevision).toBe(2);
 });
@@ -168,7 +168,7 @@ it('retains input on revision conflict and refresh until explicitly rebased', as
 it('retries ambiguous saves with exactly the same operation and freezes editable input', async () => {
   axios.request.mockRejectedValueOnce(new Error('response lost'));
   mount(); await selectRule(); editLimit('1200');
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   expect(await screen.findByRole('alert')).toHaveTextContent('uncertain');
   expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(12);
   expect(screen.getByLabelText('Limit (Stanbucks)')).toBeDisabled();
@@ -181,7 +181,7 @@ it('retries ambiguous saves with exactly the same operation and freezes editable
 it('recovers an operation result rather than issuing a second mutation', async () => {
   axios.request.mockRejectedValueOnce({ response: { status: 503, data: { code: 'RISK_UNAVAILABLE' } } });
   mount(); await selectRule(); editLimit('1300');
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   await screen.findByText(/Save outcome is uncertain/);
   axios.get.mockResolvedValue(result(axios.request.mock.calls[0][0]));
   fireEvent.click(screen.getByRole('button', { name: 'Check save result' }));
@@ -190,7 +190,7 @@ it('recovers an operation result rather than issuing a second mutation', async (
   expect(axios.get).toHaveBeenLastCalledWith(`${API}/operations/save:test-uuid`, expect.any(Object));
 });
 
-it('creates disabled custom rules, guards unsaved switching and removes only after confirmation', async () => {
+it('creates custom rules off only when saved as off, guards unsaved switching and removes only after confirmation', async () => {
   mount(); await selectRule(); editLimit('600');
   fireEvent.click(screen.getByRole('button', { name: /Quote authority Locked/ }));
   expect(screen.getByRole('alert')).toHaveTextContent('Discard');
@@ -199,8 +199,8 @@ it('creates disabled custom rules, guards unsaved switching and removes only aft
   fireEvent.change(screen.getByLabelText('Add a rule'), { target: { value: 'MAX_STAKE' } });
   fireEvent.click(screen.getByRole('button', { name: 'Discard input and continue' }));
   expect(screen.queryByRole('button', { name: 'Configure new rule' })).not.toBeInTheDocument();
-  expect(screen.getByLabelText('Enabled')).not.toBeChecked();
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  expect(screen.getByText('Not saved', { selector: '.risk-status strong' }).closest('p')).toHaveTextContent('Not saved — no effect yet');
+  fireEvent.click(screen.getByRole('button', { name: 'Save as off', exact: true }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].method).toBe('POST');
   fireEvent.click(screen.getByRole('button', { name: 'Remove', exact: true }));
@@ -219,8 +219,8 @@ it('previews factory restore and requires confirmation, with locked safeguards r
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.ruleId).toBe('default:MAX_STAKE');
   fireEvent.click(screen.getByRole('button', { name: /Quote authority Locked/ }));
-  expect(screen.getByText(/cannot be disabled, edited or removed/)).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Save', exact: true })).not.toBeInTheDocument();
+  expect(screen.getByText(/cannot be turned off, edited or removed/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Save|Turn on|Turn off/ })).not.toBeInTheDocument();
 });
 
 it('never rebases a destructive confirmation silently during refresh', async () => {
@@ -244,7 +244,7 @@ it('shows unavailable authority without fabricating an active policy and preserv
   fireEvent.click(screen.getByRole('button', { name: 'Refresh rules' }));
   await screen.findByText(/could not be loaded/);
   expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(8);
-  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
 });
 
 it('never enables accounting controls until readiness is authoritative', async () => {
@@ -253,9 +253,11 @@ it('never enables accounting controls until readiness is authoritative', async (
   data.catalogue[0] = { ...data.catalogue[0], type: 'MAX_OPEN_STAKE', category: 'accounting' };
   axios.get.mockResolvedValue({ data });
   mount(); await selectRule();
-  expect(screen.getByLabelText('Enabled')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
+  expect(screen.getByText(/Can't turn on yet: accounting history is not ready/)).toBeInTheDocument();
   editLimit('4000');
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Save as off', exact: true }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.rule.enabled).toBe(false);
 });
@@ -268,8 +270,7 @@ it.each(['MAX_OPEN_STAKE', 'MAX_OPEN_RETURN', 'MAX_OPERATOR_EXPOSURE'])(
     mount(); await selectRule();
     expect(screen.getByText(/Accounting partially ready/)).toHaveTextContent('Ready loss windows: none');
     expect(screen.queryByText(/^Accounting unavailable:/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Enabled'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on', exact: true }));
     await screen.findByText(/Revision 2 saved/);
     expect(axios.request.mock.calls[0][0].data.rule.enabled).toBe(true);
   },
@@ -280,18 +281,15 @@ it('uses server-ready loss windows and blocks an enabled rule switched to an unr
     ready: false, openPositionsReady: true, readyLossWindows: ['UTC_DAY', 'ROLLING_24H'],
   }) });
   mount(); await selectRule();
-  fireEvent.click(screen.getByLabelText('Enabled'));
   fireEvent.change(screen.getByLabelText('Window'), { target: { value: 'UTC_WEEK' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
-  expect(screen.getByRole('alert')).toHaveTextContent('Accounting history is not ready');
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
+  fireEvent.submit(screen.getByLabelText('Window').closest('form'));
+  expect(screen.getByRole('alert')).toHaveTextContent('accounting history is not ready');
   expect(axios.request).not.toHaveBeenCalled();
   expect(screen.getByLabelText('Window')).toHaveValue('UTC_WEEK');
-  fireEvent.click(screen.getByLabelText('Enabled'));
-  expect(screen.getByLabelText('Enabled')).toBeDisabled();
   fireEvent.change(screen.getByLabelText('Window'), { target: { value: 'ROLLING_24H' } });
-  expect(screen.getByLabelText('Enabled')).toBeEnabled();
-  fireEvent.click(screen.getByLabelText('Enabled'));
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeEnabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.rule.parameters.window).toBe('ROLLING_24H');
   expect(axios.request.mock.calls[0][0].data.rule.enabled).toBe(true);
@@ -302,7 +300,7 @@ it('requires ready open positions even when the selected loss window is ready', 
     ready: false, openPositionsReady: false, readyLossWindows: ['UTC_DAY'],
   }) });
   mount(); await selectRule();
-  expect(screen.getByLabelText('Enabled')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
   expect(screen.getByText(/Open-position accounting unavailable:/)).toBeInTheDocument();
 });
 
@@ -312,8 +310,8 @@ it.each([
 ])('retains legacy aggregate readiness for %s when ready=%s', async (type, ready) => {
   axios.get.mockResolvedValue({ data: accountingSnapshot(type, { ready }) });
   mount(); await selectRule();
-  if (ready) expect(screen.getByLabelText('Enabled')).toBeEnabled();
-  else expect(screen.getByLabelText('Enabled')).toBeDisabled();
+  if (ready) expect(screen.getByRole('button', { name: 'Turn on', exact: true })).toBeEnabled();
+  else expect(screen.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
 });
 
 it.each([
@@ -356,11 +354,11 @@ it.each(['MAX_SUBMISSIONS', 'MAX_TURNOVER'])(
   'does not substitute accounting readiness for missing %s activity evidence', async type => {
     axios.get.mockResolvedValue({ data: activitySnapshot(type) });
     mount(); await selectRule();
-    expect(screen.getByLabelText('Enabled')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
     expect(screen.getByLabelText('Window')).toBeEnabled();
     expect(screen.getByText(/Activity history unavailable:/)).toBeInTheDocument();
     editLimit('2000');
-    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save as off', exact: true }));
     await screen.findByText(/Revision 2 saved/);
     expect(axios.request.mock.calls[0][0].data.rule.enabled).toBe(false);
   },
@@ -372,17 +370,14 @@ it.each(['MAX_SUBMISSIONS', 'MAX_TURNOVER'])(
       tracking: true, readyWindows: ['UTC_DAY'], trackedSince: '2026-11-14T00:00:00.000Z', readyCooldownMs: 500,
     }) });
     mount(); await selectRule();
-    fireEvent.click(screen.getByLabelText('Enabled'));
     fireEvent.change(screen.getByLabelText('Window'), { target: { value: 'UTC_WEEK' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
-    expect(screen.getByRole('alert')).toHaveTextContent('Activity history is not ready');
+    expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
+    fireEvent.submit(screen.getByLabelText('Window').closest('form'));
+    expect(screen.getByRole('alert')).toHaveTextContent('activity history is not ready');
     expect(axios.request).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText('Enabled'));
-    expect(screen.getByLabelText('Enabled')).toBeDisabled();
     expect(screen.getByLabelText('Window')).toBeEnabled();
     fireEvent.change(screen.getByLabelText('Window'), { target: { value: 'UTC_DAY' } });
-    fireEvent.click(screen.getByLabelText('Enabled'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
     await screen.findByText(/Revision 2 saved/);
     expect(axios.request.mock.calls[0][0].data.rule).toMatchObject({ enabled: true, parameters: { window: 'UTC_DAY' } });
   },
@@ -394,15 +389,14 @@ it.each([
 ])('allows only the explicit zero cooldown without activity protection: %s', async (_description, activity) => {
   axios.get.mockResolvedValue({ data: activitySnapshot('REPEAT_BET_COOLDOWN_MS', activity) });
   mount(); await selectRule();
-  expect(screen.getByLabelText('Enabled')).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Turn on', exact: true })).toBeEnabled();
   expect(screen.getByText(/A zero cooldown is a no-op/)).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Limit (seconds)'), { target: { value: '0.001' } });
-  expect(screen.getByLabelText('Enabled')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
   fireEvent.change(screen.getByLabelText('Limit (seconds)'), { target: { value: '' } });
-  expect(screen.getByLabelText('Enabled')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
   fireEvent.change(screen.getByLabelText('Limit (seconds)'), { target: { value: '0' } });
-  fireEvent.click(screen.getByLabelText('Enabled'));
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.rule).toMatchObject({ enabled: true, parameters: { limit: 0 } });
 });
@@ -413,11 +407,10 @@ it('uses the exact server cooldown boundary rather than elapsed browser time', a
   }) });
   mount(); await selectRule();
   fireEvent.change(screen.getByLabelText('Limit (seconds)'), { target: { value: '0.501' } });
-  expect(screen.getByLabelText('Enabled')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeDisabled();
   fireEvent.change(screen.getByLabelText('Limit (seconds)'), { target: { value: '0.500' } });
-  expect(screen.getByLabelText('Enabled')).toBeEnabled();
-  fireEvent.click(screen.getByLabelText('Enabled'));
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  expect(screen.getByRole('button', { name: 'Save and turn on', exact: true })).toBeEnabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Save and turn on', exact: true }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.rule.parameters.limit).toBe(500);
 });
@@ -451,4 +444,54 @@ it('rejects loss readiness windows outside the catalogue options', async () => {
   mount();
   expect(await screen.findByRole('alert')).toHaveTextContent('Risk Centre could not be loaded');
   expect(axios.request).not.toHaveBeenCalled();
+});
+
+describe('explicit on/off activation', () => {
+  const minStake = () => {
+    const data = snapshot();
+    data.rules[0] = { ...rule, id: 'default:MIN_STAKE', type: 'MIN_STAKE', parameters: { limit: 10000 } };
+    data.catalogue[0] = { ...data.catalogue[0], type: 'MIN_STAKE', label: 'Minimum stake' };
+    return data;
+  };
+  const button = name => screen.getByRole('button', { name, exact: true });
+
+  it('replays the incident: an Off minimum stake edited to 5 and saved is turned on', async () => {
+    axios.get.mockResolvedValue({ data: minStake() });
+    mount(); await selectRule();
+    expect(document.body).not.toHaveTextContent(/Enabled|Disabled/);
+    expect(screen.getByText('Off', { selector: '.risk-status strong' }).closest('p')).toHaveTextContent('Off — has no effect on bets');
+    fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: '5' } });
+    fireEvent.click(button('Save and turn on'));
+    expect(await screen.findByText('Minimum stake is on: 5 Stanbucks · All bets. Applies to new bets. Revision 2 saved.')).toBeInTheDocument();
+    expect(axios.request.mock.calls[0][0].data.rule).toMatchObject({ enabled: true, parameters: { limit: 500 } });
+    expect(screen.getByText('On', { selector: '.risk-status strong' }).closest('p')).toHaveTextContent('On — checked on new bets · All bets');
+    fireEvent.click(button('Turn off'));
+    expect(await screen.findByText('Minimum stake is off — it no longer affects new bets. Revision 3 saved.')).toBeInTheDocument();
+    expect(axios.request.mock.calls[1][0].data.rule).toMatchObject({ enabled: false, parameters: { limit: 500 } });
+    expect(button('Turn on')).toBeEnabled();
+  });
+
+  it('saves edits as off only through the explicit off action', async () => {
+    axios.get.mockResolvedValue({ data: minStake() });
+    mount(); await selectRule();
+    fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: '5' } });
+    fireEvent.click(button('Save as off'));
+    expect(await screen.findByText('Minimum stake saved as off — it has no effect on bets. Revision 2 saved.')).toBeInTheDocument();
+    expect(axios.request.mock.calls[0][0].data.rule).toMatchObject({ enabled: false, parameters: { limit: 500 } });
+  });
+
+  it('turns a saved rule on without edits and keeps it on when edited and submitted with Enter', async () => {
+    axios.get.mockResolvedValue({ data: minStake() });
+    mount(); await selectRule();
+    fireEvent.submit(screen.getByLabelText('Limit (Stanbucks)').closest('form'));
+    expect(axios.request).not.toHaveBeenCalled();
+    fireEvent.click(button('Turn on'));
+    await screen.findByText(/Minimum stake is on: 100 Stanbucks/);
+    expect(axios.request.mock.calls[0][0].data.rule).toMatchObject({ enabled: true, parameters: { limit: 10000 } });
+    fireEvent.change(screen.getByLabelText('Limit (Stanbucks)'), { target: { value: '7' } });
+    expect(button('Save and turn off')).toBeEnabled();
+    fireEvent.submit(screen.getByLabelText('Limit (Stanbucks)').closest('form'));
+    await screen.findByText(/Minimum stake is on: 7 Stanbucks/);
+    expect(axios.request.mock.calls[1][0].data.rule).toMatchObject({ enabled: true, parameters: { limit: 700 } });
+  });
 });
