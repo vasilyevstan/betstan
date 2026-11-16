@@ -32,7 +32,9 @@ it('groups rules by category with explicit status tags and readable activity set
   expect(entry.querySelector('.market-pill--danger')).toHaveTextContent('OFF');
   expect(entry).toHaveTextContent('10000 bets · Calendar day (UTC) · Across all customers');
   expect(entry).not.toHaveTextContent(/UTC_DAY|false/);
-  expect(screen.getByRole('button', { name: /Quote authority ON/ }).querySelector('.market-pill--positive')).toHaveTextContent('ON');
+  expect(entry.closest('section').parentElement.closest('section')).toHaveAccessibleName('All events');
+  expect(screen.queryByRole('button', { name: /Quote authority/ })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Locked safeguard|Always-on safeguards/)).not.toBeInTheDocument();
 });
 const accountingSnapshot = (type, accounting) => {
   const data = snapshot();
@@ -86,7 +88,8 @@ it('omits the unavailable integrations panel without hiding existing safeguards'
   data.catalogue.push({ ...data.catalogue[1], type: 'WALLET', label: 'Wallet integration', category: 'unavailable' });
   axios.get.mockResolvedValue({ data });
   mount();
-  expect(await screen.findByRole('button', { name: /Quote authority ON Locked/ })).toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: /Maximum stake OFF All bets/ })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Quote authority/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'Unavailable integrations' })).not.toBeInTheDocument();
   expect(screen.queryByText(/Wallet, balance, deposit and withdrawal limits/)).not.toBeInTheDocument();
   expect(screen.queryByText(/These controls have no authoritative integration/)).not.toBeInTheDocument();
@@ -119,7 +122,7 @@ it('opens new delay settings directly and saves seconds as exact milliseconds', 
   mount();
   fireEvent.change(await screen.findByLabelText('Search rules'), { target: { value: 'Acceptance delay' } });
   expect(screen.getByRole('button', { name: /Acceptance delay ON/ })).toBeInTheDocument();
-  fireEvent.change(await screen.findByLabelText('Add a rule'), { target: { value: 'DELAY_MS' } });
+  fireEvent.change(await screen.findByLabelText('Add rule for all events'), { target: { value: 'DELAY_MS' } });
   expect(screen.getByRole('heading', { name: 'Acceptance delay' })).toHaveFocus();
   expect(screen.queryByRole('button', { name: 'Configure new rule' })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Limit (seconds)'), { target: { value: '2.125' } });
@@ -206,11 +209,11 @@ it('recovers an operation result rather than issuing a second mutation', async (
 
 it('creates custom rules off only when saved as off, guards unsaved switching and removes only after confirmation', async () => {
   mount(); await selectRule(); editLimit('600');
-  fireEvent.click(screen.getByRole('button', { name: /Quote authority ON Locked/ }));
+  fireEvent.change(screen.getByLabelText('Add live rule'), { target: { value: 'MAX_STAKE' } });
   expect(screen.getByRole('alert')).toHaveTextContent('Discard');
   fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
   expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(6);
-  fireEvent.change(screen.getByLabelText('Add a rule'), { target: { value: 'MAX_STAKE' } });
+  fireEvent.change(screen.getByLabelText('Add rule for all events'), { target: { value: 'MAX_STAKE' } });
   fireEvent.click(screen.getByRole('button', { name: 'Discard input and continue' }));
   expect(screen.queryByRole('button', { name: 'Configure new rule' })).not.toBeInTheDocument();
   expect(screen.getByText('Not saved', { selector: '.risk-status strong' }).closest('p')).toHaveTextContent('Not saved — no effect yet');
@@ -224,7 +227,7 @@ it('creates custom rules off only when saved as off, guards unsaved switching an
   expect(axios.request.mock.calls[1][0].method).toBe('DELETE');
 });
 
-it('previews factory restore and requires confirmation, with locked safeguards read-only', async () => {
+it('previews factory restore and requires confirmation', async () => {
   mount(); await selectRule();
   fireEvent.click(screen.getByRole('button', { name: 'Restore default', exact: true }));
   expect(screen.getByRole('alert')).toHaveTextContent('Exposure, usage history and pending policies are not reset');
@@ -232,9 +235,6 @@ it('previews factory restore and requires confirmation, with locked safeguards r
   fireEvent.click(screen.getByRole('button', { name: 'Confirm restore' }));
   await screen.findByText(/Revision 2 saved/);
   expect(axios.request.mock.calls[0][0].data.ruleId).toBe('default:MAX_STAKE');
-  fireEvent.click(screen.getByRole('button', { name: /Quote authority ON Locked/ }));
-  expect(screen.getByText(/cannot be turned off, edited or removed/)).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: /Save|Turn on|Turn off/ })).not.toBeInTheDocument();
 });
 
 it('never rebases a destructive confirmation silently during refresh', async () => {
@@ -507,5 +507,105 @@ describe('explicit on/off activation', () => {
     fireEvent.submit(screen.getByLabelText('Limit (Stanbucks)').closest('form'));
     await screen.findByText(/Minimum stake is on: 7 Stanbucks/);
     expect(axios.request.mock.calls[1][0].data.rule).toMatchObject({ enabled: true, parameters: { limit: 700 } });
+  });
+});
+
+describe('sections, history and all-events switches', () => {
+  const templateId = 'a'.repeat(32);
+  const routes = overrides => axios.get.mockImplementation(async url => ({ data: url in overrides ? overrides[url] : snapshot() }));
+  const templates = { enabled: true, starters: [], templates: [
+    { templateId, revision: 1, archived: false, versions: [{ id: templateId, version: 1, definition: { name: 'Total goals' } }] },
+    { templateId: 'b'.repeat(32), revision: 2, archived: true, versions: [{ id: 'b', version: 1, definition: { name: 'Archived market' } }] },
+  ] };
+
+  it('groups rules into all-events, pre-match and live sections and prefills the section bet kind', async () => {
+    mount();
+    for (const name of ['All events', 'Pre-match', 'Live']) {
+      expect(await screen.findByRole('region', { name })).toBeInTheDocument();
+    }
+    expect(screen.getByRole('region', { name: 'All events' })).toHaveTextContent('Maximum stake');
+    expect(screen.getByRole('region', { name: 'Live' })).toHaveTextContent('No live rules yet');
+    expect(screen.getByRole('region', { name: 'Live' })).toHaveTextContent('the event is in play, the market is open and the price has not changed');
+    fireEvent.change(screen.getByLabelText('Add pre-match rule'), { target: { value: 'MAX_STAKE' } });
+    expect(screen.getByLabelText('Bet kind')).toHaveValue('PRE_MATCH');
+    fireEvent.click(screen.getByRole('button', { name: 'Save as off', exact: true }));
+    await screen.findByText(/Revision 2 saved/);
+    expect(axios.request.mock.calls[0][0]).toMatchObject({
+      method: 'POST', data: { rule: { type: 'MAX_STAKE', enabled: false, scope: { betKind: 'PRE_MATCH' } } },
+    });
+    expect(await screen.findByRole('button', { name: /Maximum stake OFF All pre-match bets/ })).toBeInTheDocument();
+  });
+
+  it('shows which overlapping rules also apply and that the stricter limit wins', async () => {
+    const data = snapshot();
+    data.rules[0].enabled = true;
+    routes({ [API]: data });
+    mount();
+    fireEvent.change(await screen.findByLabelText('Add live rule'), { target: { value: 'MAX_STAKE' } });
+    expect(screen.getByRole('note', { name: 'Other rules that also apply' })).toHaveTextContent(
+      'Maximum stake (All events): 100 Stanbucks',
+    );
+    expect(screen.getByRole('note', { name: 'Other rules that also apply' })).toHaveTextContent('the stricter limit wins');
+  });
+
+  it('expands each revision to show exactly what changed', async () => {
+    const at = '2026-11-14T21:00:00.000Z';
+    const revision = (number, rules) => ({ revision: number, defaultsVersion: 1, occurredAt: at, rules });
+    routes({ [`${API}/history`]: { items: [
+      revision(3, [{ ...rule, enabled: true, parameters: { limit: 5000 } },
+        { id: 'rule:live', type: 'MAX_STAKE', enabled: false, scope: { betKind: 'LIVE' }, parameters: { limit: 100 } }]),
+      revision(2, [{ ...rule, enabled: true }]),
+    ] } });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Load recent revisions' }));
+    const latest = (await screen.findByText('Revision 3')).closest('details');
+    expect(latest.querySelector('summary')).toHaveTextContent(/^Revision 3 · .*2026.* · 2 changes$/);
+    expect(latest.querySelector('summary')).toHaveTextContent('· 2 changes');
+    expect(latest).toHaveTextContent('Maximum stake (All events): 100 Stanbucks → 50 Stanbucks');
+    expect(latest).toHaveTextContent('Added Maximum stake (Live): Off · 1 Stanbucks');
+    expect(latest).toHaveTextContent('All 2 rules in this revision');
+    expect(screen.getByText('Revision 2').closest('summary')).toHaveTextContent('Changes not loaded');
+  });
+
+  it('turns a custom market off and back on for all events through a block rule', async () => {
+    routes({ '/api/backoffice/market-templates': templates });
+    mount();
+    expect(await screen.findByText('Total goals')).toBeInTheDocument();
+    expect(screen.queryByText('Archived market')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off Total goals for all events' }));
+    await screen.findByText('Total goals is off for all events. New bets on it are declined. Revision 2 saved.');
+    expect(axios.request.mock.calls[0][0]).toMatchObject({
+      method: 'POST', url: `${API}/rules`,
+      data: { expectedRevision: 1, rule: { id: `market:${templateId}`, type: 'DENY', enabled: true, scope: { templateIds: [templateId] }, parameters: {} } },
+    });
+    expect(screen.getByText('Total goals').closest('li').querySelector('.market-pill')).toHaveTextContent('OFF');
+    expect(screen.getByRole('button', { name: /ON Market: Total goals/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on Total goals for all events' }));
+    await screen.findByText('Total goals is on for all events. Revision 3 saved.');
+    expect(axios.request.mock.calls[1][0]).toMatchObject({ method: 'DELETE', url: `${API}/rules/market:${templateId}`, data: { expectedRevision: 2 } });
+  });
+
+  it('switches cash back for all events with the expected current value', async () => {
+    routes({ '/api/backoffice/cash-back-setting': { enabled: true, revision: 0 } });
+    axios.request.mockResolvedValueOnce({ data: { enabled: false, revision: 1, updatedAt: '2026-11-14T21:00:00.000Z' } });
+    mount();
+    const panel = await screen.findByRole('region', { name: 'Cash back' });
+    expect(await screen.findByRole('button', { name: 'Turn off cash back for all events' })).toBeInTheDocument();
+    expect(panel.querySelector('.market-pill')).toHaveTextContent('ON');
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off cash back for all events' }));
+    await screen.findByText(/Cash back is off for all events/);
+    expect(axios.request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'PUT', url: '/api/backoffice/cash-back-setting', data: { enabled: false, expectedEnabled: true },
+    }));
+    expect(panel.querySelector('.market-pill')).toHaveTextContent('OFF');
+    expect(screen.getByRole('button', { name: 'Turn on cash back for all events' })).toBeInTheDocument();
+  });
+
+  it('keeps rules usable when switch settings are unavailable', async () => {
+    mount();
+    await screen.findByRole('button', { name: /Maximum stake OFF All bets/ });
+    expect(await screen.findByText('Cash-back setting is unavailable. Try refreshing.')).toBeInTheDocument();
+    expect(screen.getByText('Markets are unavailable. Try refreshing.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

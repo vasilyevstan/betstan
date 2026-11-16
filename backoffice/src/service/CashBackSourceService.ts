@@ -13,6 +13,7 @@ import {
 } from "@betstan/common";
 import { Types } from "mongoose";
 import { BackofficeCashBackHold, Event } from "../model/Event";
+import { readCashBackSetting } from "../model/CashBackSetting";
 
 export const cashBackAuthorityWritable = {
   cashBackHold: { $exists: false },
@@ -185,6 +186,9 @@ export const handleCashBackSourceRequest = async (
   }
   const reason = eligible(record);
   if (reason) return deny(request, reason, record.observedAt);
+  // Global switch gates only SNAPSHOT and new RESERVE. RELEASE and held-grant replay returned
+  // above, so an outstanding hold can still be confirmed or released while it is off.
+  if (!(await readCashBackSetting()).enabled) return deny(request, "SUSPENDED", record.observedAt);
   if (record.cashBackHold) return deny(request, "CONTENDED", record.observedAt);
   const evidence = sourceEvidence(record, request.operation.betKind);
   if (request.action === "SNAPSHOT") {
@@ -227,6 +231,17 @@ export const handleCashBackSourceRequest = async (
     request.operation.betKind === BetKind.PRE_MATCH
       ? Date.parse(evidence.kickoffAt) : Infinity
   );
+  // Re-read the global switch immediately before the reservation CAS. It is a separate document,
+  // so the Event CAS cannot include it: a switch-off committing between this read and the CAS
+  // still lets this one in-flight reservation be granted (accepted race); that hold then follows
+  // the normal confirm/RELEASE lifecycle.
+  const setting = await readCashBackSetting();
+  if (!setting.enabled) return deny(request, "SUSPENDED", record.observedAt);
+  // Snapshots are denied while the switch is off, so any global change at or after this snapshot's
+  // observation means its quote spanned a switch-off; it must not be confirmed after re-enabling.
+  if (setting.updatedAt && !(Date.parse(request.expected.observedAt) > setting.updatedAt.getTime())) {
+    return deny(request, "AUTHORITY_CHANGED", record.observedAt);
+  }
   const updated = await Event.findOneAndUpdate(
     {
       eventId,

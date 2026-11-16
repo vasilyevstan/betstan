@@ -90,8 +90,8 @@ replacing the recognizable card summary.
 ## Risk Centre
 
 **Risk Centre** sits beside **Market designer** in Backoffice. The editor
-distinguishes optional rules, shipped defaults, locked integrity safeguards
-and unavailable integrations. Explicit Save affects new durable Moderation
+distinguishes optional rules and shipped defaults; always-on integrity checks
+are enforced but not listed. Explicit Save affects new durable Moderation
 receipts; restoring defaults never clears usage or pending policy pins.
 Conflicts and ambiguous saves must preserve unsaved input and resolve against
 the server's operation result rather than silently overwrite another edit.
@@ -99,10 +99,18 @@ Accounting readiness is explicit, and informational netting is not presented
 as spendable admission capacity. See [[Risk Centre]] for the rules and
 public-write limitations.
 
-The list has category headings rather than an implied rule hierarchy, with
-left-aligned names and settings. Green **ON** and red **OFF** tags identify
-saved status without relying on color alone. Slip and My Bets name recognized
-rule types recorded on a declined bet; older records keep their generic reason.
+The list has **All events**, **Pre-match** and **Live** sections, each with
+its own **+ Add rule** list and indented category groups, with left-aligned
+names and settings. Green **ON** and red **OFF** tags identify saved status
+without relying on color alone. All-events switches turn cash back, or a
+Market designer market, off or on for every event. Expanding a revision in
+history shows what it changed. Slip and My Bets name recognized rule types
+recorded on a declined bet; older records keep their generic reason. A
+whole-ticket decline is shown once on the slip; a selection-specific reason
+stays on its row.
+
+On wide Backoffice event cards, the result form and the visibility, Markets
+and cash-back actions share two rows; narrower cards stack them.
 
 ## Private player profile
 

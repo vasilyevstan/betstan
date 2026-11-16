@@ -35,11 +35,14 @@ scripts or arbitrary financial formulas.
 | Activity | Submission counts, turnover and repeated-selection restrictions |
 | Open exposure | Open principal, gross return and conservative operator-liability ceilings |
 | Customer loss | Signed realised loss plus remaining and pending principal within each configured window |
-| Integrity | Visible but locked identity, quote, market, mixed-kind and settlement-capability safeguards |
+| Integrity | Always-on identity, quote, market, mixed-kind and settlement-capability checks; enforced on every bet and not editable, so the editor does not list them |
 
 Every matching restriction applies: the lowest ceiling, highest floor and
 longest delay win. A narrower rule cannot relax a global rule. Conflicting or
-unsupported policy values fail validation rather than being ignored.
+unsupported policy values fail validation rather than being ignored. For
+example, to require 5 Stanbucks pre-match but only 1 Stanbuck live, turn the
+All events minimum stake off (or set it to 1 or less), then add a Pre-match
+rule of 5 and a Live rule of 1.
 
 Price and stake rules apply to the complete ticket: accumulators use the
 combined price, not each leg. A rule scoped to Bet Builder also applies to a
@@ -60,7 +63,8 @@ unavailable. They are not simulated successful checks or claims of regulated
 customer protection.
 
 Existing pre-match closure at kickoff and rejection of resulted events are
-listed explicitly as locked safeguards. A positive pre-match cutoff closes
+always enforced; the Pre-match and Live sections state these checks. Live bets
+always require an in-play event, an open market and an unchanged price. A positive pre-match cutoff closes
 earlier; it never permits a pre-match bet after kickoff. There is no current
 configurable post-event grace period. Match simulation duration belongs to
 Gamemaster (`LIVE_MATCH_DURATION_MS`), not bet admission.
@@ -81,14 +85,19 @@ settings/default comparison remain available under expandable details.
 The unrelated unavailable-integrations panel is omitted. This does not
 enable those integrations or remove any backend safeguard.
 
-Rules are grouped under Bet acceptance, Betting activity, Exposure and loss,
-and Always-on safeguards. These are categories, not an override hierarchy.
-Rule titles and saved settings share consistent left alignment. Time windows
-and customer scope use readable labels rather than raw enum values or booleans.
+Rules are listed in three sections by where they apply: **All events**,
+**Pre-match** and **Live**. Each section has its own **+ Add rule** list, so a
+new rule starts with that bet kind. Within a section, rules are indented under
+Bet acceptance, Betting activity, and Exposure and loss. These are categories,
+not an override hierarchy. The editor names other saved rules of the same type
+that also apply, because the stricter limit wins. Rule titles and saved
+settings share consistent left alignment. Time windows and customer scope use
+readable labels rather than raw enum values or booleans. Always-on integrity
+checks are not listed because they cannot be changed.
 
 Each rule shows its saved status: green **ON** (checked on new bets, with its
 scope), red **OFF** (no effect on bets) or **Not saved**. Text accompanies
-color, and locked safeguards stay ON. There is no separate
+color. There is no separate
 enabled checkbox. The buttons state the result:
 
 | Saved status | Without edits | With edits |
@@ -113,6 +122,25 @@ rule without a factory counterpart is removed instead. Neither operation
 clears usage, exposure, accounting history or a pending bet's pinned policy.
 Software upgrades do not silently replace existing active defaults.
 
+**Revision history** lists recent revisions newest first. Expanding a
+revision shows what it changed compared with the previous one: rules added or
+removed, turned on or off, changed values (`old → new`) and changed scope. The
+complete rule set of that revision stays available under a nested disclosure.
+
+## All-events switches
+
+**Cash back** turns cash back off or on for every event. While it is off,
+Backoffice refuses new cash-back quotes and reservations; requests already
+being processed can finish, and per-event switches still apply when it is on.
+The switch is a separate Backoffice setting, not a policy revision. A stale
+change returns a conflict and shows the current value.
+
+**Markets** turns a Market designer market off for every event. Turning it off
+saves an enabled **Block bets** rule scoped to that market, so new bets on it
+are declined as **Declined: Block bets** while the market stays visible.
+Turning it on removes that rule. Built-in 1X2, Correct Score and live markets
+have no stable cross-event identity yet, so they cannot be switched here.
+
 ## Acceptance and recovery
 
 The first durable Moderation receipt binds the immutable placement and active
@@ -127,7 +155,10 @@ confirms as submitted or is rejected as a whole; row reasons explain the
 failure rather than authorizing partial acceptance.
 
 For risk-policy declines, Slip and My Bets name the rule types recorded in
-that decision, for example **Declined: Minimum stake**. The rule title is not
+that decision, for example **Declined: Minimum stake**. A decline for the
+whole ticket, such as a stake or price rule, is shown once on the slip. A
+reason about one selection, such as a changed quote, a closed or suspended
+market, or an event that started or resulted, is shown on that row. The rule title is not
 inferred from today's policy; changing a limit does not relabel an old bet.
 Older records without recognized reason codes retain the generic risk-policy
 explanation. Per-selection metadata stays with its affected selection when
