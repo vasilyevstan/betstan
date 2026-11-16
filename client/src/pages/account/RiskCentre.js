@@ -1,22 +1,24 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Link, useLocation } from 'react-router-dom';
+import { riskRuleNames } from '../../riskRuleLabels';
 import '../../styles/risk-centre.css';
 
 const API = '/api/backoffice/risk-centre';
 const control = 'form-control backoffice-control';
 const action = 'btn backoffice-control backoffice-action';
-const ruleNames = {
-  MIN_STAKE: 'Minimum stake', MAX_STAKE: 'Maximum stake', DELAY_MS: 'Acceptance delay',
-  MIN_ODDS: 'Minimum odds', MAX_ODDS: 'Maximum odds', MAX_RETURN: 'Maximum return',
-  MAX_LEGS: 'Maximum selections', MAX_EVENTS: 'Maximum events', MAX_BUILDER_SELECTIONS: 'Maximum Builder selections',
-  DENY: 'Block bets', MAX_SUBMISSIONS: 'Bet frequency', MAX_TURNOVER: 'Turnover limit',
-  MAX_OPEN_STAKE: 'Open stake limit', MAX_OPEN_RETURN: 'Open return limit',
-  MAX_OPERATOR_EXPOSURE: 'Operator exposure limit', MAX_CUSTOMER_LOSS: 'Customer loss limit',
-  REPEAT_BET_COOLDOWN_MS: 'Repeat bet cooldown', PRE_KICKOFF_CUTOFF_MS: 'Pre-match betting cutoff',
-  MAX_QUOTE_AGE_MS: 'Maximum quote age', MAX_NET_WIN: 'Maximum net win',
+const ruleName = entry => riskRuleNames[entry?.type] || entry?.label;
+const categoryNames = {
+  admission: 'Bet acceptance', activity: 'Betting activity',
+  accounting: 'Exposure and loss', integrity: 'Always-on safeguards',
 };
-const ruleName = entry => ruleNames[entry?.type] || entry?.label;
+const windowNames = {
+  UTC_DAY: 'Calendar day (UTC)', UTC_WEEK: 'Calendar week (UTC)', UTC_MONTH: 'Calendar month (UTC)',
+  ROLLING_1H: 'Last hour', ROLLING_24H: 'Last 24 hours', ROLLING_7D: 'Last 7 days', ROLLING_30D: 'Last 30 days',
+};
+const RuleStatus = ({ enabled }) => <span className={`market-pill market-pill--${enabled ? 'positive' : 'danger'}`}>
+  {enabled ? 'ON' : 'OFF'}
+</span>;
 const inputScale = definition => definition?.unit === 'minor units' ? 100 : definition?.unit === 'milliseconds' ? 1000 : 1;
 const inputUnit = definition => definition?.unit === 'minor units' ? 'Stanbucks' : definition?.unit === 'milliseconds' ? 'seconds' : definition?.unit;
 const wireNumber = (raw, definition) => {
@@ -106,8 +108,11 @@ const describeScope = scope => Object.entries(scope).map(([key, value]) => (
 const onOff = enabled => (enabled ? 'On' : 'Off');
 const describeParameters = (parameters, entry) => Object.entries(parameters).map(([key, value]) => {
   const definition = entry?.parameterDefinitions.find(field => field.name === key);
+  if (key === 'perCustomer') return value ? 'Per customer' : 'Across all customers';
+  if (key === 'window') return windowNames[value] || value;
+  const countUnit = { MAX_SUBMISSIONS: 'bets', MAX_LEGS: 'selections', MAX_EVENTS: 'events', MAX_BUILDER_SELECTIONS: 'Builder selections' };
   return typeof value === 'number'
-    ? `${value / inputScale(definition)} ${inputUnit(definition) || key}`
+    ? `${value / inputScale(definition)} ${countUnit[entry?.type] || inputUnit(definition) || key}`
     : `${definition?.label || key}: ${String(value)}`;
 }).join(' · ') || 'Block matching bets';
 const newId = prefix => `${prefix}:${window.crypto.randomUUID()}`;
@@ -415,6 +420,7 @@ export default function RiskCentre() {
   ] : [];
   const visible = items.filter(item => (!category || item.catalogue?.category === category)
     && `${ruleName(item.catalogue)} ${item.catalogue?.label} ${item.id} ${item.catalogue?.description}`.toLowerCase().includes(query.toLowerCase()));
+  const groups = [...new Set(visible.map(item => item.catalogue?.category))];
 
   return <section className="markets-page backoffice-markets risk-centre" aria-labelledby="risk-title">
     <nav className="market-breadcrumb" aria-label="Breadcrumb"><ol>
@@ -460,19 +466,24 @@ export default function RiskCentre() {
             <label>Search rules<input className={control} type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
             <label>Category<select className={control} value={category} onChange={event => setCategory(event.target.value)}>
               <option value="">All categories</option>
-              {[...new Set(snapshot.catalogue.filter(item => item.category !== 'unavailable').map(item => item.category))].map(value => <option key={value}>{value}</option>)}
+              {[...new Set(snapshot.catalogue.filter(item => item.category !== 'unavailable').map(item => item.category))].map(value => <option key={value} value={value}>{categoryNames[value] || value}</option>)}
             </select></label>
           </div>
           <p className="market-help">{snapshot.rules.filter(rule => !rule.id.startsWith('default:')).length || 'No'} custom rules. New rules stay off until you turn them on.</p>
           {!visible.length ? <p role="status">No rules match these filters.</p> : null}
-          <ul className="risk-rule-list">{visible.map(item => <li key={item.id}>
-            <button type="button" className={action} aria-pressed={selected?.id === item.id}
-              disabled={frozen} onClick={() => choose({ id: item.id, type: item.type })}>
-              <span>{ruleName(item.catalogue) || item.type}</span>
-              <small>{item.catalogue?.locked ? 'Locked safeguard · Always on' : `${onOff(item.enabled)} · ${describeScope(item.scope)}`}</small>
-              {!item.catalogue?.locked ? <small>{describeParameters(item.parameters, item.catalogue)}</small> : null}
-            </button>
-          </li>)}</ul>
+          {groups.map(group => <section key={group} className="risk-rule-group" aria-labelledby={`risk-group-${group}`}>
+            <h3 className="h6" id={`risk-group-${group}`}>{categoryNames[group] || group}</h3>
+            <ul className="risk-rule-list">{visible.filter(item => item.catalogue?.category === group).map(item => <li key={item.id}>
+              <button type="button" className={action} aria-pressed={selected?.id === item.id}
+                disabled={frozen} onClick={() => choose({ id: item.id, type: item.type })}>
+                <span className="risk-rule-title"><strong>{ruleName(item.catalogue) || item.type}</strong>
+                  <RuleStatus enabled={item.catalogue?.locked || item.enabled} />
+                </span>
+                <small>{item.catalogue?.locked ? 'Locked safeguard · Always on' : describeScope(item.scope)}</small>
+                {!item.catalogue?.locked ? <small>{describeParameters(item.parameters, item.catalogue)}</small> : null}
+              </button>
+            </li>)}</ul>
+          </section>)}
           <div className="market-form-actions">
             <button type="button" className={action} disabled={frozen || readOnly}
               onClick={() => requestConfirmation('all')}>Restore all defaults</button>
@@ -489,7 +500,7 @@ export default function RiskCentre() {
           </div> : null}
           {!entry ? <p>Select a rule to inspect its active value, factory default and scope.</p> : <>
             {!entry.locked && draft ? <p className="risk-status">
-              {currentRule ? <><strong>{onOff(currentRule.enabled)}</strong> — {currentRule.enabled
+              {currentRule ? <><RuleStatus enabled={currentRule.enabled} /> — {currentRule.enabled
                 ? `checked on new bets · ${describeScope(currentRule.scope)}` : 'has no effect on bets'}</> : <><strong>Not saved</strong> — no effect yet</>}
             </p> : null}
             <p>{entry.description}</p>
@@ -536,7 +547,7 @@ export default function RiskCentre() {
                         onChange={event => edit({ parameters: { ...draft.parameters, [definition.name]: event.target.checked } })} />
                         : definition.type === 'select' ? <select className={control} value={draft.parameters[definition.name]}
                           onChange={event => edit({ parameters: { ...draft.parameters, [definition.name]: event.target.value } })}>
-                          {definition.options.map(option => <option key={option}>{option}</option>)}
+                          {definition.options.map(option => <option key={option} value={option}>{windowNames[option] || option}</option>)}
                         </select> : <input className={control} type="number" value={draft.parameters[definition.name]}
                           min={definition.min / inputScale(definition)} max={definition.max / inputScale(definition)}
                           step={definition.unit === 'decimal odds' || inputScale(definition) === 100 ? '0.01' : inputScale(definition) === 1000 ? '0.001' : '1'}

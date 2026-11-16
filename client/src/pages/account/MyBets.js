@@ -232,7 +232,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
         </button>
         </div>
 
-        {bet.declineReason ? <div className="my-bets-note my-bets-note--danger">Declined: {formatDeclineReason(bet.declineReason)}</div> : null}
+        {bet.declineReason ? <div className="my-bets-note my-bets-note--danger">Declined: {formatDeclineReason(bet.declineReason, bet.reasonCodes)}</div> : null}
       </div>
       {isExpanded ? <div id={detailsId} className="card-body my-bets-details">
         <h3 className="h6">All selections and financial details</h3>
@@ -271,7 +271,7 @@ const HandleMyBetsList = ({ currentUser, isCurrentUserResolved = true, onAuthRef
                 <span className={`bet-kind-badge bet-kind-badge--${rowKind.toLowerCase()}`}>{getBetKindLabel(rowKind)}</span>
                 {rowKind === 'LIVE' && row.marketType ? <span>{formatLiveMarketType(row.marketType)}</span> : null}
               </div>
-              {row.declineReason ? <div className="my-bets-note my-bets-note--danger">{formatDeclineReason(row.declineReason)}</div> : null}
+              {row.declineReason ? <div className="my-bets-note my-bets-note--danger">{formatDeclineReason(row.declineReason, row.reasonCodes)}</div> : null}
             </div>
             <div className={`col-2 col-md-3${rowColor}`} data-label="Selection">
               {row.marketBet ? `${row.marketBet.selections.length} frozen selection${row.marketBet.selections.length === 1 ? '' : 's'}` : selectionLabel}

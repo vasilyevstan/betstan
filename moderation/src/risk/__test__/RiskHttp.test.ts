@@ -65,6 +65,10 @@ it("checks current visibility and exact ordinary selection IDs/prices over bound
     expect((await verifyRiskSource("event-one", [{ ...row, oddsValue: 3 }, { ...row, id: "unchanged-row" }])).affectedRows)
       .toEqual([{ rowId: "original-row", declineReason: "STALE_QUOTE", currentOdds: 2 }]);
     await expect(verifyRiskSource("event-one", [{ ...row, oddsId: "wrong" }])).rejects.toThrow();
+    catalogue.event.liveEnabled = false;
+    expect((await verifyRiskSource("event-one", [{ ...row, betKind: "LIVE" }])).affectedRows)
+      .toEqual([{ rowId: "original-row", declineReason: "RISK_POLICY" }]);
+    expect((await verifyRiskSource("event-one", [row])).affectedRows).toEqual([]);
     catalogue.event.visibility = "OFFLINE";
     expect((await verifyRiskSource("event-one", [row])).affectedRows).toEqual([{ rowId: "original-row", declineReason: "RISK_POLICY" }]);
     delete catalogue.event.visibility;

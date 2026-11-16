@@ -78,6 +78,14 @@ must not become a second source of truth: add the value to `common/src/` in the
 same feature, keep the bridge narrow, and remove it when consumers move to the
 published package that contains the value.
 
+The `1.1.0-rc.5` source candidate adds optional `INewEventEvent.data.liveEnabled`.
+Its absence preserves live-capable events. Event and Gamemaster bridge this
+boolean while all eight services still consume published `1.1.0-rc.4`; remove
+those intersections when their shared pin includes the field. False-valued
+events require compatible deployed readers and recovery paths: do not
+downgrade to consumers that ignore the field while affected events or creation
+publications remain outstanding. See the release compatibility contract.
+
 ## Cash-back candidate contracts — feature not active
 
 The additive cash-back declarations are available in this source candidate.

@@ -47,6 +47,10 @@ export async function verifyRiskSource(eventId: string, rows: any[], now = new D
     return result;
   }
   for (const row of rows) {
+    if (row.betKind === "LIVE" && catalogue.event.liveEnabled === false) {
+      affectedRows.push({ rowId: row.id, declineReason: ModerationDeclineReason.RISK_POLICY });
+      continue;
+    }
     if (row.betKind === "LIVE" || row.marketBet) continue;
     if (now.getTime() >= Date.parse(catalogue.event.time)) {
       affectedRows.push({ rowId: row.id, declineReason: ModerationDeclineReason.EVENT_STARTED });

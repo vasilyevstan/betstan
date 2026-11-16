@@ -6,7 +6,7 @@
 .risk-rule-list {
   list-style: none;
   padding: 0;
-  margin-block: 1rem;
+  margin-block: 0.5rem 0;
   display: grid;
   gap: 0.5rem;
 }
@@ -15,12 +15,24 @@
   text-align: start;
   white-space: normal;
   display: grid;
+  justify-content: stretch;
+  justify-items: stretch;
   gap: 0.25rem;
 }
+.risk-rule-group {
+  margin-block: 1.5rem;
+}
+.risk-rule-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
 .risk-centre .risk-rule-list button[aria-pressed='true'] {
-  background: var(--accent);
-  color: var(--accent-contrast);
+  background: var(--surface-soft);
+  color: var(--text-main);
   border-color: var(--accent);
+  outline: 1px solid var(--accent);
 }
 .risk-rule-list small {
   font-size: 0.8125rem;

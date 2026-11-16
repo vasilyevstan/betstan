@@ -445,7 +445,10 @@ export class GamemasterWorker {
           // `LIVE_PRE_KICKOFF_WINDOW_MS` before kickoff (when live kickoffs
           // are enabled), mirroring the same lead time
           // `ensureSimulationPersisted` uses to generate its simulation.
-          time: { $lte: new Date(now.getTime() + preKickoffWindowMs) },
+          $or: [
+            { liveEnabled: { $ne: false }, time: { $lte: new Date(now.getTime() + preKickoffWindowMs) } },
+            { liveEnabled: false, time: { $lte: now } },
+          ],
         },
         { time: 1 },
         now
@@ -575,7 +578,8 @@ export class GamemasterWorker {
     // published) starting `LIVE_PRE_KICKOFF_WINDOW_MS` before kickoff -- and
     // only while live kickoffs are enabled; preserves the exact prior
     // "wait until kickoff" gate when the feature is off.
-    const simulationLeadTimeMs = this.liveKickoffsEnabled(now)
+    const allowLive = event.liveEnabled !== false && this.liveKickoffsEnabled(now);
+    const simulationLeadTimeMs = allowLive
       ? LIVE_PRE_KICKOFF_WINDOW_MS
       : 0;
     if (kickoffAt.getTime() - now.getTime() > simulationLeadTimeMs) {
@@ -595,7 +599,7 @@ export class GamemasterWorker {
         eventId: event.eventId,
         seed,
       });
-      persistencePlan = this.liveKickoffsEnabled(now)
+      persistencePlan = allowLive
         ? this.initialSimulationPersistencePlan(kickoffAt, simulation)
         : this.completedSimulationPersistencePlan(simulation);
     } catch (error) {
@@ -1239,6 +1243,7 @@ export class GamemasterWorker {
         $setOnInsert: {
           eventId: event.eventId,
           name: event.name,
+          liveEnabled: event.liveEnabled,
           time: asIsoString(event.time),
           home: event.home,
           away: event.away,

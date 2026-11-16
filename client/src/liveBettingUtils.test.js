@@ -3,6 +3,7 @@ import {
   COUNTDOWN_LIVE_MARKET_TYPE,
   COUNTDOWN_WINDOW_MS,
   formatCountdownDuration,
+  formatDeclineReason,
   formatIncident,
   formatLegacyLiveSelectionLabel,
   formatLiveMarketType,
@@ -14,6 +15,7 @@ import {
   isFinishedLiveEvent,
   isInCountdownWindow,
   isLiveMarketSelectable,
+  isLiveEvent,
   isTerminalMarketStatus,
   isTerminalBetStatus,
   LIVE_MARKET_STATUS,
@@ -24,6 +26,21 @@ import {
 
 const KICKOFF_ISO = '2030-06-01T15:00:00.000Z';
 const KICKOFF_TIME = Date.parse(KICKOFF_ISO);
+
+it('names only recorded risk rules and retains the legacy or unrelated decline reason', () => {
+  expect(formatDeclineReason('RISK_POLICY', ['RISK_MIN_STAKE'])).toBe('Minimum stake');
+  expect(formatDeclineReason('RISK_POLICY', ['RISK_MIN_STAKE', 'RISK_MAX_STAKE', 'RISK_MIN_STAKE'])).toBe('Minimum stake, Maximum stake');
+  expect(formatDeclineReason('RISK_POLICY', ['RISK_UNKNOWN', null])).toBe('Risk policy restriction');
+  expect(formatDeclineReason('RISK_POLICY')).toBe('Risk policy restriction');
+  expect(formatDeclineReason('STALE_QUOTE', ['RISK_MIN_STAKE'])).toBe('Quote changed');
+});
+
+it('keeps pre-match-only events out of live and countdown betting', () => {
+  const event = { liveEnabled: false, time: KICKOFF_ISO, status: 'NO_RESULT', live: { phase: 'FIRST_HALF' } };
+  expect(isLiveEvent(event)).toBe(false);
+  expect(isInCountdownWindow(event, KICKOFF_TIME - 1000)).toBe(false);
+  expect(isLiveMarketSelectable(event, buildMarket(), KICKOFF_TIME - 1000)).toBe(false);
+});
 
 const buildScheduledEvent = (overrides = {}) => ({
   eventId: 'event-1',

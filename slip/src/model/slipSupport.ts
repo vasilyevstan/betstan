@@ -24,6 +24,7 @@ interface MutableModel {
 
 interface MutableModerationAffectedRow {
   rowId: string;
+  reasonCodes?: string[] | null;
   declineReason: ModerationDeclineReason;
   marketId?: string | null;
   marketVersion?: number | null;
@@ -67,6 +68,7 @@ export interface MutableSlip extends MutableModel {
   timestamp?: string | null;
   submittedAt?: string | null;
   declineReason?: ModerationDeclineReason | null;
+  reasonCodes?: string[] | null;
   sourceSlipId?: string | null;
   replacementSlipId?: string | null;
   boardRevision?: number | null;
@@ -163,6 +165,7 @@ export interface PlainSlip {
   timestamp: string;
   submittedAt?: string | null;
   declineReason?: ModerationDeclineReason | null;
+  reasonCodes?: string[] | null;
   sourceSlipId?: string | null;
   replacementSlipId?: string | null;
   boardRevision?: number | null;
@@ -672,6 +675,7 @@ export const findActiveSlipForUser = async (
 
 export const clearSlipDeclineState = (slip: MutableSlip) => {
   setField(slip, "declineReason", undefined);
+  setField(slip, "reasonCodes", undefined);
 
   for (const row of slip.rows) {
     setField(row, "moderation", undefined);
@@ -680,6 +684,7 @@ export const clearSlipDeclineState = (slip: MutableSlip) => {
 
 export const clearSlipDeclineReason = (slip: MutableSlip) => {
   setField(slip, "declineReason", undefined);
+  setField(slip, "reasonCodes", undefined);
 };
 
 export const slipHasMixedBetKinds = (
@@ -695,10 +700,13 @@ export const slipHasMixedBetKinds = (
 
 export const applyAffectedRows = (
   slip: MutableSlip,
-  affectedRows: IModerationAffectedRow[] = []
+  affectedRows: IModerationAffectedRow[] = [],
+  reasonCodes?: readonly string[]
 ) => {
   const affectedByRowId = new Map(
-    affectedRows.map((affectedRow) => [affectedRow.rowId, affectedRow])
+    affectedRows.map((affectedRow) => [affectedRow.rowId, {
+      ...affectedRow, ...(reasonCodes ? { reasonCodes: [...reasonCodes] } : {}),
+    }])
   );
 
   for (const row of slip.rows) {
@@ -1377,6 +1385,12 @@ export const upsertRestoredDraft = async (
         },
         {
           $ne: [
+            { $ifNull: ["$reasonCodes", null] },
+            payload.reasonCodes ?? null,
+          ],
+        },
+        {
+          $ne: [
             { $ifNull: ["$sourceSlipId", null] },
             payload.sourceSlipId ?? null,
           ],
@@ -1400,6 +1414,7 @@ export const upsertRestoredDraft = async (
           },
           sourceSlipId: payload.sourceSlipId,
           declineReason: payload.declineReason,
+          reasonCodes: payload.reasonCodes,
           rows: mergedRows,
           boardRevision: buildBoardRevisionExpression(boardChanged),
           boardFingerprint: buildBoardFingerprintExpression(boardChanged),

@@ -99,6 +99,11 @@ Accounting readiness is explicit, and informational netting is not presented
 as spendable admission capacity. See [[Risk Centre]] for the rules and
 public-write limitations.
 
+The list has category headings rather than an implied rule hierarchy, with
+left-aligned names and settings. Green **ON** and red **OFF** tags identify
+saved status without relying on color alone. Slip and My Bets name recognized
+rule types recorded on a declined bet; older records keep their generic reason.
+
 ## Private player profile
 
 Only a signed-in player can view their own `/profile`. Anonymous or expired
@@ -628,9 +633,22 @@ visitors retain the same catalog and controls in all three layouts and both
 themes.
 
 **Create new event** stays expanded and states the server-defined 15-minute
-kickoff lead time. Event cards use the compact composition from before the
+kickoff lead time. **Event mode** defaults to **Pre-match and live game**.
+**Pre-match only** instead generates an automatic final result at kickoff,
+without countdown markets or a live game. Mode is fixed at creation: changing
+it after selections exist could revoke accepted market authority.
+**Cash back** defaults to **Allowed** and may be set **Off** when creating
+an event. Both choices precede **Create** in keyboard order.
+
+Event cards show their event mode and cash-back permission. **Allow cash back**
+and **Turn off cash back** name the target state. A held cash-back reservation
+blocks a change with a retryable conflict; recorded events cannot change this
+setting. Turning it off invalidates earlier offers but does not undo an
+already accepted operation or its settlement.
+
+Event cards use the compact composition from before the
 Match Desk redesign: event name, kickoff and states on the left, with a
-bounded two-row control block on the right. **Home score** and **Away score**
+bounded control block on the right. **Home score** and **Away score**
 are equal peers above equally aligned **Save final result** and visibility
 buttons. The two regions are vertically centered, so the controls no longer
 add a separate full-width band below the event details. Below a `42rem`
@@ -672,7 +690,7 @@ If an action refresh removes the focused card, focus moves to the Events
 heading only when it was lost and the user has not moved elsewhere; local
 filtering does not trigger that fallback.
 
-The compact composition changes no mutation behavior. Search, filtering,
+Search, filtering,
 draft retention, one shared mutation-busy state, result locking, explicit
 visibility targets, refresh behavior, and feedback remain as described above.
 

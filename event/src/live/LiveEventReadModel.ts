@@ -75,6 +75,7 @@ export interface PublicLiveSnapshot {
 }
 
 export interface PublicEventSnapshot {
+  liveEnabled?: boolean;
   _id?: string;
   id: string;
   eventId: string;
@@ -829,6 +830,7 @@ export const createPublicEventSnapshot = (
     visibility:
       (eventDocument.visibility as EventVisibility) ?? FALLBACK_EVENT_VISIBILITY,
     products: normalizeProducts(eventDocument.products),
+    ...(eventDocument.liveEnabled === false ? { liveEnabled: false } : {}),
   };
 
   const legacyId = asString(eventDocument._id);
@@ -919,6 +921,7 @@ export const createPublicEventSnapshotFromLiveUpdate = (
     status: seedSnapshot?.status ?? EventStatus.NO_RESULT,
     visibility: seedSnapshot?.visibility ?? EventVisibility.OFFLINE,
     products: cloneProducts(seedSnapshot?.products ?? []),
+    ...(seedSnapshot?.liveEnabled === false ? { liveEnabled: false } : {}),
     live: liveSnapshot,
   };
 

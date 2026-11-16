@@ -109,6 +109,15 @@ it("keeps the first insert when a NewEvent delivery is duplicated", async () => 
   expect(stored?.liveSeed).toBe(firstSeed);
 });
 
+it("persists pre-match-only mode and does not change it on a predecessor redelivery", async () => {
+  const { listener, message } = await setup(0);
+  const legacy = getData();
+  const creation = { ...legacy, data: { ...legacy.data, liveEnabled: false } };
+  await listener.onMessage(creation, message);
+  await listener.onMessage(legacy, message);
+  expect((await Event.findOne({ eventId: creation.data.id }))?.liveEnabled).toBe(false);
+});
+
 it("acknowledges late NewEvent deliveries without resurrecting an archive", async () => {
   const { listener, message } = await setup();
   const data = getData();
