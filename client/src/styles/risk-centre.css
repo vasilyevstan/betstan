@@ -20,7 +20,104 @@
   gap: 0.25rem;
 }
 .risk-rule-group {
-  margin-block: 1.5rem;
+  margin-block: 1rem 0;
+  padding-inline-start: 0.75rem;
+  border-inline-start: 2px solid var(--border-subtle);
+}
+.risk-rule-group__title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  margin: 0;
+}
+.risk-kind {
+  margin-block: 1.5rem 0;
+  padding-block-start: 1rem;
+  border-block-start: 1px solid var(--border-subtle);
+}
+.risk-kind__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+.risk-kind__header h3 {
+  margin: 0;
+}
+.risk-centre .risk-kind__add {
+  inline-size: auto;
+  min-inline-size: 9rem;
+  max-inline-size: 100%;
+}
+.risk-kind__note {
+  margin-block: 0.25rem 0;
+}
+.risk-kind__empty {
+  margin-block: 0.75rem 0;
+  font-size: 0.875rem;
+}
+.risk-switches {
+  display: grid;
+  gap: 0.75rem 1rem;
+  margin-block: 1rem 1.5rem;
+}
+.risk-switches > h2 {
+  margin: 0;
+}
+.risk-switch {
+  padding: 1rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.75rem;
+  min-width: 0;
+}
+.risk-switch h3 {
+  margin-block: 0 0.25rem;
+}
+.risk-switch-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.risk-switch-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+.risk-switch-list__name {
+  overflow-wrap: anywhere;
+}
+.risk-overlap {
+  margin-block: 1rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-subtle);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 0.5rem;
+}
+.risk-overlap p,
+.risk-overlap ul {
+  margin-block: 0.25rem;
+}
+.risk-history {
+  padding-inline-start: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.25rem;
+  margin-block-start: 0.75rem;
+}
+.risk-history > li > details > summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding-block: 0.625rem;
+  font-variant-numeric: tabular-nums;
+}
+.risk-history__changes {
+  margin-block: 0 0.5rem;
 }
 .risk-rule-title {
   display: flex;
@@ -79,5 +176,12 @@
 @media (min-width: 1200px) {
   .risk-layout {
     grid-template-columns: minmax(15rem, 0.8fr) minmax(0, 1.2fr);
+  }
+  .risk-switches {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    align-items: start;
+  }
+  .risk-switches > h2 {
+    grid-column: 1 / -1;
   }
 }

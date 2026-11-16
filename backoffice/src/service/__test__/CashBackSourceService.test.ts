@@ -9,6 +9,7 @@ import {
 } from "@betstan/common";
 import { app } from "../../app";
 import { Event } from "../../model/Event";
+import * as cashBackSettingModel from "../../model/CashBackSetting";
 import ResultSetPublisher from "../../event/publisher/ResultSetPublisher";
 import { handleCashBackSourceRequest } from "../CashBackSourceService";
 
@@ -293,4 +294,75 @@ it("rejects after the manual result commits even while publication is paused", a
     published();
   }
   expect((await result).status).toBe(200);
+});
+
+const setGlobalCashBack = (enabled: boolean) => request(app).put("/api/backoffice/cash-back-setting")
+  .send({ enabled, expectedEnabled: !enabled }).expect(200);
+
+const storedFence = () => Event.findOne({ eventId: "event-one" })
+  .select("+cashBackHold +cashBackGeneration +cashBackAuthorityRevision").lean();
+
+it("denies snapshots while the global switch is off even though the event allows cash-back, and restores them when on", async () => {
+  await createEvent();
+  await reserveRequest();
+  const before = await storedFence();
+  await setGlobalCashBack(false);
+  expect(await handleCashBackSourceRequest(snapshotRequest())).toMatchObject({ outcome: "DENIED", reason: "SUSPENDED" });
+  expect(await storedFence()).toEqual(before);
+  expect(before?.cashBackEnabled).toBe(true);
+  await setGlobalCashBack(true);
+  const restored = await handleCashBackSourceRequest(snapshotRequest("fresh"));
+  expect(restored).toMatchObject({ outcome: "SNAPSHOT", snapshot: { baseGeneration: 0 } });
+});
+
+it("denies a new reservation while the global switch is off without consuming a generation", async () => {
+  await createEvent();
+  const reserve = await reserveRequest();
+  await setGlobalCashBack(false);
+  expect(await handleCashBackSourceRequest(reserve)).toMatchObject({ outcome: "DENIED", reason: "SUSPENDED" });
+  const stored = await storedFence();
+  expect(stored?.cashBackGeneration).toBe(0);
+  expect(stored?.cashBackHold).toBeUndefined();
+});
+
+it("replays a held grant and releases it while the global switch is off", async () => {
+  await createEvent();
+  const reserve = await reserveRequest();
+  const grant = await handleCashBackSourceRequest(reserve);
+  expect(grant.outcome).toBe("GRANTED");
+  await setGlobalCashBack(false);
+  expect(await handleCashBackSourceRequest(JSON.parse(JSON.stringify(reserve)))).toEqual(grant);
+  expect(await handleCashBackSourceRequest(releaseRequest(reserve))).toMatchObject({
+    outcome: "RELEASED", fenceGeneration: 2,
+  });
+  const stored = await storedFence();
+  expect(stored?.cashBackHold).toBeUndefined();
+  expect(stored?.cashBackGeneration).toBe(2);
+});
+
+it("does not confirm a quote snapshotted before a global off/on cycle", async () => {
+  await createEvent();
+  const stale = await reserveRequest("stale");
+  await setGlobalCashBack(false);
+  await setGlobalCashBack(true);
+  expect(await handleCashBackSourceRequest(stale)).toMatchObject({ outcome: "DENIED", reason: "AUTHORITY_CHANGED" });
+  expect((await storedFence())?.cashBackGeneration).toBe(0);
+  expect(await handleCashBackSourceRequest(await reserveRequest("fresh"))).toMatchObject({ outcome: "GRANTED" });
+});
+
+it("re-reads the global switch immediately before the reservation write", async () => {
+  await createEvent();
+  const reserve = await reserveRequest();
+  const read = cashBackSettingModel.readCashBackSetting;
+  const spy = jest.spyOn(cashBackSettingModel, "readCashBackSetting").mockImplementationOnce(async () => {
+    const enabled = await read();
+    await setGlobalCashBack(false);
+    return enabled;
+  });
+  try {
+    expect(await handleCashBackSourceRequest(reserve)).toMatchObject({ outcome: "DENIED", reason: "SUSPENDED" });
+  } finally {
+    spy.mockRestore();
+  }
+  expect((await storedFence())?.cashBackHold).toBeUndefined();
 });

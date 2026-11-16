@@ -108,6 +108,10 @@ test('approved blue header and compact Backoffice controls retain representative
             const [a, b] = [...group.querySelectorAll('input')].map(box);
             return Math.abs(a.width - b.width);
           }),
+          controlRows: [...document.querySelectorAll('.backoffice-event__controls')].map((group) => new Set(
+            [...group.querySelectorAll('.backoffice-scores > *, .backoffice-event__actions > *')]
+              .map((node) => Math.round(node.getBoundingClientRect().bottom)),
+          ).size),
         };
       });
       const dark = header.getByRole('link', { name: 'Dark', exact: true });
@@ -132,6 +136,7 @@ test('approved blue header and compact Backoffice controls retain representative
       }
       expect(normal.controlBorders.every((width) => width === '0px')).toBe(true);
       expect(Math.max(...normal.scoreColumnDeltas)).toBeLessThanOrEqual(0.75);
+      if (viewport.width >= 1200) expect(normal.controlRows).toEqual(normal.controlRows.map(() => 2));
       if (!state.currentUser) {
         await header.getByRole('link', { name: 'Log in', exact: true }).hover();
         expect((await inspect()).textContrast).toBeGreaterThanOrEqual(4.5);

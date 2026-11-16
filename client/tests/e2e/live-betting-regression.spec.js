@@ -1278,6 +1278,10 @@ for (const scenario of [
     await page.keyboard.press('Tab');
     await expect(main.getByLabel('Away team', { exact: true })).toBeFocused();
     await page.keyboard.press('Tab');
+    await expect(main.getByLabel('Event mode', { exact: true })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(main.getByLabel('Cash back', { exact: true })).toBeFocused();
+    await page.keyboard.press('Tab');
     await expect(main.getByRole('button', { name: 'Create', exact: true })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(main.getByRole('searchbox')).toBeFocused();
@@ -1314,7 +1318,8 @@ for (const scenario of [
         expect(Math.abs(card.identityBounds.right - card.controlsBounds.right)).toBeLessThanOrEqual(1);
       }
     }
-    expect(metrics.cards[0].height).toBeLessThanOrEqual(metrics.horizontalCards ? 170 : 330);
+    // Includes the event-mode/cash-back state row and the cash-back action.
+    expect(metrics.cards[0].height).toBeLessThanOrEqual(metrics.horizontalCards ? 220 : 420);
     expect(Math.max(...metrics.cards.map((card) => card.scoreLeft)) - Math.min(...metrics.cards.map((card) => card.scoreLeft)))
       .toBeLessThanOrEqual(1);
     const metricsPath = testInfo.outputPath('backoffice-layout-metrics.json');

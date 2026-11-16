@@ -53,6 +53,22 @@ const getBoardStatusMessage = (betKind, boardState) => {
     : 'Awaiting pre-match approval…';
 };
 
+// Reasons that describe one selection (its price, market or event), never the ticket as a whole.
+const SELECTION_DECLINE_REASONS = new Set([
+  'STALE_QUOTE', 'MARKET_CLOSED', 'MARKET_SUSPENDED', 'INVALID_SELECTION',
+  'EVENT_STARTED', 'EVENT_NOT_LIVE', 'EVENT_RESULTED',
+]);
+
+// A whole-ticket decline marks every row with the board's reason; show it once on the slip.
+export const isWholeSlipDecline = (board, rows) => {
+  const reason = board?.declineReason;
+  if (!reason) return false;
+  const flagged = rows.filter((row) => row?.moderation);
+  if (flagged.length === 0) return true;
+  return !SELECTION_DECLINE_REASONS.has(reason) && flagged.length === rows.length
+    && flagged.every((row) => row.moderation.declineReason === reason);
+};
+
 const BoardModeration = ({ row }) => {
   if (!row?.moderation) {
     return null;
@@ -87,7 +103,8 @@ const SlipBoardPanel = ({
   const boardId = getBoardId(board);
   const isBusy = boardState?.isSubmitting || boardState?.isAwaitingDecision;
   const statusMessage = getBoardStatusMessage(betKind, boardState);
-  const moderationCount = rows.filter((row) => row?.moderation).length;
+  const wholeSlipDecline = isWholeSlipDecline(board, rows);
+  const moderationCount = wholeSlipDecline ? 0 : rows.filter((row) => row?.moderation).length;
   const totalOdds = rows.reduce((accumulator, row) => (
     accumulator * (Number(row?.oddsValue) || 1)
   ), 1);
@@ -128,8 +145,11 @@ const SlipBoardPanel = ({
           {moderationCount > 0 ? <span className="text-danger">{moderationCount} declined selection{moderationCount > 1 ? 's' : ''}</span> : null}
         </div>
       </div>
-      {board?.declineReason ? <span className="slip-board__status text-danger">{formatDeclineReason(board.declineReason, board.reasonCodes)}</span> : null}
     </div>
+
+    {wholeSlipDecline ? <div className="slip-board__decline" role="note">
+      Declined: {formatDeclineReason(board.declineReason, board.reasonCodes)}
+    </div> : null}
 
     {statusMessage ? <div className="slip-board__pending" aria-live="polite">{statusMessage}</div> : null}
     {error ? <div className="alert alert-danger slip-board__error" role="alert">{error}</div> : null}
@@ -162,7 +182,7 @@ const SlipBoardPanel = ({
           {row.marketBet ? <p className="market-help">
             Quote expires {formatTimestamp(row.marketBet.expiresAt)}. To refresh it, select the outcome again on the match card.
           </p> : null}
-          <BoardModeration row={row} />
+          {wholeSlipDecline ? null : <BoardModeration row={row} />}
         </div>
       </div>;
     })}

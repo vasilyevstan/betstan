@@ -376,7 +376,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             <a className="btn backoffice-control backoffice-action"
               href={`/backoffice/events/${encodeURIComponent(event.eventId)}/markets${window.location.search}`}
               aria-label={`Markets for ${eventName}`}>Markets</a>
-            <button type="button" className="btn backoffice-control backoffice-action"
+            <button type="button" className="btn backoffice-control backoffice-action backoffice-cash-back-action"
               disabled={isResulted || Boolean(busyAction)}
               aria-label={`${cashBackEnabled ? 'Turn off' : 'Allow'} cash back for ${eventName}`}
               onClick={() => runAction(cashBackActionId,
