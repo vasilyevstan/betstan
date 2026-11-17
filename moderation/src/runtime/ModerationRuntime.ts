@@ -58,7 +58,7 @@ export interface ModerationRuntimeDependencies {
   createReplayPublisher(): ManagedPublisher;
   createWorker(replayPublisher: ManagedPublisher): ManagedWorker;
   createListeners(): ManagedListener[];
-  startProbeListener?: () => Promise<ManagedProbeListener>;
+  startProbeListener?: (isReady: () => boolean) => Promise<ManagedProbeListener>;
 }
 
 class ModerationRuntime {
@@ -69,6 +69,7 @@ class ModerationRuntime {
   private shutdownPromise: Promise<void> | null = null;
   private hooksInstalled = false;
   private exitPromise: Promise<void> | null = null;
+  private ready = false;
 
   private readonly handleSigint = () => {
     void this.exitAfterShutdown(0, "Received sigint command");
@@ -115,12 +116,19 @@ class ModerationRuntime {
       await this.worker.start();
 
       if (this.dependencies.startProbeListener) {
-        this.probeListener = await this.dependencies.startProbeListener();
+        this.probeListener = await this.dependencies.startProbeListener(() => this.ready && !this.shutdownPromise);
+      }
+
+      if (this.shutdownPromise) {
+        await this.probeListener?.close();
+        this.probeListener = null;
+        return;
       }
 
       for (const listener of this.listeners) {
         listener.listen();
       }
+      this.ready = true;
     } catch (error) {
       try {
         await this.shutdown();
@@ -135,6 +143,7 @@ class ModerationRuntime {
   }
 
   async shutdown(): Promise<void> {
+    this.ready = false;
     if (this.shutdownPromise) {
       return this.shutdownPromise;
     }
@@ -281,8 +290,9 @@ export const createDefaultModerationRuntime = (
   env: NodeJS.ProcessEnv = process.env,
   runtimeProcess: ModerationRuntimeProcess = process,
   logger: ModerationRuntimeLogger = console,
-  startProbeListener?: () => Promise<ManagedProbeListener>
+  startProbeListener?: (isReady: () => boolean) => Promise<ManagedProbeListener>
 ): ModerationRuntime => {
+  let brokerConnected = false;
   const closeMessaging = async () => {
     const connection = Reflect.get(messengerWrapper, "_connection") as
       | { close?: () => Promise<void> }
@@ -312,6 +322,16 @@ export const createDefaultModerationRuntime = (
     connectMessaging: async (uri: string) => {
       logger.log("Connecting to: ", uri);
       await messengerWrapper.connect(uri);
+      brokerConnected = true;
+      const connection = messengerWrapper.connection;
+      if ("on" in connection && typeof connection.on === "function") {
+        const brokerFailed = () => {
+          brokerConnected = false;
+          logger.error("moderation_broker_unavailable");
+        };
+        connection.on("close", brokerFailed);
+        connection.on("error", brokerFailed);
+      }
     },
     closeMessaging,
     connectDatabase: async (uri: string) => {
@@ -334,7 +354,8 @@ export const createDefaultModerationRuntime = (
       new RiskSettlementListener(messengerWrapper.connection),
       new RiskCashBackListener(messengerWrapper.connection),
     ],
-    startProbeListener,
+    startProbeListener: startProbeListener
+      ? (isReady) => startProbeListener(() => isReady() && brokerConnected) : undefined,
   });
 };
 

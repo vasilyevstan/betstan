@@ -226,15 +226,20 @@ export const createApp = (
     rateLimit(takeSummaryToken),
     async (req, res) => {
       const query = req.originalUrl.split("?")[1];
-      if (query !== undefined && query !== "metricsVersion=2") {
+      if (query !== undefined && ![
+        "metricsVersion=2", "metricsVersion=2&healthVersion=2",
+      ].includes(query)) {
         return invalidRequest(res);
       }
 
       try {
         const summary = await getSummary();
-        return res.send(query === "metricsVersion=2" ? summary : {
+        return res.send({
           ...summary,
-          metrics: summary.metrics.slice(0, METRICS_V1.length),
+          metrics: query?.startsWith("metricsVersion=2")
+            ? summary.metrics : summary.metrics.slice(0, METRICS_V1.length),
+          health: query === "metricsVersion=2&healthVersion=2"
+            ? summary.health : summary.health.map(({ service, status }) => ({ service, status })),
         });
       } catch {
         return res

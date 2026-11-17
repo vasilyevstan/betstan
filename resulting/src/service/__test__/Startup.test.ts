@@ -61,13 +61,21 @@ it("fails the process when a connected broker closes instead of keeping a health
   const connection = Object.assign(new EventEmitter(), createConnection());
   const { processLike } = createProcessLike();
   const closed = jest.fn(async () => {});
+  let isReady = () => false;
   await startResultingService(config, {
     connectBroker: async () => {}, connectDb: async () => {},
     getBrokerConnection: () => connection, createListeners: () => [], createWorkers: () => [],
     closeBroker: closed, closeDb: async () => {}, disconnectDb: async () => {},
     logger: { log: jest.fn(), error: jest.fn() }, processLike,
+    startProbeListener: async check => {
+      isReady = check;
+      expect(isReady()).toBe(false);
+      return { close: async () => { expect(isReady()).toBe(false); } };
+    },
   });
+  expect(isReady()).toBe(true);
   connection.emit("close");
+  expect(isReady()).toBe(false);
   await new Promise(resolve => setImmediate(resolve));
   expect(closed).toHaveBeenCalledTimes(1);
   expect(processLike.exit).toHaveBeenCalledWith(1);
@@ -92,6 +100,44 @@ it("resolves config and rejects missing required env variables", () => {
       RABBITMQ_URI: config.rabbitmqUri,
     } as NodeJS.ProcessEnv)
   ).toThrow("Missing MONGO_URI variable");
+});
+
+it("keeps a late-started probe unhealthy and closes it after shutdown has begun", async () => {
+  let releaseProbe!: () => void;
+  let reachedProbe!: () => void;
+  let releaseCleanup!: () => void;
+  const probeGate = new Promise<void>(resolve => { releaseProbe = resolve; });
+  const probeReached = new Promise<void>(resolve => { reachedProbe = resolve; });
+  const cleanupGate = new Promise<void>(resolve => { releaseCleanup = resolve; });
+  const { handlers, processLike } = createProcessLike();
+  const listener = createListener("late-listener");
+  const close = jest.fn(async () => {});
+  let isReady = () => false;
+  const starting = startResultingService(config, {
+    connectBroker: async () => {}, connectDb: async () => {},
+    getBrokerConnection: createConnection, createListeners: () => [listener], createWorkers: () => [],
+    closeBroker: async () => {}, closeDb: async () => cleanupGate, disconnectDb: async () => {},
+    logger: { log: jest.fn(), error: jest.fn() }, processLike,
+    startProbeListener: async check => {
+      isReady = check;
+      reachedProbe();
+      await probeGate;
+      return { close };
+    },
+  });
+  await probeReached;
+  const stopping = handlers.get("SIGTERM")!();
+  try {
+    releaseProbe();
+    await starting;
+    expect(isReady()).toBe(false);
+    expect(listener.listen).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+  } finally {
+    releaseProbe();
+    releaseCleanup();
+    await Promise.all([starting, stopping]);
+  }
 });
 
 it("registers shutdown hooks before connecting and starts recovery before listeners listen", async () => {

@@ -82,7 +82,7 @@ const isValidDateInventory = (dates, generatedAt) => {
   return dates[dates.length - 1] === new Date(generatedAt).toISOString().slice(0, 10);
 };
 
-const isValidSummary = (value, version = 2) => {
+const isValidSummary = (value, version = 2, healthVersion = 2) => {
   if (!hasExactKeys(value, ['generatedAt', 'dates', 'metrics', 'health'])) {
     return false;
   }
@@ -114,9 +114,13 @@ const isValidSummary = (value, version = 2) => {
     Array.isArray(value.health)
     && value.health.length === SERVICES.length
     && value.health.every((entry, index) => (
-      hasExactKeys(entry, ['service', 'status'])
+      hasExactKeys(entry, healthVersion === 2 && entry.service === 'gamemaster'
+        ? ['service', 'status', 'liveBettingEnabled'] : ['service', 'status'])
       && entry.service === SERVICES[index][0]
       && Object.prototype.hasOwnProperty.call(STATUSES, entry.status)
+      && (healthVersion !== 2 || entry.service !== 'gamemaster'
+        || typeof entry.liveBettingEnabled === 'boolean'
+        || (entry.liveBettingEnabled === null && entry.status === 'red'))
     ))
   );
 };
@@ -524,18 +528,25 @@ const Telemetry = () => {
       const options = { signal: operation.controller.signal, timeout: 10000 };
       let response;
       let version = 2;
+      let healthVersion = 2;
       try {
-        response = await axios.get('/api/telemetry/summary?metricsVersion=2', options);
+        response = await axios.get('/api/telemetry/summary?metricsVersion=2&healthVersion=2', options);
       } catch (error) {
-        // The prior service explicitly rejects every summary query with this response.
         if (error.response?.status !== 400 || error.response?.data?.error !== 'Invalid request') throw error;
         if (!isCurrent()) return 'neutral';
-        version = 1;
-        response = await axios.get('/api/telemetry/summary', options);
+        healthVersion = 1;
+        try {
+          response = await axios.get('/api/telemetry/summary?metricsVersion=2', options);
+        } catch (legacyError) {
+          if (legacyError.response?.status !== 400 || legacyError.response?.data?.error !== 'Invalid request') throw legacyError;
+          if (!isCurrent()) return 'neutral';
+          version = 1;
+          response = await axios.get('/api/telemetry/summary', options);
+        }
       }
       if (!isCurrent()) return 'neutral';
-      if (!isValidSummary(response.data, version)) throw new Error('Invalid telemetry summary');
-      const accepted = { ...response.data, metricsVersion: version };
+      if (!isValidSummary(response.data, version, healthVersion)) throw new Error('Invalid telemetry summary');
+      const accepted = { ...response.data, metricsVersion: version, healthVersion };
       snapshotRef.current = accepted;
       setSnapshot(accepted);
       Object.entries(recordsRef.current).forEach(([metric, record]) => {
@@ -685,9 +696,17 @@ const Telemetry = () => {
         ) : null}
         <section className="telemetry-section" aria-labelledby="telemetry-health-heading">
           <h2 className="h4 mb-0" id="telemetry-health-heading">Service health</h2>
+          {snapshot.healthVersion === 1 ? <p className="telemetry-notice" role="status">
+            This service reports connectivity only. Readiness and live betting status are unavailable.
+          </p> : null}
           <ul className="telemetry-health">
             {snapshot.health.map((entry, index) => {
-              const status = STATUSES[entry.status];
+              const status = entry.status === 'red' ? STATUSES.red
+                : snapshot.healthVersion === 1
+                  ? { label: 'Readiness unknown', modifier: 'degraded' }
+                  : entry.liveBettingEnabled === false
+                    ? { label: 'Live betting off', modifier: 'degraded' }
+                    : STATUSES[entry.status];
               return <li className="card telemetry-health__item" key={entry.service}>
                 <span className="telemetry-health__service">{SERVICES[index][1]}</span>
                 <span className={`telemetry-health__status telemetry-health__status--${status.modifier}`}>

@@ -3,15 +3,27 @@ import mongoose from "mongoose";
 import { messengerWrapper } from "@betstan/common";
 
 import NewEventListener from "./event/listener/NewEventListener";
-import { GamemasterWorker } from "./worker/GamemasterWorker";
+import { GamemasterWorker, liveKickoffsAllowedAt } from "./worker/GamemasterWorker";
 import EventResultListener from "./event/listener/EventResultListener";
 import { CashBackSourceListener } from "./event/listener/CashBackSourceListener";
 
 export const startWorkerProbeServer = async (
-  port = Number(process.env.PORT ?? 3000)
+  port = Number(process.env.PORT ?? 3000),
+  isReady: () => boolean = () => false
 ): Promise<Server> =>
   new Promise((resolve, reject) => {
-    const server = createServer((_request, response) => {
+    const server = createServer((request, response) => {
+      if (request.method === "GET" && request.url === "/health") {
+        const ready = mongoose.connection.readyState === 1 && isReady();
+        response.writeHead(ready ? 200 : 503, {
+          "Content-Type": "application/json", "Cache-Control": "no-store",
+        });
+        response.end(JSON.stringify({
+          status: ready ? "green" : "red",
+          liveBettingEnabled: liveKickoffsAllowedAt(new Date()),
+        }));
+        return;
+      }
       response.statusCode = 204;
       response.end();
     });
@@ -79,6 +91,7 @@ export const startUp = async (listenForProbes = false) => {
   let probeServer: Server | undefined;
   console.log("Connecting to: ", process.env.RABBITMQ_URI);
   await messengerWrapper.connect(process.env.RABBITMQ_URI);
+  let brokerReady = true;
   await mongoose.connect(process.env.MONGO_URI);
   console.log("Connected to database");
 
@@ -94,6 +107,7 @@ export const startUp = async (listenForProbes = false) => {
   await gameMaster.init();
 
   const closeResources = async () => {
+    brokerReady = false;
     gameMaster.stop();
     await closeServer(probeServer);
     await mongoose.connection.close();
@@ -103,8 +117,8 @@ export const startUp = async (listenForProbes = false) => {
   const handlers = installGamemasterProcessHandlers(closeResources);
   const connection = messengerWrapper.connection;
   if ("on" in connection && typeof connection.on === "function") {
-    connection.on("close", () => { void handlers.shutdown(1, "gamemaster_broker_closed"); });
-    connection.on("error", () => { void handlers.shutdown(1, "gamemaster_broker_failed"); });
+    connection.on("close", () => { brokerReady = false; void handlers.shutdown(1, "gamemaster_broker_closed"); });
+    connection.on("error", () => { brokerReady = false; void handlers.shutdown(1, "gamemaster_broker_failed"); });
   }
 
   newEventListener.listen();
@@ -112,7 +126,7 @@ export const startUp = async (listenForProbes = false) => {
   cashBackSourceListener.listen();
   gameMaster.work();
   if (listenForProbes) {
-    probeServer = await startWorkerProbeServer();
+    probeServer = await startWorkerProbeServer(undefined, () => brokerReady && gameMaster.isHealthy());
   }
 
   return { gameMaster, probeServer };

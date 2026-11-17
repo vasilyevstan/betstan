@@ -121,6 +121,7 @@ const createSummary = ({
   health: SERVICES.map(([service], index) => ({
     service,
     status: statuses[index % statuses.length],
+    ...(service === 'gamemaster' ? { liveBettingEnabled: true } : {}),
   })),
 });
 
@@ -152,17 +153,56 @@ const overviewTime = () => document.querySelector('.telemetry-page__generated ti
 const expectOverviewTime = (value) => waitFor(() => expect(overviewTime()).toHaveTextContent(value));
 
 describe('Telemetry', () => {
+  it.each([
+    ['green', false, 'Live betting off'],
+    ['green', true, 'Healthy'],
+    ['red', false, 'Unavailable'],
+    ['red', null, 'Unavailable'],
+  ])('shows Game master %s with live=%s accurately', async (status, enabled, label) => {
+    const summary = createSummary();
+    summary.health[5] = { service: 'gamemaster', status, liveBettingEnabled: enabled };
+    axios.get.mockResolvedValue({ data: summary });
+    renderTelemetry();
+    const item = (await screen.findByText('Game master')).closest('li');
+    expect(within(item).getByText(label)).toBeInTheDocument();
+    if (label !== 'Healthy') expect(item.querySelector('.telemetry-health__status--healthy')).toBeNull();
+  });
+
+  it('does not present legacy connectivity as functional readiness', async () => {
+    const legacy = createSummary({ statuses: ['green'] });
+    legacy.health = legacy.health.map(({ service, status }) => ({ service, status }));
+    axios.get.mockRejectedValueOnce({ response: { status: 400, data: { error: 'Invalid request' } } })
+      .mockResolvedValueOnce({ data: legacy });
+    renderTelemetry();
+    expect(await screen.findByText(/reports connectivity only/)).toBeInTheDocument();
+    expect(screen.getAllByText('Readiness unknown')).toHaveLength(10);
+    expect(screen.queryByText('Healthy')).not.toBeInTheDocument();
+    expect(screen.getByText('Market Template visits')).toBeInTheDocument();
+  });
+
+  it.each([undefined, 'true', null])('rejects unknown live state on an otherwise green Game master (%s)', async enabled => {
+    const summary = createSummary({ statuses: ['green'] });
+    summary.health[5].liveBettingEnabled = enabled;
+    axios.get.mockResolvedValue({ data: summary });
+    renderTelemetry();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Telemetry is unavailable');
+    expect(axios.get).toHaveBeenCalledTimes(1);
+  });
+
   it('labels verified v1 compatibility and never invents new counters', async () => {
     const v1 = createSummary();
     v1.metrics = v1.metrics.slice(0, 8);
+    v1.health = v1.health.map(({ service, status }) => ({ service, status }));
     axios.get.mockReset();
     axios.get.mockRejectedValueOnce({ response: { status: 400, data: { error: 'Invalid request' } } })
+      .mockRejectedValueOnce({ response: { status: 400, data: { error: 'Invalid request' } } })
       .mockResolvedValueOnce({ data: v1 });
     renderTelemetry();
     expect(await screen.findByText(/Version 1 compatibility/)).toBeInTheDocument();
     expect(screen.getAllByText(/Unavailable — requires/)).toHaveLength(2);
     expect(document.querySelectorAll('.telemetry-metric__graph')).toHaveLength(8);
     expect(axios.get.mock.calls.map(([url]) => url)).toEqual([
+      '/api/telemetry/summary?metricsVersion=2&healthVersion=2',
       '/api/telemetry/summary?metricsVersion=2', '/api/telemetry/summary',
     ]);
   });
@@ -280,7 +320,7 @@ describe('Telemetry', () => {
     await screen.findByRole('heading', { name: 'Service health' });
 
     expect(axios.get).toHaveBeenCalledTimes(1);
-    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary?metricsVersion=2', {
+    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary?metricsVersion=2&healthVersion=2', {
       timeout: 10000, signal: expect.any(AbortSignal),
     });
 
@@ -289,7 +329,7 @@ describe('Telemetry', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(2));
-    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary?metricsVersion=2', {
+    expect(axios.get).toHaveBeenLastCalledWith('/api/telemetry/summary?metricsVersion=2&healthVersion=2', {
       timeout: 10000, signal: expect.any(AbortSignal),
     });
     expect(await screen.findByText('Telemetry refreshed.')).toBeInTheDocument();
@@ -758,8 +798,8 @@ describe('Telemetry', () => {
       userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
       expect(cardAt().querySelectorAll('rect')).toHaveLength(24);
       expect(axios.get.mock.calls.map(([path]) => path)).toEqual([
-        '/api/telemetry/summary?metricsVersion=2', hourlyPath(), hourlyPath(1, 1),
-        '/api/telemetry/summary?metricsVersion=2', hourlyPath(), hourlyPath(1, 1),
+        '/api/telemetry/summary?metricsVersion=2&healthVersion=2', hourlyPath(), hourlyPath(1, 1),
+        '/api/telemetry/summary?metricsVersion=2&healthVersion=2', hourlyPath(), hourlyPath(1, 1),
       ]);
       const later = createDeferred();
       axios.get.mockReturnValueOnce(later.promise);

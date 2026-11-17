@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { app } from "./app";
+import { app, runtimeHealth } from "./app";
 import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./messaging/listener/NewEventListener";
 import EventResultListener from "./messaging/listener/EventResultListener";
@@ -38,6 +38,7 @@ const startUp = async () => {
     }
 
     shuttingDown = true;
+    runtimeHealth.ready = false;
 
     try {
       await scheduler?.stop();
@@ -81,6 +82,15 @@ const startUp = async () => {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);
     await messengerWrapper.connect(process.env.RABBITMQ_URI);
     rabbitConnection = messengerWrapper.connection;
+    runtimeHealth.brokerConnected = true;
+    if ("on" in rabbitConnection && typeof rabbitConnection.on === "function") {
+      const brokerFailed = () => {
+        runtimeHealth.brokerConnected = false;
+        console.error("event_broker_unavailable");
+      };
+      rabbitConnection.on("close", brokerFailed);
+      rabbitConnection.on("error", brokerFailed);
+    }
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
@@ -109,6 +119,7 @@ const startUp = async () => {
     await scheduler.start();
     marketProjection = new MarketProjectionService(messengerWrapper.connection);
     await marketProjection.start();
+    runtimeHealth.ready = true;
 
     server = app.listen(3000, () => {
       console.log("listening on port 3000");

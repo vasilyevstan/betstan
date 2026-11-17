@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import "express-async-errors";
 import { json } from "body-parser";
 import cookieSession from "cookie-session";
@@ -11,6 +12,11 @@ import { profileRouter } from "./route/Profile";
 import { errorHandler } from "@betstan/common";
 
 const app = express();
+app.get("/health", (_req, res) => {
+  const ready = mongoose.connection.readyState === 1;
+  res.set("Cache-Control", "no-store").status(ready ? 200 : 503)
+    .send({ status: ready ? "green" : "red" });
+});
 app.set("trust proxy", true);
 app.use(json());
 app.use(

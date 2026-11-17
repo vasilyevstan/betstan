@@ -339,7 +339,7 @@ flowchart LR
     MQ -->|Observer queue| Telemetry
     Telemetry -->|Validate and deduplicate| DB[("Telemetry records")]
     DB -->|UTC daily aggregates| Summary["Public summary"]
-    Probes["Bounded application TCP probes"] --> Summary
+    Probes["Bounded application HTTP readiness checks"] --> Summary
     Summary -->|HTTP on entry or Refresh| Dashboard["Telemetry dashboard"]
 ```
 

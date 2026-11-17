@@ -1,6 +1,6 @@
 import { Server } from "http";
 import mongoose from "mongoose";
-import { app } from "./app";
+import { app, runtimeHealth } from "./app";
 import { messengerWrapper } from "@betstan/common";
 
 import ModerationResultListener from "./event/listener/ModerationResultListener";
@@ -42,6 +42,13 @@ export const startUp = async () => {
 
   console.log("Connecting to: ", process.env.RABBITMQ_URI);
   await messengerWrapper.connect(process.env.RABBITMQ_URI);
+  runtimeHealth.brokerConnected = true;
+  const connection = messengerWrapper.connection;
+  if ("on" in connection && typeof connection.on === "function") {
+    const brokerUnavailable = () => { runtimeHealth.brokerConnected = false; };
+    connection.on("close", brokerUnavailable);
+    connection.on("error", brokerUnavailable);
+  }
 
   const pendingBetUpdateWorker = new PendingBetUpdateWorker();
   await pendingBetUpdateWorker.start();
@@ -66,6 +73,7 @@ export const startUp = async () => {
 
   let shuttingDownPromise: Promise<void> | null = null;
   const shutDown = async (exitCode?: number) => {
+    runtimeHealth.ready = false;
     if (shuttingDownPromise) {
       await shuttingDownPromise;
       return;
@@ -119,7 +127,6 @@ export const startUp = async () => {
     console.error("bet_unhandled_rejection");
     void shutDown(1);
   });
-  const connection = messengerWrapper.connection;
   if ("on" in connection && typeof connection.on === "function") {
     connection.on("close", () => {
       console.error("bet_broker_closed");
@@ -130,8 +137,11 @@ export const startUp = async () => {
       void shutDown(1);
     });
   }
-  for (const listener of listeners) listener.listen();
-  await cashBackFacade.start();
+  if (!shuttingDownPromise) {
+    for (const listener of listeners) listener.listen();
+    await cashBackFacade.start();
+    runtimeHealth.ready = !shuttingDownPromise;
+  }
 
   return { pendingBetUpdateWorker, cashBackFacade, server, shutDown };
 };
