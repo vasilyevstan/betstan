@@ -3,7 +3,11 @@ ARG NODE_IMAGE=docker.io/library/node:20.19.4-alpine3.22@sha256:df02558528d3d3d0
 ARG NGINX_IMAGE=docker.io/library/nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
 
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
+ARG REACT_APP_RELEASE_VERSION
+ARG SOURCE_DATE_EPOCH
 ENV CI=true
+ENV REACT_APP_RELEASE_VERSION=${REACT_APP_RELEASE_VERSION}
+ENV REACT_APP_RELEASE_EPOCH=${SOURCE_DATE_EPOCH}
 WORKDIR /app
 COPY client/package.json client/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci

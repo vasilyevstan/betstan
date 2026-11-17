@@ -1,6 +1,7 @@
 import React, { useRef, useState } from "react";
 import { Link, useLocation } from 'react-router-dom';
 import getRouteIdentity from './routeIdentity';
+import releaseMetadata from './releaseMetadata';
 
 const Header = ({ currentUser, uiVariant, theme }) => {
     const location = useLocation();
@@ -72,14 +73,23 @@ const Header = ({ currentUser, uiVariant, theme }) => {
        }}
     >
        <div className="container-fluid">
-           <Link
-               aria-current={isEventsRoute ? 'page' : undefined}
-               className="navbar-brand mb-0 fw-semibold d-flex align-items-center gap-2"
-               to={logoLink}
-               onClick={closeMenu}
-           >
-               <img className="brand-wordmark" src={brandSource} alt="BetStan home" />
-           </Link>
+           <div className="brand-lockup">
+               <Link
+                   aria-current={isEventsRoute ? 'page' : undefined}
+                   className="navbar-brand mb-0 fw-semibold d-flex align-items-center gap-2"
+                   to={logoLink}
+                   onClick={closeMenu}
+               >
+                   <img className="brand-wordmark" src={brandSource} alt="BetStan home" />
+               </Link>
+               <span className="brand-release">
+                   {releaseMetadata.versionLabel}
+                   {releaseMetadata.date ? <>
+                       <span aria-hidden="true"> · </span>
+                       <time dateTime={releaseMetadata.date}>{releaseMetadata.dateLabel}</time>
+                   </> : null}
+               </span>
+           </div>
            <button
                ref={menuToggle}
                className="navbar-toggler"
