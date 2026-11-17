@@ -310,8 +310,11 @@ The Market designer starts new templates from **Free draw**, **1X2**,
 **Correct Score** or the other built-in designs. Built-in sources stay
 unchanged; **Use template** opens an independent copy that can be renamed and
 given new layouts, outcomes and rules. Saved templates offer **Copy** for an
-independent template, **New version** for a revision, and **Archive** or
-**Restore**. Library rows and the template editor show the same player preview
+independent template, **New version** for a revision, **Archive** or
+**Restore**, and **Delete**. Delete asks for confirmation, then permanently
+removes the template from the library. Markets already added to events keep
+their own copy of the template, so they still show, publish, accept bets and
+settle. Library rows and the template editor show the same player preview
 using default values. Outcome and parameter keys are derived from their labels
 unless edited. The guided rule editor supports full-time score conditions or
 explicit operator-declared outcomes, not executable formulas. Correct Score
@@ -382,7 +385,7 @@ a winning row at 3 retains accepted total odds 15 but reports nominal return
 
 | API owner | Paths |
 | --- | --- |
-| Backoffice | GET/POST `/api/backoffice/market-templates`; PUT `/api/backoffice/market-templates/:templateId` |
+| Backoffice | GET/POST `/api/backoffice/market-templates`; PUT/DELETE `/api/backoffice/market-templates/:templateId` |
 | Backoffice | GET/POST `/api/backoffice/events/:eventId/markets`; PUT `/api/backoffice/events/:eventId/markets/:marketId`; POST `.../:marketId/result` |
 | Backoffice | POST `/api/backoffice/events/:eventId/markets/validate` for exact current source revisions |
 | Event | GET `/api/event/events/:eventId/markets`; POST `.../markets/preview`; POST `/api/event/events/:eventId/market-quotes` |

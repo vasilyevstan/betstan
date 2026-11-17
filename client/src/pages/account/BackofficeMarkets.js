@@ -336,13 +336,17 @@ const AddMarketPanel = ({ templates, starters, hasRetainedModel, busy, onCreate,
   </form>;
 };
 
-const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive }) => {
+const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive, onDelete }) => {
   const [draft, setDraft] = useState(null);
+  const [deleting, setDeleting] = useState(null);
   const sequence = useRef(0);
+  const deleteConfirm = useRef(null);
   const templates = library?.templates ?? [];
   const starters = library?.starters ?? [];
   const open = (definition, extra = {}) => setDraft({ key: ++sequence.current, definition, ...extra });
   const save = async (definition, layout) => { if (await onSave(draft, definition, layout)) setDraft(null); };
+  const remove = async (template) => { await onDelete(template); setDeleting(null); };
+  useEffect(() => { if (deleting) deleteConfirm.current?.focus(); }, [deleting]);
   return <div className="market-library">
     <div className="market-library__header">
       <div>
@@ -410,7 +414,21 @@ const TemplateLibrary = ({ library, enabled, busy, onSave, onArchive }) => {
           <button type="button" className={marketActionClass()} disabled={busy || !enabled}
             aria-label={`${template.archived ? 'Restore' : 'Archive'} ${latest.definition.name}`}
             onClick={() => onArchive(template)}>{template.archived ? 'Restore' : 'Archive'}</button>
+          {deleting === template.templateId ? null : <button type="button" className={marketActionClass()}
+            disabled={busy || !enabled || Boolean(draft)} aria-label={`Delete ${latest.definition.name}`}
+            data-template-delete={template.templateId} onClick={() => setDeleting(template.templateId)}>Delete</button>}
         </div>
+        {deleting === template.templateId ? <div className="market-template-row__confirm" role="group"
+          aria-label={`Confirm deleting ${latest.definition.name}`}>
+          <p>Delete this template permanently? Markets already on events keep working.</p>
+          <button type="button" ref={deleteConfirm} className={`${marketActionClass()} market-action--danger`}
+            disabled={busy || !enabled} onClick={() => remove(template)}>Delete permanently</button>
+          <button type="button" className={marketActionClass()} disabled={busy}
+            onClick={() => {
+              setDeleting(null);
+              window.requestAnimationFrame(() => document.querySelector(`[data-template-delete="${template.templateId}"]`)?.focus());
+            }}>Keep template</button>
+        </div> : null}
       </li>;
     })}</ul> : <p className="market-empty">No saved templates yet. Start from a design above and save it.</p>}
   </div>;
@@ -639,6 +657,9 @@ export const BackofficeMarketDesigner = () => {
   const archiveTemplate = (template) => run(async () => (
     await axios.put(`${TEMPLATES_PATH}/${template.templateId}`, { revision: template.revision, archived: !template.archived })
   ).data, template.archived ? 'Template restored.' : 'Template archived. Existing markets and bets are unchanged.');
+  const deleteTemplate = (template) => run(async () => (
+    await axios.delete(`${TEMPLATES_PATH}/${template.templateId}`, { data: { revision: template.revision } })
+  ).data, 'Template deleted. Markets already on events are unchanged.');
   const banner = loadError ? { tone: 'danger', text: library ? `Couldn't refresh templates. ${loadError}` : `Couldn't load templates. ${loadError}` }
     : library && !library.enabled ? { tone: 'warning', text: 'Market authoring is off. You can view templates but not change them.' } : null;
   return <section className="markets-page backoffice-markets" aria-labelledby="market-designer-title">
@@ -658,7 +679,8 @@ export const BackofficeMarketDesigner = () => {
     {!library && !loadError ? <p role="status" className="market-help">Loading templates...</p> : null}
     {library ? <>
       <Feedback error={error} message={message} feedback={feedback} />
-      <TemplateLibrary library={library} enabled={enabled} busy={busy} onSave={saveTemplate} onArchive={archiveTemplate} />
+      <TemplateLibrary library={library} enabled={enabled} busy={busy} onSave={saveTemplate} onArchive={archiveTemplate}
+        onDelete={deleteTemplate} />
     </> : null}
   </section>;
 };
