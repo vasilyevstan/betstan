@@ -9,7 +9,7 @@ import { acceptedOddsForBet, possibleReturn, settlementOddsForBet } from '../cas
 import { extractSelectionKeysFromBoards } from '../liveBettingUtils';
 import { gridLayout, placeTile } from '../marketLayout';
 
-jest.mock('axios', () => ({ get: jest.fn(), post: jest.fn(), put: jest.fn() }));
+jest.mock('axios', () => ({ get: jest.fn(), post: jest.fn(), put: jest.fn(), delete: jest.fn() }));
 
 const manualDefinition = {
   schemaVersion: 1, name: 'Match award', terms: 'Operator announces the winning nominee.',
@@ -227,6 +227,25 @@ it('saves reusable custom definitions with a stable request id after an uncertai
     name: 'New award', settlementMode: 'MANUAL', outcomes: [{ key: 'first-nominee', label: 'First nominee' }, { key: 'second-nominee', label: 'Second nominee' }],
   });
   await screen.findByText(/Template saved/);
+});
+
+it('deletes a template only after an explicit confirmation and can be cancelled', async () => {
+  let templates = [{ templateId: 'template-a', revision: 3, archived: true, versions: [template] }];
+  overrideGet({ '/api/backoffice/market-templates': () => ({ enabled: true, templates, starters }) });
+  axios.delete.mockImplementation(async () => { templates = []; return { data: { templateId: 'template-a', deleted: true } }; });
+  renderRoute(<BackofficeMarketDesigner />, '/backoffice/markets');
+  fireEvent.click(await screen.findByRole('button', { name: 'Delete Match award' }));
+  const confirmation = screen.getByRole('group', { name: 'Confirm deleting Match award' });
+  expect(confirmation).toHaveTextContent('Markets already on events keep working.');
+  expect(within(confirmation).getByRole('button', { name: 'Delete permanently' })).toHaveFocus();
+  fireEvent.click(within(confirmation).getByRole('button', { name: 'Keep template' }));
+  expect(screen.queryByRole('group', { name: 'Confirm deleting Match award' })).not.toBeInTheDocument();
+  expect(axios.delete).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Delete Match award' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
+  await screen.findByText('Template deleted. Markets already on events are unchanged.');
+  expect(axios.delete).toHaveBeenCalledWith('/api/backoffice/market-templates/template-a', { data: { revision: 3 } });
+  expect(screen.queryByRole('button', { name: 'Delete Match award' })).not.toBeInTheDocument();
 });
 
 it('preserves unsaved inputs after a concurrent revision until the operator explicitly reloads', async () => {

@@ -96,6 +96,7 @@ const draftFor = (rule, entry) => ({
     [key, Array.isArray(value) ? value.join(', ') : value]
   ))),
 });
+const DELETED_MARKET = 'Deleted market';
 const scopeValueNames = {
   betKind: { PRE_MATCH: 'Pre-match', LIVE: 'Live' },
   structure: { SINGLE: 'Singles', ACCUMULATOR: 'Accumulators', BUILDER: 'Bet Builder' },
@@ -554,6 +555,10 @@ export default function RiskCentre() {
   const visible = items.filter(item => (!category || item.catalogue?.category === category)
     && `${ruleName(item.catalogue)} ${item.catalogue?.label} ${item.id} ${item.catalogue?.description}`.toLowerCase().includes(query.toLowerCase()));
   const templateNames = new Map((templates?.templates || []).map(template => [template.templateId, templateName(template)]));
+  // Market switch rules exist only for library templates, so a missing one was deleted.
+  if (templates) items.filter(marketSwitch).forEach(rule => rule.scope.templateIds
+    .filter(id => rule.id === marketRuleId(id) && !templateNames.has(id))
+    .forEach(id => templateNames.set(id, DELETED_MARKET)));
   const liveTemplates = (templates?.templates || []).filter(template => !template.archived);
   const overlapping = draft && entry && !entry.locked ? snapshot.rules.filter(rule => rule.id !== draft.id
     && rule.type === draft.type && rule.enabled

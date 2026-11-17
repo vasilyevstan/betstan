@@ -234,6 +234,13 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await expect(page.getByRole('radio', { name: /^Correct Score / })).toBeEnabled();
     await page.screenshot({ path: testInfo.outputPath('event-market-picker.png'), fullPage: true });
     await page.goto(`/backoffice/markets?theme=${theme}`);
+    await page.getByRole('button', { name: 'Delete Total goals' }).click();
+    const confirmDelete = page.getByRole('group', { name: 'Confirm deleting Total goals' });
+    await expect(confirmDelete.getByRole('button', { name: 'Delete permanently' })).toBeFocused();
+    await expect(confirmDelete.getByRole('button', { name: 'Keep template' })).toBeInViewport();
+    await page.screenshot({ path: testInfo.outputPath('template-delete-confirm.png'), fullPage: true });
+    await confirmDelete.getByRole('button', { name: 'Keep template' }).click();
+    await expect(page.getByRole('button', { name: 'Delete Total goals' })).toBeFocused();
     await page.getByRole('button', { name: 'New template' }).click();
     await page.getByLabel('Template name').fill('Player of the match');
     await page.getByLabel('Settlement terms').fill('Operator declares the official award winner.');

@@ -140,6 +140,8 @@ saves an enabled **Block bets** rule scoped to that market, so new bets on it
 are declined as **Declined: Block bets** while the market stays visible.
 Turning it on removes that rule. Built-in 1X2, Correct Score and live markets
 have no stable cross-event identity yet, so they cannot be switched here.
+If a switched-off market's template is later deleted, its rule stays active
+and is listed as **Market: Deleted market** until it is removed.
 
 ## Acceptance and recovery
 

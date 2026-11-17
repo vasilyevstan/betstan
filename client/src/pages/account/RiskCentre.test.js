@@ -601,6 +601,23 @@ describe('sections, history and all-events switches', () => {
     expect(screen.getByRole('button', { name: 'Turn on cash back for all events' })).toBeInTheDocument();
   });
 
+  it('names a market switch rule whose template was deleted without hiding other unknown template IDs', async () => {
+    const deletedId = 'c'.repeat(32);
+    const policy = snapshot();
+    policy.rules.push({ id: `market:${deletedId}`, type: 'DENY', enabled: true, scope: { templateIds: [deletedId] }, parameters: {} });
+    policy.rules.push({ ...rule, id: 'custom:builder', enabled: true, scope: { templateIds: ['northport-1x2'] } });
+    routes({ [API]: policy, '/api/backoffice/market-templates': templates });
+    const view = mount();
+    expect(await screen.findByRole('button', { name: /ON Market: Deleted market/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Market: northport-1x2/ })).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(deletedId))).not.toBeInTheDocument();
+    view.unmount();
+    routes({ [API]: policy });
+    mount();
+    await screen.findByText('Markets are unavailable. Try refreshing.');
+    expect(await screen.findByRole('button', { name: new RegExp(`ON Market: ${deletedId}`) })).toBeInTheDocument();
+  });
+
   it('keeps rules usable when switch settings are unavailable', async () => {
     mount();
     await screen.findByRole('button', { name: /Maximum stake OFF All bets/ });

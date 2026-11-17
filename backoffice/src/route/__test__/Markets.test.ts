@@ -244,6 +244,30 @@ it("keeps reusable versions immutable, protects optimistic edits and archives wi
   expect(event.body.markets[0].template.definition.name).toBe("Player of the match");
 });
 
+it("deletes a template at its current revision while event markets keep working from their own copy", async () => {
+  const { template, market } = await setupMarket();
+  const remove = (body: unknown) => request(app).delete(`/api/backoffice/market-templates/${template.templateId}`).send(body as object);
+  await remove({}).expect(400);
+  await remove({ revision: 1, extra: true }).expect(400);
+  await remove({ revision: 2 }).expect(409);
+  expect(await MarketTemplate.exists({ templateId: template.templateId })).toBeTruthy();
+  process.env.EXTENSIBLE_MARKETS_ENABLED = "false";
+  await remove({ revision: 1 }).expect(503);
+  process.env.EXTENSIBLE_MARKETS_ENABLED = "true";
+  await remove({ revision: 1 }).expect(200, { templateId: template.templateId, deleted: true });
+  await remove({ revision: 1 }).expect(200, { templateId: template.templateId, deleted: true });
+  const library = await request(app).get("/api/backoffice/market-templates").expect(200);
+  expect(library.body.templates).toEqual([]);
+  await request(app).post("/api/backoffice/events/event-a/markets").send({
+    requestId: "another-market", templateId: template.templateId, templateVersion: 1, parameters: {},
+  }).expect(404);
+  const configuration = await publishMarket(market.marketId);
+  expect(configuration.template).toEqual(template.versions[0]);
+  const event = await request(app).get("/api/backoffice/events/event-a/markets").expect(200);
+  expect(event.body.markets).toHaveLength(1);
+  expect(event.body.markets[0]).toMatchObject({ marketId: market.marketId, status: "PUBLISHED", template: template.versions[0] });
+});
+
 it("creates draft instances idempotently and publishes only an explicit reviewed revision", async () => {
   const { template, market } = await setupMarket();
   const replay = await request(app).post("/api/backoffice/events/event-a/markets").send({
