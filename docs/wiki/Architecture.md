@@ -205,7 +205,9 @@ configurations. Parameter bindings freeze when publication is requested.
 Draft edits do not replace the previous successful projection; a publishing
 revision blocks new acceptance until Event acknowledges that exact configuration.
 Archive operations prevent new template instances, never delete historical
-authority. Configuration and manual-decision sends retain durable publication
+authority. Deleting a template removes only its library entry, at the expected
+revision; event markets already embed the template version they use, so they
+keep publishing and settling from that copy. Configuration and manual-decision sends retain durable publication
 obligations and coalesce concurrent local sends without claiming exactly-once
 transport.
 

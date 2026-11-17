@@ -91,6 +91,18 @@ router.put("/api/backoffice/market-templates/:templateId", requireWriting, run(a
   res.send(publicMarketTemplate(updated.toObject()));
 }));
 
+// Event markets embed their template version, so deleting the library entry leaves them unchanged.
+router.delete("/api/backoffice/market-templates/:templateId", requireWriting, run(async (req, res) => {
+  const body = marketObject(req.body, ["revision"], "Template deletion");
+  const templateId = marketKey(req.params.templateId, "Template id");
+  const revision = marketRevision(body.revision);
+  const { deletedCount } = await MarketTemplate.deleteOne({ templateId, revision });
+  if (deletedCount !== 1 && await MarketTemplate.exists({ templateId })) {
+    res.status(409).send({ message: "Template changed; reload it" }); return;
+  }
+  res.send({ templateId, deleted: true });
+}));
+
 router.get("/api/backoffice/events/:eventId/markets", run(async (req, res) => {
   const event = await Event.findOne({ eventId: req.params.eventId }).select("+customMarkets").lean();
   if (!event) { res.status(404).send({ message: "Event not found" }); return; }

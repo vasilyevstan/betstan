@@ -687,6 +687,25 @@
   flex-wrap: wrap;
   gap: 0.5rem;
 }
+.backoffice-markets .market-template-row__confirm {
+  display: flex;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-subtle);
+}
+.backoffice-markets .market-template-row__confirm p {
+  flex: 1 1 16rem;
+  margin: 0;
+}
+.backoffice-markets .backoffice-action.market-action--danger,
+.backoffice-markets .backoffice-action.market-action--danger:hover {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+}
 @media (max-width: 575.98px) {
   .backoffice-markets .market-toolbar,
   .backoffice-markets .market-detail,
