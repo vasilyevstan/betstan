@@ -1020,6 +1020,34 @@ const expectRefreshFocusAfterSuccessAndFailure = async (page, state) => {
   state.telemetrySummary = validSummary;
 };
 
+test('live betting health is truthful and fits desktop and mobile', async ({ page }, testInfo) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  const game = state.telemetrySummary.health.find(entry => entry.service === 'gamemaster');
+  await installAppApiMocks(page, state);
+  for (const width of [1280, 390]) {
+    for (const theme of THEMES) {
+      game.status = 'green';
+      game.liveBettingEnabled = false;
+      await page.setViewportSize({ width, height: 844 });
+      await page.goto(`/telemetry?ui=v1&theme=${theme}`);
+      const card = page.locator('.telemetry-health__item').filter({ hasText: 'Game master' });
+      await expect(card.getByText('Live betting off')).toBeVisible();
+      await expect(card.locator('.telemetry-health__status--degraded')).toHaveCount(1);
+      await expectNoScrollOverflow(page.locator('html'), 'telemetry document');
+      await expectNoScrollOverflow(page.locator('.telemetry-health__item'), 'health cards');
+      await page.getByRole('region', { name: 'Service health', exact: true })
+        .screenshot({ path: testInfo.outputPath(`live-off-${width}-${theme}.png`) });
+      game.liveBettingEnabled = true;
+      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+      await expect(card.getByText('Healthy', { exact: true })).toBeVisible();
+      game.status = 'red';
+      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+      await expect(card.getByText('Unavailable', { exact: true })).toBeVisible();
+    }
+  }
+});
+
 for (const uiVariant of UI_VARIANTS) {
   for (const theme of THEMES) {
     test(`Telemetry fits ${uiVariant} ${theme} across desktop, tablet, and mobile`, async ({ page }, testInfo) => {

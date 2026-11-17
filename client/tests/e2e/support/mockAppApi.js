@@ -124,6 +124,7 @@ const createTelemetrySummary = () => {
     health: services.map((service, index) => ({
       service,
       status: ['green', 'yellow', 'red'][index % 3],
+      ...(service === 'gamemaster' ? { liveBettingEnabled: true } : {}),
     })),
   };
 };
@@ -862,6 +863,9 @@ const installAppApiMocks = async (page, state) => {
       const snapshot = deepClone(response?.body ?? state.telemetrySummary);
       if (!response && new URL(route.request().url()).searchParams.get('metricsVersion') !== '2') {
         snapshot.metrics = snapshot.metrics.slice(0, 8);
+      }
+      if (!response && new URL(route.request().url()).searchParams.get('healthVersion') !== '2') {
+        snapshot.health = snapshot.health.map(({ service, status }) => ({ service, status }));
       }
       if (response?.wait) await response.wait;
       await fulfillJson(route, snapshot, response?.status || 200);

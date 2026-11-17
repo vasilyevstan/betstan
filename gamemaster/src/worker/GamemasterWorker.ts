@@ -262,6 +262,8 @@ export class GamemasterWorker {
   private scheduledTick?: TimerHandle;
   private running = false;
   private stopped = false;
+  private lastSuccessfulTickAt?: number;
+  private lastTickFailed = false;
 
   constructor(options: GamemasterWorkerOptions = {}) {
     this.clock = options.clock ?? systemClock;
@@ -335,6 +337,14 @@ export class GamemasterWorker {
     }
   }
 
+  isHealthy(): boolean {
+    const now = this.clock.now().getTime();
+    return !this.stopped && !this.lastTickFailed
+      && this.lastSuccessfulTickAt !== undefined
+      && now >= this.lastSuccessfulTickAt
+      && now - this.lastSuccessfulTickAt < 30000;
+  }
+
   private get resultPublisher(): ResultSetPublisher {
     if (!this.resultSetPublisher) {
       throw new Error("Result publisher is not initialised");
@@ -372,7 +382,10 @@ export class GamemasterWorker {
     this.running = true;
     try {
       await this.checkEventsOnce();
+      this.lastSuccessfulTickAt = this.clock.now().getTime();
+      this.lastTickFailed = false;
     } catch (err) {
+      this.lastTickFailed = true;
       console.error("GAMEMASTER_TICK_FAILED", err);
     } finally {
       this.running = false;

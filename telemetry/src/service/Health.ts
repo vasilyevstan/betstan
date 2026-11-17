@@ -1,4 +1,5 @@
-import net from "net";
+import http from "http";
+import mongoose from "mongoose";
 import { SERVICES, ServiceName } from "../domain/metrics";
 
 export interface ProbeTarget {
@@ -11,12 +12,17 @@ export interface HealthClock {
   nowMs(): number;
 }
 
-export type TcpProbe = (target: ProbeTarget) => Promise<void>;
 export type HealthStatus = "green" | "yellow" | "red";
+export interface ProbeResult {
+  status: HealthStatus;
+  liveBettingEnabled?: boolean;
+}
+export type HttpProbe = (target: ProbeTarget) => Promise<ProbeResult>;
 
 export interface ServiceHealth {
   service: ServiceName;
   status: HealthStatus;
+  liveBettingEnabled?: boolean | null;
 }
 
 const REMOTE_SERVICES = SERVICES.filter(
@@ -33,30 +39,79 @@ export const defaultTargets = (
     port: Number(env[`${service.toUpperCase()}_PORT`] ?? 3000),
   }));
 
-export const createTcpProbe = (timeoutMs = 1000): TcpProbe =>
+export const createHttpProbe = (timeoutMs = 1000): HttpProbe =>
   (target) =>
-    new Promise<void>((resolve, reject) => {
-      const socket = net.createConnection({
-        host: target.host,
-        port: target.port,
-      });
+    new Promise<ProbeResult>((resolve, reject) => {
       let settled = false;
-      const finish = (error?: Error) => {
+      let response: http.IncomingMessage | undefined;
+      const finish = (error?: Error, result?: ProbeResult) => {
         if (settled) {
           return;
         }
         settled = true;
-        socket.destroy();
+        clearTimeout(deadline);
+        response?.destroy();
+        request.destroy();
         if (error) {
           reject(error);
-        } else {
-          resolve();
+        } else if (result) {
+          resolve(result);
         }
       };
-      socket.setTimeout(timeoutMs);
-      socket.once("connect", () => finish());
-      socket.once("timeout", () => finish(new Error("timeout")));
-      socket.once("error", () => finish(new Error("connection")));
+      const request = http.get({
+        host: target.host,
+        port: target.port,
+        path: target.service === "client" ? "/" : "/health",
+        agent: false,
+      }, (incoming) => {
+        response = incoming;
+        if (incoming.statusCode !== 200) {
+          finish(new Error("not_ready"));
+          return;
+        }
+        const client = target.service === "client";
+        if (!incoming.headers["content-type"]?.startsWith(client ? "text/html" : "application/json")) {
+          finish(new Error("invalid_response"));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        incoming.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > (client ? 65536 : 1024)) {
+            finish(new Error("invalid_response"));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        incoming.once("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          if (client) {
+            finish(body.trim() ? undefined : new Error("invalid_response"), { status: "green" });
+            return;
+          }
+          try {
+            const value = JSON.parse(body);
+            if (!value || !["green", "yellow", "red"].includes(value.status)
+              || (target.service === "gamemaster"
+                && typeof value.liveBettingEnabled !== "boolean")) {
+              finish(new Error("invalid_response"));
+              return;
+            }
+            finish(undefined, {
+              status: value.status,
+              ...(target.service === "gamemaster"
+                ? { liveBettingEnabled: value.liveBettingEnabled } : {}),
+            });
+          } catch {
+            finish(new Error("invalid_response"));
+          }
+        });
+        incoming.once("error", () => finish(new Error("connection")));
+        incoming.once("aborted", () => finish(new Error("connection")));
+      });
+      const deadline = setTimeout(() => finish(new Error("timeout")), timeoutMs);
+      request.once("error", () => finish(new Error("connection")));
     });
 
 const classifyElapsed = (elapsed: number): HealthStatus => {
@@ -72,8 +127,9 @@ const classifyElapsed = (elapsed: number): HealthStatus => {
 export class HealthService {
   constructor(
     private readonly targets: ProbeTarget[] = defaultTargets(),
-    private readonly probe: TcpProbe = createTcpProbe(),
-    private readonly clock: HealthClock = { nowMs: () => Date.now() }
+    private readonly probe: HttpProbe = createHttpProbe(),
+    private readonly clock: HealthClock = { nowMs: () => Date.now() },
+    private readonly selfReady: () => boolean = () => mongoose.connection.readyState === 1
   ) {}
 
   async check(): Promise<ServiceHealth[]> {
@@ -81,15 +137,20 @@ export class HealthService {
       this.targets.map(async (target): Promise<ServiceHealth> => {
         const startedAt = this.clock.nowMs();
         try {
-          await this.probe(target);
+          const result = await this.probe(target);
+          const elapsedStatus = classifyElapsed(this.clock.nowMs() - startedAt);
           return {
             service: target.service,
-            status: classifyElapsed(this.clock.nowMs() - startedAt),
+            status: result.status === "red" || elapsedStatus === "red" ? "red"
+              : result.status === "yellow" || elapsedStatus === "yellow" ? "yellow" : "green",
+            ...(target.service === "gamemaster"
+              ? { liveBettingEnabled: result.liveBettingEnabled ?? null } : {}),
           };
         } catch {
           return {
             service: target.service,
             status: "red",
+            ...(target.service === "gamemaster" ? { liveBettingEnabled: null } : {}),
           };
         }
       })
@@ -97,8 +158,11 @@ export class HealthService {
     const byService = new Map(remote.map((health) => [health.service, health]));
     return SERVICES.map((service) =>
       service === "telemetry"
-        ? { service, status: "green" }
-        : byService.get(service) ?? { service, status: "red" }
+        ? { service, status: this.selfReady() ? "green" : "red" }
+        : byService.get(service) ?? {
+          service, status: "red",
+          ...(service === "gamemaster" ? { liveBettingEnabled: null } : {}),
+        }
     );
   }
 }

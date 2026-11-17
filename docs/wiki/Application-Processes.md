@@ -800,12 +800,25 @@ block navigation, signup, login, or draft creation.
   entry and on explicit **Refresh**, without polling, and retains the last
   successful snapshot when refresh fails.
 
-Health uses concurrent bounded TCP-connect probes to the other nine
-applications. `green`, `yellow`, and `red` describe connection speed or
-failure; the UI labels them **Healthy**, **Degraded**, and **Unavailable**.
-Telemetry's own entry is green in a successfully served summary, not an
-independent self-probe. None of these states proves deep readiness, queue
-progress, settlement correctness, historical uptime, or public match kickoff.
+Health uses concurrent, bounded HTTP checks, not successful TCP connections.
+Backend `/health` responses require database connectivity and completed
+startup; messaging-dependent services also track broker availability. The
+client must serve an HTML document. Game master additionally requires a
+successful worker tick within the last 30 seconds; failed or stopped ticks
+are unavailable even when its HTTP listener remains reachable. Telemetry
+checks its own database connection; consumer failure closes its listener.
+Responses slower than 250 ms are degraded; failures or responses taking
+at least one second are unavailable. These are point-in-time checks, not proof
+of every queue's progress, settlement correctness, uptime or public kickoff.
+
+`?metricsVersion=2&healthVersion=2` preserves the ten metrics and adds
+`liveBettingEnabled` to the Game master health entry. This is the effective
+kickoff switch, including the activation lease: `false` appears as **Live
+betting off**, never green. `null` accompanies an unavailable Game master
+when the switch could not be read. The legacy summary contracts keep their
+exact shapes and report service readiness separately from activation.
+When talking to an older service, the dashboard labels connectivity-only
+results **Readiness unknown** rather than treating them as functional health.
 
 ### Current scope and limits
 

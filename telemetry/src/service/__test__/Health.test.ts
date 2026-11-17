@@ -1,7 +1,7 @@
-import { EventEmitter } from "events";
-import net from "net";
+import http from "http";
+import { AddressInfo } from "net";
 import {
-  createTcpProbe,
+  createHttpProbe,
   defaultTargets,
   HealthService,
   ProbeTarget,
@@ -31,41 +31,86 @@ it("builds default and explicitly configured probe targets", () => {
   });
 });
 
-it("uses one bounded socket and settles only its first terminal event", async () => {
-  const createSocket = () =>
-    Object.assign(new EventEmitter(), {
-      destroy: jest.fn(),
-      setTimeout: jest.fn(),
-    });
-  const connectedSocket = createSocket();
-  const timedOutSocket = createSocket();
-  const connect = jest
-    .spyOn(net, "createConnection")
-    .mockReturnValueOnce(connectedSocket as any)
-    .mockReturnValueOnce(timedOutSocket as any);
-  const probe = createTcpProbe(750);
-
+it.each([
+  [200, "application/json", '{"status":"green"}', "green"],
+  [200, "application/json", '{"status":"yellow"}', "yellow"],
+  [503, "application/json", '{"status":"red"}', null],
+  [204, "application/json", "", null],
+  [200, "text/html", '<html>not readiness</html>', null],
+  [200, "application/json", '{"status":"unknown"}', null],
+  [200, "application/json", "not-json", null],
+  [200, "application/json", "x".repeat(1025), null],
+])("validates HTTP readiness %s %s", async (code, contentType, body, expected) => {
+  const server = http.createServer((req, res) => {
+    expect(req.url).toBe("/health");
+    res.writeHead(code, { "Content-Type": contentType });
+    res.end(body);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   try {
-    const connected = probe(targets[0]);
-    connectedSocket.emit("connect");
-    connectedSocket.emit("timeout");
-    await expect(connected).resolves.toBeUndefined();
-    expect(connectedSocket.setTimeout).toHaveBeenCalledWith(750);
-    expect(connectedSocket.destroy).toHaveBeenCalledTimes(1);
-
-    const timedOut = probe(targets[1]);
-    timedOutSocket.emit("timeout");
-    await expect(timedOut).rejects.toThrow("timeout");
-    expect(timedOutSocket.destroy).toHaveBeenCalledTimes(1);
+    const result = createHttpProbe()({
+      service: "auth", host: "127.0.0.1", port: (server.address() as AddressInfo).port,
+    });
+    if (expected) await expect(result).resolves.toEqual({ status: expected });
+    else await expect(result).rejects.toThrow();
   } finally {
-    connect.mockRestore();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+it("times out even when a listening socket never answers HTTP", async () => {
+  const server = http.createServer(() => {});
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    await expect(createHttpProbe(50)({
+      service: "auth", host: "127.0.0.1", port: (server.address() as AddressInfo).port,
+    })).rejects.toThrow("timeout");
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+it.each(["complete", "empty", "aborted", "headers-only"])("requires a complete client document (%s)", async mode => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.flushHeaders();
+    if (mode === "complete") res.end("<html><body>BetStan</body></html>");
+    if (mode === "empty") res.end();
+    if (mode === "aborted") res.destroy();
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const probe = createHttpProbe(100)({
+      service: "client", host: "127.0.0.1", port: (server.address() as AddressInfo).port,
+    });
+    if (mode === "complete") await expect(probe).resolves.toEqual({ status: "green" });
+    else await expect(probe).rejects.toThrow();
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+it.each([true, false, undefined])("requires an explicit live flag from Game master (%s)", async (enabled) => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "green", liveBettingEnabled: enabled }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const probe = createHttpProbe()({
+      service: "gamemaster", host: "127.0.0.1", port: (server.address() as AddressInfo).port,
+    });
+    if (enabled === undefined) await expect(probe).rejects.toThrow("invalid_response");
+    else await expect(probe).resolves.toEqual({ status: "green", liveBettingEnabled: enabled });
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
 
 it("starts remote probes concurrently and returns exact service order", async () => {
   const resolvers: Array<() => void> = [];
   const probe = jest.fn(
-    () => new Promise<void>((resolve) => resolvers.push(resolve))
+    () => new Promise<{ status: "green" }>((resolve) => resolvers.push(() => resolve({ status: "green" })))
   );
   const healthPromise = new HealthService(targets, probe, {
     nowMs: () => 0,
@@ -98,9 +143,9 @@ it("classifies exact elapsed boundaries and probe errors", async () => {
     targets,
     jest
       .fn()
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined),
+      .mockResolvedValueOnce({ status: "green" })
+      .mockResolvedValueOnce({ status: "green" })
+      .mockResolvedValueOnce({ status: "green" }),
     { nowMs: () => times.shift()! }
   ).check();
   expect(health.slice(0, 3)).toEqual([
@@ -119,7 +164,7 @@ it("classifies exact elapsed boundaries and probe errors", async () => {
 });
 
 it("executes one new direct concurrent probe fan-out for every check", async () => {
-  const probe = jest.fn().mockResolvedValue(undefined);
+  const probe = jest.fn().mockResolvedValue({ status: "green" });
   const healthService = new HealthService(targets, probe, { nowMs: () => 0 });
 
   const first = await healthService.check();
@@ -134,7 +179,7 @@ it("does not retain a failed probe result for the next check", async () => {
   const probe = jest
     .fn()
     .mockRejectedValueOnce(new Error("connection"))
-    .mockResolvedValueOnce(undefined);
+    .mockResolvedValueOnce({ status: "green" });
   const healthService = new HealthService([targets[0]], probe, {
     nowMs: () => 0,
   });
@@ -145,4 +190,12 @@ it("does not retain a failed probe result for the next check", async () => {
   expect(first[0]).toEqual({ service: "auth", status: "red" });
   expect(second[0]).toEqual({ service: "auth", status: "green" });
   expect(probe).toHaveBeenCalledTimes(2);
+});
+
+it("does not turn a fast failed service or failed observer green", async () => {
+  const health = await new HealthService(
+    targets, jest.fn().mockResolvedValue({ status: "red" }),
+    { nowMs: () => 0 }, () => false,
+  ).check();
+  expect(health.every(entry => entry.status === "red")).toBe(true);
 });

@@ -482,8 +482,12 @@ after 30 days are unchanged.
 The service-health section lists Authentication, Backoffice, Betting, Client,
 Events, Game master, Moderation, Resulting, Slip, and Telemetry in a fixed
 order. Health is expressed with both text and color: **Healthy**, **Degraded**,
-or **Unavailable**. It remains a coarse point-in-time snapshot, not deep
-readiness or an authority for product decisions.
+or **Unavailable**. Game master shows **Live betting off** in the warning
+state when its effective kickoff switch is disabled or its activation lease
+has expired. A failed service stays **Unavailable** even if its switch is on.
+Older services that only report connectivity show **Readiness unknown**,
+not green. Health remains a point-in-time snapshot, not proof that a public
+match has kicked off or an authority for betting decisions.
 
 Hourly detail is additive; older clients keep the unchanged daily dashboard.
 A rollout should make backend support available before the new client. An

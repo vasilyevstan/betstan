@@ -1,4 +1,5 @@
 import net from "net";
+import request from "supertest";
 import { EventEmitter } from "events";
 import { AddressInfo } from "net";
 import {
@@ -26,6 +27,31 @@ it("does not bind on import and explicitly starts, accepts, and closes", async (
     server.close((error) => (error ? reject(error) : resolve()));
   });
   expect(server.listening).toBe(false);
+});
+
+it("reports readiness and the effective live switch, including an expired activation lease", async () => {
+    const previousEnabled = process.env.LIVE_KICKOFFS_ENABLED;
+    const previousLease = process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH;
+    let ready = false;
+    const server = await startWorkerProbeServer(0, () => ready);
+    try {
+      process.env.LIVE_KICKOFFS_ENABLED = "true";
+      delete process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH;
+      await request(server).get("/health").expect(503, { status: "red", liveBettingEnabled: true });
+      ready = true;
+      await request(server).get("/health").expect(200, { status: "green", liveBettingEnabled: true });
+      process.env.LIVE_KICKOFFS_ENABLED = "false";
+      await request(server).get("/health").expect(200, { status: "green", liveBettingEnabled: false });
+      process.env.LIVE_KICKOFFS_ENABLED = "true";
+      process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH = "1";
+      await request(server).get("/health").expect(200, { status: "green", liveBettingEnabled: false });
+    } finally {
+      if (previousEnabled === undefined) delete process.env.LIVE_KICKOFFS_ENABLED;
+      else process.env.LIVE_KICKOFFS_ENABLED = previousEnabled;
+      if (previousLease === undefined) delete process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH;
+      else process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH = previousLease;
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
 });
 
 it("closes resources and fails the process on rejected asynchronous message handlers", async () => {

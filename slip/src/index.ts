@@ -1,5 +1,5 @@
 import { messengerWrapper } from "@betstan/common";
-import { app } from "./app";
+import { app, runtimeHealth } from "./app";
 import ModerationResultListener from "./event/listener/ModerationResultListener";
 import OddsClickedListener from "./event/listener/OddsClickedListener";
 import mongoose from "mongoose";
@@ -44,6 +44,7 @@ const shutDown = async (exitCode: number, error?: unknown) => {
   }
 
   shuttingDown = true;
+  runtimeHealth.ready = false;
 
   if (error) {
     console.log(error);
@@ -79,6 +80,16 @@ const startUp = async () => {
 
   console.log("Connecting to: ", process.env.RABBITMQ_URI);
   await messengerWrapper.connect(process.env.RABBITMQ_URI);
+  runtimeHealth.brokerConnected = true;
+  const connection = messengerWrapper.connection;
+  if ("on" in connection && typeof connection.on === "function") {
+    const brokerFailed = () => {
+      runtimeHealth.brokerConnected = false;
+      console.error("slip_broker_unavailable");
+    };
+    connection.on("close", brokerFailed);
+    connection.on("error", brokerFailed);
+  }
 
   submissionWorker = new SlipSubmissionWorker(messengerWrapper.connection);
   await submissionWorker.start();
@@ -91,8 +102,10 @@ const startUp = async () => {
   );
   await moderationResultListener.init();
 
+  if (shuttingDown) throw new Error("slip_startup_interrupted");
   listener.listen();
   moderationResultListener.listen();
+  runtimeHealth.ready = true;
 
   server = app.listen(3000, () => {
     console.log("listening on port 3000");
