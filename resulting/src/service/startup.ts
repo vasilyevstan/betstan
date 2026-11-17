@@ -57,7 +57,7 @@ export interface StartupDependencies {
   getBrokerConnection?: () => IAmqpConnection;
   logger?: Pick<Console, "error" | "log">;
   processLike?: ProcessLike;
-  startProbeListener?: () => Promise<ManagedProbeListener>;
+  startProbeListener?: (isReady: () => boolean) => Promise<ManagedProbeListener>;
 }
 
 const REGISTERED_SIGNALS = ["SIGINT", "SIGTERM"] as const;
@@ -134,6 +134,7 @@ export class ResultingServiceRuntime {
   private workers: ManagedBackgroundWorker[] = [];
   private probeListener?: ManagedProbeListener;
   private shutdownPromise?: Promise<void>;
+  private ready = false;
 
   private readonly handleSigint = async () => {
     this.dependencies.logger.log("Received sigint command");
@@ -189,11 +190,18 @@ export class ResultingServiceRuntime {
         await worker.start();
       }
 
-      this.probeListener = await this.dependencies.startProbeListener();
+      this.probeListener = await this.dependencies.startProbeListener(() => this.ready && !this.shutdownPromise);
+
+      if (this.shutdownPromise) {
+        await this.probeListener.close();
+        this.probeListener = undefined;
+        return;
+      }
 
       for (const listener of this.listeners) {
         listener.listen();
       }
+      this.ready = true;
     } catch (error) {
       await this.shutdownInternal(1, true);
       throw error;
@@ -245,6 +253,7 @@ export class ResultingServiceRuntime {
     exitCode: number,
     suppressExit: boolean
   ): Promise<void> {
+    this.ready = false;
     if (!this.shutdownPromise) {
       this.shutdownPromise = (async () => {
         this.unregisterShutdownHandlers();

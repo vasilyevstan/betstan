@@ -58,6 +58,44 @@ beforeEach(() => {
 
 const baseKickoff = new Date("2025-01-01T12:00:00.000Z");
 
+it("reports failed, stale and stopped ticks unhealthy, but an empty successful tick healthy", async () => {
+  let now = baseKickoff.getTime();
+  const ticks: Array<() => void> = [];
+  const worker = new GamemasterWorker({
+    clock: {
+      now: () => new Date(now),
+      setTimeout: callback => { ticks.push(callback); return ticks.length; },
+      clearTimeout: () => {},
+    },
+  });
+  const check = jest.spyOn(worker, "checkEventsOnce").mockResolvedValue(undefined);
+  const errorLog = jest.spyOn(console, "error").mockImplementation(() => {});
+  const tick = async () => {
+    ticks.shift()!();
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  try {
+    expect(worker.isHealthy()).toBe(false);
+    worker.work();
+    await tick();
+    expect(worker.isHealthy()).toBe(true);
+    check.mockRejectedValueOnce(new Error("database unavailable"));
+    await tick();
+    expect(worker.isHealthy()).toBe(false);
+    await tick();
+    expect(worker.isHealthy()).toBe(true);
+    now += 30000;
+    expect(worker.isHealthy()).toBe(false);
+    await tick();
+    expect(worker.isHealthy()).toBe(true);
+    worker.stop();
+    expect(worker.isHealthy()).toBe(false);
+  } finally {
+    worker.stop();
+    errorLog.mockRestore();
+  }
+});
+
 function createStaticClock(now: Date): WorkerClock {
   return {
     now: () => new Date(now.getTime()),

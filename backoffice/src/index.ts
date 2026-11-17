@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { app } from "./app";
+import { app, runtimeHealth } from "./app";
 import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./event/listener/NewEventListener";
 import EventResultListener from "./event/listener/EventResultListener";
@@ -25,9 +25,11 @@ const startUp = async () => {
   try {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);
     await messengerWrapper.connect(process.env.RABBITMQ_URI);
+    runtimeHealth.brokerConnected = true;
     const connection = messengerWrapper.connection;
     if ("on" in connection && typeof connection.on === "function") {
       const brokerFailed = () => {
+        runtimeHealth.brokerConnected = false;
         console.error("backoffice_broker_failed");
         process.exit(1);
       };
@@ -60,6 +62,7 @@ const startUp = async () => {
       messengerWrapper.connection
     );
     await publicationService.start();
+    runtimeHealth.ready = true;
   } catch (err) {
     console.log(err);
   }
@@ -69,6 +72,7 @@ const startUp = async () => {
   });
 
   process.on("uncaughtException", async function (err) {
+    runtimeHealth.ready = false;
     console.log("logging general error", err);
     try {
       await publicationService?.stop();
@@ -85,6 +89,7 @@ const startUp = async () => {
   });
 
   process.on("SIGINT", async () => {
+    runtimeHealth.ready = false;
     console.log("Received sigint command");
     try {
       await publicationService?.stop();
@@ -98,6 +103,7 @@ const startUp = async () => {
   });
 
   process.on("SIGTERM", async () => {
+    runtimeHealth.ready = false;
     console.log("Received sigterm command");
     try {
       await publicationService?.stop();
@@ -112,6 +118,7 @@ const startUp = async () => {
 };
 
 process.on("unhandledRejection", () => {
+  runtimeHealth.ready = false;
   console.error("backoffice_unhandled_rejection");
   process.exit(1);
 });

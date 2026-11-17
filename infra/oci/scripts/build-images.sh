@@ -75,7 +75,11 @@ for service in "${services[@]}"; do
     --label "io.betstan.registry-provider=ghcr"
   )
   if [[ "$service" == "client" ]]; then
-    build_args+=(--file infra/oci/build/Dockerfile.client .)
+    build_args+=(
+      --file infra/oci/build/Dockerfile.client
+      --build-arg "REACT_APP_RELEASE_VERSION=$SOURCE_SHA"
+      .
+    )
   else
     build_args+=(
       --file infra/oci/build/Dockerfile.backend

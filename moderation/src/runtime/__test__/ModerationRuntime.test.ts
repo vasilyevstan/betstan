@@ -183,13 +183,55 @@ it("starts all resources before any listener begins consuming", async () => {
 
 it("starts and closes the injected probe listener with the runtime", async () => {
   const close = jest.fn().mockResolvedValue(undefined);
-  const startProbeListener = jest.fn().mockResolvedValue({ close });
+  let isReady = () => false;
+  const startProbeListener = jest.fn(async (check: () => boolean) => {
+    isReady = check;
+    expect(isReady()).toBe(false);
+    return { close };
+  });
   const { runtime } = createDependencies({ startProbeListener });
 
   await runtime.start();
   expect(startProbeListener).toHaveBeenCalledTimes(1);
-  await runtime.shutdown();
+  expect(isReady()).toBe(true);
+  const shutdown = runtime.shutdown();
+  expect(isReady()).toBe(false);
+  await shutdown;
   expect(close).toHaveBeenCalledTimes(1);
+});
+
+it("never restores readiness or starts consuming when startup finishes during shutdown", async () => {
+  let releaseProbe!: () => void;
+  let reachedProbe!: () => void;
+  let releaseCleanup!: () => void;
+  const probeGate = new Promise<void>(resolve => { releaseProbe = resolve; });
+  const probeReached = new Promise<void>(resolve => { reachedProbe = resolve; });
+  const cleanupGate = new Promise<void>(resolve => { releaseCleanup = resolve; });
+  let isReady = () => false;
+  const close = jest.fn(async () => {});
+  const { runtime, listeners } = createDependencies({
+    startProbeListener: async check => {
+      isReady = check;
+      reachedProbe();
+      await probeGate;
+      return { close };
+    },
+    closeDatabase: async () => cleanupGate,
+  });
+  const starting = runtime.start();
+  await probeReached;
+  const stopping = runtime.shutdown();
+  try {
+    releaseProbe();
+    await starting;
+    expect(isReady()).toBe(false);
+    listeners.forEach(listener => expect(listener.listen).not.toHaveBeenCalled());
+    expect(close).toHaveBeenCalledTimes(1);
+  } finally {
+    releaseProbe();
+    releaseCleanup();
+    await Promise.all([starting, stopping]);
+  }
 });
 
 it("fails closed on partial startup and never calls listen", async () => {

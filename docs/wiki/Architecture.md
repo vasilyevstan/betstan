@@ -116,7 +116,10 @@ A MongoDB TTL index makes records eligible for deletion 30 days after
 `occurredAt`; deletion is asynchronous, not an exact wall-clock deadline.
 Daily counts are aggregated on request over the current UTC day and preceding
 13 days, rather than stored as a separate reporting warehouse. Service health
-is probed on summary refresh and is not persisted as a history.
+is probed through HTTP readiness on summary refresh and is not persisted as
+a history. Game master reports its effective live-kickoff switch separately
+from process readiness, so a healthy but deliberately disabled engine cannot
+appear as enabled live betting on the dashboard.
 
 Telemetry never reads other services' collections or publishes business
 decisions. Its HTTP listener starts only after MongoDB, indexes, RabbitMQ,

@@ -667,6 +667,14 @@ for literal in \
   grep -Fq -- "$literal" "$target" ||
     fail "partial GHCR candidate publication lacks first-attempt repair authority: $literal"
 done
+grep -Fq 'REACT_APP_RELEASE_VERSION=$SOURCE_SHA' "$OCI_DIR/scripts/build-images.sh" ||
+  fail "client image build does not bind the displayed release version to its source SHA"
+grep -Fq 'ARG REACT_APP_RELEASE_VERSION' "$OCI_DIR/build/Dockerfile.client" ||
+  fail "client Dockerfile does not accept release version build metadata"
+grep -Fq 'ARG SOURCE_DATE_EPOCH' "$OCI_DIR/build/Dockerfile.client" ||
+  fail "client Dockerfile does not accept the reproducible source date"
+grep -Fq 'ENV REACT_APP_RELEASE_EPOCH=${SOURCE_DATE_EPOCH}' "$OCI_DIR/build/Dockerfile.client" ||
+  fail "client build does not expose the reproducible source date"
 grep -Fq 'create secret generic ocir-pull' "$OCI_DIR/scripts/deploy.sh" &&
   fail "forward deploy still creates an OCIR pull secret"
 grep -Fq '"$image_id" == *"@$actual_digest" ||' \

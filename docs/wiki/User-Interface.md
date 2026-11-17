@@ -53,6 +53,8 @@ Primary routes are:
 
 The header restores the compact, pre-redesign icon composition across all
 density profiles. The theme-appropriate wordmark returns to Events.
+The release source revision and UTC source date appear directly beneath the
+wordmark; local builds are identified as development builds.
 **Backoffice** and **Telemetry** retain visible labels for anonymous and signed-in
 visitors; theme and authentication icons retain accessible names and tooltips.
 Signed-in users also receive **My bets** and a name chip linking to **My profile**.
@@ -480,8 +482,12 @@ after 30 days are unchanged.
 The service-health section lists Authentication, Backoffice, Betting, Client,
 Events, Game master, Moderation, Resulting, Slip, and Telemetry in a fixed
 order. Health is expressed with both text and color: **Healthy**, **Degraded**,
-or **Unavailable**. It remains a coarse point-in-time snapshot, not deep
-readiness or an authority for product decisions.
+or **Unavailable**. Game master shows **Live betting off** in the warning
+state when its effective kickoff switch is disabled or its activation lease
+has expired. A failed service stays **Unavailable** even if its switch is on.
+Older services that only report connectivity show **Readiness unknown**,
+not green. Health remains a point-in-time snapshot, not proof that a public
+match has kicked off or an authority for betting decisions.
 
 Hourly detail is additive; older clients keep the unchanged daily dashboard.
 A rollout should make backend support available before the new client. An

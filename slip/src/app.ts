@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import { json } from "body-parser";
 import { currentUser, errorHandler } from "@betstan/common";
 import { ShowSlip } from "./route/ShowSlip";
@@ -10,6 +11,13 @@ import { MarketSelection } from "./route/MarketSelection";
 
 const cors = require("cors");
 const app = express();
+export const runtimeHealth = { ready: false, brokerConnected: false };
+app.get("/health", (_req, res) => {
+  const ready = runtimeHealth.ready && runtimeHealth.brokerConnected
+    && mongoose.connection.readyState === 1;
+  res.set("Cache-Control", "no-store").status(ready ? 200 : 503)
+    .send({ status: ready ? "green" : "red" });
+});
 
 app.use(cors());
 app.use(json());

@@ -81,6 +81,10 @@ it.each(['v1', 'v2', 'v3'])('keeps compact icons and labelled public routes with
   }
   expect(screen.getByRole('img', { name: 'BetStan home' }))
     .toHaveAttribute('src', '/brand/betstan-wordmark-light.svg');
+  expect(screen.getByText(/^(Development build|Release \w{7})/))
+    .toBeVisible();
+  expect(screen.getByText(/^(Development build|Release \w{7})/).parentElement)
+    .toHaveClass('brand-lockup');
   expect(screen.queryByRole('link', { name: 'Events' })).not.toBeInTheDocument();
   for (const [label, icon] of [
     ['Backoffice', 'backoffice'], ['Telemetry', 'telemetry'],

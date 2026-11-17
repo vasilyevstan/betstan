@@ -38,7 +38,23 @@ it("opts into ten metrics while preserving the exact cached v1 response", async 
   expect(deps.summaryStore.aggregate).toHaveBeenCalledTimes(1);
 });
 
-it.each(["metricsVersion=1", "metricsVersion=3", "metricsVersion=2&metricsVersion=2", "metricsVersion=2&user=x", "__proto__=x"])(
+it("reports live activation only on the opt-in health contract without altering legacy readiness", async () => {
+  const deps = dependencies();
+  deps.health.check.mockResolvedValue(health.map(entry => ({
+    ...entry, ...(entry.service === "gamemaster" ? { liveBettingEnabled: false } : {}),
+  })));
+  const app = createApp(deps);
+  const detailed = await request(app)
+    .get("/api/telemetry/summary?metricsVersion=2&healthVersion=2").expect(200);
+  const legacy = await request(app).get("/api/telemetry/summary?metricsVersion=2").expect(200);
+  expect(detailed.body.health[5]).toEqual({
+    service: "gamemaster", status: "green", liveBettingEnabled: false,
+  });
+  expect(legacy.body.health).toEqual(health);
+  expect(deps.health.check).toHaveBeenCalledTimes(1);
+});
+
+it.each(["metricsVersion=1", "metricsVersion=3", "metricsVersion=2&metricsVersion=2", "metricsVersion=2&healthVersion=1", "metricsVersion=2&healthVersion=2&healthVersion=2", "metricsVersion=2&user=x", "__proto__=x"])(
   "rejects unsupported summary selector %s", async (query) => {
     await request(createApp(dependencies())).get(`/api/telemetry/summary?${query}`).expect(400);
   }
