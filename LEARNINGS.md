@@ -64,6 +64,7 @@ Working guide, not policy. [CONTRIBUTING.md](CONTRIBUTING.md) owns delivery rule
 - File seals bind inode, never `st_dev` (macOS renumbers APFS devices).
 - Removing environment reviewers changes timing; test ungated, terminal and chained paths.
 - Every authority profile a validator can emit needs an end-to-end chained fixture; an unhandled arm fails the restore late.
+- Disable `oci-live-data-rollout` as soon as its exact run has a real job: its competing-activity guard fails after 180 s if the workflow is still enabled, and that failure spends the one-use same-SHA request.
 - A master push auto-chains `production-build` then `oci-production-build`; exclusivity blocks live-data dispatch until both finish. `oci-production-deploy` stays disabled, so after a live-data handoff dispatch it explicitly before the handoff lock lease expires.
 - An ancestor-resume deploy runs at a later head than its image build; every downstream validator of deployed generations must accept that proven GitHub/infra/Markdown-only lineage, or the next release has no truthful tuple.
 - The k3s root keeps every released image generation (~0.6-0.75 GB each) until a governed CRI reclaim, so a finalize eventually withholds its checkpoint (`candidate_preload`). Diagnose, then CRI-reclaim exactly the owned-unused IDs that `classify()` yields from the GHCR validation's protected generations; restart at a new master SHA, because same-SHA capacity/GHCR/finalize requests are one-use and CRI reclaim never emits a checkpoint.
