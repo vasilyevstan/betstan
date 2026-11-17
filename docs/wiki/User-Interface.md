@@ -53,6 +53,8 @@ Primary routes are:
 
 The header restores the compact, pre-redesign icon composition across all
 density profiles. The theme-appropriate wordmark returns to Events.
+The release source revision and UTC source date appear directly beneath the
+wordmark; local builds are identified as development builds.
 **Backoffice** and **Telemetry** retain visible labels for anonymous and signed-in
 visitors; theme and authentication icons retain accessible names and tooltips.
 Signed-in users also receive **My bets** and a name chip linking to **My profile**.

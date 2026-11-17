@@ -309,11 +309,30 @@ body {
   box-shadow: none;
 }
 
+.brand-lockup {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.brand-lockup .navbar-brand {
+  margin: 0;
+}
+
 .brand-wordmark {
   display: block;
   width: auto;
   height: 32px;
   max-width: 132px;
+}
+
+.brand-release {
+  padding-left: 1px;
+  color: var(--text-subtle);
+  font-size: 0.65rem;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .navbar-light .brand-wordmark,
