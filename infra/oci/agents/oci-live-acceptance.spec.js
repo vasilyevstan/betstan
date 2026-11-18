@@ -544,6 +544,30 @@ const placeAdditionalAcceptanceBet = async (page, fixture, betKind) => {
   throw new Error('Cash-back acceptance could not place a current owned bet.');
 };
 
+const publishedFixtureIds = new Set();
+const setAcceptanceVisibility = async (request, eventIds, visibility) => {
+  const outcomes = await Promise.allSettled(eventIds.map(async (eventId) => {
+    const response = await request.post('/api/backoffice/event_visibility', {
+      data: { eventId, visibility },
+    });
+    expect(response.ok()).toBeTruthy();
+    expect((await response.json()).visibility).toBe(visibility);
+    await expect.poll(async () => {
+      const catalogue = await request.get(`/api/event/events/${eventId}/markets`);
+      expect(catalogue.ok()).toBeTruthy();
+      const body = await catalogue.json();
+      return body.event?.eventId === eventId ? body.event.visibility : null;
+    }, { timeout: 30000, intervals: [250, 500, 1000] }).toBe(visibility);
+  }));
+  expect(outcomes.filter(outcome => outcome.status === 'rejected')).toEqual([]);
+};
+
+test.afterEach(async ({ request }) => {
+  const eventIds = [...publishedFixtureIds];
+  publishedFixtureIds.clear();
+  await setAcceptanceVisibility(request, eventIds, 'OFFLINE');
+});
+
 test('production live matches, dual slips, and settlement stay coherent', async ({
   browser,
   page,
@@ -719,6 +743,10 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       ]),
     );
   }
+
+  // Exercise ordinary admission; administrator preview is not permission to bet offline.
+  for (const fixture of fixtures) publishedFixtureIds.add(fixture.eventId);
+  await setAcceptanceVisibility(publicContext.request, [...publishedFixtureIds], 'ONLINE');
 
   await page.goto(
     `/?ui=v2&theme=dark&acceptanceEventIds=${acceptanceEventIds}`,

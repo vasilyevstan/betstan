@@ -68,7 +68,8 @@ for contract in \
   'const scope = {userId}' \
   'candidates.length > maxActiveSlips' \
   'slip.status !== "DRAFT"' \
-  '!Number.isSafeInteger(slip.boardRevision)' \
+  '!Number.isSafeInteger(boardRevision)' \
+  'slip.boardRevision?._bsontype === "Long"' \
   '!/^[0-9a-f]{24}$/.test(slip.boardFingerprint)' \
   'slip.rows.length > 10' \
   'expectedEventNames.has(row.eventName)' \
@@ -89,12 +90,19 @@ const vm = require("vm");
 const [scriptPath, mode, runId, userId] = process.argv.slice(2);
 const suffix = runId.slice(-10);
 const eventId = "0123456789abcdef01234567";
+class Long {
+  constructor(value) { this._bsontype = "Long"; this.value = value; }
+  toNumber() { return this.value; }
+}
+const originalRevision = mode.startsWith("bson-long")
+  ? new Long(mode === "bson-long-unsafe" ? Number.MAX_SAFE_INTEGER + 1 : 1)
+  : mode === "string-revision" ? "1" : 1;
 const documents = [{
   _id: "slip-1",
   userId,
   betKind: "LIVE",
   status: "DRAFT",
-  boardRevision: 1,
+  boardRevision: originalRevision,
   boardFingerprint: "111111111111111111111111",
   rows: [{
     betKind: "LIVE",
@@ -117,7 +125,10 @@ const slips = {
   find(query) {
     const snapshot = documents
       .filter((document) => matches(document, query))
-      .map((document) => JSON.parse(JSON.stringify(document)));
+      .map((document) => ({
+        ...JSON.parse(JSON.stringify(document)),
+        boardRevision: document.boardRevision
+      }));
     return {
       limit() {
         return {toArray: () => snapshot};
@@ -125,11 +136,15 @@ const slips = {
     };
   },
   deleteMany(query) {
-    if (mode === "placement") {
+    if (mode.startsWith("bson-long") &&
+        query.$or[0].boardRevision !== originalRevision) {
+      throw new Error("cleanup must preserve the original BSON revision predicate");
+    }
+    if (mode === "placement" || mode === "bson-long-placement") {
       documents[0].status = "SUBMITTED";
       documents[0].boardRevision = 2;
       documents[0].boardFingerprint = "222222222222222222222222";
-    } else if (mode === "row") {
+    } else if (mode === "row" || mode === "bson-long-row") {
       documents[0].rows[0].marketId = `${eventId}:changed`;
       documents[0].boardRevision = 2;
       documents[0].boardFingerprint = "333333333333333333333333";
@@ -166,19 +181,19 @@ try {
 } catch (error) {
   failed = true;
 }
-if (mode === "none") {
+if (mode === "none" || mode === "bson-long") {
   if (failed || documents.length !== 0 || !printed.includes('"deletedActiveSlips":1')) {
     process.exit(1);
   }
 } else {
-  const expectedStatus = mode === "placement" ? "SUBMITTED" : "DRAFT";
+  const expectedStatus = mode.endsWith("placement") ? "SUBMITTED" : "DRAFT";
   if (!failed || documents.length !== 1 || documents[0].status !== expectedStatus) {
     process.exit(1);
   }
 }
 EOF_NODE
 
-for mode in none placement row; do
+for mode in none placement row bson-long bson-long-placement bson-long-row bson-long-unsafe string-revision; do
   node "$work_dir/interleaving-test.js" \
     "$capture" "$mode" "$run_id" "$user_id" ||
     fail "atomic Mongo cleanup failed interleaving case: $mode"
