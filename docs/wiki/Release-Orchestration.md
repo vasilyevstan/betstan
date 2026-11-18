@@ -1547,6 +1547,8 @@ activation. Synthetic draft cleanup accepts safe integer BSON Long revisions
 written by the application while retaining the original revision and fingerprint
 in its compare-and-delete predicate. Submitted slips, foreign fixtures and
 unsafe or malformed revisions remain outside cleanup authority.
+Recovery initializes its cleanup evidence directory before account demotion;
+it does not rely on a later data-execution step to create that directory.
 
 The existing `oci-live-data-resume-activation-released` operation adds one
 disjoint, frozen pre-arm/no-account reader qualification. It binds the complete

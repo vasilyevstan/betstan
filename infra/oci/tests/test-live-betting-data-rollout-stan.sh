@@ -696,6 +696,7 @@ cat >"$demotion_bin/kubectl" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >>"${STUB_ROLE_LOG:?}"
 if [[ "${1:-}" == "exec" && " $* " == *" deployment/gaming-auth-depl "* ]]; then
+  test -d artifacts/oci-live-data-rollout/evidence
   [ "${STUB_ROLE_CHANGE_FAIL:-false}" != true ]
   exit 0
 fi
@@ -712,7 +713,6 @@ EOF
 chmod 755 "$demotion_bin/kubectl"
 run_demotion() {
   rm -rf -- "$work_dir/artifacts"
-  mkdir -p "$work_dir/artifacts/oci-live-data-rollout/evidence"
   (
     cd "$work_dir"
     PATH="$demotion_bin:$PATH" \
