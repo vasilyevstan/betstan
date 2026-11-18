@@ -429,6 +429,7 @@ workflow_id_for() {
     oci-migrate.yml) echo 314 ;;
     oci-migration-recovery.yml) echo 315 ;;
     common-package-publish.yml) echo 316 ;;
+    oci-restore-held-runtime.yml) echo 317 ;;
     *) return 1 ;;
   esac
 }
