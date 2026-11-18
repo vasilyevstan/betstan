@@ -90,11 +90,18 @@ const expectedEventNames = new Set([
   `E2E-${suffix}-Future - E2E-${suffix}-Reserve`
 ]);
 for (const slip of candidates) {
+  // mongosh preserves application $toLong revisions as BSON Long values.
+  const boardRevision = typeof slip.boardRevision === "number"
+    ? slip.boardRevision
+    : slip.boardRevision?._bsontype === "Long" &&
+        typeof slip.boardRevision.toNumber === "function"
+      ? slip.boardRevision.toNumber()
+      : NaN;
   if (
     !allowedBetKinds.has(slip.betKind) ||
     slip.status !== "DRAFT" ||
-    !Number.isSafeInteger(slip.boardRevision) ||
-    slip.boardRevision < 1 ||
+    !Number.isSafeInteger(boardRevision) ||
+    boardRevision < 1 ||
     typeof slip.boardFingerprint !== "string" ||
     !/^[0-9a-f]{24}$/.test(slip.boardFingerprint) ||
     !Array.isArray(slip.rows) ||

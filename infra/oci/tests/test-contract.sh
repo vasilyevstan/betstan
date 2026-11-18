@@ -604,6 +604,11 @@ grep -Fq "new URL(response.url()).pathname === '/api/auth/login'" \
   fail "OCI live acceptance does not bind login to the exact API response"
 grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
   fail "OCI live acceptance does not pass scoped event IDs into the browser context"
+grep -Fq "await setAcceptanceVisibility(publicContext.request, [...publishedFixtureIds], 'ONLINE')" "$acceptance_spec" &&
+  grep -Fq 'test.afterEach(async ({ request }) => {' "$acceptance_spec" &&
+  grep -Fq "await setAcceptanceVisibility(request, eventIds, 'OFFLINE')" "$acceptance_spec" &&
+  grep -Fq 'body.event?.eventId === eventId ? body.event.visibility : null' "$acceptance_spec" ||
+  fail "OCI live acceptance must publish bettable fixtures and verify their post-test hiding"
 grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
   grep -Fq 'expect(publicBackoffice.status()).toBe(200)' "$acceptance_spec" &&
   grep -Fq 'expect(Array.isArray(publicBackofficeBody)).toBe(true)' "$acceptance_spec" ||
