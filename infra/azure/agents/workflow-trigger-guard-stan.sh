@@ -402,7 +402,7 @@ workflow_set="$(
   ./infra/azure/agents/production-workflow-inventory-stan.sh |
     sed -n 's/^production_workflows=//p'
 )"
-oci_workflow_set="common-package-publish,ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+oci_workflow_set="common-package-publish,ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,oci-restore-held-runtime,production-build,production-deploy,production-rollback"
 [[ "$workflow_set" == "$oci_workflow_set" ]] ||
   fail "unexpected production workflow set: ${workflow_set:-none}"
 

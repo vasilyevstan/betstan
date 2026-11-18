@@ -509,8 +509,8 @@ paths = {
     for line in open(sys.argv[2], encoding="utf-8")
     if line.strip()
 }
-if len(paths) != 16:
-    raise SystemExit("protected-operation policy must enumerate exactly 16 workflows")
+if len(paths) != 17:
+    raise SystemExit("protected-operation policy must enumerate exactly 17 workflows")
 strict = sys.argv[3] == "true"
 def object_pairs(pairs):
     result = {}

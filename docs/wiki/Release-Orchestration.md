@@ -1550,6 +1550,15 @@ unsafe or malformed revisions remain outside cleanup authority.
 Recovery initializes its cleanup evidence directory before account demotion;
 it does not rely on a later data-execution step to create that directory.
 
+`oci-restore-held-runtime` is the narrow restore for a live-data run that failed
+after entering maintenance but before any data step. It accepts only a failed
+first-attempt `apply-slip-index` run whose cleanup and data steps were skipped
+and whose hold was retained. It authenticates that run's checksummed baseline,
+deployment and infrastructure, then reclaims only that run's expired lock. It
+rejects image drift, restores the exact baseline images and replicas, lifts the
+fence, verifies readiness and releases the lock. If restoration fails, it
+re-establishes the hold. It changes no data and does not activate live betting.
+
 The existing `oci-live-data-resume-activation-released` operation adds one
 disjoint, frozen pre-arm/no-account reader qualification. It binds the complete
 authenticated historical tree and three executable blobs, exact scoped
