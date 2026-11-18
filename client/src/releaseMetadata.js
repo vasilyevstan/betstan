@@ -10,14 +10,17 @@ export const getReleaseMetadata = (version, sourceDateEpoch) => {
 
   return {
     versionLabel: fullVersion ? `Release ${fullVersion.slice(0, 7)}` : 'Development build',
-    date: hasValidDate ? date.toISOString().slice(0, 10) : null,
+    date: hasValidDate ? `${date.toISOString().slice(0, 16)}Z` : null,
     dateLabel: hasValidDate
-      ? new Intl.DateTimeFormat('en-GB', {
+      ? `${new Intl.DateTimeFormat('en-GB', {
         day: 'numeric',
+        hour: '2-digit',
+        hourCycle: 'h23',
+        minute: '2-digit',
         month: 'short',
         timeZone: 'UTC',
         year: 'numeric',
-      }).format(date)
+      }).format(date)} UTC`
       : null,
   };
 };
