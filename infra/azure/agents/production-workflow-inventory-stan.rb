@@ -23,6 +23,7 @@ OCI_WORKFLOWS = %w[
   oci-production-build
   oci-production-deploy
   oci-production-rollback
+  oci-restore-held-runtime
 ].freeze
 PACKAGE_WORKFLOWS = %w[
   common-package-publish
@@ -42,7 +43,8 @@ PROTECTED_ENVIRONMENTS = {
   "oci-ghcr-cache-recovery" => "oci-production",
   "oci-production-build" => "oci-build",
   "oci-production-deploy" => "oci-production",
-  "oci-production-rollback" => "oci-production"
+  "oci-production-rollback" => "oci-production",
+  "oci-restore-held-runtime" => "oci-migration"
 }.freeze
 ROLLBACK_ACTION_PINS = {
   "common-package-publish" => {
