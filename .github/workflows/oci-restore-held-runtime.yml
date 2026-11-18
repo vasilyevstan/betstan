@@ -51,8 +51,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       BASELINE_DIR: artifacts/failed-hold/oci-data-baseline-before
       SHARED_MONGO_LOCK_TOKEN: restore-held-${{ github.run_id }}-${{ github.run_attempt }}
-      SHARED_MONGO_LOCK_OPERATION: restore-held-runtime
-      SHARED_MONGO_LOCK_LEASE_SECONDS: "3600"
+      SHARED_MONGO_LOCK_OPERATION: restore-held-${{ inputs.failed_run_id }}
+      SHARED_MONGO_LOCK_LEASE_SECONDS: "2700"
     steps:
       - name: Initialize isolated OCI paths
         run: |
@@ -294,9 +294,15 @@ jobs:
               jq -er '.data | [.state, .holder, ."operation-id", ."source-sha", ."lease-until-epoch"] | @tsv'
           )
           [ "$state" = "active" ]
-          [ "$holder" = "live-data-$FAILED_RUN_ID-1" ]
-          [ "$operation" = "live-data-apply-slip-index" ]
-          [ "$source" = "$FAILED_SOURCE_SHA" ]
+          if [ "$holder" = "live-data-$FAILED_RUN_ID-1" ]; then
+            [ "$operation" = "live-data-apply-slip-index" ]
+            [ "$source" = "$FAILED_SOURCE_SHA" ]
+          else
+            # Continue only an interrupted restore of this same failed run.
+            [[ "$holder" =~ ^restore-held-[1-9][0-9]*-1$ ]]
+            [ "$operation" = "$SHARED_MONGO_LOCK_OPERATION" ]
+            [[ "$source" =~ ^[0-9a-f]{40}$ ]]
+          fi
           [[ "$lease_until" =~ ^[1-9][0-9]*$ ]]
           (( lease_until <= $(date +%s) )) || {
             echo "The failed run's lock lease has not expired yet" >&2
@@ -312,7 +318,7 @@ jobs:
               ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
           )"
           echo "$acquired"
-          grep -q " reclaimed=expired previous_holder=live-data-$FAILED_RUN_ID-1 " <<<"$acquired"
+          grep -qF " reclaimed=expired previous_holder=$holder " <<<"$acquired"
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
           OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \

@@ -1557,7 +1557,9 @@ and whose hold was retained. It authenticates that run's checksummed baseline,
 deployment and infrastructure, then reclaims only that run's expired lock. It
 rejects image drift, restores the exact baseline images and replicas, lifts the
 fence, verifies readiness and releases the lock. If restoration fails, it
-re-establishes the hold. It changes no data and does not activate live betting.
+re-establishes the hold; a later dispatch for the same failed run may continue
+only after its own expired restore lock. It changes no data and does not
+activate live betting.
 
 The existing `oci-live-data-resume-activation-released` operation adds one
 disjoint, frozen pre-arm/no-account reader qualification. It binds the complete
