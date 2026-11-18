@@ -1538,6 +1538,16 @@ unchanged.
 
 This separates "the code is deployed" from "the feature is safe to expose."
 
+The synthetic journey first verifies that offline fixtures are hidden, then
+publishes its own fixtures and waits for Event's authoritative catalogue before
+placing bets. Administrator preview does not bypass Risk Centre's offline-event
+restriction. Test teardown returns every published fixture to offline and
+verifies propagation, including after a failed placement; failure blocks
+activation. Synthetic draft cleanup accepts safe integer BSON Long revisions
+written by the application while retaining the original revision and fingerprint
+in its compare-and-delete predicate. Submitted slips, foreign fixtures and
+unsafe or malformed revisions remain outside cleanup authority.
+
 The existing `oci-live-data-resume-activation-released` operation adds one
 disjoint, frozen pre-arm/no-account reader qualification. It binds the complete
 authenticated historical tree and three executable blobs, exact scoped
