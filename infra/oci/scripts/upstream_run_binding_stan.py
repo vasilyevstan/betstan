@@ -6012,7 +6012,36 @@ def without_workflow_state_wait(workflow, label):
     )
 
 
+DEMOTION_EVIDENCE_DIRECTORY_HEADER = """
+      - name: Demote and verify exact retained live-acceptance account
+        if: >-
+          inputs.phase != 'incident-restore' &&
+          inputs.failed_activation_run_id != '0' &&
+          steps.provenance_request.outputs.released_activation_qualification != 'pre-arm-no-account'
+        run: |
+          set -euo pipefail
+          [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]]
+"""
+DEMOTION_EVIDENCE_DIRECTORY_EDITS = ((
+    DEMOTION_EVIDENCE_DIRECTORY_HEADER
+    + '          kubectl exec -n "$OCI_K8S_NAMESPACE" \\\n',
+    DEMOTION_EVIDENCE_DIRECTORY_HEADER
+    + "          mkdir -p artifacts/oci-live-data-rollout/evidence\n"
+    + '          kubectl exec -n "$OCI_K8S_NAMESPACE" \\\n',
+),)
+
+
+def without_demotion_evidence_directory(workflow, label):
+    """Normalize only the reviewed demotion evidence-directory initialization."""
+    if DEMOTION_EVIDENCE_DIRECTORY_EDITS[0][1] not in workflow:
+        return workflow
+    return exact_current_reader_edits(
+        workflow, DEMOTION_EVIDENCE_DIRECTORY_EDITS, label, inverse=True,
+    )
+
+
 def without_read_only_preflight(workflow, label):
+    workflow = without_demotion_evidence_directory(workflow, label)
     workflow = without_workflow_state_wait(workflow, label)
     workflow = without_checkpoint_read_auth(workflow, label)
     markers = (

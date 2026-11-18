@@ -318,6 +318,7 @@ YAML
   cp "$ROOT_DIR/.github/workflows/oci-production-rollback.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-restore-held-runtime.yml" "$tmp_dir/"
 }
 
 assert_pass() {
@@ -762,7 +763,7 @@ YAML
 }
 
 azure_set="common-package-publish,production-build,production-deploy,production-rollback"
-full_set="common-package-publish,ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+full_set="common-package-publish,ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,oci-restore-held-runtime,production-build,production-deploy,production-rollback"
 install_pr_gh_stub
 
 canonical_inventory="$(WORKFLOW_DIR="$ROOT_DIR/.github/workflows" "$INVENTORY")"
