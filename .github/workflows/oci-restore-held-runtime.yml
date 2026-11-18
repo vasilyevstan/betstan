@@ -1,0 +1,408 @@
+name: oci-restore-held-runtime
+run-name: oci-restore-held-runtime ${{ inputs.approved_sha }}
+
+# Restores the authenticated pre-maintenance baseline after a live-data run
+# failed before any data step and retained the maintenance hold.
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact current master SHA
+        required: true
+        type: string
+      failed_run_id:
+        description: Failed first-attempt oci-live-data-rollout run that retained the hold before any data step
+        required: true
+        type: string
+      confirmation:
+        description: Type RESTORE FAILED HOLD BASELINE
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: oci-migration
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      FAILED_RUN_ID: ${{ inputs.failed_run_id }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      GH_TOKEN: ${{ github.token }}
+      BASELINE_DIR: artifacts/failed-hold/oci-data-baseline-before
+      SHARED_MONGO_LOCK_TOKEN: restore-held-${{ github.run_id }}-${{ github.run_attempt }}
+      SHARED_MONGO_LOCK_OPERATION: restore-held-${{ inputs.failed_run_id }}
+      SHARED_MONGO_LOCK_LEASE_SECONDS: "2700"
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-restore-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-restore-home/.kube/config"
+            echo "STATE_FILE=$RUNNER_TEMP/restore-held-runtime/state.tsv"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-restore-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/oci-restore-home/.kube" artifacts/failed-hold \
+            artifacts/infrastructure artifacts/oci-restore-held-runtime
+          chmod 700 "$RUNNER_TEMP/oci-restore-home" "$RUNNER_TEMP/oci-restore-home/.kube"
+
+      - name: Check out exact approved source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.approved_sha }}
+          persist-credentials: false
+
+      - name: Authenticate exact master and failed pre-data hold
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$OCI_RUNTIME_MODE" = "k3s" ]
+          [ "$CONFIRMATION" = "RESTORE FAILED HOLD BASELINE" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$FAILED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
+
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .path == ".github/workflows/oci-live-data-rollout.yml" and
+            .event == "workflow_dispatch" and .head_branch == "master" and
+            .head_repository.full_name == $repo and .status == "completed" and
+            .conclusion == "failure" and .run_attempt == 1 and
+            (.display_title | test("^oci-live-data apply-slip-index [0-9a-f]{40}$"))
+          ' <<<"$run" >/dev/null || {
+            echo "Failed run is not an exact failed first-attempt apply-slip-index run" >&2
+            exit 1
+          }
+          failed_sha="$(jq -er .head_sha <<<"$run")"
+          [[ "$failed_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          # Data must not have been touched: maintenance entered, the hold was
+          # retained, and both data-mutating steps were skipped.
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/attempts/1/jobs" |
+            jq -e '
+              def step($n): [.jobs[0].steps[] | select(.name == $n) | .conclusion];
+              (.jobs | length) == 1 and .jobs[0].name == "rollout" and
+              .jobs[0].conclusion == "failure" and
+              step("Enter or re-establish live data maintenance") == ["success"] and
+              step("Delete exact orphaned live-acceptance slips") == ["skipped"] and
+              step("Execute exact-digest live data phase") == ["skipped"] and
+              step("Restore runtime or retain hold if final handoff packaging failed") == ["success"] and
+              step("Release database operation lock unless handed to deploy") == ["skipped"]
+            ' >/dev/null || {
+              echo "Failed run does not prove a retained hold before any data step" >&2
+              exit 1
+            }
+          echo "FAILED_SOURCE_SHA=$failed_sha" >> "$GITHUB_ENV"
+
+      - name: Download and verify exact failed-run baseline
+        run: |
+          set -euo pipefail
+          name="oci-live-data-baselines-$FAILED_RUN_ID-1"
+          artifact="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/artifacts" |
+              jq -c --arg name "$name" --argjson run "$FAILED_RUN_ID" '
+                [.artifacts[] | select(.name == $name and .expired == false and
+                  .workflow_run.id == $run)]'
+          )"
+          [ "$(jq length <<<"$artifact")" = "1" ]
+          artifact_id="$(jq -er '.[0].id' <<<"$artifact")"
+          digest="$(jq -er '.[0].digest' <<<"$artifact")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          zip="$RUNNER_TEMP/failed-hold-baseline.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" >"$zip"
+          [ "sha256:$(sha256sum "$zip" | awk '{print $1}')" = "$digest" ]
+          unzip -q "$zip" -d artifacts/failed-hold
+          rm -f "$zip"
+          [ -d "$BASELINE_DIR" ] && [ ! -L "$BASELINE_DIR" ]
+          if find artifacts/failed-hold -type l | grep -q .; then
+            echo "Baseline artifact contains symbolic links" >&2
+            exit 1
+          fi
+          (cd "$BASELINE_DIR" && sha256sum --strict --quiet -c SHA256SUMS)
+          for file in deployments.tsv live-images.tsv baseline-provenance.env trusted-deploy-provenance.txt; do
+            grep -q "  $file\$" "$BASELINE_DIR/SHA256SUMS"
+          done
+
+          python3 - "$BASELINE_DIR" "$FAILED_RUN_ID" "$OCI_K8S_NAMESPACE" "$GITHUB_ENV" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          root, failed_run, namespace, env_file = sys.argv[1:]
+
+          def parse(name):
+              values = {}
+              for line in (Path(root) / name).read_text(encoding="utf-8").splitlines():
+                  key, sep, value = line.partition("=")
+                  if not sep or not re.fullmatch(r"[a-z0-9_]+", key) or key in values:
+                      raise SystemExit(f"{name} is malformed")
+                  values[key] = value
+              return values
+
+          baseline = parse("baseline-provenance.env")
+          deploy = parse("trusted-deploy-provenance.txt")
+          sha = re.compile(r"[0-9a-f]{40}")
+          digest = re.compile(r"[0-9a-f]{64}")
+          run_id = re.compile(r"[1-9][0-9]*")
+          checks = [
+              baseline.get("baseline_capture_run_id") == failed_run,
+              baseline.get("baseline_capture_run_attempt") == "1",
+              baseline.get("namespace") == namespace,
+              baseline.get("baseline_recovery_run_id") == "0",
+              bool(sha.fullmatch(baseline.get("baseline_source_sha", ""))),
+              deploy.get("source_sha") == baseline.get("baseline_source_sha"),
+              deploy.get("deployment_run_id") == baseline.get("baseline_deploy_run_id"),
+              deploy.get("deployment_run_attempt") == "1",
+              deploy.get("runtime_mode") == "k3s",
+              bool(digest.fullmatch(deploy.get("runtime_fingerprint", ""))),
+              bool(run_id.fullmatch(deploy.get("deployment_run_id", ""))),
+              bool(run_id.fullmatch(deploy.get("infrastructure_run_id", ""))),
+              deploy.get("infrastructure_run_attempt") == "1",
+              bool(digest.fullmatch(deploy.get("infrastructure_provenance_sha256", ""))),
+          ]
+          if not all(checks):
+              raise SystemExit("baseline provenance does not bind the failed run and deployment")
+          with open(env_file, "a", encoding="utf-8") as handle:
+              handle.write(f"BASELINE_SOURCE_SHA={deploy['source_sha']}\n")
+              handle.write(f"BASELINE_DEPLOY_RUN_ID={deploy['deployment_run_id']}\n")
+              handle.write(f"INFRASTRUCTURE_RUN_ID={deploy['infrastructure_run_id']}\n")
+              handle.write(f"INFRASTRUCTURE_SHA256={deploy['infrastructure_provenance_sha256']}\n")
+              handle.write(f"RUNTIME_FINGERPRINT={deploy['runtime_fingerprint']}\n")
+          PY
+
+      - name: Authenticate baseline deployment and infrastructure runs
+        run: |
+          set -euo pipefail
+          deploy="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BASELINE_DEPLOY_RUN_ID")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$BASELINE_SOURCE_SHA" '
+            .path == ".github/workflows/oci-production-deploy.yml" and
+            .head_sha == $sha and .head_branch == "master" and
+            .head_repository.full_name == $repo and .status == "completed" and
+            .conclusion == "success" and .run_attempt == 1
+          ' <<<"$deploy" >/dev/null
+          infrastructure="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$INFRASTRUCTURE_RUN_ID")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .path == ".github/workflows/oci-infrastructure.yml" and
+            .event == "workflow_dispatch" and .head_branch == "master" and
+            .head_repository.full_name == $repo and .status == "completed" and
+            .conclusion == "success" and .run_attempt == 1
+          ' <<<"$infrastructure" >/dev/null
+
+      - name: Download exact infrastructure provenance
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: oci-infrastructure-provenance-${{ env.INFRASTRUCTURE_RUN_ID }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.INFRASTRUCTURE_RUN_ID }}
+
+      - name: Bind exact runtime identity
+        id: infrastructure
+        run: |
+          set -euo pipefail
+          provenance=artifacts/infrastructure/provenance.env
+          [ -f "$provenance" ] && [ ! -L "$provenance" ]
+          [ "$(sha256sum "$provenance" | awk '{print $1}')" = "$INFRASTRUCTURE_SHA256" ]
+          # shellcheck source=/dev/null
+          source "$provenance"
+          [ "$source_sha" = "$BASELINE_SOURCE_SHA" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$infrastructure_finalized" = "true" ]
+          [ "$runtime_mode" = "k3s" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          [ "$instance_fingerprint" = "$RUNTIME_FINGERPRINT" ]
+          echo "::add-mask::$instance_ocid"
+          echo "::add-mask::$bastion_ocid"
+          printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+
+      - name: Reject competing production activity
+        env:
+          REPO: ${{ github.repository }}
+          EXCLUDE_RUN_ID: ${{ github.run_id }}
+        run: ./infra/azure/agents/production-run-exclusivity-stan.sh
+
+      - name: Install pinned OCI CLI
+        id: oci_cli
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Verify k3s identity
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_INSTANCE_OCID: ${{ steps.infrastructure.outputs.instance_ocid }}
+        run: |
+          set -euo pipefail
+          oci compute instance get \
+            --instance-id "$OCI_INSTANCE_OCID" \
+            --query 'data.{shape:shape,state:"lifecycle-state"}' >/dev/null
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/restore-k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-restore
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Verify exact held state and reclaim the failed run's expired lock
+        id: lock
+        run: |
+          set -euo pipefail
+          IFS=$'\t' read -r state holder operation source lease_until < <(
+            kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json |
+              jq -er '.data | [.state, .holder, ."operation-id", ."source-sha", ."lease-until-epoch"] | @tsv'
+          )
+          [ "$state" = "active" ]
+          if [ "$holder" = "live-data-$FAILED_RUN_ID-1" ]; then
+            [ "$operation" = "live-data-apply-slip-index" ]
+            [ "$source" = "$FAILED_SOURCE_SHA" ]
+          else
+            # Continue only an interrupted restore of this same failed run.
+            [[ "$holder" =~ ^restore-held-[1-9][0-9]*-1$ ]]
+            [ "$operation" = "$SHARED_MONGO_LOCK_OPERATION" ]
+            [[ "$source" =~ ^[0-9a-f]{40}$ ]]
+          fi
+          [[ "$lease_until" =~ ^[1-9][0-9]*$ ]]
+          (( lease_until <= $(date +%s) )) || {
+            echo "The failed run's lock lease has not expired yet" >&2
+            exit 1
+          }
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          acquired="$(
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
+          )"
+          echo "$acquired"
+          grep -qF " reclaimed=expired previous_holder=$holder " <<<"$acquired"
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+
+      - name: Restore authenticated baseline and lift the fence
+        id: restore
+        env:
+          BASELINE_DEPLOYMENTS_FILE: ${{ env.BASELINE_DIR }}/deployments.tsv
+          BASELINE_LIVE_IMAGES_FILE: ${{ env.BASELINE_DIR }}/live-images.tsv
+          RESTORE_KEEP_FENCE: "false"
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh reconstruct-baseline
+          # Reject drift: the held deployments must still carry the baseline images.
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-baseline-images
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
+          ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+
+      # A readiness failure after the fence is lifted keeps the site up and the
+      # lock held for diagnosis rather than taking production down again.
+      - name: Verify restored readiness at the authenticated baseline
+        env:
+          BASELINE_DEPLOYMENTS_FILE: ${{ env.BASELINE_DIR }}/deployments.tsv
+          BASELINE_LIVE_IMAGES_FILE: ${{ env.BASELINE_DIR }}/live-images.tsv
+          READINESS_FILE: artifacts/oci-restore-held-runtime/readiness.tsv
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh reconstruct-baseline
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-baseline-images
+          ./infra/oci/scripts/live-data-maintenance-stan.sh capture-readiness
+
+      - name: Release restore lock
+        run: |
+          set -euo pipefail
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
+
+      - name: Re-establish the hold if restoration failed
+        if: (failure() || cancelled()) && steps.lock.outcome == 'success' && steps.restore.outcome != 'success'
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh hold
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+
+      - name: Upload restore evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-restore-held-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-restore-held-runtime
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && steps.oci_cli.outcome == 'success'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: ${{ runner.temp }}/restore-k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-restore
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated runner state
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/oci-restore-home" "$RUNNER_TEMP/betstan-k3s-restore" \
+            "$RUNNER_TEMP/restore-held-runtime"
+          rm -f "$RUNNER_TEMP/restore-k3s-access.env"

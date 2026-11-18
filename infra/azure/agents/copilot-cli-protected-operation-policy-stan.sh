@@ -799,6 +799,18 @@ POLICIES = {
         subject_input="approved_sha",
         subject_relation="ancestor-or-current",
     ),
+    "oci-restore-held-runtime": dispatch(
+        "oci-restore-held-runtime",
+        "oci-restore-held-runtime.yml",
+        "oci-migration",
+        "oci-restore-held-runtime {subject_sha}",
+        ["approved_sha", "failed_run_id", "confirmation"],
+        fixed={"confirmation": "RESTORE FAILED HOLD BASELINE"},
+        positive=["failed_run_id"],
+        full_shas=["approved_sha"],
+        subject_input="approved_sha",
+        subject_relation="current",
+    ),
     "oci-capacity-acquire": dispatch(
         "oci-capacity-acquire",
         "oci-capacity-acquire.yml",
