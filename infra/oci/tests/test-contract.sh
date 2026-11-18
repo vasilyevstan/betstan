@@ -565,9 +565,6 @@ PY
 grep -Fq 'Treat broker backpressure as a consistency boundary' \
   "$ROOT_DIR/docs/wiki/Engineering-Learnings.md" ||
   fail "Engineering wiki omits broker backpressure consistency guidance"
-grep -Fq 'Drive a burst through the real consume callback' \
-  "$ROOT_DIR/.github/agents/betstan-test-engineer.agent.md" ||
-  fail "Test agent does not require consume-path backpressure evidence"
 public_backoffice_middleware="$ROOT_DIR/backoffice/src/middleware/PublicBackofficeAccess.ts"
 [[ -f "$public_backoffice_middleware" ]] ||
   fail "Backoffice does not declare its intentional public access policy"
@@ -755,13 +752,9 @@ done
 grep -Fq "archive/azure/github-agents/betstan-mongo-migration.md" \
     "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
   fail "deployment safety does not route to the archived migration procedure"
-for agent in betstan-oci-operator; do
-  agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
-  [[ -f "$agent_file" ]] || fail "required runtime agent is missing: $agent"
-  grep -Fq 'restartCount > 0' "$agent_file" &&
-    grep -Fq 'termination reason, exit code' "$agent_file" ||
-    fail "runtime agent omits restart-bound termination evidence: $agent"
-done
+grep -Fq 'termination reason, exit code' "$lessons" &&
+  grep -Fq 'positive restart count' "$lessons" ||
+  fail "OCI lessons omit restart-bound termination evidence"
 agent_readme="$ROOT_DIR/.github/agents/README.md"
 agent_readme_flat="$(tr '\n' ' ' <"$agent_readme")"
 # Consolidated role and owner safeguards are enforced by
@@ -869,6 +862,7 @@ PY
 [[ -f "$ux_wiki" ]] || fail "canonical UI/UX consistency wiki page is missing"
 [[ -f "$ux_backend_agent" ]] || fail "backend developer agent is missing"
 [[ -f "$ux_frontend_agent" ]] || fail "frontend developer agent is missing"
+[[ -f "$ux_test_agent" ]] || fail "test engineer agent is missing"
 grep -Fq 'name: betstan-ux-ui-expert' "$ux_agent" ||
   fail "UX/UI expert frontmatter has the wrong name"
 grep -Fq 'name: betstan-public-wiki-editor' "$public_wiki_agent" ||
@@ -890,26 +884,20 @@ grep -Fq 'tools: [read, search]' "$ux_agent" ||
 if grep -Eq '^tools:.*execute' "$ux_agent"; then
   fail "UX/UI expert exposes mutation-capable command execution"
 fi
-ux_agent_flat="$(tr '\n' ' ' <"$ux_agent")"
+grep -Fq 'UI/UX Consistency](../../docs/wiki/UI-UX-Consistency.md)' "$ux_agent" ||
+  fail "UX/UI expert does not route to the canonical UI/UX contract"
+ux_wiki_flat="$(tr '\n' ' ' <"$ux_wiki" | tr -s '[:space:]' ' ')"
 for ux_contract in \
-    'Never infer usability from screenshots alone' \
-    'all three UI variants and both themes' \
-    'Preserve DOM, reading, and keyboard order' \
-    'live updates do not steal focus' \
-    'Establish a named design-consistency baseline' \
-    'Produce one cross-route, state, variant, theme, and responsive-mode' \
-    'consistency matrix. Compare hierarchy and typography' \
-    'intentional product exception' \
-    'required consistency fix' \
-    'Do not require a new automated visual-regression matrix' \
-    'Define measurable rendered acceptance criteria' \
-    'When layout or geometry is affected or remains unresolved' \
-    'When overflow or clipping is in scope or remains unresolved' \
-    'For event-grid changes' \
-    'For market-control changes' \
+    '## Establishing the reference baseline' \
+    '## Consistency matrix' \
+    'Screenshots cannot prove interaction behavior' \
+    'DOM, reading, and keyboard order' \
+    'Intentional product exception' \
+    'Required consistency fix' \
+    'Optional polish' \
     'UX_REVIEW_PASSED'; do
-  grep -Fq "$ux_contract" <<<"$ux_agent_flat" ||
-    fail "UX/UI expert omits usability contract: $ux_contract"
+  grep -Fq "$ux_contract" <<<"$ux_wiki_flat" ||
+    fail "UI/UX consistency wiki omits usability contract: $ux_contract"
 done
 for unconditional_rendered_gate in \
     '- Require bounding-box checks for sibling-card and child-control collisions' \
@@ -926,75 +914,48 @@ grep -Fq 'A user-facing change does not automatically require a new screenshot b
   fail "UI/UX consistency wiki turns visual tests into a blanket gate"
 grep -Fq '[[UI UX Consistency]]' "$ux_home" ||
   fail "wiki Home does not link the UI/UX consistency contract"
-backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
-grep -Fq 'Return evidence directly to the accountable owner' \
-    <<<"$backend_agent_flat" ||
-  fail "backend developer omits returning implementation evidence"
-grep -Eq 'persist a retry marker[[:space:]]+in the same atomic write' \
-    <<<"$backend_agent_flat" ||
-  fail "backend developer omits durable mutation publication"
-grep -Fq 'A quote identity owns exactly one validity window' \
-    "$ux_backend_agent" ||
-  fail "backend developer permits quote expiry mutation under one identity"
-frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
-grep -Fq 'Return evidence directly to the accountable owner' \
-    <<<"$frontend_agent_flat" ||
-  fail "frontend developer omits returning implementation evidence"
-grep -Fq 'an obsolete negative mutation probe must not create' "$ux_test_agent" ||
-  fail "test engineer can miss side-effecting stale authorization probes"
-grep -Fq 'Do not add or require a screenshot/image-diff matrix' "$ux_test_agent" ||
-  fail "test engineer turns user-facing work into a blanket visual-test gate"
-test_agent_flat="$(tr '\n' ' ' <"$ux_test_agent")"
-grep -Eq 'set or clear `GITHUB_RUN_ID` and[[:space:]]+`GITHUB_RUN_ATTEMPT` explicitly' \
-    <<<"$test_agent_flat" ||
-  fail "test engineer does not isolate first-attempt fixtures from ambient CI metadata"
-grep -Eq 'prove a[[:space:]]+restart replay clears it' <<<"$test_agent_flat" ||
-  fail "test engineer omits pending-publication recovery coverage"
-grep -Fq 'stable-odds material transition whose' "$ux_test_agent" ||
-  fail "test engineer omits unchanged-price quote-boundary coverage"
+grep -Fq 'return evidence directly to the accountable owner' \
+    <<<"$agent_readme_flat" ||
+  fail "agent roles omit returning implementation evidence"
+engineering_wiki_flat="$(tr '\n' ' ' <"$ROOT_DIR/docs/wiki/Engineering-Learnings.md" | tr -s '[:space:]' ' ')"
+grep -Fq 'persist a pending publication marker in the same state change' \
+    <<<"$engineering_wiki_flat" ||
+  fail "engineering wiki omits durable mutation publication"
+grep -Fq 'an obsolete negative mutation probe must not create' \
+    <<<"$engineering_wiki_flat" ||
+  fail "engineering wiki can miss side-effecting stale authorization probes"
+grep -Fq 'replay after restart until confirmed' <<<"$engineering_wiki_flat" ||
+  fail "engineering wiki omits pending-publication recovery coverage"
 grep -Fq 'Do not add retries to disguise stale authority' "$ROOT_DIR/LEARNINGS.md" ||
   fail "working guidance can disguise stale quote authority with retries"
 grep -Fq '## UI, timelines and access' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the product-wide UI/UX consistency contract"
 for ux_reinforced_check in \
-    'Cross-card baseline drift' \
-    'Selection tokens versus event identity' \
-    'Centered sibling market headings' \
-    'User terminology versus internal model names' \
-    'Stable, non-volatile board order with exact ID preservation' \
-    'Coupled-market plausibility' \
-    'Public access means usable capability, not only discoverable navigation' \
-    'Single-live-card width and relative-height budget' \
-    'Phantom auto-fill tracks' \
-    'Equal-height market groups' \
-    'Readable status words' \
-    'Nested-board content fit in every card context' \
-    'Section heading spans its product group'; do
-  grep -Fq "$ux_reinforced_check" "$ux_agent" ||
-    fail "UX/UI expert omits reinforced consistency check: $ux_reinforced_check"
+    'event/team identity stays in the card header and accessible name' \
+    'one shared centered heading' \
+    "presentation sort preserves each option's original ID/name/value tuple" \
+    'coupled markets sharing one pricing model' \
+    'visible navigation proves discovery only' \
+    'equal-height market groups' \
+    'one product, one grid slot' \
+    'readable status words' \
+    'nested-board content fit' \
+    'one shared badge/title header spans the complete product group'; do
+  grep -Fq "$ux_reinforced_check" <<<"$ux_wiki_flat" ||
+    fail "UI/UX consistency wiki omits reinforced check: $ux_reinforced_check"
 done
 grep -Fq 'user-facing betting terminology consistently says **slip**' \
     "$ux_wiki" ||
   fail "UI/UX consistency wiki does not protect slip terminology"
-grep -Fq 'For live-history and presentation-order changes, prove producer-attested' \
-    "$ux_test_agent" ||
-  fail "test engineer omits live-history/presentation-order coverage requirements"
-grep -Fq 'For semantic-control and layout changes, prove accessible names remain' \
-    "$ux_test_agent" ||
-  fail "test engineer omits semantic-control/computed-geometry coverage requirements"
-grep -Fq 'When output changes public presentation ordering or exposes a' \
-    "$ux_backend_agent" ||
-  fail "backend developer omits public-ordering/completeness handoff evidence"
-grep -Fq 'Keep terminal Event placeholders fail-dark' "$ux_backend_agent" ||
-  fail "backend developer omits unresolved terminal placeholder safety"
-grep -Fq 'Every terminal visibility writer and recovery path' "$ux_backend_agent" ||
-  fail "backend developer omits atomic terminal recovery safety"
-grep -Fq 'including one with pending `ONLINE` intent, remains `OFFLINE`' \
-    <<<"$test_agent_flat" ||
-  fail "test engineer omits fail-dark terminal placeholder coverage"
-grep -Fq 'exact-ID-preservation evidence' \
-    "$ux_frontend_agent" ||
-  fail "frontend developer omits semantic-control-label/exact-ID handoff evidence"
+grep -Fq '### Preserve identity while changing presentation' \
+    "$ROOT_DIR/docs/wiki/Engineering-Learnings.md" ||
+  fail "engineering wiki omits public-ordering identity guidance"
+live_prod_wiki_flat="$(tr '\n' ' ' <"$ROOT_DIR/docs/wiki/Live-Betting-Production.md" | tr -s '[:space:]' ' ')"
+grep -Fq 'Every terminal visibility writer and delayed recovery' \
+    <<<"$live_prod_wiki_flat" ||
+  fail "live-betting wiki omits atomic terminal recovery safety"
+grep -Fq 'even when pending intent is `ONLINE`' <<<"$live_prod_wiki_flat" ||
+  fail "live-betting wiki omits fail-dark terminal placeholder coverage"
 grep -Fq 'Claim complete history only with valid cumulative producer evidence' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the live timeline completeness and market alignment contract"
 grep -Fq 'One quote identity must map to' "$ROOT_DIR/LEARNINGS.md" ||
@@ -1030,19 +991,15 @@ grep -Fq '"GITHUB_RUN_ID=777"' <<<"$ghcr_fixture_head" ||
   fail "GHCR contract fixture does not isolate the run ID"
 grep -Fq '"GITHUB_RUN_ATTEMPT=1"' <<<"$ghcr_fixture_head" ||
   fail "GHCR contract fixture inherits ambient workflow rerun metadata"
-for migration_guidance in \
-    "$archived_migration_agent" \
-    "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md"; do
-  grep -Fq "A run waiting for approval is active, not hung" "$migration_guidance" ||
-      fail "migration recovery guidance can misclassify approval waits: $migration_guidance"
-  grep -Fq "After \`cutover-committed\`, recover forward only" "$migration_guidance" ||
-      fail "migration recovery guidance can roll back a committed cutover: $migration_guidance"
-  mongo_agent_flat="$(tr '\n' ' ' <"$migration_guidance")"
-  grep -Fq "controller-level HTTP mutation fence" <<<"$mongo_agent_flat" ||
-      fail "migration recovery guidance does not preserve the restart-safe HTTP fence: $migration_guidance"
-  grep -Fq "routing-fence protocol" <<<"$mongo_agent_flat" ||
-      fail "migration recovery guidance does not require the RabbitMQ routing fence: $migration_guidance"
-done
+grep -Fq "A run waiting for approval is active, not hung" "$archived_migration_agent" ||
+  fail "archived migration recovery guidance can misclassify approval waits"
+grep -Fq "After \`cutover-committed\`, recover forward only" "$archived_migration_agent" ||
+  fail "archived migration recovery guidance can roll back a committed cutover"
+mongo_agent_flat="$(tr '\n' ' ' <"$archived_migration_agent")"
+grep -Fq "controller-level HTTP mutation fence" <<<"$mongo_agent_flat" ||
+  fail "archived migration recovery guidance does not preserve the restart-safe HTTP fence"
+grep -Fq "routing-fence protocol" <<<"$mongo_agent_flat" ||
+  fail "archived migration recovery guidance does not require the RabbitMQ routing fence"
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-oci-operator.agent.md" ||
     fail "OCI operator routing guidance lacks the canonical host"

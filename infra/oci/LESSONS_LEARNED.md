@@ -1023,3 +1023,23 @@ Lessons:
   binding definitions as a checked-in manifest and prove it equivalent to the
   protected-operation policy, so one definition governs both enforcement paths
   without a cross-cloud dependency.
+
+## Release-chain timing details
+
+Moved from the root working guide so it can stay short.
+
+- A master push chains `production-build` then `oci-production-build`;
+  production exclusivity blocks live-data dispatch until both finish.
+  `oci-production-deploy` stays disabled, so after a live-data handoff dispatch
+  it explicitly before the handoff lock lease expires.
+- Disable `oci-live-data-rollout` as soon as its exact run has a real job. Its
+  competing-activity guard fails after 180 seconds if the workflow is still
+  enabled, and that failure spends the one-use same-SHA request.
+- The k3s root keeps every released image generation (roughly 0.6-0.75 GB
+  each) until a governed CRI reclaim, so finalization eventually withholds its
+  checkpoint (`candidate_preload`). Reclaim exactly the owned-unused IDs that
+  the GHCR validation's protected generations classify, then restart at a new
+  master SHA: same-SHA capacity, GHCR and finalize requests are one-use, and a
+  CRI reclaim never emits a checkpoint.
+- Every authority profile a validator can emit needs an end-to-end chained
+  fixture; an unhandled arm otherwise fails a restore late.

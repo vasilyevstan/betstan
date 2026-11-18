@@ -278,6 +278,8 @@ input, explicit scores, atomic/idempotent terminal writes and no-store
 responses. Missing events return `404`; only identical terminal retries are
 idempotent, while conflicting results or overlapping visibility writes return
 `409`. Absent values must not become destructive defaults.
+Test the requested capability, data and actions, not navigation; an
+obsolete negative mutation probe must not create untracked data.
 
 Privileged synthetic-fixture access is a different boundary. A signed JWT
 role is only a hint: current persisted authorization is rechecked server-side
@@ -1120,6 +1122,25 @@ Historical Common publication lessons:
 - Service-local bridges are temporary additive rolling-release adapters, not
   another contract owner. The shared wire value belongs in Common in the same
   feature; remove the bridge after consumers adopt the published contract.
+
+## Condensed working-guide history
+
+The root `LEARNINGS.md` keeps only short rules. These observations explain
+some of them:
+
+- An unbounded `gh pr checks --watch` left a green promotion idle for hours,
+  because a pending-by-design ledger status never resolves.
+- Mocked browser suites passed while a runtime flag kept market writers off;
+  activation now ends with a real-backend smoke of the core write path.
+- File seals bind inode identity rather than device numbers, because macOS
+  can renumber APFS devices.
+- Presentation metadata on shared objects broke predecessor writers that copy
+  them into strict payloads; test mixed-writer creation and retry
+  fingerprints, not only new-code publication.
+- Policy-publisher event order comes from authenticated transitions, not
+  arrival order.
+- Host-wide redirects must exempt ACME challenge paths; prove certificate
+  renewal, not only first issuance.
 
 ## What this public page omits
 
