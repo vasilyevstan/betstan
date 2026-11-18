@@ -62,8 +62,7 @@ jobs:
             echo "STATE_FILE=$RUNNER_TEMP/restore-held-runtime/state.tsv"
           } >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/oci-restore-home/.local/bin" >> "$GITHUB_PATH"
-          mkdir -p "$RUNNER_TEMP/oci-restore-home/.kube" artifacts/failed-hold \
-            artifacts/infrastructure artifacts/oci-restore-held-runtime
+          mkdir -p "$RUNNER_TEMP/oci-restore-home/.kube"
           chmod 700 "$RUNNER_TEMP/oci-restore-home" "$RUNNER_TEMP/oci-restore-home/.kube"
 
       - name: Check out exact approved source
@@ -136,6 +135,8 @@ jobs:
           zip="$RUNNER_TEMP/failed-hold-baseline.zip"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" >"$zip"
           [ "sha256:$(sha256sum "$zip" | awk '{print $1}')" = "$digest" ]
+          # Checkout cleans the workspace, so create the extraction root here.
+          mkdir -p artifacts/failed-hold
           unzip -q "$zip" -d artifacts/failed-hold
           rm -f "$zip"
           [ -d "$BASELINE_DIR" ] && [ ! -L "$BASELINE_DIR" ]

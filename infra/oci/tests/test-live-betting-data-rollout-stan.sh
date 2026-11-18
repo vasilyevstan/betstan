@@ -746,6 +746,13 @@ grep -Fq \
   'USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:0123456789abcdef01234567:USER' \
   "$demotion_log" ||
   fail "account demotion did not bind the exact artifact user"
+# actions/checkout cleans the workspace, so workspace directories made before it vanish.
+awk '/uses: actions\/checkout@/ { checkout = 1 }
+  /mkdir -p .*artifacts\// && !checkout { bad = 1 }
+  /mkdir -p artifacts\/failed-hold$/ && checkout { found = 1 }
+  END { exit !(found && !bad) }' \
+  "$ROOT_DIR/.github/workflows/oci-restore-held-runtime.yml" ||
+  fail "held-runtime restore must create its extraction directory after checkout"
 if STUB_ROLE_CHANGE_FAIL=true run_demotion >/dev/null 2>&1; then
   fail "role revocation failure did not block failed-activation recovery"
 fi
