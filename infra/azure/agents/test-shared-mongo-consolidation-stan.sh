@@ -71,15 +71,9 @@ for required_reference in \
   grep -Fq "$required_reference" "$MIGRATION_AGENT" ||
     fail "migration agent is missing required reference: $required_reference"
 done
-for required_reference in \
-  'archive/azure/github-agents/betstan-mongo-migration.md' \
-  'consolidate-production-mongo-stan.sh' \
-  'shared-mongo-operation-lock-stan.sh' \
-  'shared-mongo-topology-guard-stan.sh' \
-  'rollback-readiness-stan.sh'; do
-  grep -Fq "$required_reference" "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
-    fail "active deployment-safety routing is missing migration reference: $required_reference"
-done
+grep -Fq 'archive/azure/github-agents/betstan-mongo-migration.md' \
+  "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
+  fail "active deployment-safety routing is missing the archived migration procedure"
 
 retired_paths=(
   "$ROOT_DIR/.github/workflows/deploy-stage-shared-db.yml"

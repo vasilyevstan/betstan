@@ -87,6 +87,32 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   Mongo, and RabbitMQ images are also pinned by verified multi-architecture
   index digest.
 
+### Operator invariants
+
+- Provisioning, deploy, rollback, runner access, migration and deletion are
+  separate approvals; manual agent invocation grants none of them. Never use
+  Azure credentials here, and preserve the retained Mongo volume.
+- Verify runtime identity before every command with an isolated `HOME` and
+  `KUBECONFIG`. For OKE, the kubeconfig exec arguments contain the exact
+  cluster OCID; for k3s, verify the recorded instance and runtime identity.
+- OKE runner access is one tagged `/32` NSG rule revoked by exact rule ID; k3s
+  uses per-job keys, one Bastion session and a loopback tunnel. Always clean
+  up sessions, rules, tunnels and keys.
+- Deploy exact digests sequentially: Mongo, RabbitMQ, backends, client,
+  ingress.
+- GoDaddy DNS is external; never use registrar credentials. Never weaken TLS,
+  use `curl --insecure`, repeatedly delete certificates, replace the load
+  balancer or change DNS because one check failed. Load-balancer replacement
+  needs separate approval and never overlaps two paid load balancers.
+- Never delete resources because health failed; wait for terminal
+  asynchronous deletion.
+- Health-only work runs only checked-in health scripts and grants no mutation
+  authority. The full loop covers a Ready ARM64 node, workloads, digest parity,
+  restart/OOM evidence, the retained volume and eight databases, RabbitMQ
+  consumers, canonical TLS and API JSON, the `www` redirect, a real user
+  journey and zero-cost inventory. CLI success or a manifest apply is not
+  health.
+
 ## Configuration
 
 Copy `config/free-tier.env.example` outside version control, fill every
@@ -197,7 +223,8 @@ active-to-active replacement with generation increment and incident
 manifest/run/control bindings. It never uses generic acquisition, retry,
 force release, or a released intermediate state. A named predecessor may be
 another exact manifest-bound incident generation; strict release removes all
-incident fields so the ordinary lock shape remains canonical.
+incident fields so the ordinary lock shape remains canonical. Takeover
+authority comes from provider timestamps, never runner clocks.
 
 Restoration keeps the HTTP fence active while exact images and replica counts
 return. A normal failure re-quiesces every writer while the exact incident
