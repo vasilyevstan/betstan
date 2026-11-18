@@ -2311,8 +2311,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]]
-          output=artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-role.json
-          mkdir -p "$(dirname "$output")"
+          mkdir -p artifacts/oci-live-data-rollout/evidence
           kubectl exec -n "$OCI_K8S_NAMESPACE" \
             deployment/gaming-auth-depl \
             -c gaming-auth -- \
@@ -2372,6 +2371,7 @@ jobs:
             (keys | sort) == ["role", "userCount", "verified"]
           ' <<<"$result" >/dev/null
 
+          output=artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-role.json
           temporary="${output}.tmp"
           trap 'rm -f "$temporary"' EXIT
           jq -cS \

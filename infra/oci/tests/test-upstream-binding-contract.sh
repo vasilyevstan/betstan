@@ -5154,6 +5154,30 @@ assert blob(
     (root / "infra/azure/agents/copilot_cli_authority_stan.py").read_text()
 ) != m.CURRENT_READER_AUTHORITY_BLOB
 current_workflow = (root / ".github/workflows/oci-live-data-rollout.yml").read_text()
+evidence_workflow = current_workflow
+current_workflow = m.without_demotion_evidence_directory(evidence_workflow, "evidence directory")
+assert current_workflow != evidence_workflow
+assert m.without_demotion_evidence_directory(current_workflow, "historical evidence") == current_workflow
+evidence_inverse = m.current_reader_workflow_v5(current_workflow, "historical evidence inverse", inverse=True)
+assert m.current_reader_workflow_v5(evidence_workflow, "evidence inverse", inverse=True) == evidence_inverse
+evidence_before, evidence_after = m.DEMOTION_EVIDENCE_DIRECTORY_EDITS[0]
+evidence_mkdir = "          mkdir -p artifacts/oci-live-data-rollout/evidence\n"
+assert evidence_workflow.count(evidence_after) == 1
+assert evidence_after == evidence_before.replace(
+    m.DEMOTION_EVIDENCE_DIRECTORY_HEADER,
+    m.DEMOTION_EVIDENCE_DIRECTORY_HEADER + evidence_mkdir, 1,
+)
+for replacement in ("          mkdir -p /tmp\n", evidence_mkdir * 2, "          true\n"):
+    candidate = evidence_workflow.replace(
+        evidence_after, evidence_after.replace(evidence_mkdir, replacement, 1), 1,
+    )
+    assert candidate != evidence_workflow
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            inverse = m.current_reader_workflow_v5(candidate, "changed evidence directory", inverse=True)
+        except SystemExit:
+            continue
+    assert inverse != evidence_inverse, "changed evidence directory escaped frozen source qualification"
 state_wait_workflow = current_workflow
 current_workflow = m.without_workflow_state_wait(state_wait_workflow, "workflow state wait")
 assert current_workflow != state_wait_workflow
