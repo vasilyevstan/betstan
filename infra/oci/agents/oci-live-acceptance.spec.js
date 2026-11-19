@@ -556,6 +556,12 @@ const setAcceptanceVisibility = async (request, eventIds, visibility) => {
       const catalogue = await request.get(`/api/event/events/${eventId}/markets`);
       expect(catalogue.ok()).toBeTruthy();
       const body = await catalogue.json();
+      // Event keeps a full-time result public; a resulted fixture is already closed to betting.
+      if (
+        visibility === 'OFFLINE'
+        && body.event?.eventId === eventId
+        && body.event.status === 'RESULTED'
+      ) return 'OFFLINE';
       return body.event?.eventId === eventId ? body.event.visibility : null;
     }, { timeout: 30000, intervals: [250, 500, 1000] }).toBe(visibility);
   }));
