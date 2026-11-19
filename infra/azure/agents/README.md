@@ -156,11 +156,16 @@ EXPECTED_OPERATION=oci-production-deploy \
 
 `release-chain-stan.sh` runs this lifecycle for one request: it prepares
 the two transition workflows below, enables the workflow, dispatches, disables
-the workflow once the exact run reaches its pending environment gate (or
-completes), approves eligible CLI-owned gates, and observes the run to its
+the workflow once the exact run reaches its pending environment gate, starts a
+job (environments without required reviewers never show a gate, and the
+live-data guard fails if the workflow is still enabled 180 seconds after its
+job starts), or completes, approves eligible CLI-owned gates, and observes the run to its
 conclusion. Every other exit disables the workflow, except a dispatched run
 that never materialized. Disabling that run could strand it, so the workflow
 stays enabled with a warning (no gate can be approved while it is enabled).
+A workflow whose policy `approvalWorkflowState` is `active` (for example
+`ghcr-package-validate` on `ghcr-package-management.yml`) must already be
+active; the runner dispatches and approves it without enabling or disabling it.
 With `--chain`, starting from an `apply-slip-index` live-data request without
 a recovery baseline, it derives and runs the deploy and activation requests.
 Run it from a clean checkout at the request's `controlSha`, which must be the

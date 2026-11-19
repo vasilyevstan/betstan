@@ -25,6 +25,7 @@ case "$2" in
   oci-live-data-*) echo '{"workflow":"oci-live-data-rollout.yml"}' ;;
   oci-production-deploy) echo '{"workflow":"oci-production-deploy.yml"}' ;;
   oci-live-betting-activate) echo '{"workflow":"oci-live-betting-activate.yml"}' ;;
+  ghcr-package-validate) echo '{"workflow":"ghcr-package-management.yml","approvalWorkflowState":"active"}' ;;
   *) exit 1 ;;
 esac
 EOF
@@ -39,6 +40,7 @@ case "$operation" in
   oci-live-data-*) echo "dispatch=ACCEPTED run_id=101 next_action=observe-exact-run" ;;
   oci-production-deploy) echo "dispatch=ACCEPTED run_id=202 next_action=observe-exact-run" ;;
   oci-live-betting-activate) echo "dispatch=ACCEPTED run_id=303 next_action=observe-exact-run" ;;
+  ghcr-package-validate) echo "dispatch=ACCEPTED run_id=404 next_action=observe-exact-run" ;;
 esac
 EOF
 cat >"$AGENTS/copilot-cli-run-approval-stan.sh" <<'EOF'
@@ -69,10 +71,10 @@ case "$1 $2" in
     run="$3"
     case "$7" in
       jobs) echo "job/failing step" ;;
-      status)
-        if [[ " ${STUB_UNGATED_RUNS:-} " == *" $run "* ]]; then echo completed
+      status,jobs)
+        if [[ " ${STUB_UNGATED_RUNS:-} ${STUB_STARTED_RUNS:-} " == *" $run "* ]]; then echo started
         elif [[ " ${STUB_QUEUED_RUNS:-} " == *" $run "* ]]; then echo queued
-        else echo in_progress; fi ;;
+        else echo waiting; fi ;;
       status,conclusion,jobs)
         conclusion=success
         [[ " ${STUB_FAIL_RUNS:-} " == *" $run "* ]] && conclusion=failure
@@ -85,7 +87,7 @@ case "$1 $2" in
       echo "${STUB_WORKFLOW_STATE:-disabled_manually}"
     elif [[ "$2" == */pending_deployments ]]; then
       run="${2%/pending_deployments}"; run="${run##*/}"
-      if [[ " ${STUB_UNGATED_RUNS:-} ${STUB_QUEUED_RUNS:-} " == *" $run "* || -f "$STUB_STATE/approved-$run" ]]; then
+      if [[ " ${STUB_UNGATED_RUNS:-} ${STUB_QUEUED_RUNS:-} ${STUB_STARTED_RUNS:-} " == *" $run "* || -f "$STUB_STATE/approved-$run" ]]; then
         echo 0
       else
         echo 1
@@ -115,6 +117,7 @@ cat >"$REQUESTS/deploy.json" <<EOF
 {"schemaVersion":1,"repository":"example/repo","operation":"oci-production-deploy",
  "controlSha":"$CONTROL","subjectSha":"$CONTROL","targetSha":null,"inputs":{}}
 EOF
+sed 's/"oci-production-deploy"/"ghcr-package-validate"/' "$REQUESTS/deploy.json" >"$REQUESTS/ghcr.json"
 
 run_case() {
   local expected="$1" pattern="$2" output status=0
@@ -186,6 +189,12 @@ run_case 2 "reason=materialization-unproven operation=oci-production-deploy run_
   RELEASE_CHAIN_START_SECONDS=0 "$RUN" "$REQUESTS/deploy.json"
 expect_calls "exclusivity exclude=none;gh workflow enable oci-production-deploy.yml;dispatcher oci-production-deploy --dispatch;"
 
+# Without a reviewer gate, a started job materializes the run: the workflow is
+# disabled at once (the live-data guard allows 180 s) and nothing is approved.
+run_case 0 "stage=oci-live-data-resume-activation-released run_id=101 result=SUCCESS" STUB_STARTED_RUNS=101 \
+  RELEASE_CHAIN_START_SECONDS=0 "$RUN" "$REQUESTS/dry-run.json"
+expect_calls "exclusivity exclude=none;dispatcher oci-live-data-resume-activation-released --prepare-disabled-ghosts;gh workflow enable oci-live-data-rollout.yml;dispatcher oci-live-data-resume-activation-released --dispatch-prepared;gh workflow disable oci-live-data-rollout.yml;"
+
 # A failed enable dispatches nothing, reports not started, and disables again.
 run_case 2 "reason=enable-failed workflow=oci-production-deploy.yml" STUB_ENABLE_FAIL=1 "$RUN" "$REQUESTS/deploy.json"
 expect_calls "exclusivity exclude=none;gh workflow enable oci-production-deploy.yml;gh workflow disable oci-production-deploy.yml;"
@@ -196,6 +205,13 @@ run_case 2 "reason=control-sha-not-master-tip" STUB_MASTER=fffffffffffffffffffff
 [[ ! -f "$LOG" ]] || { echo "preflight refusal made calls: $(calls)" >&2; exit 1; }
 run_case 2 "reason=workflow-not-disabled" STUB_WORKFLOW_STATE=active "$RUN" "$REQUESTS/deploy.json"
 [[ "$(calls)" == "exclusivity exclude=none;" ]] || { echo "enabled despite active workflow: $(calls)" >&2; exit 1; }
+run_case 2 "reason=workflow-not-active" "$RUN" "$REQUESTS/ghcr.json"
+[[ "$(calls)" == "exclusivity exclude=none;" ]] || { echo "dispatched to a disabled active-policy workflow: $(calls)" >&2; exit 1; }
+
+# A workflow the policy keeps active is dispatched and approved without being
+# enabled or disabled.
+run_case 0 "stage=ghcr-package-validate run_id=404 result=SUCCESS" STUB_WORKFLOW_STATE=active "$RUN" "$REQUESTS/ghcr.json"
+expect_calls "exclusivity exclude=none;dispatcher ghcr-package-validate --dispatch;approve 404 --approve op=ghcr-package-validate auto=true;"
 run_case 2 "reason=chain-must-start-with-live-data" "$RUN" "$REQUESTS/deploy.json" --chain
 run_case 2 "reason=chain-needs-apply-slip-index-without-recovery-baseline" "$RUN" "$REQUESTS/dry-run.json" --chain
 [[ ! -f "$LOG" ]] || { echo "unchainable request made calls: $(calls)" >&2; exit 1; }
