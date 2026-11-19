@@ -121,6 +121,16 @@ const newId = prefix => `${prefix}:${window.crypto.randomUUID()}`;
 const requestOptions = { timeout: 10000 };
 const CASH_BACK_API = '/api/backoffice/cash-back-setting';
 const TEMPLATES_API = '/api/backoffice/market-templates';
+const ACCESS_API = '/api/backoffice/access-controls';
+const BETTING_RULE_ID = 'betting:all';
+const accessSwitches = [
+  { name: 'registration', field: 'registrationEnabled', label: 'New registrations',
+    stopped: 'New registrations are stopped. Existing customers can still sign in.',
+    allowed: 'New registrations are allowed.' },
+  { name: 'login', field: 'loginEnabled', label: 'Customer sign-in',
+    stopped: 'Customer sign-in is stopped. People already signed in stay signed in until their session ends; administrators can still sign in.',
+    allowed: 'Customer sign-in is allowed.' },
+];
 const betKindSections = [
   { key: '', title: 'All events', add: 'Add rule for all events', scopeLabel: 'All bets',
     note: 'Applies to pre-match and live bets.', empty: 'No rules for all events.' },
@@ -145,6 +155,8 @@ const describeRule = (rule, catalogue) => {
   return `${onOff(rule.enabled)} · ${describeParameters(rule.parameters, entry)}`;
 };
 const marketSwitch = rule => rule.type === 'DENY' && Object.keys(rule.scope).join() === 'templateIds';
+// An enabled Block bets rule with no scope declines every new bet, pre-match and live.
+const closesBetting = rule => rule.type === 'DENY' && rule.enabled && !Object.keys(rule.scope).length;
 const marketNames = (rule, templateNames) => rule.scope.templateIds.map(id => templateNames?.get(id) || id).join(', ');
 // Human-readable differences between two complete policy revisions.
 export const describeChanges = (before, after, catalogue, templateNames) => {
@@ -153,6 +165,10 @@ export const describeChanges = (before, after, catalogue, templateNames) => {
   after.rules.forEach(rule => {
     const old = previous.get(rule.id);
     const entry = catalogue.find(item => item.type === rule.type);
+    if (!old && rule.id === BETTING_RULE_ID && closesBetting(rule)) {
+      changes.push('Betting closed for all events');
+      return;
+    }
     if (!old) {
       changes.push(marketSwitch(rule) && rule.enabled
         ? `Market ${marketNames(rule, templateNames)} turned off for all events`
@@ -168,9 +184,10 @@ export const describeChanges = (before, after, catalogue, templateNames) => {
     if (parts.length) changes.push(`${ruleTitle(old, catalogue, templateNames)}: ${parts.join('; ')}`);
   });
   const current = new Set(after.rules.map(rule => rule.id));
-  before.rules.filter(rule => !current.has(rule.id)).forEach(rule => changes.push(marketSwitch(rule) && rule.enabled
-    ? `Market ${marketNames(rule, templateNames)} turned on for all events`
-    : `Removed ${ruleTitle(rule, catalogue, templateNames)}`));
+  before.rules.filter(rule => !current.has(rule.id)).forEach(rule => changes.push(
+    rule.id === BETTING_RULE_ID && closesBetting(rule) ? 'Betting opened for all events'
+      : marketSwitch(rule) && rule.enabled ? `Market ${marketNames(rule, templateNames)} turned on for all events`
+        : `Removed ${ruleTitle(rule, catalogue, templateNames)}`));
   return changes;
 };
 const formatTime = value => {
@@ -180,6 +197,7 @@ const formatTime = value => {
 const templateName = template => template.versions?.[template.versions.length - 1]?.definition?.name || template.templateId;
 const marketRuleId = templateId => `market:${templateId}`;
 const blocksTemplate = (rule, templateId) => marketSwitch(rule) && rule.enabled && rule.scope.templateIds.includes(templateId);
+const validAccess = data => plain(data) && typeof data.registrationEnabled === 'boolean' && typeof data.loginEnabled === 'boolean';
 const validCashBack = data => plain(data) && typeof data.enabled === 'boolean' && Number.isSafeInteger(data.revision);
 const validTemplates = data => plain(data) && Array.isArray(data.templates) && data.templates.every(template => (
   plain(template) && typeof template.templateId === 'string' && Array.isArray(template.versions)
@@ -245,6 +263,8 @@ export default function RiskCentre() {
   const [cashBack, setCashBack] = useState(null);
   const [cashBackBusy, setCashBackBusy] = useState(false);
   const [templates, setTemplates] = useState(null);
+  const [access, setAccess] = useState(null);
+  const [accessBusy, setAccessBusy] = useState(false);
   const [switchesLoaded, setSwitchesLoaded] = useState(false);
   const mounted = useRef(false);
   const readSequence = useRef(0);
@@ -284,10 +304,11 @@ export default function RiskCentre() {
   }, [reload]);
   // Global switches are optional extras: a failure only marks them unavailable.
   const loadSwitches = useCallback(async () => {
-    const [cash, markets] = await Promise.allSettled([
-      axios.get(CASH_BACK_API, requestOptions), axios.get(TEMPLATES_API, requestOptions),
+    const [cash, markets, accounts] = await Promise.allSettled([
+      axios.get(CASH_BACK_API, requestOptions), axios.get(TEMPLATES_API, requestOptions), axios.get(ACCESS_API, requestOptions),
     ]);
     if (!mounted.current) return;
+    setAccess(accounts.status === 'fulfilled' && validAccess(accounts.value?.data) ? accounts.value.data : null);
     setCashBack(cash.status === 'fulfilled' && validCashBack(cash.value?.data) ? cash.value.data : null);
     setTemplates(markets.status === 'fulfilled' && validTemplates(markets.value?.data) ? markets.value.data : null);
     setSwitchesLoaded(true);
@@ -377,8 +398,8 @@ export default function RiskCentre() {
     const previous = snapshotRef.current;
     const accepted = result.revision >= previous.revision ? { ...previous, ...result } : previous;
     acceptSnapshot(accepted);
-    if (pending.kind === 'market') {
-      // A market switch is a separate rule: keep the editor's selection and unsaved input.
+    if (pending.kind === 'market' || pending.kind === 'betting') {
+      // A market or betting switch is a separate rule: keep the editor's selection and unsaved input.
       if (!dirty && draft) {
         const kept = accepted.rules.find(item => item.id === draft.id);
         setDraft(kept ? draftFor(kept, accepted.catalogue.find(item => item.type === kept.type)) : null);
@@ -513,6 +534,42 @@ export default function RiskCentre() {
       label: `${name} is on for all events.`, body,
     });
   };
+  const switchBetting = close => {
+    if (readOnly || frozen) return;
+    const own = snapshot.rules.find(rule => rule.id === BETTING_RULE_ID);
+    const body = { expectedRevision: snapshot.revision, requestId: newId('save') };
+    const rule = { id: BETTING_RULE_ID, type: 'DENY', enabled: true, scope: {}, parameters: {} };
+    execute(close ? {
+      method: own ? 'PUT' : 'POST', url: own ? `${API}/rules/${BETTING_RULE_ID}` : `${API}/rules`, ruleId: BETTING_RULE_ID, kind: 'betting',
+      label: 'Betting is closed for all events. New pre-match and live bets are declined.', body: { ...body, rule },
+    } : {
+      method: 'DELETE', url: `${API}/rules/${BETTING_RULE_ID}`, ruleId: BETTING_RULE_ID, kind: 'betting',
+      label: 'Betting is open for all events.', body,
+    });
+  };
+  const switchAccess = async item => {
+    if (!access || accessBusy) return;
+    const current = access[item.field];
+    setAccessBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const response = await axios.request({
+        method: 'PUT', url: `${ACCESS_API}/${item.name}`, ...requestOptions,
+        data: { enabled: !current, expectedEnabled: current },
+      });
+      if (!validAccess(response.data)) throw new Error('Invalid access response.');
+      if (!mounted.current) return;
+      setAccess(response.data);
+      setMessage(response.data[item.field] ? item.allowed : item.stopped);
+    } catch (failure) {
+      if (!mounted.current) return;
+      setError(failure.response?.status === 409
+        ? `The ${item.label.toLowerCase()} setting was changed by someone else. The current setting is shown; try again if needed.`
+        : `The ${item.label.toLowerCase()} setting could not be changed. Refresh to check the current setting.`);
+      if (failure.response?.status === 409) loadSwitches();
+    } finally { if (mounted.current) setAccessBusy(false); }
+  };
   const switchCashBack = async () => {
     if (!cashBack || cashBackBusy) return;
     setCashBackBusy(true);
@@ -560,6 +617,8 @@ export default function RiskCentre() {
     .filter(id => rule.id === marketRuleId(id) && !templateNames.has(id))
     .forEach(id => templateNames.set(id, DELETED_MARKET)));
   const liveTemplates = (templates?.templates || []).filter(template => !template.archived);
+  const ownBetting = snapshot?.rules.find(rule => rule.id === BETTING_RULE_ID && closesBetting(rule));
+  const bettingClosed = Boolean(snapshot?.rules.some(closesBetting));
   const overlapping = draft && entry && !entry.locked ? snapshot.rules.filter(rule => rule.id !== draft.id
     && rule.type === draft.type && rule.enabled
     && (!draft.scope.betKind || !rule.scope.betKind || rule.scope.betKind === draft.scope.betKind)) : [];
@@ -593,6 +652,33 @@ export default function RiskCentre() {
       {snapshot.readiness.transactions !== 'READY' ? <p className="market-notice market-notice--warning" role="status">Rule editing is not available in this deployment. Existing bet validation continues to run.</p> : null}
       <section className="risk-switches" aria-labelledby="risk-switches-title">
         <h2 className="h5" id="risk-switches-title">All-events switches</h2>
+        <section className="risk-switch" aria-labelledby="risk-betting-title">
+          <h3 className="h6" id="risk-betting-title">Betting</h3>
+          <p className="market-help">Closing betting declines every new bet, pre-match and live. Bets received before closing finish normally.</p>
+          {snapshot.readiness.transactions === 'READY' ? <ul className="risk-switch-list"><li>
+            <span className="risk-switch-list__name">All bets</span>
+            <RuleStatus enabled={!bettingClosed} />
+            {ownBetting || !bettingClosed ? <button type="button" className={action} disabled={readOnly || frozen}
+              aria-label={`${ownBetting ? 'Open' : 'Close'} betting for all events`} onClick={() => switchBetting(!ownBetting)}>
+              {ownBetting ? 'Open betting' : 'Close betting'}
+            </button> : <small>Closed by a Block bets rule</small>}
+          </li></ul> : <p className="market-help">Betting can't be switched in this deployment.</p>}
+        </section>
+        <section className="risk-switch" aria-labelledby="risk-accounts-title">
+          <h3 className="h6" id="risk-accounts-title">Accounts</h3>
+          <p className="market-help">Stopping sign-in also stops registration, because new accounts are signed in straight away. Administrators can still sign in, and people already signed in stay signed in until their session ends.</p>
+          {access ? <ul className="risk-switch-list">{accessSwitches.map(item => <li key={item.name}>
+            <span className="risk-switch-list__name">{item.label}</span>
+            <RuleStatus enabled={access[item.field]} />
+            <button type="button" className={action} disabled={accessBusy} onClick={() => switchAccess(item)}
+              aria-label={`${access[item.field] ? 'Stop' : 'Allow'} ${item.label.toLowerCase()}`}>
+              {access[item.field] ? 'Stop' : 'Allow'}
+            </button>
+            {item.name === 'registration' && access.registrationEnabled && !access.loginEnabled
+              ? <small>Paused while sign-in is stopped</small> : null}
+          </li>)}</ul> : null}
+          {!access && switchesLoaded ? <p className="market-help">Account switches are unavailable. Try refreshing.</p> : null}
+        </section>
         <section className="risk-switch" aria-labelledby="risk-cashback-title">
           <h3 className="h6" id="risk-cashback-title">Cash back</h3>
           <p className="market-help">For every event. Per-event cash-back switches in Backoffice still apply.</p>

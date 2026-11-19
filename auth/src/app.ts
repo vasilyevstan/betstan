@@ -9,6 +9,7 @@ import { logoutRouter } from "./route/LogOut";
 import { newUser } from "./route/NewUser";
 import { verifyAdminRouter } from "./route/VerifyAdmin";
 import { profileRouter } from "./route/Profile";
+import { accessControlsRouter } from "./route/AccessControls";
 import { errorHandler } from "@betstan/common";
 
 const app = express();
@@ -33,6 +34,7 @@ app.use(logoutRouter);
 app.use(newUser);
 app.use(verifyAdminRouter);
 app.use(profileRouter);
+app.use(accessControlsRouter);
 
 app.all("*", async (req, res, next) => {
   //next(new NotFoundError());

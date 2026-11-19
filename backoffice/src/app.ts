@@ -9,6 +9,7 @@ import { EventVisibility } from "./route/EventVisibility";
 import { publicBackofficeAccess } from "./middleware/PublicBackofficeAccess";
 import { Markets } from "./route/Markets";
 import { RiskCentre } from "./route/RiskCentre";
+import { AccessControls } from "./route/AccessControls";
 import { EventCashBack } from "./route/EventCashBack";
 import { GlobalCashBackSetting } from "./route/CashBackSetting";
 
@@ -41,6 +42,7 @@ app.use(EventCashBack);
 app.use(GlobalCashBackSetting);
 app.use(Markets);
 app.use(RiskCentre);
+app.use(AccessControls);
 
 app.use(errorHandler);
 

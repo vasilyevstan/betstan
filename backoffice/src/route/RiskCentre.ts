@@ -7,11 +7,13 @@ const base = "/api/backoffice/risk-centre";
 const error = (code: string, message: string) => ({ code, message });
 
 // A fixed deployment authority, never a URL supplied by the public caller.
-export function riskRequest(path: string, method: string, body?: unknown): Promise<{ status: number; data: unknown }> {
-  const configured = process.env.MODERATION_SERVICE_URL;
-  if (!configured) return Promise.reject(new Error("Moderation authority is not configured"));
-  const url = new URL(`/api/moderation/risk-centre${path}`, configured);
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return Promise.reject(new Error("Invalid moderation authority"));
+export function serviceRequest(
+  configured: string | undefined, path: string, method: string, body?: unknown,
+  statuses: number[] = [200, 400, 404, 409, 413, 503],
+): Promise<{ status: number; data: unknown }> {
+  if (!configured) return Promise.reject(new Error("Service authority is not configured"));
+  const url = new URL(path, configured);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return Promise.reject(new Error("Invalid service authority"));
   const payload = body === undefined ? undefined : JSON.stringify(body);
   if (payload && Buffer.byteLength(payload) > 65536) return Promise.resolve({ status: 413, data: error("BODY_TOO_LARGE", "Request exceeds 64 KiB") });
   return new Promise((resolve, reject) => {
@@ -23,7 +25,7 @@ export function riskRequest(path: string, method: string, body?: unknown): Promi
       const chunks: Buffer[] = [];
       response.on("data", chunk => {
         size += chunk.length;
-        if (size > 4 * 1024 * 1024) { request.destroy(new Error("Oversized risk response")); return; }
+        if (size > 4 * 1024 * 1024) { request.destroy(new Error("Oversized service response")); return; }
         chunks.push(Buffer.from(chunk));
       });
       response.on("error", reject);
@@ -31,19 +33,22 @@ export function riskRequest(path: string, method: string, body?: unknown): Promi
         clearTimeout(deadline);
         try {
           const status = response.statusCode ?? 502;
-          if (![200, 400, 404, 409, 413, 503].includes(status)) throw new Error("Unexpected risk authority status");
+          if (!statuses.includes(status)) throw new Error("Unexpected service status");
           const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid risk response");
-          if (status !== 200 && (typeof data.code !== "string" || typeof data.message !== "string")) throw new Error("Invalid risk error");
+          if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid service response");
+          if (status !== 200 && (typeof data.code !== "string" || typeof data.message !== "string")) throw new Error("Invalid service error");
           resolve({ status, data });
         } catch (failure) { reject(failure); }
       });
     });
-    const deadline = setTimeout(() => request.destroy(new Error("Risk authority timed out")), 5000);
+    const deadline = setTimeout(() => request.destroy(new Error("Service authority timed out")), 5000);
     request.on("error", failure => { clearTimeout(deadline); reject(failure); });
     request.end(payload);
   });
 }
+
+const riskRequest = (path: string, method: string, body?: unknown) =>
+  serviceRequest(process.env.MODERATION_SERVICE_URL, `/api/moderation/risk-centre${path}`, method, body);
 
 router.all([base, `${base}/*`], (req, res, next) => {
   res.set("Cache-Control", "no-store");

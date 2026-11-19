@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { MemoryRouter } from 'react-router-dom';
 import axios from 'axios';
-import RiskCentre from './RiskCentre';
+import RiskCentre, { describeChanges } from './RiskCentre';
 
 jest.mock('axios', () => ({ get: jest.fn(), request: jest.fn() }));
 const API = '/api/backoffice/risk-centre';
@@ -618,10 +618,65 @@ describe('sections, history and all-events switches', () => {
     expect(await screen.findByRole('button', { name: new RegExp(`ON Market: ${deletedId}`) })).toBeInTheDocument();
   });
 
+  it('closes and reopens all betting through one unscoped block rule', async () => {
+    mount();
+    const panel = await screen.findByRole('region', { name: 'Betting' });
+    expect(panel.querySelector('.market-pill')).toHaveTextContent('ON');
+    fireEvent.click(screen.getByRole('button', { name: 'Close betting for all events' }));
+    await screen.findByText('Betting is closed for all events. New pre-match and live bets are declined. Revision 2 saved.');
+    expect(axios.request.mock.calls[0][0]).toMatchObject({
+      method: 'POST', url: `${API}/rules`,
+      data: { expectedRevision: 1, rule: { id: 'betting:all', type: 'DENY', enabled: true, scope: {}, parameters: {} } },
+    });
+    expect(panel.querySelector('.market-pill')).toHaveTextContent('OFF');
+    fireEvent.click(screen.getByRole('button', { name: 'Open betting for all events' }));
+    await screen.findByText('Betting is open for all events. Revision 3 saved.');
+    expect(axios.request.mock.calls[1][0]).toMatchObject({ method: 'DELETE', url: `${API}/rules/betting:all`, data: { expectedRevision: 2 } });
+  });
+
+  it('shows betting closed by another unscoped block rule without offering to open it', async () => {
+    const policy = snapshot();
+    policy.rules.push({ id: 'default:DENY', type: 'DENY', enabled: true, scope: {}, parameters: {} });
+    routes({ [API]: policy });
+    mount();
+    const panel = await screen.findByRole('region', { name: 'Betting' });
+    expect(panel.querySelector('.market-pill')).toHaveTextContent('OFF');
+    expect(panel).toHaveTextContent('Closed by a Block bets rule');
+    expect(screen.queryByRole('button', { name: /betting for all events/ })).not.toBeInTheDocument();
+  });
+
+  it('describes betting switches in revision history', () => {
+    const closed = { id: 'betting:all', type: 'DENY', enabled: true, scope: {}, parameters: {} };
+    expect(describeChanges({ rules: [rule] }, { rules: [rule, closed] }, [], new Map())).toEqual(['Betting closed for all events']);
+    expect(describeChanges({ rules: [rule, closed] }, { rules: [rule] }, [], new Map())).toEqual(['Betting opened for all events']);
+  });
+
+  it('stops and allows customer sign-in and registration with the expected current value', async () => {
+    routes({ '/api/backoffice/access-controls': { registrationEnabled: true, loginEnabled: true, revision: 0 } });
+    axios.request.mockResolvedValueOnce({ data: { registrationEnabled: true, loginEnabled: false, revision: 1 } });
+    mount();
+    const panel = await screen.findByRole('region', { name: 'Accounts' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop customer sign-in' }));
+    await screen.findByText(/Customer sign-in is stopped\. .*administrators can still sign in/);
+    expect(axios.request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'PUT', url: '/api/backoffice/access-controls/login', data: { enabled: false, expectedEnabled: true },
+    }));
+    expect(panel).toHaveTextContent('Paused while sign-in is stopped');
+    expect(screen.getByRole('button', { name: 'Allow customer sign-in' })).toBeInTheDocument();
+
+    axios.request.mockRejectedValueOnce({ response: { status: 409 } });
+    fireEvent.click(screen.getByRole('button', { name: 'Stop new registrations' }));
+    await screen.findByText('The new registrations setting was changed by someone else. The current setting is shown; try again if needed.');
+    expect(axios.request).toHaveBeenLastCalledWith(expect.objectContaining({
+      url: '/api/backoffice/access-controls/registration', data: { enabled: false, expectedEnabled: true },
+    }));
+  });
+
   it('keeps rules usable when switch settings are unavailable', async () => {
     mount();
     await screen.findByRole('button', { name: /Maximum stake OFF All bets/ });
     expect(await screen.findByText('Cash-back setting is unavailable. Try refreshing.')).toBeInTheDocument();
+    expect(screen.getByText('Account switches are unavailable. Try refreshing.')).toBeInTheDocument();
     expect(screen.getByText('Markets are unavailable. Try refreshing.')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });

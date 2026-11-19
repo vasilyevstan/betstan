@@ -129,6 +129,33 @@ complete rule set of that revision stays available under a nested disclosure.
 
 ## All-events switches
 
+**Betting** closes or opens all betting. Closing it saves an enabled **Block
+bets** rule with no scope (`betting:all`), so every new pre-match and live bet
+is declined as **Declined: Block bets** at moderation, after its normal delay.
+Bets received before closing keep the policy they were received under and
+finish normally. Opening it removes that rule. If another unscoped Block bets
+rule is on, the switch shows **Closed by a Block bets rule** and that rule must
+be changed in the list instead. The switch needs rule editing to be available
+in the deployment.
+
+**Accounts** stops or allows **New registrations** and **Customer sign-in**.
+Auth owns both settings and enforces them on `POST /api/auth/new` and
+`POST /api/auth/login`; Backoffice forwards `GET
+/api/backoffice/access-controls` and `PUT
+/api/backoffice/access-controls/{registration|login}` with
+`{enabled, expectedEnabled}` to Auth's cluster-internal endpoint, and a stale
+change returns a conflict. Stopping sign-in:
+
+- refuses new customer sign-ins with "Sign-in is paused";
+- also refuses registration, because a new account is signed in straight
+  away;
+- keeps administrators able to sign in, so release acceptance and recovery
+  keep working (the reusable acceptance account must already exist as an
+  administrator);
+- does not end existing sessions; they expire normally, within 12 hours.
+
+These are separate Auth settings, not policy revisions.
+
 **Cash back** turns cash back off or on for every event. While it is off,
 Backoffice refuses new cash-back quotes and reservations; requests already
 being processed can finish, and per-event switches still apply when it is on.
