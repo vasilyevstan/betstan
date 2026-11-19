@@ -1543,7 +1543,9 @@ publishes its own fixtures and waits for Event's authoritative catalogue before
 placing bets. Administrator preview does not bypass Risk Centre's offline-event
 restriction. Test teardown returns every published fixture to offline and
 verifies propagation, including after a failed placement; failure blocks
-activation. Synthetic draft cleanup accepts safe integer BSON Long revisions
+activation. A fixture Event has already resulted stays visible as a public
+full-time result and counts as hidden, because it no longer accepts bets.
+Synthetic draft cleanup accepts safe integer BSON Long revisions
 written by the application while retaining the original revision and fingerprint
 in its compare-and-delete predicate. Submitted slips, foreign fixtures and
 unsafe or malformed revisions remain outside cleanup authority.
