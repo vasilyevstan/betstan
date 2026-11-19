@@ -13,7 +13,10 @@
 # enable the workflow, dispatch with the canonical dispatcher, disable the
 # workflow once the exact run reaches its pending environment gate (or
 # completes), submit eligible CLI-owned gates through the canonical approval
-# helper, and wait for the conclusion. Every other exit disables the workflow,
+# helper, and wait for the conclusion. A workflow the policy keeps active
+# (approvalWorkflowState=active, e.g. ghcr-package-management.yml) is
+# dispatched and approved as is: never enabled or disabled. Every other exit
+# disables the workflow,
 # except a dispatched run that never materialized: disabling it could strand
 # that run, so the workflow is left enabled with an explicit warning (no gate
 # can be approved while it is enabled). This helper grants no authority: the
@@ -119,15 +122,19 @@ PY
 }
 
 run_stage() {
-  local request="$1" operation workflow output run_id mode deadline
+  local request="$1" operation workflow expected_state output run_id mode deadline
   local state conclusion step began next_heartbeat next_approval=0 pending failed
   operation="$(json_field "$request" operation)"
-  workflow="$("$POLICY" get "$operation" |
-    python3 -c 'import json, sys; print(json.load(sys.stdin)["workflow"])')" ||
+  # The policy says whether the workflow is kept disabled between runs or, like
+  # ghcr-package-management.yml, stays active and is approved while active.
+  read -r workflow expected_state < <("$POLICY" get "$operation" |
+    python3 -c 'import json, sys; p = json.load(sys.stdin); print(p["workflow"], p.get("approvalWorkflowState", "disabled_manually"))') ||
+    stop 2 "reason=policy-unresolved operation=$operation"
+  [[ -n "$workflow" && "$expected_state" =~ ^(active|disabled_manually)$ ]] ||
     stop 2 "reason=policy-unresolved operation=$operation"
   state="$(gh api "repos/$REPO/actions/workflows/$workflow" --jq .state)" ||
     stop 2 "reason=workflow-state-unreadable workflow=$workflow"
-  [[ "$state" == "disabled_manually" ]] || stop 2 "reason=workflow-not-disabled workflow=$workflow"
+  [[ "$state" == "$expected_state" ]] || stop 2 "reason=workflow-not-${expected_state%_manually} workflow=$workflow"
 
   mode="--dispatch"
   if is_transition_workflow "$workflow"; then
@@ -138,8 +145,10 @@ run_stage() {
     }
   fi
 
-  ACTIVE_WORKFLOW="$workflow"
-  gh workflow enable "$workflow" -R "$REPO" >/dev/null || stop 2 "reason=enable-failed workflow=$workflow"
+  if [[ "$expected_state" == disabled_manually ]]; then
+    ACTIVE_WORKFLOW="$workflow"
+    gh workflow enable "$workflow" -R "$REPO" >/dev/null || stop 2 "reason=enable-failed workflow=$workflow"
+  fi
   output="$("$DISPATCHER" "$request" "$mode" 2>&1)" || {
     printf '%s\n' "$output" | tail -3
     stop 2 "reason=dispatch-unconfirmed operation=$operation"
@@ -154,19 +163,21 @@ run_stage() {
 
   # Disable only once the exact run has materialized (its expected pending
   # environment, or completion), then approve with the workflow disabled.
-  UNMATERIALIZED_RUN="$run_id"
-  deadline=$((SECONDS + START_SECONDS))
-  while :; do
-    pending="$(gh api "repos/$REPO/actions/runs/$run_id/pending_deployments" --jq length 2>/dev/null)" || pending=0
-    ((pending > 0)) && break
-    state="$(gh run view "$run_id" -R "$REPO" --json status --jq .status 2>/dev/null)" || state=unknown
-    [[ "$state" == "completed" ]] && break
-    ((SECONDS < deadline)) || stop 2 "reason=materialization-unproven operation=$operation run_id=$run_id"
-    sleep "$JOB_POLL_SECONDS"
-  done
-  UNMATERIALIZED_RUN=""
-  gh workflow disable "$workflow" -R "$REPO" >/dev/null || stop 2 "reason=disable-failed-run-waiting-unapproved workflow=$workflow run_id=$run_id"
-  ACTIVE_WORKFLOW=""
+  if [[ "$expected_state" == disabled_manually ]]; then
+    UNMATERIALIZED_RUN="$run_id"
+    deadline=$((SECONDS + START_SECONDS))
+    while :; do
+      pending="$(gh api "repos/$REPO/actions/runs/$run_id/pending_deployments" --jq length 2>/dev/null)" || pending=0
+      ((pending > 0)) && break
+      state="$(gh run view "$run_id" -R "$REPO" --json status --jq .status 2>/dev/null)" || state=unknown
+      [[ "$state" == "completed" ]] && break
+      ((SECONDS < deadline)) || stop 2 "reason=materialization-unproven operation=$operation run_id=$run_id"
+      sleep "$JOB_POLL_SECONDS"
+    done
+    UNMATERIALIZED_RUN=""
+    gh workflow disable "$workflow" -R "$REPO" >/dev/null || stop 2 "reason=disable-failed-run-waiting-unapproved workflow=$workflow run_id=$run_id"
+    ACTIVE_WORKFLOW=""
+  fi
 
   deadline=$((SECONDS + RUN_SECONDS))
   next_heartbeat=$((SECONDS + HEARTBEAT_SECONDS))
