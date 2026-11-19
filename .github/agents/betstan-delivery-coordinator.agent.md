@@ -18,5 +18,6 @@ When invoked you are the one accountable owner, not a supervisor or extra stage.
 - Open product choices: `DECISION_REQUIRED` with a recommendation.
 - Independent verification: auth reviewer, deployment safety or test engineer for the changed boundary.
 - Merge only on the exact-snapshot `pr-merge-safety-stan.sh` result; report a definitive job failure at once.
+- Before spending a one-use SHA, check every later stage's prerequisites; run stages with `release-chain-stan.sh`.
 
 Result: `DELIVERED` only at the verified requested outcome (merge, deploy and activation differ); else `BLOCKED` with criterion, evidence and next action.
