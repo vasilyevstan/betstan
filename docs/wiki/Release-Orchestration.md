@@ -19,11 +19,48 @@ For a CLI-owned PR (feature-to-`dev` or `dev`-to-`master` promotion):
    `3` timeout; it grants no authority.
 2. `COPILOT_CLI_AUTO_APPROVE=true ./infra/azure/agents/pr-merge-safety-stan.sh <pr>`.
 3. `gh pr merge <pr> --merge --match-head-commit <sha>`.
-4. Wait, bounded, on the `master` builds, then run the protected OCI chain.
+4. Wait, bounded, on the `master` builds, then run the protected OCI chain
+   with `release-chain-stan.sh` (below).
 
 Never use `gh pr checks --watch` or any other unbounded watcher: it waits on
 every status and never exits. `trusted-quality-transition/*` is a
 pending-by-design ledger marker, never a gate.
+
+## Released chain: one command and stage budgets
+
+`./infra/azure/agents/release-chain-stan.sh <request> [--chain]` replaces the
+manual enable, dispatch, disable, approve and watch loop. `--chain` runs live
+data, deploy and activation from one live-data request, deriving each next
+request from the previous run ID. This keeps the deploy inside the handoff
+lease. The runner adds no authority and stops at the first failure.
+Usage and exit codes are in the
+[agents README](https://github.com/vasilyevstan/betstan/blob/master/infra/azure/agents/README.md).
+
+The budgets below come from the measured November 2026 restore. If a stage
+runs past 1.5 times its budget, inspect the current step at once.
+
+| Stage | Budget |
+| --- | --- |
+| Fix PR to `dev` (checks, merge safety, merge) | 20 min |
+| `dev` to `master` promotion | 30 min |
+| `master` builds (`production-build` about 10 min, `oci-build` about 20 min) | 30 min |
+| Live-data rollout | 15 min |
+| Deploy | 15 min |
+| Activation | 25 min |
+| Diagnosing one failure | 15 min |
+
+Each production failure costs a full new-SHA iteration (about 2 hours), so
+before you spend a one-use SHA:
+
+- Confirm that the `master` builds for that SHA succeeded. A failed build,
+  even a flaky one, leaves the SHA without trusted OCI images.
+- Confirm that every prerequisite the remaining stages read exists. Do not
+  check only the first stage.
+- Use fenced data recovery only to recover data. It stops every writer, so
+  never use it for an application, probe or telemetry fault.
+- While production relies on the released no-rebuild path, limit `dev` to
+  `.github/`, `infra/` and Markdown changes. Application changes need a full
+  release.
 
 ## Delivery redesign: compatibility stage
 
@@ -1543,7 +1580,11 @@ publishes its own fixtures and waits for Event's authoritative catalogue before
 placing bets. Administrator preview does not bypass Risk Centre's offline-event
 restriction. Test teardown returns every published fixture to offline and
 verifies propagation, including after a failed placement; failure blocks
-activation. Synthetic draft cleanup accepts safe integer BSON Long revisions
+activation. A fixture Event has already resulted stays visible as a public
+full-time result and counts as hidden, because it no longer accepts bets.
+A cash-back quote that is unavailable because source authority is momentarily
+pending or contended is retried within the journey's bounded five attempts.
+Synthetic draft cleanup accepts safe integer BSON Long revisions
 written by the application while retaining the original revision and fingerprint
 in its compare-and-delete predicate. Submitted slips, foreign fixtures and
 unsafe or malformed revisions remain outside cleanup authority.

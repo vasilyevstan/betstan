@@ -54,6 +54,11 @@ const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([
 const RETRYABLE_CASH_BACK_REASONS = [
   'QUOTE_EXPIRED', 'QUOTE_CHANGED', 'STALE_REVISION', 'RESERVATION_DENIED',
 ];
+// Quote snapshots report transient source states, such as a pending visibility
+// publication or a concurrent hold, as AUTHORITY_UNAVAILABLE.
+const RETRYABLE_CASH_BACK_QUOTE_REASONS = [
+  ...RETRYABLE_CASH_BACK_REASONS, 'AUTHORITY_UNAVAILABLE',
+];
 
 const board = (page, betKind) => page.locator(
   `section[aria-labelledby="slip-board-title-${betKind}"]`,
@@ -425,7 +430,8 @@ const acceptCashBack = async (page, slipId, portion) => {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const operation = await requestCashBackQuote(page, slipId, portion);
     if (operation.state === 'UNAVAILABLE') {
-      expect(RETRYABLE_CASH_BACK_REASONS).toContain(operation.reason);
+      expect(RETRYABLE_CASH_BACK_QUOTE_REASONS).toContain(operation.reason);
+      await new Promise(resolve => setTimeout(resolve, 2000));
       continue;
     }
     const confirm = {
@@ -556,6 +562,12 @@ const setAcceptanceVisibility = async (request, eventIds, visibility) => {
       const catalogue = await request.get(`/api/event/events/${eventId}/markets`);
       expect(catalogue.ok()).toBeTruthy();
       const body = await catalogue.json();
+      // Event keeps a full-time result public; a resulted fixture is already closed to betting.
+      if (
+        visibility === 'OFFLINE'
+        && body.event?.eventId === eventId
+        && body.event.status === 'RESULTED'
+      ) return 'OFFLINE';
       return body.event?.eventId === eventId ? body.event.visibility : null;
     }, { timeout: 30000, intervals: [250, 500, 1000] }).toBe(visibility);
   }));

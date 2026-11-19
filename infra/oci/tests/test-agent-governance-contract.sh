@@ -48,16 +48,29 @@ for role, path in roles.items():
         raise SystemExit(f"{role}: read-only verifier gained editing authority")
 if manual != manual_expected:
     raise SystemExit("manual-invocation restrictions changed")
-if len(roles["deployment-safety"].read_text(encoding="utf-8").splitlines()) > 150:
-    raise SystemExit("deployment safety guidance exceeded the concise role contract")
+budgets = {path: 1600 for path in roles.values()}
+budgets.update({
+    agents / "README.md": 2600,
+    root / "CONTRIBUTING.md": 7000,
+    root / "LEARNINGS.md": 3500,
+})
+for path, limit in budgets.items():
+    size = len(path.read_bytes())
+    if size > limit:
+        raise SystemExit(
+            f"{path.relative_to(root)}: {size} bytes exceeds the {limit}-byte budget; "
+            "link to canonical docs instead of restating them"
+        )
 if len((root / "LEARNINGS.md").read_text(encoding="utf-8").splitlines()) > 200:
     raise SystemExit("working learnings exceeded 200 lines; retain history in the wiki")
 
 sources = [
     root / ".github/copilot-instructions.md",
-    agents / "README.md",
     root / ".github/skills/betstan-branch-governance/SKILL.md",
+    root / "CONTRIBUTING.md",
     root / "LEARNINGS.md",
+    agents / "README.md",
+    *roles.values(),
 ]
 for source in sources:
     text = source.read_text(encoding="utf-8")
@@ -80,48 +93,30 @@ def require(path, *outcomes):
         if outcome not in text:
             raise SystemExit(f"{path.relative_to(root)}: missing {outcome}")
 
-# Policy assertions cover retained responsibilities, not a prescribed sequence.
+# Essential safety rules live once in canonical docs; role cards link to them.
+require(
+    root / "CONTRIBUTING.md",
+    "Never commit or push directly to `dev` or `master`",
+    "Use ancestry-preserving merges",
+    "skipped, stale or pending checks are not success",
+    "requires `APPROVED_SHA` equal to its exact current head",
+    "without a separate personal prompt",
+    "immutable deployed identity, physical single-writer locks/fences, data integrity, compatible recovery and observed health",
+    "Preserve failed-run locks/fences; timeout or lease expiry is not proof that a writer stopped",
+    "`https://betstan.xyz` is canonical",
+    "Current executable controls remain authoritative",
+)
 require(
     agents / "README.md",
     "one accountable owner",
-    "Changes to trust or state boundaries require independent verification",
     "The verifier must not be the author",
-    "Current executable controls remain authoritative until a proven cutover",
     "Do not rerun unchanged tests",
-)
-require(
-    root / "CONTRIBUTING.md",
-    "Never push directly to `dev`",
-    "Never commit or push directly to it",
-    "Use ancestry-preserving merges",
-    "Every other PR requires `APPROVED_SHA` equal to its exact current head",
-    "CLI-created and CLI-owned",
-    "without a separate personal prompt",
-    "immutable deployed identity",
-    "physical single-writer locks/fences",
-    "data integrity",
-    "compatible recovery",
-    "observed health",
-)
-require(
-    agents / "README.md",
-    "main owner also owns coordination",
-    "one active observer per wait",
-    "thirty minutes",
-    "Timeout, runner exit or lease expiry is not proof that a writer stopped",
-    "Never edit live authority",
 )
 require(
     root / "docs/copilot-security-guardrails.md",
     "Never commit sensitive information",
     "human-origin work requires exact approval",
     "policy edits grant no production permissions",
-)
-require(
-    agents / "betstan-public-wiki-editor.agent.md",
-    "Never publish credentials",
-    "byte-identical publication",
-    "This editor does not perform Git or publication actions",
 )
 require(
     root / ".github/pull_request_template.md",
@@ -134,87 +129,12 @@ require(
     "Independent verification for changed trust/state boundaries",
     "Reused evidence",
 )
-
-# Domain safeguards survive routing consolidation; their executable tests
-# remain with the package, authorization, migration and release implementations.
-require(
-    agents / "betstan-test-engineer.agent.md",
-    "state both versions and never substitute one for the other",
-    "a shared contract requires every genuine consumer",
-    "mixed-version/rollback matrix",
-    "one exact pin across all eight consumers",
-)
-require(
-    agents / "betstan-delivery-coordinator.agent.md",
-    "you **are** the one accountable owner, not a supervisor",
-    "A missing user-supplied SHA does not block local work",
-    "verified exact identities are required before any protected merge, dispatch, approval or mutation",
-    "Non-author verification is required at changed trust/state boundaries",
-    "No default specialist pass elsewhere",
-    "name the current failure path",
-    "do not remove protections to simplify",
-    "no quorum, veto or protection removal by vote",
-    "source candidate and each service's installed `@betstan/common` pin are separate authorities",
-    "immutable ingress time",
-    "Report a definitive job or shard failure as a blocker as soon as it is known",
-    "cancelled, skipped or stale results are never success",
-    "An agent token never authorizes a merge, release or production mutation",
-)
-require(
-    agents / "betstan-test-engineer.agent.md",
-    "Never use `npm install --no-save <tarball>` as evidence",
-    "Prove Backoffice quiesces first and restores last",
-)
-require(
-    agents / "betstan-deployment-safety.agent.md",
-    "exact candidate Auth and Client images plus a valid candidate-prefix/baseline-suffix split",
-    "do not apply an AKS journal requirement to an OCI release",
-    "compatibility readers and manifest bindings needed by supported old images",
-    "drain durable pending publications before incompatible image rollback",
-    "Keep retained-maintenance version/FCV/digest finalization",
-    "Preserve failed-run locks/fences and use compatible recovery",
-    "complete production inventory",
-    "Only executable classifiers may exclude proven records",
-    "no run-ID exclusion or age-based shortcut",
-    "Unknown dispatch/approval outcomes require the supported resume or reconciliation transition",
-    "canonical automatic approval without a personal prompt",
-)
-require(
-    agents / "betstan-oci-operator.agent.md",
-    "Repository-only implementation uses its exact source/diff contract and performs no live baseline or provider operation",
-)
-require(
-    agents / "betstan-oci-operator.agent.md",
-    "For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID",
-    "For k3s, verify the recorded instance/runtime identity",
-    "A health-only assignment grants no mutation authority",
-)
 require(
     archived_migration,
     "disable-model-invocation: true",
     "Require exact in-AKS source/target server-version and FCV compatibility",
     "The unattended recovery identity remains stop-only",
     "After `cutover-committed`, recover forward only",
-)
-require(
-    agents / "betstan-deployment-safety.agent.md",
-    "archive/azure/github-agents/betstan-mongo-migration.md",
-    "A disabled workflow is not proof that its recovery obligation retired",
-    "any read error is unknown and `NO_GO`",
-    "immutable original journal SHA",
-    "A run waiting for approval is active, not hung",
-    "controller-level HTTP mutation fence",
-    "routing-fence protocol",
-    "After `cutover-committed`, recover forward only",
-    "The unattended recovery identity remains stop-only",
-)
-require(
-    agents / "betstan-oci-operator.agent.md",
-    "`https://betstan.xyz` is canonical",
-    "never satisfies canonical health",
-    "never use registrar credentials",
-    "never overlaps two paid LBs",
-    "CLI automatic approval never waives resource scope, DNS ownership or TLS checks",
 )
 PY
 

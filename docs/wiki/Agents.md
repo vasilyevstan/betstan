@@ -53,6 +53,11 @@ Editors stay within assigned paths. Application developers do not commit,
 push, approve, merge or deploy. Manual invocation of a runtime capability is
 not authorization to mutate a cluster, data, settings or release state.
 
+Role files are short cards that link to canonical sources instead of restating
+them: domain checklists live in [[Quality Gates]], [[UI UX Consistency]],
+[[Security]], [[Release Orchestration]] and [[Engineering Learnings]], and OCI
+operator invariants live in the repository's OCI runbook.
+
 ## Runtime and data boundaries
 
 Repository-only work requires exact source/diff evidence, not cloud access. A
