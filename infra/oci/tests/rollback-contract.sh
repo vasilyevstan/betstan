@@ -832,26 +832,52 @@ case "${1:-} ${2:-}" in
       artifacts:[{name:$name, expired:false, created_at:$recent, updated_at:$recent}]
     }'
     ;;
+  "api repos/example/repo/actions/runs/${STUB_UNBUILT_DEPLOY_RUN_ID:-none}/attempts/1")
+    jq -n --arg head_sha "$STUB_UNBUILT_SOURCE_SHA" --arg recent "$recent" '{
+      workflow_id:901,
+      path:".github/workflows/oci-production-deploy.yml",
+      event:"workflow_dispatch",
+      head_sha:$head_sha,
+      head_branch:"master",
+      head_repository:{full_name:"example/repo"},
+      status:"completed",
+      conclusion:"success",
+      run_attempt:1,
+      created_at:$recent,
+      updated_at:$recent
+    }'
+    ;;
+  "api repos/example/repo/actions/runs/${STUB_UNBUILT_DEPLOY_RUN_ID:-none}/artifacts")
+    jq -n --arg name "oci-deploy-provenance-${STUB_UNBUILT_DEPLOY_RUN_ID}-1" --arg recent "$recent" '{
+      artifacts:[{name:$name, expired:false, created_at:$recent, updated_at:$recent}]
+    }'
+    ;;
   *)
     if [[ "${1:-} ${2:-}" == "run list" ]]; then
       workflow=""
+      commit=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --workflow) workflow="$2"; shift 2 ;;
-          --repo|--limit|--json|--commit) shift 2 ;;
+          --commit) commit="$2"; shift 2 ;;
+          --repo|--limit|--json) shift 2 ;;
           *) shift ;;
         esac
       done
       case "$workflow" in
         oci-production-deploy.yml)
-          jq -n --arg recent "$recent" --argjson run_id "$STUB_DEPLOY_RUN_ID" '[{
-            databaseId:$run_id,
-            createdAt:$recent,
-            status:"completed",
-            conclusion:"success"
-          }]'
+          jq -n --arg recent "$recent" --argjson run_id "$STUB_DEPLOY_RUN_ID" \
+            --arg unbuilt "${STUB_UNBUILT_DEPLOY_RUN_ID:-}" \
+            --arg unbuilt_only "${STUB_UNBUILT_ONLY:-0}" '
+            def run($id): {databaseId:$id, createdAt:$recent, status:"completed", conclusion:"success"};
+            (if $unbuilt == "" then [] else [run($unbuilt | tonumber)] end) +
+            (if $unbuilt_only == "1" then [] else [run($run_id)] end)'
           ;;
         oci-production-build.yml)
+          if [[ -n "${STUB_UNBUILT_SOURCE_SHA:-}" && "$commit" == "$STUB_UNBUILT_SOURCE_SHA" ]]; then
+            printf '[]\n'
+            exit 0
+          fi
           jq -n --arg recent "$recent" --argjson run_id "$STUB_BUILD_RUN_ID" '[{
             databaseId:$run_id,
             createdAt:$recent,
@@ -884,6 +910,13 @@ case "${1:-} ${2:-}" in
         deploy_fixture="${STUB_DEPLOY_PROVENANCE_FIXTURE:-$STUB_BASELINE_FIXTURE}"
         cp "$deploy_fixture/images.tsv" "$dir/images.tsv"
         cp "$deploy_fixture/trusted-deploy-provenance.txt" "$dir/provenance.txt"
+        cp "$STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE" "$dir/rabbitmq-baseline.txt"
+      elif [[ -n "${STUB_UNBUILT_DEPLOY_RUN_ID:-}" && "$run_id" == "$STUB_UNBUILT_DEPLOY_RUN_ID" &&
+              "$name" == "oci-deploy-provenance-${STUB_UNBUILT_DEPLOY_RUN_ID}-1" ]]; then
+        cp "$STUB_BASELINE_FIXTURE/images.tsv" "$dir/images.tsv"
+        sed -e "s/^source_sha=.*/source_sha=${STUB_UNBUILT_SOURCE_SHA}/" \
+          -e "s/^deployment_run_id=.*/deployment_run_id=${STUB_UNBUILT_DEPLOY_RUN_ID}/" \
+          "$STUB_BASELINE_FIXTURE/trusted-deploy-provenance.txt" >"$dir/provenance.txt"
         cp "$STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE" "$dir/rabbitmq-baseline.txt"
       else
         printf 'unexpected gh run download: run=%s name=%s\n' "$run_id" "$name" >&2
@@ -2377,6 +2410,33 @@ if ! run_capture "$current_capture_dir" \
   cat "$current_capture_dir.out" >&2
   fail "authenticated current ten-service baseline capture was rejected"
 fi
+unbuilt_source_sha=4444444444444444444444444444444444444444
+unbuilt_capture_dir="$WORK_DIR/capture-unbuilt-newer-deploy"
+if ! run_capture "$unbuilt_capture_dir" \
+    STUB_CAPTURE_TEN=1 \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten" \
+    GITHUB_RUN_ID="$CAPTURE_RUN_ID" GITHUB_RUN_ATTEMPT=1 \
+    STUB_SHORT_SSE_MODE=quiet-timeout \
+    STUB_UNBUILT_DEPLOY_RUN_ID=1602 "STUB_UNBUILT_SOURCE_SHA=$unbuilt_source_sha" \
+    >"$unbuilt_capture_dir.out" 2>&1; then
+  cat "$unbuilt_capture_dir.out" >&2
+  fail "capture rejected the older trusted deploy behind a newer unbuilt released deploy"
+fi
+assert_line "$unbuilt_capture_dir/baseline-provenance.env" "baseline_source_sha=$TARGET_SHA"
+assert_line "$unbuilt_capture_dir/baseline-provenance.env" "baseline_deploy_run_id=$DEPLOY_RUN_ID"
+assert_line "$unbuilt_capture_dir/baseline-provenance.env" "baseline_build_run_id=$BUILD_RUN_ID"
+assert_contains "$unbuilt_capture_dir.out" \
+  "baseline_deploy_candidate_skipped run_id=1602 source_sha=$unbuilt_source_sha reason=no-trusted-oci-build"
+run_capture_expect_failure capture-unbuilt-deploy-only \
+  STUB_CAPTURE_TEN=1 \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten" \
+  GITHUB_RUN_ID="$CAPTURE_RUN_ID" GITHUB_RUN_ATTEMPT=1 \
+  STUB_SHORT_SSE_MODE=quiet-timeout \
+  STUB_UNBUILT_DEPLOY_RUN_ID=1602 "STUB_UNBUILT_SOURCE_SHA=$unbuilt_source_sha" \
+  STUB_UNBUILT_ONLY=1
+assert_contains "$WORK_DIR/capture-unbuilt-deploy-only.out" \
+  "unable to find trusted OCI build provenance for $unbuilt_source_sha"
+printf 'baseline_unbuilt_deploy_fallback=PASS\n'
 for inventory in images.tsv live-images.tsv deployments.tsv pod-images.tsv; do
   [[ "$(wc -l <"$current_capture_dir/$inventory" | tr -d ' ')" == "10" ]] ||
     fail "current capture must include all ten services in $inventory"
