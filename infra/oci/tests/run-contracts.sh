@@ -59,6 +59,7 @@ governance_suites=(
   "$AGENTS_DIR/test-copilot-cli-protected-operation-policy-stan.sh"
   "$AGENTS_DIR/test-copilot-cli-run-approval-stan.sh"
   "$AGENTS_DIR/test-production-run-exclusivity-stan.sh"
+  "$AGENTS_DIR/test-release-chain-stan.sh"
 )
 
 dispatch_suites=(

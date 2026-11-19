@@ -154,6 +154,27 @@ EXPECTED_OPERATION=oci-production-deploy \
 ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 ```
 
+`release-chain-stan.sh` runs this lifecycle for one request: it prepares
+the two transition workflows below, enables the workflow, dispatches, disables
+the workflow once the exact run reaches its pending environment gate (or
+completes), approves eligible CLI-owned gates, and observes the run to its
+conclusion. Every other exit disables the workflow, except a dispatched run
+that never materialized. Disabling that run could strand it, so the workflow
+stays enabled with a warning (no gate can be approved while it is enabled).
+With `--chain`, starting from an `apply-slip-index` live-data request without
+a recovery baseline, it derives and runs the deploy and activation requests.
+Run it from a clean checkout at the request's `controlSha`, which must be the
+`master` tip:
+
+```bash
+./infra/azure/agents/release-chain-stan.sh "$request" --chain
+```
+
+The runner adds no authority. It never replays an unconfirmed dispatch and
+stops at the first failed run. Exit codes: `0` success, `1` run failed or
+timed out, `2` not started, unconfirmed or unmaterialized (follow
+`next_action`).
+
 If disabled history for a frozen prepared-transition workflow contains
 evidence-complete unmaterialized queue records, enabling the workflow
 intentionally makes the ordinary exclusivity check block. Seal that complete
