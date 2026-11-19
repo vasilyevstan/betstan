@@ -121,6 +121,12 @@ Rollback uses a known prior application generation and a baseline captured
 before deployment. Data restore is a separate decision and is not coupled to
 every application rollback.
 
+The baseline binds the live image digests to the newest trusted deploy whose
+source commit also has its own trusted OCI build. A released deploy that reused
+an older build's digests at a commit without that build is skipped in favour of
+the newest older trusted deploy with identical live digests; capture fails if
+none exists.
+
 ### Retained Azure shared-Mongo safety
 
 The retained Azure consolidation path is separate from primary OCI
