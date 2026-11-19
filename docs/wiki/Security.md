@@ -64,7 +64,11 @@ validation, expected-revision conflicts and stable operation receipts, but no
 claimed authenticated attribution. Public responses do not expose player
 records. Correctness safeguards and deployment capabilities are read-only;
 the editor cannot enable unsupported wallets, identity checks or settlement
-products. See [[Risk Centre]].
+products. The same public model covers the Risk Centre switches that close
+all betting and stop customer registration or sign-in. Auth enforces the
+account switches from its own stored setting, exempts only accounts whose
+stored role is administrator, and exposes the setting only on a
+cluster-internal path that Backoffice forwards. See [[Risk Centre]].
 
 ## Public Telemetry boundary
 

@@ -309,8 +309,9 @@ conversation summaries are not authority.
   persisted retry marker that the service replays after restart.
 - Image-only rollback does not restore an older Deployment manifest. Retain
   the legacy Backoffice `AUTH_SERVICE_URL` and `JWT_KEY` bindings while the
-  protected fallback image remains a supported rollback target, even though
-  the current public image does not consume them.
+  protected fallback image remains a supported rollback target. The current
+  public image consumes `AUTH_SERVICE_URL` again for the Risk Centre
+  registration and sign-in switches.
 - Before an image-only rollback crosses a durable-publication boundary, prove
   pending mutation markers are empty while a reviewed HTTP write fence prevents
   new public mutations and the current replay worker remains available. Skip
