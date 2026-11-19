@@ -605,7 +605,9 @@ grep -Fq "await setAcceptanceVisibility(publicContext.request, [...publishedFixt
   grep -Fq 'test.afterEach(async ({ request }) => {' "$acceptance_spec" &&
   grep -Fq "await setAcceptanceVisibility(request, eventIds, 'OFFLINE')" "$acceptance_spec" &&
   grep -Fq 'body.event?.eventId === eventId ? body.event.visibility : null' "$acceptance_spec" &&
-  grep -Fq "&& body.event.status === 'RESULTED'" "$acceptance_spec" ||
+  grep -Fq "&& body.event.status === 'RESULTED'" "$acceptance_spec" &&
+  grep -Fq "expect(RETRYABLE_CASH_BACK_QUOTE_REASONS).toContain(operation.reason);" "$acceptance_spec" &&
+  grep -Fq "expect(RETRYABLE_CASH_BACK_REASONS).toContain(decided.receipt.reason);" "$acceptance_spec" ||
   fail "OCI live acceptance must publish bettable fixtures and verify their post-test hiding"
 grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
   grep -Fq 'expect(publicBackoffice.status()).toBe(200)' "$acceptance_spec" &&
