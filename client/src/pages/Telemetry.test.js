@@ -374,6 +374,8 @@ describe('Telemetry', () => {
     afterEach(() => jest.restoreAllMocks());
 
     const expectTooltip = (card, bucket, label, count) => {
+      // Callers may reuse a card resolved by accessible name; it must still be the mounted card.
+      expect(card).toBeInTheDocument();
       const tooltip = within(card).getByRole('tooltip');
       const isDaily = bucket.length === 10;
       const time = tooltip.querySelector('time');
@@ -400,6 +402,7 @@ describe('Telemetry', () => {
           `${card.querySelector('h3').textContent}, ${bucket} UTC, ${count}`,
         );
       }
+      return tooltip;
     };
 
     it('requires UTC date bucket identity and amount together for past and in-progress daily buckets', async () => {
@@ -429,30 +432,41 @@ describe('Telemetry', () => {
       expect(axios.get).toHaveBeenCalledTimes(3);
     });
 
-    it.each(['2026-09-10', '2027-01-10'])(
-      'pairs date/time bucket identity and amount for all ten metrics and every daily/hourly bucket across the boundary ending %s',
+    // Daily and hourly halves share only this rendered overview, so they run as separate cases with
+    // their original assertions. Each card is resolved by accessible name once per step, not per hover:
+    // every document-wide getByRole('article', { name }) recomputes all card names through JSDOM's
+    // style cascade, and ~900 such lookups made the former combined case exceed 30 s on 2-vCPU CI.
+    const BOUNDARY_LAST_DAYS = ['2026-09-10', '2027-01-10'];
+    const showBoundarySummary = async (lastDay) => {
+      const summary = createSummary({
+        generatedAt: `${lastDay}T04:30:00.000Z`,
+        valueFor: (metricIndex, index) => index === 0 ? 0 : index === 13 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + index,
+      });
+      summary.dates = Array.from({ length: 14 }, (_, index) => (
+        new Date(Date.parse(`${lastDay}T00:00:00.000Z`) - (13 - index) * 86400000).toISOString().slice(0, 10)
+      ));
+      axios.get.mockResolvedValueOnce({ data: summary });
+      renderTelemetry();
+      await screen.findByRole('heading', { name: 'Service health' });
+      expect(overviewTime()).toHaveTextContent(summary.generatedAt);
+      return summary;
+    };
+
+    it.each(BOUNDARY_LAST_DAYS)(
+      'pairs date bucket identity and amount for all ten metrics and every daily bucket across the boundary ending %s',
       async (lastDay) => {
-        const summary = createSummary({
-          generatedAt: `${lastDay}T04:30:00.000Z`,
-          valueFor: (metricIndex, index) => index === 0 ? 0 : index === 13 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + index,
-        });
-        summary.dates = Array.from({ length: 14 }, (_, index) => (
-          new Date(Date.parse(`${lastDay}T00:00:00.000Z`) - (13 - index) * 86400000).toISOString().slice(0, 10)
-        ));
-        axios.get.mockResolvedValueOnce({ data: summary });
-        renderTelemetry();
-        await screen.findByRole('heading', { name: 'Service health' });
-        expect(overviewTime()).toHaveTextContent(summary.generatedAt);
+        const summary = await showBoundarySummary(lastDay);
 
         for (let metricIndex = 0; metricIndex < METRIC_NAMES.length; metricIndex += 1) {
           const card = cardAt(metricIndex);
+          const previousCard = metricIndex > 0 ? cardAt(metricIndex - 1) : null;
           const bars = card.querySelectorAll('rect');
           const buttons = card.querySelectorAll('.telemetry-metric__values button');
           for (let index = 0; index < 14; index += 1) {
             fireEvent.mouseEnter(bars[index]);
             expectTooltip(card, summary.dates[index], `${summary.dates[index]} UTC`, summary.metrics[metricIndex].values[index]);
-            if (metricIndex > 0) {
-              expectTooltip(cardAt(metricIndex - 1), summary.dates[13], `${summary.dates[13]} UTC`, Number.MAX_SAFE_INTEGER);
+            if (previousCard) {
+              expectTooltip(previousCard, summary.dates[13], `${summary.dates[13]} UTC`, Number.MAX_SAFE_INTEGER);
             }
             fireEvent.mouseLeave(bars[index], { clientX: 0, clientY: 0 });
           }
@@ -465,6 +479,16 @@ describe('Telemetry', () => {
           expect(listValues).toHaveLength(14);
           expect([...listValues].map((value) => value.textContent)).toEqual(summary.metrics[metricIndex].values.map(String));
         }
+        // Daily hover and focus never fetch: only the overview request was made.
+        expect(axios.get).toHaveBeenCalledTimes(1);
+      },
+      30000,
+    );
+
+    it.each(BOUNDARY_LAST_DAYS)(
+      'pairs time bucket identity and amount for all ten metrics and every hourly bucket across the boundary ending %s',
+      async (lastDay) => {
+        const summary = await showBoundarySummary(lastDay);
 
         // Adjacent selections spanning Aug/Sep or Dec/Jan stay card-local.
         for (let metricIndex = 0; metricIndex < METRIC_NAMES.length; metricIndex += 1) {
@@ -477,19 +501,22 @@ describe('Telemetry', () => {
           axios.get.mockResolvedValueOnce({ data: detail });
           userEvent.click(cardAt(metricIndex).querySelectorAll('.telemetry-metric__values button')[3 + metricIndex]);
           await within(cardAt(metricIndex)).findByRole('list', { name: /hourly UTC/ });
-          expect(cardAt(metricIndex).querySelector('.telemetry-metric__generated time'))
+          // Re-resolve both cards by accessible name after the hourly load, then reuse them for hovers.
+          const card = cardAt(metricIndex);
+          const previousCard = metricIndex > 0 ? cardAt(metricIndex - 1) : null;
+          expect(card.querySelector('.telemetry-metric__generated time'))
             .toHaveTextContent(detail.generatedAt);
-          if (metricIndex > 0) {
-            fireEvent.mouseEnter(cardAt(metricIndex - 1).querySelectorAll('rect')[23]);
-            expectTooltip(cardAt(metricIndex - 1), `${summary.dates[2 + metricIndex]}T23:00:00.000Z`, '23:00 UTC', Number.MAX_SAFE_INTEGER);
+          if (previousCard) {
+            fireEvent.mouseEnter(previousCard.querySelectorAll('rect')[23]);
+            expectTooltip(previousCard, `${summary.dates[2 + metricIndex]}T23:00:00.000Z`, '23:00 UTC', Number.MAX_SAFE_INTEGER);
           }
-          const bars = cardAt(metricIndex).querySelectorAll('rect');
+          const bars = card.querySelectorAll('rect');
           for (let hour = 0; hour < 24; hour += 1) {
             fireEvent.mouseEnter(bars[hour]);
-            expectTooltip(cardAt(metricIndex), detail.hours[hour], `${String(hour).padStart(2, '0')}:00 UTC`, values[hour]);
-            expect(within(cardAt(metricIndex)).getByRole('tooltip')).not.toHaveTextContent(lastDay);
+            const tooltip = expectTooltip(card, detail.hours[hour], `${String(hour).padStart(2, '0')}:00 UTC`, values[hour]);
+            expect(tooltip).not.toHaveTextContent(lastDay);
           }
-          const listValues = cardAt(metricIndex).querySelectorAll('.telemetry-metric__values data');
+          const listValues = card.querySelectorAll('.telemetry-metric__values data');
           expect(listValues).toHaveLength(24);
           expect([...listValues].map((value) => value.textContent)).toEqual(values.map(String));
           expect(axios.get).toHaveBeenLastCalledWith(
@@ -497,6 +524,7 @@ describe('Telemetry', () => {
             { timeout: 10000, signal: expect.any(AbortSignal) },
           );
         }
+        // One overview request plus exactly one hourly request per metric.
         expect(axios.get).toHaveBeenCalledTimes(11);
       },
       30000,

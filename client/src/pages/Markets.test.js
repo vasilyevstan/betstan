@@ -115,8 +115,11 @@ it('asks before replacing another selection from the same match and refreshes it
   boards.PRE_MATCH = { status: 'DRAFT', boardRevision: 4, boardFingerprint: 'reviewed-board',
     rows: [{ eventId: 'event-a', productName: '1X2', oddsName: 'Home', oddsValue: 2 }] };
   renderCard();
-  fireEvent.click(await screen.findByRole('button', { name: outcome('Nominee A') }));
-  const replace = await screen.findByRole('button', { name: 'Replace with Nominee A' });
+  const select = await screen.findByRole('button', { name: outcome('Nominee A') });
+  // The prompt focuses Replace in a passive effect. findByRole can resolve on the prompt's DOM commit
+  // before a slow runner flushes that effect, so settle the click (boards GET + effects) inside act.
+  await act(async () => { fireEvent.click(select); });
+  const replace = screen.getByRole('button', { name: 'Replace with Nominee A' });
   expect(replace).toHaveFocus();
   expect(axios.post).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Keep current' }));
