@@ -11,6 +11,7 @@ import {
   usernamePattern,
 } from "../service/Identifier";
 import { authTelemetryReporter } from "../service/TelemetryReporter";
+import { readAccessControls } from "../model/AccessControl";
 
 const router = express.Router();
 
@@ -71,6 +72,11 @@ router.post(
     if (!(await Password.compare(existingUser.password, password))) {
       await logLoginAttempt(req, identifier);
       throw new BadRequestError("Invalid credentials");
+    }
+
+    // Administrators stay able to sign in so production acceptance and recovery keep working.
+    if (existingUser.role !== UserRole.ADMIN && !(await readAccessControls()).loginEnabled) {
+      throw new BadRequestError("Sign-in is paused. Try again later.");
     }
 
     const userJwt = jwt.sign(

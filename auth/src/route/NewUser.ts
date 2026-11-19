@@ -10,6 +10,7 @@ import {
   usernamePattern,
 } from "../service/Identifier";
 import { authTelemetryReporter } from "../service/TelemetryReporter";
+import { readAccessControls } from "../model/AccessControl";
 
 const router = express.Router();
 
@@ -48,6 +49,15 @@ router.post(
   ],
   validateRequest,
   async (req: Request<{}, {}, NewUserBody>, res: Response) => {
+    const access = await readAccessControls();
+    if (!access.registrationEnabled) {
+      throw new BadRequestError("Registration is paused. Try again later.");
+    }
+    // A new account is signed in immediately, so a sign-in pause also pauses registration.
+    if (!access.loginEnabled) {
+      throw new BadRequestError("Sign-in is paused. Try again later.");
+    }
+
     const { email: identifier, password } = req.body;
     const identifierNormalized = normalizeIdentifier(identifier);
     const existingUser = await User.findOne({

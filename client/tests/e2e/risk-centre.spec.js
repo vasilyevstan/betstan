@@ -82,6 +82,15 @@ async function installRiskApi(page, { uncertain = false } = {}) {
     cashBack = { enabled: body.enabled, revision: cashBack.revision + 1, updatedAt: '2026-11-14T21:00:00.000Z' };
     return reply(route, cashBack);
   });
+  let access = { registrationEnabled: true, loginEnabled: true, revision: 0 };
+  await page.route('**/api/backoffice/access-controls**', async route => {
+    if (route.request().method() === 'GET') return reply(route, access);
+    const field = route.request().url().endsWith('/login') ? 'loginEnabled' : 'registrationEnabled';
+    const body = route.request().postDataJSON();
+    if (body.expectedEnabled !== access[field]) return reply(route, { code: 'CONFLICT', message: 'Changed' }, 409);
+    access = { ...access, [field]: body.enabled, revision: access.revision + 1 };
+    return reply(route, access);
+  });
   await page.route('**/api/backoffice/market-templates**', route => reply(route, { enabled: true, starters: [], templates: [
     { templateId: TEMPLATE_ID, archived: false, versions: [{ version: 1, definition: { name: 'Total goals' } }] },
   ] }));
@@ -136,6 +145,19 @@ for (const theme of ['light', 'dark']) {
       await expect(cashBack.locator('.market-pill--danger')).toHaveText('OFF');
       await cashBack.getByRole('button', { name: 'Turn on cash back for all events' }).click();
       await expect(cashBack.locator('.market-pill--positive')).toHaveText('ON');
+      const betting = page.getByRole('region', { name: 'Betting', exact: true });
+      await betting.getByRole('button', { name: 'Close betting for all events' }).click();
+      await expect(page.getByText(/Betting is closed for all events\. New pre-match and live bets are declined\. Revision \d+ saved/)).toBeVisible();
+      expect(mutations.at(-1).body.rule).toMatchObject({ id: 'betting:all', type: 'DENY', enabled: true, scope: {} });
+      await expect(betting.locator('.market-pill--danger')).toHaveText('OFF');
+      await betting.getByRole('button', { name: 'Open betting for all events' }).click();
+      await expect(betting.locator('.market-pill--positive')).toHaveText('ON');
+      const accounts = page.getByRole('region', { name: 'Accounts', exact: true });
+      await accounts.getByRole('button', { name: 'Stop customer sign-in' }).click();
+      await expect(page.getByText(/Customer sign-in is stopped\./)).toBeVisible();
+      await expect(accounts).toContainText('Paused while sign-in is stopped');
+      await accounts.getByRole('button', { name: 'Allow customer sign-in' }).click();
+      await expect(page.getByText('Customer sign-in is allowed.')).toBeVisible();
       const markets = page.getByRole('region', { name: 'Markets', exact: true });
       await markets.getByRole('button', { name: 'Turn off Total goals for all events' }).click();
       await expect(page.getByText(/Total goals is off for all events\. New bets on it are declined\. Revision \d+ saved/)).toBeVisible();
