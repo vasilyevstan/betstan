@@ -1545,6 +1545,8 @@ restriction. Test teardown returns every published fixture to offline and
 verifies propagation, including after a failed placement; failure blocks
 activation. A fixture Event has already resulted stays visible as a public
 full-time result and counts as hidden, because it no longer accepts bets.
+A cash-back quote that is unavailable because source authority is momentarily
+pending or contended is retried within the journey's bounded five attempts.
 Synthetic draft cleanup accepts safe integer BSON Long revisions
 written by the application while retaining the original revision and fingerprint
 in its compare-and-delete predicate. Submitted slips, foreign fixtures and
