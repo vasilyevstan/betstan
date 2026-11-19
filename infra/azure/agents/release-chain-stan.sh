@@ -11,8 +11,9 @@
 # deploy is dispatched well inside the 1,800-second handoff lease.
 # Each stage: prepare disabled ghosts for the two frozen transition workflows,
 # enable the workflow, dispatch with the canonical dispatcher, disable the
-# workflow once the exact run reaches its pending environment gate (or
-# completes), submit eligible CLI-owned gates through the canonical approval
+# workflow once the exact run reaches its pending environment gate, starts a
+# job (environments without reviewers never gate), or completes, submit
+# eligible CLI-owned gates through the canonical approval
 # helper, and wait for the conclusion. A workflow the policy keeps active
 # (approvalWorkflowState=active, e.g. ghcr-package-management.yml) is
 # dispatched and approved as is: never enabled or disabled. Every other exit
@@ -162,15 +163,20 @@ run_stage() {
   log "stage=$operation run_id=$run_id dispatched"
 
   # Disable only once the exact run has materialized (its expected pending
-  # environment, or completion), then approve with the workflow disabled.
+  # environment, a started job, or completion), then approve with the workflow
+  # disabled. Environments without required reviewers never show a pending
+  # gate, and the live-data guard fails if the workflow is still enabled
+  # 180 seconds after its job starts.
   if [[ "$expected_state" == disabled_manually ]]; then
     UNMATERIALIZED_RUN="$run_id"
     deadline=$((SECONDS + START_SECONDS))
     while :; do
       pending="$(gh api "repos/$REPO/actions/runs/$run_id/pending_deployments" --jq length 2>/dev/null)" || pending=0
       ((pending > 0)) && break
-      state="$(gh run view "$run_id" -R "$REPO" --json status --jq .status 2>/dev/null)" || state=unknown
-      [[ "$state" == "completed" ]] && break
+      state="$(gh run view "$run_id" -R "$REPO" --json status,jobs \
+        --jq 'if .status == "completed" or any(.jobs[]; .status == "in_progress" or .status == "completed") then "started" else .status end' \
+        2>/dev/null)" || state=unknown
+      [[ "$state" == "started" ]] && break
       ((SECONDS < deadline)) || stop 2 "reason=materialization-unproven operation=$operation run_id=$run_id"
       sleep "$JOB_POLL_SECONDS"
     done
