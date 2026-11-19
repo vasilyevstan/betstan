@@ -879,6 +879,52 @@ for run in runs:
         print(run.get('databaseId'))
 PY
 
+# Sets candidate_build_run_id to the trusted OCI build at the exact source, or empty.
+find_trusted_build_run() {
+  local source_sha="$1"
+  local build_runs_json="$WORK_DIR/build-runs-${source_sha}.json"
+  local build_candidates_file="$WORK_DIR/build-candidates-${source_sha}.txt"
+  local build_run_id build_metadata_file build_artifacts_file
+  candidate_build_run_id=""
+  gh run list --repo "$REPO" --workflow oci-production-build.yml \
+    --commit "$source_sha" --limit 20 \
+    --json databaseId,createdAt,status,conclusion >"$build_runs_json"
+  python3 - "$build_runs_json" "$BASELINE_RETENTION_DAYS" >"$build_candidates_file" <<'PY'
+import json
+import sys
+from datetime import datetime, timedelta, timezone
+
+runs = json.load(open(sys.argv[1], encoding='utf-8'))
+retention_days = int(sys.argv[2])
+for run in runs:
+    if run.get('status') != 'completed' or run.get('conclusion') != 'success':
+        continue
+    created_at = run.get('createdAt') or run.get('created_at')
+    if not created_at:
+        continue
+    created = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+    if datetime.now(timezone.utc) - created <= timedelta(days=retention_days):
+        print(run.get('databaseId'))
+PY
+  while IFS= read -r build_run_id; do
+    [[ "$build_run_id" =~ ^[1-9][0-9]*$ ]] || continue
+    build_metadata_file="$WORK_DIR/build-run-${build_run_id}.json"
+    gh api "repos/$REPO/actions/runs/$build_run_id/attempts/1" >"$build_metadata_file"
+    if validate_build_metadata "$build_metadata_file" "$trusted_build_workflow_id" "$source_sha"; then
+      build_artifacts_file="$WORK_DIR/build-run-${build_run_id}-artifacts.json"
+      gh api "repos/$REPO/actions/runs/$build_run_id/artifacts" >"$build_artifacts_file"
+      validate_artifact_listing "$build_artifacts_file" \
+        "oci-image-provenance-${source_sha}-${build_run_id}-1"
+      candidate_build_run_id="$build_run_id"
+      return 0
+    fi
+  done <"$build_candidates_file"
+}
+
+# A released deploy reuses an older build's digests. When the newest matching deploy's
+# source has no trusted OCI build of its own it cannot anchor rollback, so fall back to
+# the newest older deploy with the identical live digests and a trusted build at its source.
+unbuilt_source_sha=""
 while IFS= read -r run_id; do
   [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || continue
   metadata_file="$WORK_DIR/deploy-run-${run_id}.json"
@@ -904,60 +950,35 @@ while IFS= read -r run_id; do
   if ! compare_live_images "$candidate_images_file"; then
     continue
   fi
-  matched_source_sha="$(env_value "$candidate_provenance_file" source_sha || true)"
-  [[ "$matched_source_sha" =~ ^[0-9a-f]{40}$ ]] || continue
+  candidate_source_sha="$(env_value "$candidate_provenance_file" source_sha || true)"
+  [[ "$candidate_source_sha" =~ ^[0-9a-f]{40}$ ]] || continue
   if ! validate_trusted_ghcr_deploy_provenance \
       "$candidate_provenance_file" \
       "$candidate_images_file" \
-      "$matched_source_sha" \
+      "$candidate_source_sha" \
       "$run_id"; then
     continue
   fi
+  find_trusted_build_run "$candidate_source_sha"
+  if [[ -z "$candidate_build_run_id" ]]; then
+    [[ -n "$unbuilt_source_sha" ]] || unbuilt_source_sha="$candidate_source_sha"
+    oci_log "baseline_deploy_candidate_skipped run_id=${run_id} source_sha=${candidate_source_sha} reason=no-trusted-oci-build"
+    continue
+  fi
   matched_deploy_run_id="$run_id"
+  matched_source_sha="$candidate_source_sha"
+  matched_build_run_id="$candidate_build_run_id"
   cp "$candidate_images_file" "$OUTPUT_DIR/images.tsv"
   cp "$candidate_provenance_file" "$OUTPUT_DIR/trusted-deploy-provenance.txt"
   break
 done <"$WORK_DIR/deploy-candidates.txt"
 
-[[ -n "$matched_deploy_run_id" ]] || oci_die "unable to find trusted OCI deploy provenance for the live digest set"
+if [[ -z "$matched_deploy_run_id" ]]; then
+  [[ -z "$unbuilt_source_sha" ]] ||
+    oci_die "unable to find trusted OCI build provenance for ${unbuilt_source_sha}"
+  oci_die "unable to find trusted OCI deploy provenance for the live digest set"
+fi
 
-build_runs_json="$WORK_DIR/build-runs.json"
-gh run list --repo "$REPO" --workflow oci-production-build.yml \
-  --commit "$matched_source_sha" --limit 20 \
-  --json databaseId,createdAt,status,conclusion >"$build_runs_json"
-python3 - "$build_runs_json" "$BASELINE_RETENTION_DAYS" >"$WORK_DIR/build-candidates.txt" <<'PY'
-import json
-import sys
-from datetime import datetime, timedelta, timezone
-
-runs = json.load(open(sys.argv[1], encoding='utf-8'))
-retention_days = int(sys.argv[2])
-for run in runs:
-    if run.get('status') != 'completed' or run.get('conclusion') != 'success':
-        continue
-    created_at = run.get('createdAt') or run.get('created_at')
-    if not created_at:
-        continue
-    created = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-    if datetime.now(timezone.utc) - created <= timedelta(days=retention_days):
-        print(run.get('databaseId'))
-PY
-
-while IFS= read -r run_id; do
-  [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || continue
-  metadata_file="$WORK_DIR/build-run-${run_id}.json"
-  gh api "repos/$REPO/actions/runs/$run_id/attempts/1" >"$metadata_file"
-  if validate_build_metadata "$metadata_file" "$trusted_build_workflow_id" "$matched_source_sha"; then
-    matched_build_run_id="$run_id"
-    build_artifact_name="oci-image-provenance-${matched_source_sha}-${run_id}-1"
-    artifacts_file="$WORK_DIR/build-run-${run_id}-artifacts.json"
-    gh api "repos/$REPO/actions/runs/$run_id/artifacts" >"$artifacts_file"
-    validate_artifact_listing "$artifacts_file" "$build_artifact_name"
-    break
-  fi
-done <"$WORK_DIR/build-candidates.txt"
-
-[[ -n "$matched_build_run_id" ]] || oci_die "unable to find trusted OCI build provenance for ${matched_source_sha}"
 oci_verify_cash_back_source_flags "$matched_source_sha" "$OCI_K8S_NAMESPACE" running ||
   oci_die "baseline cash-back configuration differs from authenticated source"
 fi
