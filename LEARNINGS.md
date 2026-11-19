@@ -8,6 +8,7 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Wait with bounded `wait-required-checks-stan.sh`, never `gh pr checks --watch`: the `trusted-quality-transition/*` ledger stays pending by design.
 - Re-read eventually consistent inventories (`total_count` vs rows) a bounded number of times before failing closed; never burn a one-use run on a transient read.
 - Every PR-routed suite must be suite-gate classified, or all heavy master suites run. `cancel-in-progress: false` keeps one pending run; the policy publisher uses `queue: max`.
+- Fix a flaky test on first failure: a red `master` build leaves its SHA without OCI images.
 
 ## Contracts, messaging and data
 
@@ -35,6 +36,8 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Validate every prerequisite before one-use authority and preserve lineage; a post-claim revalidation must not treat its own claim as foreign.
 - Each authority profile a validator can emit needs a chained end-to-end fixture.
 - File seals bind inode, never `st_dev`.
-- Disable `oci-live-data-rollout` once its run has a real job (its guard fails after 180 s); dispatch `oci-production-deploy` before the handoff lease expires.
+- Disable `oci-live-data-rollout` once its run has a real job (its guard fails after 180 s); dispatch `oci-production-deploy` before the handoff lease expires. `release-chain-stan.sh --chain` does both; see its [stage budgets](docs/wiki/Release-Orchestration.md).
+- Fenced data recovery stops every writer: use it only for data, never for an app, probe or telemetry fault.
+- Live acceptance tolerates legal transient states (resulted fixtures, retryable authority) via bounded reason-specific retries.
 - k3s keeps released images until a governed CRI reclaim; a withheld checkpoint (`candidate_preload`) needs reclaim, then a new SHA.
 - Read failures mean unknown. Bind cloud credentials on every Actions step. Redirects exempt `/.well-known/acme-challenge/`; prove renewal.
