@@ -71,10 +71,10 @@ case "$1 $2" in
     run="$3"
     case "$7" in
       jobs) echo "job/failing step" ;;
-      status)
-        if [[ " ${STUB_UNGATED_RUNS:-} " == *" $run "* ]]; then echo completed
+      status,jobs)
+        if [[ " ${STUB_UNGATED_RUNS:-} ${STUB_STARTED_RUNS:-} " == *" $run "* ]]; then echo started
         elif [[ " ${STUB_QUEUED_RUNS:-} " == *" $run "* ]]; then echo queued
-        else echo in_progress; fi ;;
+        else echo waiting; fi ;;
       status,conclusion,jobs)
         conclusion=success
         [[ " ${STUB_FAIL_RUNS:-} " == *" $run "* ]] && conclusion=failure
@@ -87,7 +87,7 @@ case "$1 $2" in
       echo "${STUB_WORKFLOW_STATE:-disabled_manually}"
     elif [[ "$2" == */pending_deployments ]]; then
       run="${2%/pending_deployments}"; run="${run##*/}"
-      if [[ " ${STUB_UNGATED_RUNS:-} ${STUB_QUEUED_RUNS:-} " == *" $run "* || -f "$STUB_STATE/approved-$run" ]]; then
+      if [[ " ${STUB_UNGATED_RUNS:-} ${STUB_QUEUED_RUNS:-} ${STUB_STARTED_RUNS:-} " == *" $run "* || -f "$STUB_STATE/approved-$run" ]]; then
         echo 0
       else
         echo 1
@@ -188,6 +188,12 @@ expect_calls "exclusivity exclude=none;gh workflow enable oci-production-deploy.
 run_case 2 "reason=materialization-unproven operation=oci-production-deploy run_id=202" STUB_QUEUED_RUNS=202 \
   RELEASE_CHAIN_START_SECONDS=0 "$RUN" "$REQUESTS/deploy.json"
 expect_calls "exclusivity exclude=none;gh workflow enable oci-production-deploy.yml;dispatcher oci-production-deploy --dispatch;"
+
+# Without a reviewer gate, a started job materializes the run: the workflow is
+# disabled at once (the live-data guard allows 180 s) and nothing is approved.
+run_case 0 "stage=oci-live-data-resume-activation-released run_id=101 result=SUCCESS" STUB_STARTED_RUNS=101 \
+  RELEASE_CHAIN_START_SECONDS=0 "$RUN" "$REQUESTS/dry-run.json"
+expect_calls "exclusivity exclude=none;dispatcher oci-live-data-resume-activation-released --prepare-disabled-ghosts;gh workflow enable oci-live-data-rollout.yml;dispatcher oci-live-data-resume-activation-released --dispatch-prepared;gh workflow disable oci-live-data-rollout.yml;"
 
 # A failed enable dispatches nothing, reports not started, and disables again.
 run_case 2 "reason=enable-failed workflow=oci-production-deploy.yml" STUB_ENABLE_FAIL=1 "$RUN" "$REQUESTS/deploy.json"
