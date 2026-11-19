@@ -32,7 +32,9 @@ pending-by-design ledger marker, never a gate.
 manual enable, dispatch, disable, approve and watch loop. `--chain` runs live
 data, deploy and activation from one live-data request, deriving each next
 request from the previous run ID. This keeps the deploy inside the handoff
-lease. The runner adds no authority and stops at the first failure.
+lease. The runner adds no authority and stops at the first failure. It runs
+every full-release stage, including GHCR validation, whose workflow stays
+active by policy and is never enabled or disabled.
 Usage and exit codes are in the
 [agents README](https://github.com/vasilyevstan/betstan/blob/master/infra/azure/agents/README.md).
 
