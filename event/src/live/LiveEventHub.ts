@@ -2,10 +2,14 @@ import type { PublicEventSnapshot } from "./LiveEventReadModel";
 
 type LiveEventSubscriber = (snapshot: PublicEventSnapshot) => void;
 
+const MAX_CACHED_EVENTS = 128;
+
 export class LiveEventHub {
   private readonly subscribers = new Set<LiveEventSubscriber>();
-  private readonly lastSequenceByEvent = new Map<string, number>();
-  private readonly lastSnapshotByEvent = new Map<string, PublicEventSnapshot>();
+  private readonly lastSnapshotByEvent = new Map<
+    string,
+    { sequence: number; snapshot: PublicEventSnapshot }
+  >();
 
   subscribe(subscriber: LiveEventSubscriber): () => void {
     this.subscribers.add(subscriber);
@@ -20,13 +24,20 @@ export class LiveEventHub {
       return false;
     }
 
-    const previousSequence = this.lastSequenceByEvent.get(snapshot.eventId);
+    const previousSequence =
+      this.lastSnapshotByEvent.get(snapshot.eventId)?.sequence;
     if (previousSequence !== undefined && previousSequence >= sequence) {
       return false;
     }
 
-    this.lastSequenceByEvent.set(snapshot.eventId, sequence);
-    this.lastSnapshotByEvent.set(snapshot.eventId, snapshot);
+    this.lastSnapshotByEvent.delete(snapshot.eventId);
+    this.lastSnapshotByEvent.set(snapshot.eventId, { sequence, snapshot });
+    if (this.lastSnapshotByEvent.size > MAX_CACHED_EVENTS) {
+      const oldestEventId = this.lastSnapshotByEvent.keys().next().value;
+      if (oldestEventId !== undefined) {
+        this.lastSnapshotByEvent.delete(oldestEventId);
+      }
+    }
 
     for (const subscriber of this.subscribers) {
       subscriber(snapshot);
@@ -36,7 +47,7 @@ export class LiveEventHub {
   }
 
   getSnapshot(eventId: string): PublicEventSnapshot | undefined {
-    return this.lastSnapshotByEvent.get(eventId);
+    return this.lastSnapshotByEvent.get(eventId)?.snapshot;
   }
 
   subscriberCount(): number {
@@ -45,7 +56,6 @@ export class LiveEventHub {
 
   reset(): void {
     this.subscribers.clear();
-    this.lastSequenceByEvent.clear();
     this.lastSnapshotByEvent.clear();
   }
 }

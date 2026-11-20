@@ -146,7 +146,10 @@ const loadProtectedAcceptanceHelpers = (assertion = expect) => {
     URL,
     process: { env: {} },
     require: (name) => {
-      if (name === '@playwright/test') return { test: () => {}, expect: assertion };
+      if (name === '@playwright/test') return {
+        test: Object.assign(() => {}, { afterEach: () => {} }),
+        expect: assertion,
+      };
       if (name === 'fs' || name === 'child_process') return {};
       if (name === '../scripts/cash-back-acceptance-recovery-stan') {
         return {

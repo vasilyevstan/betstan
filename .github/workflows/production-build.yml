@@ -67,6 +67,8 @@ jobs:
                   top = path.split("/", 1)[0]
                   if top in services:
                       selected.add(top)
+                      if top in {"backoffice", "bet", "gamemaster"}:
+                          selected.add("resulting")
                   elif path.startswith("common/") or path.startswith("betstan-common-"):
                       full = True
                   elif path.startswith((
@@ -79,6 +81,8 @@ jobs:
                       pass
                   else:
                       full = True
+                  if path == "infra/oci/agents/oci-live-acceptance.spec.js":
+                      selected.add("client")
                   if path.startswith((
                       "infra/azure/agents/",
                       ".github/scripts/",
@@ -435,6 +439,28 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix: ${{ fromJSON(needs.change-scope.outputs.coverage_matrix) }}
+    services:
+      mongodb:
+        image: ${{ matrix.service == 'resulting' && 'mongo:7' || '' }}
+        ports:
+          - 27017/tcp
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        image: ${{ matrix.service == 'resulting' && 'rabbitmq:3.12.10-management' || '' }}
+        env:
+          RABBITMQ_DEFAULT_USER: cashback_test
+          RABBITMQ_DEFAULT_PASS: cashback_test
+        ports:
+          - 5672/tcp
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -443,7 +469,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 20
+          node-version: "24.22.3"
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
@@ -465,10 +491,9 @@ jobs:
         run: |
           if [ "${{ matrix.service }}" = "client" ]; then
             npm test -- --watchAll=false --coverage --coverageReporters=json-summary \
-              --collectCoverageFrom=src/hook/UseRequest.js \
-              --collectCoverageFrom=src/pages/auth/NewUser.js \
-              --collectCoverageFrom=src/pages/auth/LogIn.js \
-              --collectCoverageFrom=src/pages/auth/LogOut.js
+              --collectCoverageFrom='src/**/*.{js,jsx}' \
+              --collectCoverageFrom='!src/**/*.test.{js,jsx}' \
+              --collectCoverageFrom='!src/setupTests.js'
             npm run build
           else
             ./node_modules/.bin/tsc --noEmit
@@ -491,6 +516,30 @@ jobs:
             if (lines < 80) { console.error('Line coverage gate failed (<80%)'); process.exit(1); }
             if (branchTotal > 0 && branches < 80) { console.error('Branch coverage gate failed (<80%)'); process.exit(1); }
           "
+
+      - name: Run mocked client browser regressions
+        if: matrix.service == 'client'
+        working-directory: ./client
+        env:
+          CI: "true"
+        run: |
+          ./node_modules/.bin/playwright install --with-deps chromium
+          npm run test:e2e -- --workers=1
+
+      - name: Run isolated real cash-back transport
+        if: matrix.service == 'resulting'
+        env:
+          CI: "true"
+          CASH_BACK_INTEGRATION: "1"
+          CASH_BACK_TEST_MONGO_BASE: mongodb://127.0.0.1:${{ job.services.mongodb.ports['27017'] }}
+          CASH_BACK_TEST_RABBIT_URI: amqp://cashback_test:cashback_test@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}
+          MONGOMS_DOWNLOAD_DIR: ${{ runner.temp }}/mongodb-binaries
+        run: |
+          for service in backoffice bet gamemaster; do
+            npm ci --prefix "$service"
+          done
+          npm run test:ci --prefix resulting -- --runInBand \
+            --testMatch='**/cashBackTransport.integration.ts'
 
   pr-quality-gates:
     name: pr-quality-gates

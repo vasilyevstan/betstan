@@ -799,6 +799,10 @@ block navigation, signup, login, or draft creation.
   concurrent cache misses share one refresh. The `/telemetry` UI loads on
   entry and on explicit **Refresh**, without polling, and retains the last
   successful snapshot when refresh fails.
+- Daily and hourly MongoDB aggregations use a five-second driver deadline,
+  including its server-side execution budget. A timed-out daily query releases
+  the shared refresh and follows the existing sanitized `503` contract, so a
+  later request can retry. No detached, uncancelled query is substituted.
 
 Health uses concurrent, bounded HTTP checks, not successful TCP connections.
 Backend `/health` responses require database connectivity and completed

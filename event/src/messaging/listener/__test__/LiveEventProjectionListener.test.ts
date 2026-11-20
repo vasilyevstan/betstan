@@ -219,6 +219,48 @@ it("rebuilds pod-local snapshots from cumulative incidents without duplicating t
   expect(subscriber.mock.calls[0][0].live.sequence).toEqual(3);
 });
 
+it("rebuilds evicted fanout state from Mongo without replaying an older sequence or losing history", async () => {
+  const projectionListener = new LiveEventProjectionListener(
+    messengerWrapper.connection
+  );
+  await projectionListener.init();
+  await projectionListener.onMessage(buildLiveUpdate(1), buildMessage());
+  await projectionListener.onMessage(buildLiveUpdate(2), buildMessage());
+
+  const hub = new LiveEventHub();
+  const listener = new LiveEventUpdateListener(messengerWrapper.connection, {
+    hub,
+    podId: "pod-eviction",
+  });
+  await listener.init();
+  await listener.onMessage(buildLiveUpdate(2), buildMessage());
+  const snapshot = hub.getSnapshot("live-event");
+  if (!snapshot) {
+    throw new Error("Expected the initial fanout snapshot");
+  }
+  for (let index = 0; index < 1000; index += 1) {
+    hub.broadcast({
+      ...snapshot,
+      id: `other-${index}`,
+      eventId: `other-${index}`,
+    });
+  }
+  expect(hub.getSnapshot("live-event")).toBeUndefined();
+
+  const subscriber = jest.fn();
+  hub.subscribe(subscriber);
+  await listener.onMessage(buildLiveUpdate(1), buildMessage());
+  await listener.onMessage(buildLiveUpdate(3), buildMessage());
+
+  expect(subscriber).toHaveBeenCalledTimes(2);
+  expect(subscriber.mock.calls[0][0].live.sequence).toBe(2);
+  expect(subscriber.mock.calls[1][0].live.sequence).toBe(3);
+  expect(subscriber.mock.calls[1][0].live.incidentHistory.map(
+    (incident: { id: string }) => incident.id
+  )).toEqual(["incident-1", "incident-2", "incident-3"]);
+  expect(subscriber.mock.calls[1][0].visibility).toBe(EventVisibility.OFFLINE);
+});
+
 it("delivers snapshots to both pod-local fanout listeners", async () => {
   const projectionListener = new LiveEventProjectionListener(
     messengerWrapper.connection
