@@ -1326,6 +1326,10 @@ body {
   flex-shrink: 0;
 }
 
+.cash-back-strip:has(.cash-back-editor:not([hidden]) .cash-back-amount) h3 {
+  flex-basis: 100%;
+}
+
 .cash-back-editor {
   min-width: 0;
 }
@@ -1427,7 +1431,7 @@ body {
 .cash-back-amount {
   display: grid;
   flex: 1 1 16rem;
-  grid-template-columns: minmax(0, 1fr) clamp(5.5rem, 35%, 7.5rem);
+  grid-template-columns: minmax(0, 1fr) clamp(6.5rem, 35%, 7.5rem);
   align-items: center;
   gap: 0.5rem 0.75rem;
   max-width: 24rem;

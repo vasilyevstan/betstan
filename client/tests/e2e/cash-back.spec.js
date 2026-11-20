@@ -934,6 +934,15 @@ test.describe('My Bets whole-page usability', () => {
       const primary = wide.cards[1].controls.filter((control) => control.label !== 'Cash-back history');
       expect(Math.max(...primary.map((control) => control.bounds.top)) - Math.min(...primary.map((control) => control.bounds.top))).toBeLessThanOrEqual(1);
       await page.setViewportSize({ width: 1600, height: 1000 });
+      const fallbackFont = await page.addStyleTag({
+        content: '.my-bets-board { font-family: Verdana, system-ui, sans-serif; }',
+      });
+      const fallbackPrimaryTops = await pending.locator('.cash-back button').evaluateAll((buttons) => buttons
+        .filter((button) => button.checkVisibility() && button.textContent.trim() !== 'Cash-back history')
+        .map((button) => button.getBoundingClientRect().top));
+      expect(fallbackPrimaryTops).toHaveLength(primary.length);
+      expect(Math.max(...fallbackPrimaryTops) - Math.min(...fallbackPrimaryTops)).toBeLessThanOrEqual(1);
+      await fallbackFont.evaluate((style) => style.remove());
       await expired.getByRole('button', { name: 'Expired offer details' }).click();
       await expect(expired.locator('.cash-back-review-values')).toBeVisible();
       await expired.getByRole('button', { name: 'Cash-back history' }).click();
