@@ -21,6 +21,7 @@ export interface Scope {
   productIds?: string[];
   marketIds?: string[];
   templateIds?: string[];
+  selectionIds?: string[];
 }
 export interface Rule {
   id: string;
@@ -123,14 +124,19 @@ export function parseRule(value: unknown): Rule {
   if (!TYPES.includes(r.type) || typeof r.enabled !== "boolean") return fail("Unsupported rule type or enabled value");
   const type = r.type as RuleType;
   if (id.startsWith("default:") && id !== `default:${type}`) return fail("Factory identity cannot change type");
-  const scope = object(r.scope, ["betKind", "structure", "eventIds", "productIds", "marketIds", "templateIds"]);
+  const scope = object(r.scope, ["betKind", "structure", "eventIds", "productIds", "marketIds", "templateIds", "selectionIds"]);
   if (scope.betKind !== undefined && !["PRE_MATCH", "LIVE"].includes(scope.betKind)) return fail("Unsupported bet kind");
   if (scope.structure !== undefined && !["SINGLE", "ACCUMULATOR", "BUILDER"].includes(scope.structure)) return fail("Unsupported structure");
-  for (const field of ["eventIds", "productIds", "marketIds", "templateIds"]) {
+  for (const field of ["eventIds", "productIds", "marketIds", "templateIds", "selectionIds"]) {
     if (scope[field] !== undefined) {
       if (!Array.isArray(scope[field]) || scope[field].length < 1 || scope[field].length > 32) return fail("Scope requires 1-32 identifiers");
       scope[field] = [...new Set(scope[field].map(key))].sort();
     }
+  }
+  if (scope.selectionIds !== undefined && (type !== "DENY" || scope.eventIds?.length !== 1 || !scope.betKind
+    || Object.keys(scope).some(field => !["betKind", "eventIds", "selectionIds"].includes(field))
+    || scope.selectionIds.some((id: string) => !/^[a-f0-9]{64}$/.test(id)))) {
+    return fail("Choice switches require Block bets, one event, a bet kind and exact selection keys");
   }
   const parameters = object(r.parameters, [
     ...(type === "DENY" ? [] : ["limit"]), ...(windowed(type) ? ["window"] : []), ...(customerOption(type) ? ["perCustomer"] : []),
@@ -161,6 +167,9 @@ export interface Facts {
   betKind: string; structure: string; eventIds: string[]; productIds: string[]; marketIds: string[]; templateIds: string[];
 }
 export function matches(scope: Scope, facts: Facts): boolean {
+  // Accounting snapshots deliberately keep their original aggregate Facts shape.
+  // Choice restrictions require immutable rows and are matched at admission.
+  if (scope.selectionIds) return false;
   return Object.entries(scope).every(([field, value]) => Array.isArray(value)
     ? value.some(id => (facts as any)[field].includes(id)) : (facts as any)[field] === value);
 }

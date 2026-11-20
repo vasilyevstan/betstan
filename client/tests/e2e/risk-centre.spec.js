@@ -37,22 +37,61 @@ const createPolicy = () => {
       defaultEnabled: true, defaultScope: {}, defaultParameters: {}, parameterDefinitions: [], locked: true,
     }],
     readiness: { transactions: 'READY', accounting: { ready: false, code: 'HISTORICAL_RECONCILIATION_REQUIRED' },
-      capabilities: { extensibleMarkets: false } },
+      capabilities: { extensibleMarkets: false, selectionBlocking: true } },
   };
 };
-async function installRiskApi(page, { uncertain = false } = {}) {
+async function installRiskApi(page, { uncertain = false, eventRisk = false } = {}) {
   const state = createShellMockState();
   await installFakeEventSource(page);
   await installAppApiMocks(page, state);
   let policy = createPolicy();
+  if (eventRisk) {
+    policy.readiness.accounting = { ready: false, openPositionsReady: true, readyLossWindows: [] };
+    const ceiling = policy.rules.find(rule => rule.type === 'MAX_OPERATOR_EXPOSURE');
+    ceiling.enabled = true;
+    ceiling.parameters = { limit: 1200, perCustomer: false };
+    policy.rules.push({ ...ceiling, id: 'award-budget', scope: { marketIds: ['award'] }, parameters: { limit: 50, perCustomer: false } });
+  }
   const operations = new Map();
   const mutations = [];
+  const eventReads = [];
+  const events = [
+    { eventId: 'event-a', name: 'Northport - Lakewood', time: '2099-01-01T12:00:00.000Z', phase: 'PRE_MATCH' },
+    { eventId: 'event-b', name: 'Eastwick - North Christopherborough United', time: '2099-01-02T12:00:00.000Z', phase: 'PRE_MATCH' },
+    { eventId: 'event-c', name: 'Westhaven - Southport', time: '2099-01-03T12:00:00.000Z', phase: 'PRE_MATCH' },
+  ];
+  const metrics = { exposureMinor: '100', openTickets: 1, pendingTickets: 0 };
+  const report = () => ({ asOf: '2026-11-14T21:00:00.000Z', policyRevision: policy.revision, analysis: { ready: true, code: 'READY' } });
+  const offers = [
+    { id: 'a'.repeat(64), origin: 'STANDARD', marketId: 'result', marketName: '1X2', label: 'Home', odds: 3, sourceOpen: true, headroomMinor: '250' },
+    { id: 'b'.repeat(64), origin: 'STANDARD', marketId: 'result', marketName: '1X2', label: 'Away', odds: 1.8, sourceOpen: true, headroomMinor: '250' },
+    { id: 'c'.repeat(64), origin: 'TEMPLATE', marketId: 'award', marketName: 'Match award', label: 'Nominee A', odds: 4, sourceOpen: false, headroomMinor: '50' },
+  ];
   const reply = (route, data, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
   await page.route('**/api/backoffice/risk-centre**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === 'GET') {
       if (path === API) return reply(route, policy);
+      if (eventRisk && path.startsWith(`${API}/events`)) {
+        eventReads.push(request.url());
+        const query = new URL(request.url()).searchParams;
+        if (path === `${API}/events`) return reply(route, {
+          ...report(), events: (query.has('after') ? events.slice(2) : events.slice(0, 2)).map(event => ({
+            ...event, metrics: { ...metrics, exposureMinor: event.eventId === 'event-b' ? '850' : '100' },
+          })), nextAfter: query.has('after') ? null : 'event-b',
+        });
+        const stakeMinor = Number(query.get('stakeMinor') || 100);
+        return reply(route, { ...report(), event: events[0], metrics, stakeMinor, choices: offers.map(offer => {
+          const off = policy.rules.some(rule => rule.id === `choice:${offer.id}` && rule.enabled);
+          const ceiling = Math.floor(Number(offer.headroomMinor) * 100 / stakeMinor) / 100;
+          const payout = Math.floor(stakeMinor * offer.odds);
+          const advice = off ? 'OFF' : payout <= Number(offer.headroomMinor) ? 'WITHIN_CEILING'
+            : ceiling < 1.01 ? 'TURN_OFF' : 'LOWER_ODDS';
+          return { ...offer, betKind: 'PRE_MATCH', off, advice, switchConflict: false, singleBlockedByOtherRule: false,
+            stressReturnMinor: String(payout), suggestedOdds: advice === 'LOWER_ODDS' ? ceiling : null };
+        }) });
+      }
       if (path === `${API}/history`) return reply(route, { items: [...operations.values()].reverse() });
       const id = path.slice(`${API}/operations/`.length);
       return operations.has(id) ? reply(route, operations.get(id)) : reply(route, { message: 'Operation not found', code: 'NOT_FOUND' }, 404);
@@ -94,7 +133,66 @@ async function installRiskApi(page, { uncertain = false } = {}) {
   await page.route('**/api/backoffice/market-templates**', route => reply(route, { enabled: true, starters: [], templates: [
     { templateId: TEMPLATE_ID, archived: false, versions: [{ version: 1, definition: { name: 'Total goals' } }] },
   ] }));
-  return { state, mutations };
+  return { state, mutations, eventReads };
+}
+
+for (const theme of ['light', 'dark']) {
+  for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }]) {
+    test(`event stress, choice switches and pagination in ${theme} at ${viewport.width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      const errors = [];
+      page.on('pageerror', error => errors.push(error.message));
+      const { state, mutations, eventReads } = await installRiskApi(page, { eventRisk: true });
+      await page.goto(`/backoffice/risk-centre?theme=${theme}`);
+      await expect(page.getByRole('tab', { name: 'Rules', exact: true })).toBeVisible();
+      expect(eventReads).toHaveLength(0);
+      await page.getByRole('tab', { name: 'Rules', exact: true }).focus();
+      await page.keyboard.press('ArrowRight');
+      await expect(page.getByRole('tab', { name: 'Events', exact: true })).toBeFocused();
+      await page.getByRole('button', { name: 'Review risk for Northport - Lakewood' }).click();
+      await expect(page.getByText('Lower odds to 2.50 or less')).toBeVisible();
+      await expect(page.getByText('Consider turning off')).toBeVisible();
+      await expect(page.getByText('Paused or unavailable at source')).toBeVisible();
+      const choice = page.getByRole('switch', { name: 'Allow Home in 1X2 for Northport - Lakewood', exact: true });
+      await choice.focus();
+      await page.keyboard.press('Space');
+      await expect(choice).toHaveAttribute('aria-checked', 'false');
+      await expect(choice).toBeEnabled();
+      await expect(choice).toBeFocused();
+      expect(mutations.at(-1).body.rule.scope).toEqual({ betKind: 'PRE_MATCH', eventIds: ['event-a'], selectionIds: ['a'.repeat(64)] });
+      await choice.click();
+      await expect(choice).toHaveAttribute('aria-checked', 'true');
+      await expect(choice).toBeEnabled();
+      expect(mutations.at(-1)).toMatchObject({ method: 'DELETE', path: `${API}/rules/choice:${'a'.repeat(64)}` });
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+      const short = await page.locator('.risk-events button, .risk-events input, .risk-events summary').evaluateAll(nodes =>
+        nodes.filter(node => node.getClientRects().length && !node.disabled && node.getBoundingClientRect().height < 43.5).map(node => node.textContent));
+      expect(short).toEqual([]);
+      const summary = await page.locator('.risk-event-summary').first().evaluate(node => {
+        const [identity, exposure, action] = node.children;
+        const text = document.createRange();
+        text.selectNodeContents(action);
+        return { identityBottom: identity.getBoundingClientRect().bottom, exposureTop: exposure.getBoundingClientRect().top,
+          actionLines: text.getClientRects().length };
+      });
+      expect(summary.actionLines).toBe(1);
+      if (viewport.width < 760) expect(summary.exposureTop).toBeGreaterThanOrEqual(summary.identityBottom);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: testInfo.outputPath(`risk-events-${theme}-${viewport.width}.png`), fullPage: true });
+      await page.getByLabel('Test stake (Stanbucks)').fill('2');
+      await page.getByRole('button', { name: 'Recalculate', exact: true }).click();
+      await expect(page.getByText('Tested stake: 2.00 Stanbucks')).toBeVisible();
+      expect(eventReads.at(-1)).toContain('stakeMinor=200');
+      await page.getByRole('button', { name: 'Next events', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Review risk for Westhaven - Southport' })).toBeVisible();
+      expect(eventReads.at(-1)).toContain('after=event-b');
+      await page.getByRole('button', { name: 'Previous events', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Review risk for Northport - Lakewood' })).toBeVisible();
+      expect(errors).toEqual([]);
+      expect(state.unhandledRequests).toEqual([]);
+    });
+  }
 }
 
 for (const theme of ['light', 'dark']) {

@@ -286,7 +286,10 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.getByRole('radio', { name: /^Player of the match/ }).check();
     await page.getByRole('button', { name: 'Add to event' }).click();
     await expect(page.getByText('Draft created.', { exact: false })).toBeVisible();
-    await page.getByRole('button', { name: 'Generate odds' }).click();
+    await expect(page.getByRole('combobox', { name: 'Starting point' })).toBeHidden();
+    await expect(page.getByLabel('Captain: decimal odds')).toBeVisible();
+    await page.locator('.market-editor').screenshot({ path: testInfo.outputPath('manual-odds-editor.png') });
+    await page.getByRole('button', { name: 'Use equal chances' }).click();
     await expect(page.getByText('Price preview.', { exact: false })).toBeVisible();
     await page.getByRole('button', { name: 'Publish market' }).click();
     await expect(page.getByRole('button', { name: /Player of the match.*Published/ })).toBeVisible();
@@ -358,7 +361,7 @@ for (const scenario of [
     await page.getByRole('button', { name: 'Add to event' }).click();
     await expect(page.getByText('Draft created.', { exact: false })).toBeVisible();
     expect(writes.filter((write) => write.path === '/api/backoffice/market-templates')).toHaveLength(1);
-    await page.getByRole('button', { name: 'Generate odds' }).click();
+    await page.getByRole('button', { name: 'Use equal chances' }).click();
     await expect(page.getByText('Price preview.', { exact: false })).toBeVisible();
     expect(writes.find((write) => write.path.endsWith('/preview')).body.generation.method).toBe('EQUAL_CHANCE');
     await page.getByRole('button', { name: 'Publish market' }).click();

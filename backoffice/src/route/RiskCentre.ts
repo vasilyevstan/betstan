@@ -57,7 +57,8 @@ router.all([base, `${base}/*`], (req, res, next) => {
   try { pathname = decodeURIComponent(path.split("?")[0]); }
   catch { res.status(400).send(error("INVALID_PATH", "Invalid path encoding")); return; }
   const allowed = req.method === "GET"
-    ? pathname === "" || pathname === "/history" || /^\/operations\/[A-Za-z0-9:_.-]{1,96}$/.test(pathname)
+    ? pathname === "" || pathname === "/history" || pathname === "/events"
+      || /^\/(?:operations|events)\/[A-Za-z0-9:_.-]{1,96}$/.test(pathname)
     : req.method === "POST" ? ["/rules", "/reset"].includes(pathname)
       : ["PUT", "DELETE"].includes(req.method) && /^\/rules\/[A-Za-z0-9:_.-]{1,96}$/.test(pathname);
   if (!allowed) { res.status(404).send(error("NOT_FOUND", "Route not found")); return; }

@@ -83,6 +83,169 @@ beforeEach(() => {
   Object.defineProperty(window, 'crypto', { configurable: true, value: { randomUUID: jest.fn(() => 'test-uuid') } });
 });
 
+describe('event stress and choice switches', () => {
+  const choiceId = 'a'.repeat(64);
+  const fixture = () => {
+    const policy = snapshot();
+    policy.readiness.capabilities.selectionBlocking = true;
+    policy.readiness.accounting = { ready: false, openPositionsReady: true, readyLossWindows: [] };
+    policy.catalogue.push({
+      type: 'DENY', label: 'Block bets', description: 'Block matching bets.', category: 'admission',
+      defaultParameters: {}, defaultEnabled: false, defaultScope: {}, locked: false, parameterDefinitions: [],
+    });
+    const event = { eventId: 'event-a', name: 'Open event', time: '2099-01-01T12:00:00.000Z', phase: 'PRE_MATCH' };
+    const metrics = { exposureMinor: '12345', openTickets: 2, pendingTickets: 1 };
+    const report = { asOf: '2026-11-14T21:00:00.000Z', policyRevision: 1, analysis: { ready: true, code: 'READY' } };
+    const state = {
+      policy, operation: null,
+      list: { ...report, events: [{ ...event, metrics }], nextAfter: null },
+      detail: { ...report, event, metrics, stakeMinor: 100, choices: [{
+        id: choiceId, origin: 'TEMPLATE', marketId: 'award', marketName: 'Match award', label: 'Nominee A',
+        odds: 3, betKind: 'PRE_MATCH', sourceOpen: true, off: false, switchConflict: false,
+        singleBlockedByOtherRule: false, stressReturnMinor: '300', headroomMinor: '250',
+        advice: 'LOWER_ODDS', suggestedOdds: 2.5,
+      }] },
+    };
+    const response = data => ({ data: JSON.parse(JSON.stringify(data)) });
+    axios.get.mockImplementation(async url => {
+      if (url === API) return response(state.policy);
+      if (url === `${API}/events`) return response(state.list);
+      if (url.startsWith(`${API}/events/event-a?`)) return response({
+        ...state.detail, stakeMinor: Number(new URL(url, 'http://test').searchParams.get('stakeMinor')),
+      });
+      if (url.startsWith(`${API}/operations/`)) return response(state.operation);
+      return response(state.policy);
+    });
+    return state;
+  };
+  const review = async () => {
+    fireEvent.click(await screen.findByRole('tab', { name: 'Events' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review risk for Open event' }));
+    await screen.findByLabelText('Test stake (Stanbucks)');
+  };
+
+  it('loads events lazily, supports keyboard tabs and preserves an unsaved rule draft', async () => {
+    fixture(); mount(); await selectRule(); editLimit('2000');
+    expect(axios.get.mock.calls.some(([url]) => url.startsWith(`${API}/events`))).toBe(false);
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Rules' }), { key: 'ArrowRight' });
+    expect(await screen.findByRole('button', { name: 'Review risk for Open event' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Events' })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Events' }), { key: 'Home' });
+    expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(20);
+    expect(axios.request).not.toHaveBeenCalled();
+  });
+
+  it('shows precise large loss bounds and sends only valid minor-unit stress stakes', async () => {
+    const state = fixture();
+    state.detail.metrics.exposureMinor = '900719925474099123';
+    mount(); await review();
+    expect(await screen.findByText(/^Existing loss bound:/)).toHaveTextContent('9,007,199,254,740,991.23 Stanbucks');
+    expect(screen.getByText('Lower odds to 2.50 or less')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Manage odds' })).toHaveAttribute('href', '/backoffice/events/event-a/markets');
+    const reads = axios.get.mock.calls.length;
+    fireEvent.change(screen.getByLabelText('Test stake (Stanbucks)'), { target: { value: '0.001' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Recalculate' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('at most two decimal places');
+    expect(axios.get).toHaveBeenCalledTimes(reads);
+    state.detail.choices[0] = { ...state.detail.choices[0], stressReturnMinor: '87', advice: 'WITHIN_CEILING', suggestedOdds: null };
+    fireEvent.change(screen.getByLabelText('Test stake (Stanbucks)'), { target: { value: '0.29' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Recalculate' }));
+    expect(await screen.findByText('Tested stake: 0.29 Stanbucks')).toBeVisible();
+    expect(axios.get).toHaveBeenLastCalledWith(`${API}/events/event-a?stakeMinor=29`, expect.any(Object));
+  });
+
+  it('uses revision-bound choice writes and removes only its own deny when turned back on', async () => {
+    const state = fixture();
+    const broader = { id: 'book-closed', type: 'DENY', enabled: true, scope: {}, parameters: {} };
+    state.policy.rules.push(broader);
+    state.detail.choices[0].singleBlockedByOtherRule = true;
+    window.crypto.randomUUID.mockReturnValueOnce('off-uuid').mockReturnValueOnce('on-uuid');
+    axios.request.mockImplementation(async config => {
+      const off = config.method === 'POST';
+      state.policy = { ...state.policy, revision: state.policy.revision + 1,
+        rules: off ? [...state.policy.rules, config.data.rule] : state.policy.rules.filter(item => item.id !== `choice:${choiceId}`) };
+      state.detail = { ...state.detail, policyRevision: state.policy.revision,
+        choices: [{ ...state.detail.choices[0], off, advice: off ? 'OFF' : 'LOWER_ODDS', suggestedOdds: off ? null : 2.5 }] };
+      return { data: { ...result(config).data, rules: state.policy.rules } };
+    });
+    mount(); await review();
+    fireEvent.click(await screen.findByRole('switch'));
+    await waitFor(() => expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
+    expect(axios.request.mock.calls[0][0]).toMatchObject({
+      method: 'POST', url: `${API}/rules`, data: { expectedRevision: 1, requestId: 'save:off-uuid', rule: {
+        id: `choice:${choiceId}`, type: 'DENY', enabled: true, parameters: {},
+        scope: { betKind: 'PRE_MATCH', eventIds: ['event-a'], selectionIds: [choiceId] },
+      } },
+    });
+    fireEvent.click(screen.getByRole('switch'));
+    await waitFor(() => expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
+    expect(axios.request.mock.calls[1][0]).toMatchObject({
+      method: 'DELETE', url: `${API}/rules/choice:${choiceId}`, data: { expectedRevision: 2, requestId: 'save:on-uuid' },
+    });
+    expect(state.policy.rules).toContainEqual(broader);
+    expect(screen.getByText('Another rule still blocks this single')).toBeVisible();
+  });
+
+  it('recovers a lost choice-save response by its original operation without optimistically changing the switch or losing a draft', async () => {
+    const state = fixture();
+    axios.request.mockImplementationOnce(async config => {
+      state.operation = { ...result(config).data, rules: [...state.policy.rules, config.data.rule] };
+      state.policy = { ...state.policy, ...state.operation };
+      state.detail = { ...state.detail, policyRevision: 2,
+        choices: [{ ...state.detail.choices[0], off: true, advice: 'OFF', suggestedOdds: null }] };
+      throw new Error('response lost');
+    });
+    mount(); await selectRule(); editLimit('2000'); await review();
+    fireEvent.click(await screen.findByRole('switch'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('uncertain');
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('switch')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Check save result' }));
+    await waitFor(() => expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
+    expect(axios.request).toHaveBeenCalledTimes(1);
+    expect(axios.get).toHaveBeenCalledWith(`${API}/operations/save:test-uuid`, expect.any(Object));
+    fireEvent.click(screen.getByRole('tab', { name: 'Rules' }));
+    expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(20);
+  });
+
+  it.each([
+    [false, 'UNAVAILABLE', /Missing evidence is not zero exposure/],
+    [true, 'NO_LIMIT', /No book-wide exposure ceiling applies/],
+  ])('does not imply safe odds when accounting or a book ceiling is missing (%s, %s)', async (ready, advice, message) => {
+    const state = fixture();
+    state.list.analysis = state.detail.analysis = { ready, code: ready ? 'READY' : 'HISTORICAL_RECONCILIATION_REQUIRED' };
+    if (!ready) { state.list.events[0].metrics = null; state.detail.metrics = null; }
+    state.detail.choices[0] = { ...state.detail.choices[0], advice, headroomMinor: null, suggestedOdds: null };
+    mount(); await review();
+    expect(await screen.findByText(message)).toBeVisible();
+    expect(screen.queryByText(/Within exposure ceiling|Lower odds to/)).not.toBeInTheDocument();
+    expect(screen.getByRole('switch')).toBeEnabled();
+  });
+
+  it('requires a current policy read before enabling switches on a stale analysis', async () => {
+    const state = fixture();
+    state.detail.policyRevision = 2;
+    mount(); await review();
+    expect(await screen.findByRole('switch')).toBeDisabled();
+    state.policy = { ...state.policy, revision: 2 };
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh active policy' }));
+    await waitFor(() => expect(screen.getByRole('switch')).toBeEnabled());
+    expect(axios.request).not.toHaveBeenCalled();
+  });
+
+  it('removes stale financial advice and switches after a failed analysis refresh', async () => {
+    fixture(); mount(); await review();
+    expect(await screen.findByRole('switch')).toBeEnabled();
+    axios.get.mockRejectedValueOnce(new Error('source unavailable'));
+    fireEvent.click(screen.getByRole('button', { name: 'Recalculate' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be refreshed');
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Existing loss bound:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Lower odds to/)).not.toBeInTheDocument();
+    expect(axios.request).not.toHaveBeenCalled();
+  });
+});
+
 it('omits the unavailable integrations panel without hiding existing safeguards', async () => {
   const data = snapshot();
   data.catalogue.push({ ...data.catalogue[1], type: 'WALLET', label: 'Wallet integration', category: 'unavailable' });

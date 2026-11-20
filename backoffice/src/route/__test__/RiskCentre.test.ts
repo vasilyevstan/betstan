@@ -37,6 +37,17 @@ it("forwards stable mutation bodies and encoded factory identities without auth"
   expect(JSON.parse(received)).toEqual(body);
   expect(upstream.mock.calls[0][0].url).toBe("/api/moderation/risk-centre/rules/default%3ADELAY_MS");
 });
+it("forwards bounded event catalogue and stress paths only to the fixed risk authority", async () => {
+  await request(app).get("/api/backoffice/risk-centre/events?after=event-a&limit=10").expect(200);
+  await request(app).get("/api/backoffice/risk-centre/events/event%3Aa?stakeMinor=29").expect(200);
+  expect(upstream.mock.calls.map(call => call[0].url)).toEqual([
+    "/api/moderation/risk-centre/events?after=event-a&limit=10",
+    "/api/moderation/risk-centre/events/event%3Aa?stakeMinor=29",
+  ]);
+  await request(app).get("/api/backoffice/risk-centre/events/event-a/other").expect(404);
+  await request(app).post("/api/backoffice/risk-centre/events").send({}).expect(404);
+  expect(upstream).toHaveBeenCalledTimes(2);
+});
 it("preserves policy conflicts and never redirects public callers to another authority", async () => {
   upstream.mockImplementation((_req: http.IncomingMessage, res: http.ServerResponse) => {
     res.statusCode = 409; res.end(JSON.stringify({ code: "REVISION_CONFLICT", message: "Reload policy" }));
