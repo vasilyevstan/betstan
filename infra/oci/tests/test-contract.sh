@@ -2890,11 +2890,15 @@ workflow_text = File.read(workflow_file)
 trusted_workflow_blob = "1e3118276cc4746e824303245339c25de4411c15"
 lean_workflow_blob = "7f036e038c780d929417ea7e9f6227bdf9d5fb89"
 native_dispatch_workflow_blob = "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"
+regression_workflow_blob = "e1235e30437714325cda6b655368eefe66bc9d76"
 workflow_blob = Digest::SHA1.hexdigest(
   "blob #{workflow_text.bytesize}\0#{workflow_text}"
 )
-unless [trusted_workflow_blob, lean_workflow_blob, native_dispatch_workflow_blob].include?(workflow_blob)
-  abort("production-build is neither the trusted restoration nor the reviewed lean workflow")
+unless [
+  trusted_workflow_blob, lean_workflow_blob,
+  native_dispatch_workflow_blob, regression_workflow_blob,
+].include?(workflow_blob)
+  abort("production-build is not an approved exact workflow")
 end
 lean_workflow = workflow_blob != trusted_workflow_blob
 expected_checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
@@ -2907,7 +2911,7 @@ approved_action_refs = {
   "docker/build-push-action" => "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
   "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
 }
-if workflow_blob == native_dispatch_workflow_blob
+if [native_dispatch_workflow_blob, regression_workflow_blob].include?(workflow_blob)
   approved_action_refs["actions/github-script"] = "ed597411d8f924073f98dfc5c65a23a2325f34cd"
 end
 approved_action_refs.freeze
