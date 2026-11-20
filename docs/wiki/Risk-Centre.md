@@ -73,6 +73,66 @@ Zero configured acceptance delay does not promise an instantaneous response:
 transport and missing-event-evidence retries can keep a bet pending. The
 editor does not mislabel those retries as an active delay rule.
 
+## Events and black-swan stress
+
+The **Rules** and **Events** tabs separate policy editing from event review.
+Switching tabs preserves an unsaved rule draft. Events lists all online,
+unresulted upcoming and in-play events, without the public event page's time
+horizon. Offline, finished and unresolved-visibility events are excluded.
+Lifecycle-active source pauses remain visible so their choices can be managed.
+Use **Previous events**, **Next events** and **Refresh events** to navigate
+the catalogue; it is not a truncated list of the nearest matches.
+
+Each event shows a conservative **loss bound**, not a black-swan probability
+or a cross-ticket hedge calculation. Each open ticket contributes once per
+event:
+
+```text
+max(0, original-principal return bound - original stake)
++ remaining principal while pending
+```
+
+Partial closure does not proportionally reduce the full standalone return
+bound. A ticket involving several events appears under each relevant event;
+do not sum overlapping event totals. Public reports contain aggregate amounts
+and current market offers, not raw tickets, player IDs or receipt details.
+Financial reads use a read-only MongoDB snapshot and do not increment the
+admission serialization document.
+
+Expand an event to test one new single, initially **1 Stanbuck**. The test
+reserves its gross payout, including pending principal. Every matching,
+enabled, non-customer **Operator exposure limit** is checked against its
+whole applicable book, not just this event. The tightest headroom produces
+**Lower odds** or **Consider turning off** guidance. **Within exposure
+ceiling** describes only this test, not permission to accept the bet.
+Per-customer limits are not book budgets. Without a configured applicable
+ceiling, there is no odds recommendation; incomplete accounting is
+**Unavailable**, never zero. Reports reserve no capacity, and admission
+continues to enforce all applicable rules independently.
+
+The same view switches an individual choice off or on. An off switch is a
+normal **Block bets** rule with an exact event/origin/market/outcome identity;
+it also matches that choice inside Builders and accumulators. Live identities
+survive quote and market revisions without merging distinct score selections
+that share `NONE`. Turning on removes only that choice's managed rule:
+broader blocks and source pauses still apply. Pending and accepted bets keep
+their original policy and price. Choices can remain visible to players while
+new receipts containing them are declined.
+
+**Manage odds** opens the existing custom-market editor. Standard and live
+prices remain owned by their pricing models; analysis never automatically
+reprices or removes a selection. Rule conflicts and uncertain switches use
+the same revision and operation-recovery protocol as the Rules tab.
+
+Backoffice exposes `GET /api/backoffice/risk-centre/events` and
+`GET /api/backoffice/risk-centre/events/:eventId?stakeMinor=100` through its
+fixed Moderation authority. Pages default to 20 events, at most 25; event
+details support at most 1,000 choices. Test stakes are 1 to 1,000,000,000,000
+minor units. Accounting retains the existing 10,000-position read budget,
+checked before baseline/live deduplication can hide truncation. Exceeded
+budgets report unavailable evidence, never partial totals. Choice rules
+share the existing 128-rule/48-KiB policy limits.
+
 ## Saving and restoring
 
 The editor shows readable rule names and saved values in the rule list.
@@ -316,6 +376,23 @@ compatible, with unavailable new metrics rather than fabricated zeroes.
 Malformed responses and genuine service failures remain errors.
 
 ## Rollout and rollback
+
+Choice blocking extends policy scopes with `selectionIds`; it does not change
+persisted accounting facts, placement fingerprints or settlement contracts.
+Older Moderation readers reject this scope, even on a disabled active rule.
+Deploy the capable reader before emitting choice rules. The client requires
+the server's `selectionBlocking` capability and ready transaction storage.
+The canonical deployment and production k3s overlay retain one Moderation
+replica with `Recreate`; preserve that no-mixed-reader assumption, or design
+an explicit compatibility cutover before changing rollout strategy or scale.
+Event and Backoffice report routes must also be available for the Events view.
+
+Before reverting to a pre-choice Moderation binary, remove **all** active
+choice-scoped rules, including disabled ones, and resolve receipts pinned to
+enabled choice rules under the capable reader. A feature-off flag does not
+make those receipts compatible. Keep the capable reader or forward-fix when
+that drain cannot be proven; never drop receipts, rewrite pinned policies or
+edit stored accounting facts as a rollback shortcut.
 
 Compatible shared contracts/readers and authoritative accounting come before
 transaction-dependent writers and financial-rule activation. Establish

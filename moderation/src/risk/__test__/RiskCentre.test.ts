@@ -9,6 +9,7 @@ import { receiveRisk, terminalRisk } from "../Gateway";
 import { getHistory, getOperation, getPolicy, initializeRisk, mutatePolicy, RiskAccountingInbox, RiskMovement, RiskPosition, RiskState } from "../Store";
 import { applyAccountingInbox, completeEvidence, receiveAccounting, replayAccounting } from "../Accounting";
 import { verifyRiskSource } from "../SourceVerifier";
+import { choiceId } from "../Selections";
 jest.mock("../SourceVerifier", () => ({ verifyRiskSource: jest.fn() }));
 
 beforeEach(async () => {
@@ -123,6 +124,39 @@ it("pins cutoff policy and rechecks authoritative time in the terminal transacti
     affectedRows: [{ rowId: input.data.rows[0].id, declineReason: "RISK_POLICY" }], publishedAt: "" });
   expect((await terminalRisk(input.data.slipId, decision, new Date())).moderationTimestamp).toBe(stored.moderationTimestamp);
   expect((await RiskPosition.findById(input.data.slipId).lean() as any).reserved).toBe(false);
+});
+
+it("enforces choice off/on for new receipts without rewriting either previously pinned policy", async () => {
+  const waiting = event();
+  const target = waiting.data.rows[0];
+  const next = () => {
+    const input = event();
+    input.data.rows = [{ ...target, id: input.data.rows[0].id }];
+    return input;
+  };
+  const id = choiceId({ eventId: target.eventId, origin: "STANDARD", marketId: target.productId, outcomeKey: target.oddsId });
+  await receiveRisk(waiting, new Date());
+  await mutatePolicy("CREATE", { expectedRevision: 1, requestId: "choice-off", rule: {
+    id: `choice:${id}`, type: "DENY", enabled: true,
+    scope: { betKind: "PRE_MATCH", eventIds: [target.eventId], selectionIds: [id] }, parameters: {},
+  } });
+  const blocked = next();
+  expect((await receiveRisk(blocked, new Date())).reason).toBe("RISK_DENY");
+  await mutatePolicy("DELETE", { expectedRevision: 2, requestId: "choice-on" }, `choice:${id}`);
+  const service = new ModerationService({ publishWithConfirm: async () => undefined });
+  await service.handlePlaceBet(waiting);
+  await service.handlePlaceBet(blocked);
+  const allowed = next();
+  await service.handlePlaceBet(allowed);
+  expect(await Bet.findOne({ slipId: waiting.data.slipId }).lean()).toMatchObject({
+    status: ModerationStatus.APPROVED, riskPolicyRevision: 1,
+  });
+  expect(await Bet.findOne({ slipId: blocked.data.slipId }).lean()).toMatchObject({
+    status: ModerationStatus.DECLINED, riskPolicyRevision: 2, riskReason: "RISK_DENY",
+  });
+  expect(await Bet.findOne({ slipId: allowed.data.slipId }).lean()).toMatchObject({
+    status: ModerationStatus.APPROVED, riskPolicyRevision: 3,
+  });
 });
 
 it("publishes typed whole-ticket net-win declines without reducing wager or payout", async () => {

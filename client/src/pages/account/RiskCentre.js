@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Link, useLocation } from 'react-router-dom';
 import { riskRuleNames } from '../../riskRuleLabels';
+import RiskEvents from './RiskEvents';
 import '../../styles/risk-centre.css';
 
 const API = '/api/backoffice/risk-centre';
@@ -30,6 +31,7 @@ const idPattern = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,95}$/;
 const scopeLists = [
   ['eventIds', 'Event IDs'], ['productIds', 'Product IDs'],
   ['marketIds', 'Market IDs'], ['templateIds', 'Template IDs'],
+  ['selectionIds', 'Choice keys (managed in Events)'],
 ];
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hasReadinessField = (accounting, field) => Object.prototype.hasOwnProperty.call(accounting, field);
@@ -238,6 +240,7 @@ function prepareRule(draft, catalogue) {
 
 export default function RiskCentre() {
   const { search } = useLocation();
+  const [tab, setTab] = useState('rules');
   const [snapshot, setSnapshot] = useState(null);
   const snapshotRef = useRef(null);
   const [loading, setLoading] = useState(true);
@@ -398,7 +401,7 @@ export default function RiskCentre() {
     const previous = snapshotRef.current;
     const accepted = result.revision >= previous.revision ? { ...previous, ...result } : previous;
     acceptSnapshot(accepted);
-    if (pending.kind === 'market' || pending.kind === 'betting') {
+    if (pending.kind === 'market' || pending.kind === 'betting' || pending.kind === 'choice') {
       // A market or betting switch is a separate rule: keep the editor's selection and unsaved input.
       if (!dirty && draft) {
         const kept = accepted.rules.find(item => item.id === draft.id);
@@ -407,7 +410,7 @@ export default function RiskCentre() {
         setBaseRevision(accepted.revision);
       }
       setError('');
-      setMessage(`${pending.label} Revision ${result.revision} saved.`);
+      setMessage(pending.kind === 'choice' ? '' : `${pending.label} Revision ${result.revision} saved.`);
       operationRef.current = null;
       setOperation(null);
       setHistory(null);
@@ -459,8 +462,10 @@ export default function RiskCentre() {
         operationRef.current = null;
         setOperation(null);
         if (code === 'REVISION_CONFLICT') setStale(true);
+        if (code === 'REVISION_CONFLICT' && pending.kind === 'choice') reload();
         setError(code === 'REVISION_CONFLICT'
-          ? 'This policy changed before Save. Refresh, review the active values, then explicitly use the refreshed revision. Your input is preserved.'
+          ? pending.kind === 'choice' ? 'The policy changed before the switch. Current rules are reloading; review them before trying again. Your rule input is preserved.'
+            : 'This policy changed before Save. Refresh, review the active values, then explicitly use the refreshed revision. Your input is preserved.'
           : failure.response?.data?.message || 'The change was rejected. Review your input and try again.');
       } else {
         setError('Save outcome is uncertain. Your input and operation ID are preserved. Check the result or retry the exact same save before making another change.');
@@ -547,6 +552,30 @@ export default function RiskCentre() {
       label: 'Betting is open for all events.', body,
     });
   };
+  const switchChoice = (choice, event, revision) => {
+    if (readOnly || frozen || !snapshot.readiness.capabilities.selectionBlocking) return;
+    if (revision !== snapshot.revision) {
+      setError('The analysis and active policy differ. Refresh the active policy and review the choice before switching.'); return;
+    }
+    const id = `choice:${choice.id}`;
+    const own = snapshot.rules.find(rule => rule.id === id);
+    const body = { expectedRevision: revision, requestId: newId('save') };
+    const rule = { id, type: 'DENY', enabled: true,
+      scope: { betKind: choice.betKind, eventIds: [event.eventId], selectionIds: [choice.id] }, parameters: {} };
+    execute(choice.off ? {
+      method: 'DELETE', url: `${API}/rules/${id}`, ruleId: id, kind: 'choice', body,
+    } : {
+      method: own ? 'PUT' : 'POST', url: own ? `${API}/rules/${id}` : `${API}/rules`, ruleId: id, kind: 'choice',
+      body: { ...body, rule },
+    });
+  };
+  const changeTab = event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'rules' : event.key === 'End' ? 'events' : tab === 'rules' ? 'events' : 'rules';
+    setTab(next);
+    document.getElementById(`risk-tab-${next}`)?.focus();
+  };
   const switchAccess = async item => {
     if (!access || accessBusy) return;
     const current = access[item.field];
@@ -630,7 +659,8 @@ export default function RiskCentre() {
     </ol></nav>
     <header className="market-page-heading">
       <h1 className="h3" id="risk-title">Risk Centre</h1>
-      <p>Choose a rule, set its value, then turn it on. Changes apply to new bets, not bets already waiting.</p>
+      <p>{tab === 'rules' ? 'Choose a rule, set its value, then turn it on. Changes apply to new bets, not bets already waiting.'
+        : 'Review event exposure, stress the current odds, and switch individual choices for new bets.'}</p>
       <p className="market-help">This simulation's rules are public: anyone can edit them. When rules overlap, the stricter limit applies.</p>
       <div className="market-form-actions">
         <button type="button" className={action} disabled={loading || busy} onClick={() => { reload(); loadSwitches(); }}>Refresh rules</button>
@@ -650,6 +680,19 @@ export default function RiskCentre() {
     </div> : null}
     {snapshot ? <>
       {snapshot.readiness.transactions !== 'READY' ? <p className="market-notice market-notice--warning" role="status">Rule editing is not available in this deployment. Existing bet validation continues to run.</p> : null}
+      <div className="risk-tabs" role="tablist" aria-label="Risk Centre views">
+        {['rules', 'events'].map(name => <button key={name} type="button" role="tab" id={`risk-tab-${name}`}
+          className={action} aria-selected={tab === name} aria-controls={`risk-panel-${name}`}
+          tabIndex={tab === name ? 0 : -1} onKeyDown={changeTab} onClick={() => setTab(name)}>
+          {name === 'rules' ? 'Rules' : 'Events'}
+        </button>)}
+      </div>
+      <div role="tabpanel" id="risk-panel-events" aria-labelledby="risk-tab-events" hidden={tab !== 'events'}>
+        {tab === 'events' ? <RiskEvents revision={snapshot.revision} disabled={readOnly || frozen}
+          canSwitch={snapshot.readiness.transactions === 'READY' && snapshot.readiness.capabilities.selectionBlocking === true}
+          onSwitch={switchChoice} onRefreshRules={reload} search={search} /> : null}
+      </div>
+      <div role="tabpanel" id="risk-panel-rules" aria-labelledby="risk-tab-rules" hidden={tab !== 'rules'}>
       <section className="risk-switches" aria-labelledby="risk-switches-title">
         <h2 className="h5" id="risk-switches-title">All-events switches</h2>
         <section className="risk-switch" aria-labelledby="risk-betting-title">
@@ -818,7 +861,7 @@ export default function RiskCentre() {
                   }}>Use refreshed revision</button>
                 </div> : null}
                 <form onSubmit={submit} noValidate>
-                  <fieldset disabled={readOnly || frozen}>
+                  <fieldset disabled={readOnly || frozen || Boolean(draft.scope.selectionIds)}>
                     <legend className="h6">Rule settings</legend>
                     <div className="market-form-grid">{entry.parameterDefinitions.map(definition => <label key={definition.name}>
                       {definition.label}{definition.unit ? ` (${inputUnit(definition)})` : ''}
@@ -852,11 +895,12 @@ export default function RiskCentre() {
                     <details className="risk-secondary" open={scopeLists.some(([key]) => Boolean(currentRule?.scope[key])) || undefined}>
                       <summary>Specific events, products or markets</summary>
                       <p className="market-help">Optional. Leave blank to apply to all. Enter comma-separated IDs only when targeting a specific event, product, market or template.</p>
-                      <div className="market-form-grid">{scopeLists.map(([key, label]) => <label key={key}>{label}<input className={control} value={draft.scope[key] || ''} maxLength={3103}
+                      <div className="market-form-grid">{scopeLists.filter(([key]) => key !== 'selectionIds' || draft.scope.selectionIds).map(([key, label]) => <label key={key}>{label}<input className={control} value={draft.scope[key] || ''} maxLength={3103}
                         onChange={event => edit({ scope: { ...draft.scope, [key]: event.target.value } })} /></label>)}
                       </div>
                     </details>
                   </fieldset>
+                  {draft.scope.selectionIds ? <p className="market-help">This choice's identity is managed in Events. You can turn this Block bets rule off or remove it here; its scope is read-only.</p> : null}
                   {activationBlocked ? <p className="market-help" id="risk-activation-reason">
                     Can't turn on yet: {accountingUnavailable ? 'accounting history is not ready' : 'activity history is not ready for this window or cooldown'}. You can save it as off.
                   </p> : null}
@@ -923,6 +967,7 @@ export default function RiskCentre() {
           </details></li>;
         })}</ol> : null}
       </section>
+      </div>
     </> : null}
   </section>;
 }

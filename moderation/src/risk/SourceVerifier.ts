@@ -4,16 +4,13 @@ import { IModerationAffectedRow, ModerationDeclineReason } from "@betstan/common
 
 export interface RiskSourceCheck { kickoffAt: string; affectedRows: IModerationAffectedRow[] }
 
-/** Current public visibility and exact ordinary-price authority from Event's
- * existing per-event catalogue. This is a bounded evidence cut, not a remote
- * market lock or globally linearizable source-to-admission protocol.
- */
-export async function verifyRiskSource(eventId: string, rows: any[], now = new Date()): Promise<RiskSourceCheck> {
+export async function readEventAuthority(path: string): Promise<unknown> {
   const configured = process.env.EVENT_SERVICE_URL;
   if (!configured) throw new Error("Event authority is unavailable");
-  const url = new URL(`/api/event/events/${encodeURIComponent(eventId)}/markets`, configured);
+  if (!path.startsWith("/api/event/")) throw new Error("Invalid Event authority path");
+  const url = new URL(path, configured);
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("Invalid Event authority");
-  const catalogue: any = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? https : http).get(url, response => {
       let size = 0;
       const chunks: Buffer[] = [];
@@ -34,6 +31,14 @@ export async function verifyRiskSource(eventId: string, rows: any[], now = new D
     const deadline = setTimeout(() => request.destroy(new Error("Event authority timed out")), 5000);
     request.on("error", error => { clearTimeout(deadline); reject(error); });
   });
+}
+
+/** Current public visibility and exact ordinary-price authority from Event's
+ * existing per-event catalogue. This is a bounded evidence cut, not a remote
+ * market lock or globally linearizable source-to-admission protocol.
+ */
+export async function verifyRiskSource(eventId: string, rows: any[], now = new Date()): Promise<RiskSourceCheck> {
+  const catalogue: any = await readEventAuthority(`/api/event/events/${encodeURIComponent(eventId)}/markets`);
   if (catalogue === null) throw new Error("Event authority unavailable");
   if (!catalogue?.event || catalogue.event.eventId !== eventId
     || !["ONLINE", "OFFLINE"].includes(catalogue.event.visibility)

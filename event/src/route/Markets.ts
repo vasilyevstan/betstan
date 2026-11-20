@@ -8,6 +8,7 @@ import {
   createMarketQuote, marketCatalog, marketQuoteSelection, MarketAuthorityUnavailableError,
   MarketUnavailableError, requireMarketWriting, validateMarketQuote,
 } from "../service/MarketQuoteService";
+import { listRiskEvents, riskEventChoices } from "../service/RiskCatalogueService";
 
 const router = express.Router();
 const run = (action: (req: Request, res: Response) => Promise<void>): RequestHandler =>
@@ -17,6 +18,20 @@ const run = (action: (req: Request, res: Response) => Promise<void>): RequestHan
     else if (error instanceof MarketValidationError) res.status(400).send({ message: error.message });
     else next(error);
   }); };
+
+router.get("/api/event/risk-events", run(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (Object.keys(req.query).some(key => !["after", "limit"].includes(key))
+    || (req.query.limit !== undefined && typeof req.query.limit !== "string")) {
+    throw new MarketValidationError("Unsupported event catalogue query");
+  }
+  res.send(await listRiskEvents(req.query.after, req.query.limit === undefined ? 20 : Number(req.query.limit)));
+}));
+router.get("/api/event/risk-events/:eventId", run(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (Object.keys(req.query).length) throw new MarketValidationError("Event choices do not accept query parameters");
+  res.send(await riskEventChoices(marketKey(req.params.eventId, "Event id")));
+}));
 
 router.get("/api/event/events/:eventId/markets", run(async (req, res) => {
   res.send(await marketCatalog(marketKey(req.params.eventId, "Event id")));

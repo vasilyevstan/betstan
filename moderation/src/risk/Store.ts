@@ -51,14 +51,20 @@ export const RiskSnapshot = document("RiskSnapshot", {
 export const RiskSnapshotPage = document("RiskSnapshotPage", { snapshotId: String, page: Number, hash: String, entries: Schema.Types.Mixed });
 RiskSnapshotPage.schema.index({ snapshotId: 1, page: 1 }, { unique: true });
 
-export async function readBook(filter: Record<string, unknown>, session: ClientSession): Promise<any[]> {
-  const live = await RiskPosition.find(filter).limit(10001).session(session).lean();
-  const baseline = await RiskBaseline.find(filter).limit(10001).session(session).lean();
+export async function readBook(filter: Record<string, unknown>, session: ClientSession,
+  options: { projection?: Record<string, 0 | 1>; maxTimeMS?: number } = {}): Promise<{ positions: any[]; capacityExceeded: boolean }> {
+  const live = await RiskPosition.find(filter).select(options.projection ?? {}).limit(10001)
+    .maxTimeMS(options.maxTimeMS ?? 0).session(session).lean();
+  const baseline = await RiskBaseline.find(filter).select(options.projection ?? {}).limit(10001)
+    .maxTimeMS(options.maxTimeMS ?? 0).session(session).lean();
+  if (live.length > 10000 || baseline.length > 10000) return { positions: [], capacityExceeded: true };
   // Exclude baseline even when its live counterpart no longer matches the
   // filter (e.g. already fully closed): stale baseline must not resurrect it.
-  const shadows = await RiskPosition.find({ _id: { $in: baseline.map(p => p._id) } }).select({ _id: 1 }).session(session).lean();
+  const shadows = await RiskPosition.find({ _id: { $in: baseline.map(p => p._id) } }).select({ _id: 1 })
+    .maxTimeMS(options.maxTimeMS ?? 0).session(session).lean();
   const ids = new Set(shadows.map(p => p._id));
-  return [...live, ...baseline.filter(p => !ids.has(p._id))];
+  const positions = [...live, ...baseline.filter(p => !ids.has(p._id))];
+  return { positions, capacityExceeded: positions.length > 10000 };
 }
 export function accountingRuleReady(rule: Rule, coverage: any, now: Date): boolean {
   return Boolean(coverage?.valid && coverage.openPositionsReady
@@ -120,10 +126,10 @@ export async function initializeRisk(): Promise<void> {
 }
 
 export const riskEnabled = () => process.env.RISK_CENTRE_ENABLED === "true";
-export async function readiness(ready = true, session?: ClientSession, now = new Date()) {
-  const state = await RiskState.findById("active").session(session ?? null).lean() as any;
+export async function readiness(ready = true, session?: ClientSession, now = new Date(), maxTimeMS = 0) {
+  const state = await RiskState.findById("active").maxTimeMS(maxTimeMS).session(session ?? null).lean() as any;
   const coverage = state?.accountingCoverage;
-  const unsupported = await RiskPosition.exists({ reserved: true, moneyReady: { $ne: true } }).session(session ?? null);
+  const unsupported = await RiskPosition.exists({ reserved: true, moneyReady: { $ne: true } }).maxTimeMS(maxTimeMS).session(session ?? null);
   const open = Boolean(ready && coverage?.valid && coverage.openPositionsReady && !unsupported);
   const readyLossWindows = open ? WINDOWS.filter(window => accountingRuleReady({
     id: "readiness", type: "MAX_CUSTOMER_LOSS", enabled: true, scope: {}, parameters: { window },
@@ -138,7 +144,7 @@ export async function readiness(ready = true, session?: ClientSession, now = new
     accounting: { ready: open && allWindows, openPositionsReady: open, readyLossWindows,
       code: !open ? "HISTORICAL_RECONCILIATION_REQUIRED" : allWindows ? "READY" : "HISTORY_WINDOW_UNAVAILABLE",
       ...(coverage?.valid ? { realisedCompleteSince: coverage.realisedCompleteSince } : {}) },
-    capabilities: { extensibleMarkets: process.env.EXTENSIBLE_MARKETS_ENABLED === "true" },
+    capabilities: { extensibleMarkets: process.env.EXTENSIBLE_MARKETS_ENABLED === "true", selectionBlocking: true },
     activity: { tracking: Boolean(ready && activity?.tracking), readyWindows: readyActivityWindows,
       ...(activity?.since ? { trackedSince: activity.since } : {}),
       readyCooldownMs: ready && activity?.tracking
