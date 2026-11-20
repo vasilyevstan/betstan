@@ -358,6 +358,12 @@ The disabled `source-quality.yml` retains its previously qualified Node 20
 execution profile. This application-runtime upgrade does not activate or
 requalify that staged protocol.
 
+The optional native-dispatch caller list retains the prior approved production
+workflow and adds the reviewed regression-coverage variant. A changed helper
+closure remains ineligible until protected approval matches; ordinary dispatch
+contracts still execute when proof is unavailable. This does not qualify
+historical artifacts or claim native-reuse timing acceptance.
+
 The build-push step explicitly disables `DOCKER_BUILD_SUMMARY` and
 `DOCKER_BUILD_RECORD_UPLOAD` at step scope to preserve prior defaults, without
 adding a `.dockerbuild` artifact.
