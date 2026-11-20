@@ -141,36 +141,7 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 
 // Exact workflow authorizations are added only in a separately promoted,
 // short-lived policy change and removed immediately after their intended PR.
-const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
-  {
-    id: "review-fixes-production-build-source-20261120-v1",
-    repository: "vasilyevstan/betstan",
-    headRepository: "vasilyevstan/betstan",
-    workflowPath: ".github/workflows/production-build.yml",
-    trustedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
-    authorizedBlob: "e1235e30437714325cda6b655368eefe66bc9d76",
-    pullNumber: null,
-    headRef: "fix/review-runtime-and-reliability",
-    baseRef: "dev",
-    issuedAt: "2026-11-20T11:11:56.000Z",
-    expiresAt: "2026-11-22T11:11:56.000Z",
-    receiptSha: "03095fbb7cc0e92625ca5e1ae9dba32652832981",
-  },
-  {
-    id: "review-fixes-production-build-promotion-20261120-v1",
-    repository: "vasilyevstan/betstan",
-    headRepository: "vasilyevstan/betstan",
-    workflowPath: ".github/workflows/production-build.yml",
-    trustedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
-    authorizedBlob: "e1235e30437714325cda6b655368eefe66bc9d76",
-    pullNumber: null,
-    headRef: "dev",
-    baseRef: "master",
-    issuedAt: "2026-11-20T11:11:56.000Z",
-    expiresAt: "2026-11-22T11:11:56.000Z",
-    receiptSha: "03095fbb7cc0e92625ca5e1ae9dba32652832981",
-  },
-]);
+const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS = Object.freeze(
   JSON.parse(TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON),

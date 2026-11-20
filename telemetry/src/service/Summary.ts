@@ -70,7 +70,7 @@ export class MongoSummaryStore implements SummaryStore, HourlySummaryStore {
           count: { $sum: 1 },
         },
       },
-    ]);
+    ]).option({ timeoutMS: 5000 });
   }
 
   async aggregateHourly(

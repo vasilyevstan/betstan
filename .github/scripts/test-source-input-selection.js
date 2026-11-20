@@ -73,7 +73,7 @@ function testServiceFeedback() {
   assert.equal(feedback.jobs.tests.needs, "scope");
   assert.equal(feedback.jobs.tests.if, "needs.scope.outputs.has_tests == 'true'");
   assert.equal(feedback.jobs.tests.steps.find((step) => step.uses?.startsWith("actions/setup-node@"))
-    .with["node-version"], "20.19.5");
+    .with["node-version"], "24.22.3");
   assert.deepEqual(feedback.jobs.tests.steps.filter((step) => step.run).map((step) => step.run),
     ["npm ci", "npm run test:ci"]);
   for (const job of Object.values(feedback.jobs)) {

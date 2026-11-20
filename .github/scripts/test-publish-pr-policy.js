@@ -5618,69 +5618,7 @@ async function main() {
       receiptSha: "d007b67d1206034b61ccb6cc7063d9ac3f00bacb",
     },
   ];
-  const expectedReviewFixesAuthorizations = [
-    {
-      id: "review-fixes-production-build-source-20261120-v1",
-      repository: "vasilyevstan/betstan",
-      headRepository: "vasilyevstan/betstan",
-      workflowPath: ".github/workflows/production-build.yml",
-      trustedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
-      authorizedBlob: "e1235e30437714325cda6b655368eefe66bc9d76",
-      pullNumber: null,
-      headRef: "fix/review-runtime-and-reliability",
-      baseRef: "dev",
-      issuedAt: "2026-11-20T11:11:56.000Z",
-      expiresAt: "2026-11-22T11:11:56.000Z",
-      receiptSha: "03095fbb7cc0e92625ca5e1ae9dba32652832981",
-    },
-    {
-      id: "review-fixes-production-build-promotion-20261120-v1",
-      repository: "vasilyevstan/betstan",
-      headRepository: "vasilyevstan/betstan",
-      workflowPath: ".github/workflows/production-build.yml",
-      trustedBlob: "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
-      authorizedBlob: "e1235e30437714325cda6b655368eefe66bc9d76",
-      pullNumber: null,
-      headRef: "dev",
-      baseRef: "master",
-      issuedAt: "2026-11-20T11:11:56.000Z",
-      expiresAt: "2026-11-22T11:11:56.000Z",
-      receiptSha: "03095fbb7cc0e92625ca5e1ae9dba32652832981",
-    },
-  ];
-  const configuredWorkflowAuthorizationTime = "2026-11-20T11:11:57.000Z";
-  assert.deepEqual(
-    publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    expectedReviewFixesAuthorizations,
-  );
-  for (const authorization of expectedReviewFixesAuthorizations) {
-    const lookup = {
-      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
-      repository: authorization.repository,
-      workflowPath: authorization.workflowPath,
-      trustedBlob: authorization.trustedBlob,
-      authorizedBlob: authorization.authorizedBlob,
-      pull: {
-        number: 999,
-        state: "open",
-        headRepository: authorization.headRepository,
-        headRef: authorization.headRef,
-        baseRef: authorization.baseRef,
-      },
-      now: configuredWorkflowAuthorizationTime,
-    };
-    assert.deepEqual(
-      publishPrPolicy.findWorkflowAuthorization(lookup),
-      authorization,
-    );
-    assert.equal(
-      publishPrPolicy.findWorkflowAuthorization({
-        ...lookup,
-        pull: { ...lookup.pull, state: "closed" },
-      }),
-      null,
-    );
-  }
+  assert.deepEqual(publishPrPolicy.trustedWorkflowBlobAuthorizations, []);
   for (const authorization of retiredNativeDispatchWorkflowAuthorizations) {
     const lookup = {
       authorizations: retiredNativeDispatchWorkflowAuthorizations,
@@ -5692,7 +5630,6 @@ async function main() {
     };
     assert.equal(publishPrPolicy.findWorkflowAuthorization({
       ...lookup, authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
-      now: configuredWorkflowAuthorizationTime,
     }), null, "adoption must retain no live production-caller authorization");
     assert.deepEqual(publishPrPolicy.findWorkflowAuthorization(lookup), authorization);
     for (const mismatch of [
@@ -5722,7 +5659,7 @@ async function main() {
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: configuredWorkflowAuthorizationTime,
+        now: "2026-11-05T11:33:00.000Z",
       }),
       null,
     );
@@ -5740,7 +5677,7 @@ async function main() {
           headRef: authorization.headRef,
           baseRef: authorization.baseRef,
         },
-        now: configuredWorkflowAuthorizationTime,
+        now: "2026-11-05T11:33:00.000Z",
       }),
       null,
     );
@@ -5759,7 +5696,7 @@ async function main() {
         headRef: "ci/lean-production-build-blob",
         baseRef: "dev",
       },
-      now: configuredWorkflowAuthorizationTime,
+      now: "2026-11-05T11:33:00.000Z",
     }),
     null,
   );
@@ -5841,7 +5778,7 @@ async function main() {
           headRef: retired.headRef,
           baseRef: retired.baseRef,
         },
-        now: configuredWorkflowAuthorizationTime,
+        now: "2026-11-05T11:33:00.000Z",
       }),
       null,
     );

@@ -291,6 +291,12 @@ The browser stream is intentionally recoverable. Sequence checks reject stale
 updates, and terminal state is reconciled against the REST projection so a
 missed or reordered stream message does not become final truth.
 
+Each Event pod retains at most 128 recently updated snapshots and their
+sequence guards. Eviction does not remove stream subscribers. Subsequent
+fanout rebuilds from the durable projection, which remains the replay and
+lifecycle authority; clients may see the latest frame again, as after restart,
+but an older update cannot replace that persisted state.
+
 At most six non-terminal live products are projected into the actionable UI.
 The authoritative snapshot retains closed and settled versions so Moderation
 can validate an accepted historical quote and Resulting can replay settlement

@@ -209,7 +209,7 @@ describe("retained real Mongo hourly data", () => {
     expect(summary.values).toEqual(Array(24).fill(0));
   });
 
-  it("forwards only hourly timeoutMS through Mongoose without changing daily options", async () => {
+  it("forwards the driver deadline through Mongoose for daily and hourly queries", async () => {
     const start = retainedDay();
     const end = new Date(start.getTime() + 86400000);
     const aggregate = jest.spyOn(TelemetryRecordModel.collection, "aggregate");
@@ -226,70 +226,82 @@ describe("retained real Mongo hourly data", () => {
         },
       ], { timeoutMS: 5000 });
       await store.aggregate(start, end);
-      expect(aggregate.mock.calls[1][1]).toEqual({});
+      expect(aggregate.mock.calls[1][1]).toEqual({ timeoutMS: 5000 });
     } finally {
       aggregate.mockRestore();
     }
   });
 
-  it("enforces actual driver CSOT on a slow Mongo command and permits a later query", async () => {
-    const start = retainedDay();
-    await TelemetryRecordModel.create({
-      _id: "csot-test",
-      metric: "BET_PLACED",
-      occurredAt: start,
-    });
-    // Use the same harness database with the installed Mongoose driver.
-    // Command monitoring is test-local, never a production connection option.
-    const client = new mongoose.mongo.MongoClient(
-      `mongodb://${mongoose.connection.host}:${mongoose.connection.port}`,
-      { monitorCommands: true }
-    );
-    const commands: Record<string, any>[] = [];
-    client.on("commandStarted", (event) => {
-      if (event.commandName === "aggregate") {
-        commands.push(event.command);
-      }
-    });
-    await client.connect();
-    const collection = client.db(mongoose.connection.name)
-      .collection(TelemetryRecordModel.collection.name);
-    const aggregate = jest.spyOn(TelemetryRecordModel.collection, "aggregate")
-      .mockImplementationOnce((pipeline, options) =>
-        collection.aggregate([
-          ...pipeline!,
-          {
-            $match: {
-              $expr: {
-                $function: {
-                  body: "function() { const end = Date.now() + 15000; "
-                    + "while (Date.now() < end) {} return true; }",
-                  args: [],
-                  lang: "js",
+  it.each(["daily", "hourly"] as const)(
+    "enforces actual driver CSOT on a slow %s command and permits a later query",
+    async (kind) => {
+      const start = retainedDay();
+      await TelemetryRecordModel.create({
+        _id: "csot-test",
+        metric: "BET_PLACED",
+        occurredAt: start,
+      });
+      // Use the same harness database with the installed Mongoose driver.
+      // Command monitoring is test-local, never a production connection option.
+      const client = new mongoose.mongo.MongoClient(
+        `mongodb://${mongoose.connection.host}:${mongoose.connection.port}`,
+        { monitorCommands: true }
+      );
+      const commands: Record<string, unknown>[] = [];
+      client.on("commandStarted", (event) => {
+        if (event.commandName === "aggregate") {
+          commands.push(event.command);
+        }
+      });
+      await client.connect();
+      const collection = client.db(mongoose.connection.name)
+        .collection(TelemetryRecordModel.collection.name);
+      const aggregate = jest.spyOn(TelemetryRecordModel.collection, "aggregate")
+        .mockImplementationOnce((pipeline, options) =>
+          collection.aggregate([
+            ...pipeline!,
+            {
+              $match: {
+                $expr: {
+                  $function: {
+                    body: "function() { const end = Date.now() + 15000; "
+                      + "while (Date.now() < end) {} return true; }",
+                    args: [],
+                    lang: "js",
+                  },
                 },
               },
             },
-          },
-        ], options)
-      );
-    try {
-      const began = Date.now();
-      await expect(new MongoSummaryStore().aggregateHourly(
-        "BET_PLACED", start, new Date(start.getTime() + 86400000)
-      )).rejects.toMatchObject({ name: "MongoOperationTimeoutError" });
-      expect(Date.now() - began).toBeLessThan(14000);
-      expect(commands).toHaveLength(1);
-      // CSOT derives this server-side budget; the application sets no maxTimeMS.
-      expect(commands[0].maxTimeMS).toBeGreaterThan(0);
-      expect(commands[0].maxTimeMS).toBeLessThanOrEqual(5000);
-      expect(commands[0]).not.toHaveProperty("timeoutMS");
-      expect(aggregate.mock.calls[0][1]).toEqual({ timeoutMS: 5000 });
-      await expect(new MongoSummaryStore().aggregateHourly(
-        "BET_PLACED", start, new Date(start.getTime() + 86400000)
-      )).resolves.toEqual([{ _id: 0, count: 1 }]);
-    } finally {
-      aggregate.mockRestore();
-      await client.close();
+          ], options)
+        );
+      const store = new MongoSummaryStore();
+      const query = () => kind === "daily"
+        ? store.aggregate(start, new Date(start.getTime() + 86400000))
+        : store.aggregateHourly(
+          "BET_PLACED", start, new Date(start.getTime() + 86400000)
+        );
+      try {
+        const began = Date.now();
+        await expect(query()).rejects.toMatchObject({
+          name: "MongoOperationTimeoutError",
+        });
+        expect(Date.now() - began).toBeLessThan(14000);
+        expect(commands).toHaveLength(1);
+        // CSOT derives this server-side budget; the application sets no maxTimeMS.
+        expect(commands[0].maxTimeMS).toBeGreaterThan(0);
+        expect(commands[0].maxTimeMS).toBeLessThanOrEqual(5000);
+        expect(commands[0]).not.toHaveProperty("timeoutMS");
+        expect(aggregate.mock.calls[0][1]).toEqual({ timeoutMS: 5000 });
+        await expect(query()).resolves.toEqual([{
+          _id: kind === "daily"
+            ? { metric: "BET_PLACED", date: start.toISOString().slice(0, 10) }
+            : 0,
+          count: 1,
+        }]);
+      } finally {
+        aggregate.mockRestore();
+        await client.close();
+      }
     }
-  });
+  );
 });

@@ -346,11 +346,23 @@ Overall flow and timing acceptance remain incomplete.
 ### Actions runtime and compatible pins
 
 JavaScript actions use an action-host Node runtime, separate from the Node
-version installed for application tests. The compatible immutable pin update
-selects Node 24 for nine action families; application/test `node-version: 20`,
-container bases, and package versions are unchanged. Compatibility retains
+version installed for application tests. Immutable action pins select Node 24
+for nine action families. The maintained application build/test baseline is
+Node 24.22.3; service and OCI Dockerfiles pin its Alpine 3.24 multiarchitecture
+image digest, and active Node setup steps use the same exact Node version.
+Package dependencies and Common consumer pins are unchanged. Compatibility retains
 authentication and masking, isolation, cache behavior, permissions,
 conditions, immutable image provenance, and artifact retention.
+
+The disabled `source-quality.yml` retains its previously qualified Node 20
+execution profile. This application-runtime upgrade does not activate or
+requalify that staged protocol.
+
+The optional native-dispatch caller list retains the prior approved production
+workflow and adds the reviewed regression-coverage variant. A changed helper
+closure remains ineligible until protected approval matches; ordinary dispatch
+contracts still execute when proof is unavailable. This does not qualify
+historical artifacts or claim native-reuse timing acceptance.
 
 The build-push step explicitly disables `DOCKER_BUILD_SUMMARY` and
 `DOCKER_BUILD_RECORD_UPLOAD` at step scope to preserve prior defaults, without
@@ -369,6 +381,25 @@ affected workflow runs. Skipped paths are not execution evidence and must not
 be activated solely to demonstrate the upgrade. Corrections and reverts
 retain the same protected review and one-use rules. See
 [[Release Orchestration]].
+
+### Application and transport regression coverage
+
+The existing required coverage matrix runs backend typechecks and Jest, plus
+the production Client build. Client coverage collects implementation JS/JSX
+across `src/`, excluding tests and `setupTests.js`, while retaining the same
+80-percent line/branch thresholds. Its matrix job also runs the existing
+mocked Playwright suite with locked Chromium. Changes to the protected
+production acceptance spec select this Client job because its helper interface
+is exercised without running production setup or cleanup.
+
+Resulting's matrix job additionally runs
+`npm run test:ci -- --runInBand --testMatch='**/cashBackTransport.integration.ts'`
+with `CASH_BACK_INTEGRATION=1`, run-owned loopback MongoDB/RabbitMQ endpoints
+and locked dependencies for its Backoffice, Bet and Gamemaster participants.
+Those participant changes also select Resulting. Only that matrix job starts
+the transport service containers; fixture endpoint guards remain mandatory.
+This is real isolated transport coverage, not authorization to run protected
+production acceptance from ordinary CI.
 
 ### Metadata-neutral quality transitions
 
@@ -513,6 +544,11 @@ focus, or dynamic interaction. A screenshot-only assertion is not enough.
 - ordering is stable and preserves IDs;
 - all required states remain visible and understandable;
 - layouts avoid overflow and unnecessary vertical growth.
+
+Browser geometry must pass with the native font stack in CI, not only on a
+developer workstation. Keep compactness, 44px targets, 200% text, and overflow
+assertions intact when fallback font metrics differ; correct wrapping or
+flexible control widths rather than increasing test limits.
 
 ## Release and production gates
 
