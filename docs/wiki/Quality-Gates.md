@@ -545,6 +545,11 @@ focus, or dynamic interaction. A screenshot-only assertion is not enough.
 - all required states remain visible and understandable;
 - layouts avoid overflow and unnecessary vertical growth.
 
+Browser geometry must pass with the native font stack in CI, not only on a
+developer workstation. Keep compactness, 44px targets, 200% text, and overflow
+assertions intact when fallback font metrics differ; correct wrapping or
+flexible control widths rather than increasing test limits.
+
 ## Release and production gates
 
 Before deployment:
