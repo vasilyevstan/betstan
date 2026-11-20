@@ -477,7 +477,10 @@ const DISPATCH_CALLER_BLOBS = Object.freeze({
     "7bbe29e2bebd4b2054c27824c07d63dc33d366ca",
     "8a263fb9dd649a68fa94e7fb3eafd36cd43e1e41",
   ],
-  ".github/workflows/production-build.yml": ["8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"],
+  ".github/workflows/production-build.yml": [
+    "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84",
+    "e1235e30437714325cda6b655368eefe66bc9d76",
+  ],
 });
 const DISPATCH_TOOLS = Object.freeze([
   "bash", "python3", "ruby", "git", "gh", "node", "jq", "curl", "tar", "zip", "unzip",

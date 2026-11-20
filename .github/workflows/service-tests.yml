@@ -84,7 +84,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: "20.19.5"
+          node-version: "24.22.3"
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
       - name: Install locked dependencies

@@ -475,7 +475,7 @@ jobs:
       - name: Install browser acceptance dependencies
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: "18"
+          node-version: "24.22.3"
 
       - name: Install locked client and Chromium
         run: |
