@@ -797,6 +797,7 @@ oci_deploy_script = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 trusted_build_workflow_blob = "1e3118276cc4746e824303245339c25de4411c15"
 lean_build_workflow_blob = "7f036e038c780d929417ea7e9f6227bdf9d5fb89"
 native_dispatch_build_workflow_blob = "8d9f264ea75645a7eb2571bfdfa3d771d4f61c84"
+regression_build_workflow_blob = "e1235e30437714325cda6b655368eefe66bc9d76"
 trusted_build_restoration = build_workflow_blob == trusted_build_workflow_blob
 
 expected_azure_order = [
@@ -831,7 +832,10 @@ approved_action_refs = {
     "docker/build-push-action": "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
     "actions/upload-artifact": "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
 }
-if build_workflow_blob == native_dispatch_build_workflow_blob:
+if build_workflow_blob in (
+    native_dispatch_build_workflow_blob,
+    regression_build_workflow_blob,
+):
     approved_action_refs["actions/github-script"] = "ed597411d8f924073f98dfc5c65a23a2325f34cd"
 full_sha_pattern = re.compile(r"^[0-9a-f]{40}$")
 
@@ -844,6 +848,7 @@ if build_workflow_blob not in (
     trusted_build_workflow_blob,
     lean_build_workflow_blob,
     native_dispatch_build_workflow_blob,
+    regression_build_workflow_blob,
 ):
     fail(
         "production-build.yml is neither the trusted restoration nor "
@@ -1213,6 +1218,35 @@ selector_fixtures = {
         },
     ),
 }
+if build_workflow_blob == regression_build_workflow_blob:
+    for participant in ("backoffice", "bet", "gamemaster"):
+        selector_fixtures[f"transport-{participant}"] = (
+            [f"{participant}/src/index.ts"],
+            "pull_request",
+            {
+                "auth_smoke": "false",
+                "coverage_needed": "true",
+                "coverage_matrix": {
+                    "service": [
+                        service for service in all_services
+                        if service in {participant, "resulting"}
+                    ]
+                },
+                "deployment_safety": "none",
+                "runtime_validation": "false",
+            },
+        )
+    selector_fixtures["production-acceptance-helper"] = (
+        ["infra/oci/agents/oci-live-acceptance.spec.js"],
+        "pull_request",
+        {
+            "auth_smoke": "false",
+            "coverage_needed": "true",
+            "coverage_matrix": {"service": ["client"]},
+            "deployment_safety": "none",
+            "runtime_validation": "false",
+        },
+    )
 for name, (paths, event_name, expected) in selector_fixtures.items():
     actual = run_change_scope(paths, event_name)
     actual["coverage_matrix"] = json.loads(actual["coverage_matrix"])
