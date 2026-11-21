@@ -1,8 +1,9 @@
 import http from "http";
 import https from "https";
 import { IModerationAffectedRow, ModerationDeclineReason } from "@betstan/common";
+import { builtinMarketId } from "./BuiltinMarkets";
 
-export interface RiskSourceCheck { kickoffAt: string; affectedRows: IModerationAffectedRow[] }
+export interface RiskSourceCheck { kickoffAt: string; affectedRows: IModerationAffectedRow[]; marketTypes?: string[] }
 
 export async function readEventAuthority(path: string): Promise<unknown> {
   const configured = process.env.EVENT_SERVICE_URL;
@@ -37,7 +38,7 @@ export async function readEventAuthority(path: string): Promise<unknown> {
  * existing per-event catalogue. This is a bounded evidence cut, not a remote
  * market lock or globally linearizable source-to-admission protocol.
  */
-export async function verifyRiskSource(eventId: string, rows: any[], now = new Date()): Promise<RiskSourceCheck> {
+export async function verifyRiskSource(eventId: string, rows: any[], now = new Date(), requireMarketTypes = false): Promise<RiskSourceCheck> {
   const catalogue: any = await readEventAuthority(`/api/event/events/${encodeURIComponent(eventId)}/markets`);
   if (catalogue === null) throw new Error("Event authority unavailable");
   if (!catalogue?.event || catalogue.event.eventId !== eventId
@@ -45,13 +46,27 @@ export async function verifyRiskSource(eventId: string, rows: any[], now = new D
     || !["NO_RESULT", "RESULTED"].includes(catalogue.event.status)
     || !Number.isFinite(Date.parse(catalogue.event.time))) throw new Error("Incomplete Event authority");
   const affectedRows: IModerationAffectedRow[] = [];
-  const result = { kickoffAt: catalogue.event.time, affectedRows };
+  const result: RiskSourceCheck = {
+    kickoffAt: catalogue.event.time, affectedRows, ...(requireMarketTypes ? { marketTypes: [] } : {}),
+  };
   if (catalogue.event.visibility !== "ONLINE" || catalogue.event.status !== "NO_RESULT") {
     affectedRows.push(...rows.map(row => ({ rowId: row.id, declineReason: catalogue.event.status === "RESULTED"
       ? ModerationDeclineReason.EVENT_RESULTED : ModerationDeclineReason.RISK_POLICY })));
     return result;
   }
   for (const row of rows) {
+    if (requireMarketTypes && row.betKind !== "LIVE") {
+      const productIds = row.marketBet
+        ? row.marketBet.selections.filter((selection: any) => selection.origin === "STANDARD").map((selection: any) => selection.marketId)
+        : [row.productId];
+      for (const productId of productIds) {
+        if (!Array.isArray(catalogue.standardMarkets)) throw new Error("Built-in market authority unavailable");
+        const matches = catalogue.standardMarkets.filter((product: any) => product.marketId === productId);
+        const id = matches.length === 1 ? builtinMarketId("PRE_MATCH", matches[0].marketType) : undefined;
+        if (!id) throw new Error("Incomplete built-in market type authority");
+        result.marketTypes!.push(id);
+      }
+    }
     if (row.betKind === "LIVE" && catalogue.event.liveEnabled === false) {
       affectedRows.push({ rowId: row.id, declineReason: ModerationDeclineReason.RISK_POLICY });
       continue;
@@ -70,5 +85,6 @@ export async function verifyRiskSource(eventId: string, rows: any[], now = new D
       rowId: row.id, declineReason: ModerationDeclineReason.STALE_QUOTE, currentOdds: exact[0].odds,
     });
   }
+  if (result.marketTypes) result.marketTypes = [...new Set(result.marketTypes)].sort();
   return result;
 }

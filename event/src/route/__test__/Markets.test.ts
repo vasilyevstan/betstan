@@ -165,8 +165,11 @@ it("rejects other owners, price tampering, expiry and disabled new acceptance", 
 });
 
 it("exposes public odds previews but requires the registered owner to issue or retrieve a quote", async () => {
-  await createEvent();
+  const event = await createEvent();
   await enableMarket(manual, "manual");
+  const catalogue = await request(app).get("/api/event/events/event-a/markets").expect(200);
+  expect(catalogue.body.standardMarkets).toEqual(event.products.map(product => ({ marketId: product.id, marketType: product.type })));
+  expect(catalogue.body.standardSelections).toEqual(standardSelections((await findMarketEvent("event-a"))!));
   const preview = await request(app).post("/api/event/events/event-a/markets/preview")
     .send({ definition: manual, parameters: {}, generation: { method: "WEIGHTS", values: { one: 1, two: 3 } } }).expect(200);
   expect(preview.body.odds.one).toBeGreaterThan(preview.body.odds.two);
@@ -219,7 +222,7 @@ it("retains suspended published custom choices alongside exact standard identiti
   const response = await request(app).get("/api/event/risk-events/event-a").expect(200);
   expect(response.body.choices).toEqual(expect.arrayContaining([
     expect.objectContaining({ origin: "STANDARD", marketId: event.products[0].id,
-      outcomeKey: event.products[0].odds[0].id, sourceOpen: true }),
+      outcomeKey: event.products[0].odds[0].id, sourceOpen: true, marketType: event.products[0].type }),
     expect.objectContaining({ origin: "TEMPLATE", marketId: "award", outcomeKey: "one", sourceOpen: false }),
   ]));
 });

@@ -32,6 +32,7 @@ const scopeLists = [
   ['eventIds', 'Event IDs'], ['productIds', 'Product IDs'],
   ['marketIds', 'Market IDs'], ['templateIds', 'Template IDs'],
   ['selectionIds', 'Choice keys (managed in Events)'],
+  ['marketTypes', 'Built-in types (managed in Markets)'],
 ];
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hasReadinessField = (accounting, field) => Object.prototype.hasOwnProperty.call(accounting, field);
@@ -76,6 +77,11 @@ const validRules = rules => Array.isArray(rules) && rules.length <= 128
     && typeof rule.enabled === 'boolean' && plain(rule.scope) && plain(rule.parameters));
 const validRevision = data => plain(data) && Number.isSafeInteger(data.revision) && data.revision > 0
   && data.defaultsVersion === 1 && validRules(data.rules);
+const validBuiltinMarkets = markets => Array.isArray(markets) && markets.length > 0 && markets.length <= 32
+  && new Set(markets.map(market => market?.id)).size === markets.length
+  && markets.every(market => plain(market) && typeof market.id === 'string' && idPattern.test(market.id)
+    && typeof market.name === 'string' && market.name.trim().length > 0
+    && ['PRE_MATCH', 'LIVE'].includes(market.betKind) && market.id.startsWith(`${market.betKind}:`));
 const validSnapshot = data => validRevision(data) && Array.isArray(data.catalogue)
   && data.catalogue.every(entry => plain(entry) && typeof entry.type === 'string'
     && typeof entry.label === 'string' && typeof entry.category === 'string'
@@ -86,6 +92,7 @@ const validSnapshot = data => validRevision(data) && Array.isArray(data.catalogu
       && ['number', 'select', 'boolean'].includes(parameter.type)
       && (parameter.type !== 'select' || Array.isArray(parameter.options))
     )))
+  && (!hasReadinessField(data, 'builtinMarkets') || validBuiltinMarkets(data.builtinMarkets))
   && plain(data.readiness) && ['READY', 'UNAVAILABLE'].includes(data.readiness.transactions)
   && validAccounting(data.readiness.accounting, data.catalogue)
   && (!hasReadinessField(data.readiness, 'activity') || validActivity(data.readiness.activity, data.catalogue))
@@ -105,7 +112,7 @@ const scopeValueNames = {
 };
 const describeScope = (scope, templateNames) => Object.entries(scope).map(([key, value]) => (
   scopeValueNames[key]?.[value]
-    || (key === 'templateIds' && templateNames && Array.isArray(value)
+    || (['templateIds', 'marketTypes'].includes(key) && templateNames && Array.isArray(value)
       ? `Market: ${value.map(id => templateNames.get(id) || id).join(', ')}`
       : `${scopeLists.find(([name]) => name === key)?.[1] || key}: ${Array.isArray(value) ? value.join(', ') : value}`)
 )).join('; ') || 'All bets';
@@ -156,10 +163,12 @@ const describeRule = (rule, catalogue) => {
   const entry = catalogue.find(item => item.type === rule.type);
   return `${onOff(rule.enabled)} · ${describeParameters(rule.parameters, entry)}`;
 };
-const marketSwitch = rule => rule.type === 'DENY' && Object.keys(rule.scope).join() === 'templateIds';
+const marketSwitch = rule => rule.type === 'DENY' && ['templateIds', 'marketTypes'].some(field => (
+  Object.keys(rule.scope).join() === field && Array.isArray(rule.scope[field])
+));
 // An enabled Block bets rule with no scope declines every new bet, pre-match and live.
 const closesBetting = rule => rule.type === 'DENY' && rule.enabled && !Object.keys(rule.scope).length;
-const marketNames = (rule, templateNames) => rule.scope.templateIds.map(id => templateNames?.get(id) || id).join(', ');
+const marketNames = (rule, templateNames) => (rule.scope.templateIds || rule.scope.marketTypes).map(id => templateNames?.get(id) || id).join(', ');
 // Human-readable differences between two complete policy revisions.
 export const describeChanges = (before, after, catalogue, templateNames) => {
   const previous = new Map(before.rules.map(rule => [rule.id, rule]));
@@ -197,8 +206,10 @@ const formatTime = value => {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 };
 const templateName = template => template.versions?.[template.versions.length - 1]?.definition?.name || template.templateId;
-const marketRuleId = templateId => `market:${templateId}`;
-const blocksTemplate = (rule, templateId) => marketSwitch(rule) && rule.enabled && rule.scope.templateIds.includes(templateId);
+const marketRuleId = id => `market:${id}`;
+const blocksMarket = (rule, market) => marketSwitch(rule) && rule.enabled && rule.scope[market.field]?.includes(market.id);
+const ownsMarket = (rule, market) => marketSwitch(rule) && !Object.keys(rule.parameters).length
+  && rule.scope[market.field]?.length === 1 && rule.scope[market.field][0] === market.id;
 const validAccess = data => plain(data) && typeof data.registrationEnabled === 'boolean' && typeof data.loginEnabled === 'boolean';
 const validCashBack = data => plain(data) && typeof data.enabled === 'boolean' && Number.isSafeInteger(data.revision);
 const validTemplates = data => plain(data) && Array.isArray(data.templates) && data.templates.every(template => (
@@ -524,13 +535,17 @@ export default function RiskCentre() {
         : 'The save result could not be verified. Keep this page open and retry the same operation.');
     } finally { if (mounted.current) setBusy(false); }
   };
-  const switchMarket = (template, off) => {
+  const switchMarket = (market, off) => {
     if (readOnly || frozen) return;
-    const id = marketRuleId(template.templateId);
+    const id = marketRuleId(market.id);
     const own = snapshot.rules.find(rule => rule.id === id);
-    const name = templateName(template);
+    if (own && !ownsMarket(own, market)) {
+      setError('This market switch rule was changed. Review it in Rules before switching this market.');
+      return;
+    }
+    const name = market.label || market.name;
     const body = { expectedRevision: snapshot.revision, requestId: newId('save') };
-    const rule = { id, type: 'DENY', enabled: true, scope: { templateIds: [template.templateId] }, parameters: {} };
+    const rule = { id, type: 'DENY', enabled: true, scope: { [market.field]: [market.id] }, parameters: {} };
     execute(off ? {
       method: own ? 'PUT' : 'POST', url: own ? `${API}/rules/${id}` : `${API}/rules`, ruleId: id, kind: 'market',
       label: `${name} is off for all events. New bets on it are declined.`, body: { ...body, rule },
@@ -641,11 +656,19 @@ export default function RiskCentre() {
   const visible = items.filter(item => (!category || item.catalogue?.category === category)
     && `${ruleName(item.catalogue)} ${item.catalogue?.label} ${item.id} ${item.catalogue?.description}`.toLowerCase().includes(query.toLowerCase()));
   const templateNames = new Map((templates?.templates || []).map(template => [template.templateId, templateName(template)]));
-  // Market switch rules exist only for library templates, so a missing one was deleted.
-  if (templates) items.filter(marketSwitch).forEach(rule => rule.scope.templateIds
+  (snapshot?.builtinMarkets || []).forEach(market => templateNames.set(market.id, market.name));
+  if (templates) items.filter(rule => marketSwitch(rule) && rule.scope.templateIds).forEach(rule => rule.scope.templateIds
     .filter(id => rule.id === marketRuleId(id) && !templateNames.has(id))
     .forEach(id => templateNames.set(id, DELETED_MARKET)));
-  const liveTemplates = (templates?.templates || []).filter(template => !template.archived);
+  const markets = [
+    ...(snapshot?.builtinMarkets || []).map(market => ({
+      ...market, field: 'marketTypes', detail: `Built-in / ${market.betKind === 'LIVE' ? 'Live' : 'Pre-match'}`,
+    })),
+    ...(templates?.templates || []).map(template => ({
+      id: template.templateId, name: templateName(template), field: 'templateIds',
+      detail: template.archived ? 'Template / Archived' : 'Template',
+    })),
+  ];
   const ownBetting = snapshot?.rules.find(rule => rule.id === BETTING_RULE_ID && closesBetting(rule));
   const bettingClosed = Boolean(snapshot?.rules.some(closesBetting));
   const overlapping = draft && entry && !entry.locked ? snapshot.rules.filter(rule => rule.id !== draft.id
@@ -737,19 +760,23 @@ export default function RiskCentre() {
         </section>
         <section className="risk-switch" aria-labelledby="risk-markets-title">
           <h3 className="h6" id="risk-markets-title">Markets</h3>
-          <p className="market-help">Turning a market off declines new bets on it in every event. Built-in markets (1X2, Correct Score and live markets) can't be switched here yet.</p>
+          <p className="market-help">All built-in market types and saved templates. Turning one off blocks new bets on it in every event, including Bet Builder. Other rules and event availability still apply; turning on does not unarchive a template.</p>
+          {!snapshot.builtinMarkets ? <p className="market-help">Built-in market switches are unavailable in this deployment.</p> : null}
           {templates && !templates.enabled ? <p className="market-help">Custom markets are turned off in this deployment.</p> : null}
-          {!templates && switchesLoaded ? <p className="market-help">Markets are unavailable. Try refreshing.</p> : null}
-          {templates && !liveTemplates.length ? <p className="market-help">No custom markets yet. Create one in <Link to={`/backoffice/markets${search}`}>Market designer</Link>.</p> : null}
-          {liveTemplates.length ? <ul className="risk-switch-list">{liveTemplates.map(template => {
-            const name = templateName(template);
-            const own = snapshot.rules.find(rule => rule.id === marketRuleId(template.templateId) && rule.enabled);
-            const blocked = snapshot.rules.some(rule => blocksTemplate(rule, template.templateId));
-            return <li key={template.templateId}>
-              <span className="risk-switch-list__name">{name}</span>
+          {!templates && switchesLoaded ? <p className="market-help">Custom market templates are unavailable. Try refreshing.</p> : null}
+          {templates && !templates.templates.length ? <p className="market-help">No custom markets yet. Create one in <Link to={`/backoffice/markets${search}`}>Market designer</Link>.</p> : null}
+          {markets.length ? <ul className="risk-switch-list">{markets.map(market => {
+            const { name } = market;
+            const label = markets.some(other => other !== market && other.name === name) ? `${name} (${market.detail})` : name;
+            const existing = snapshot.rules.find(rule => rule.id === marketRuleId(market.id));
+            const conflict = Boolean(existing && !ownsMarket(existing, market));
+            const own = existing?.enabled && !conflict;
+            const blocked = snapshot.rules.some(rule => blocksMarket(rule, market));
+            return <li key={`${market.field}:${market.id}`}>
+              <span className="risk-switch-list__name">{name}<small>{market.detail}</small></span>
               <RuleStatus enabled={!blocked} />
-              {own || !blocked ? <button type="button" className={action} disabled={readOnly || frozen || !idPattern.test(marketRuleId(template.templateId))}
-                aria-label={`${own ? 'Turn on' : 'Turn off'} ${name} for all events`} onClick={() => switchMarket(template, !own)}>
+              {conflict ? <small>Switch rule changed; manage it in Rules</small> : own || !blocked ? <button type="button" className={action} disabled={readOnly || frozen || !idPattern.test(marketRuleId(market.id))}
+                aria-label={`${own ? 'Turn on' : 'Turn off'} ${label} for all events`} onClick={() => switchMarket({ ...market, label }, !own)}>
                 {own ? 'Turn on' : 'Turn off'}
               </button> : <small>Off by a Block bets rule</small>}
             </li>;

@@ -28,6 +28,7 @@ export interface RiskChoiceOffer {
   templateId?: string;
   marketVersion?: number;
   selectionId?: string;
+  marketType?: string;
 }
 
 export async function listRiskEvents(after: unknown, limit: number, now = new Date()) {
@@ -48,7 +49,7 @@ export async function riskEventChoices(eventId: string, now = new Date()) {
   if (preMatch) {
     for (const product of event.products) for (const odd of product.odds) choices.push({
       origin: "STANDARD", marketId: product.id, outcomeKey: odd.id, marketName: product.name,
-      label: odd.name, odds: odd.value, betKind: "PRE_MATCH", sourceOpen: true,
+      label: odd.name, odds: odd.value, betKind: "PRE_MATCH", sourceOpen: true, marketType: product.type,
     });
     const catalogue = await marketCatalog(eventId);
     for (const market of catalogue.markets) {
@@ -68,6 +69,7 @@ export async function riskEventChoices(eventId: string, now = new Date()) {
       origin: "LIVE", marketId: market.marketId, outcomeKey: selection.selectionId,
       marketName: market.marketType.toLowerCase().replace(/_/g, " "), label: selection.label ?? selection.side,
       odds: selection.odds, betKind: "LIVE", marketVersion: market.marketVersion, selectionId: selection.selectionId,
+      marketType: market.marketType,
       sourceOpen: event.liveEnabled !== false && event.live?.bettingStatus === "OPEN" && market.status === "OPEN"
         && Number.isFinite(quoteUntil) && quoteUntil > now.getTime(),
     });

@@ -2,13 +2,14 @@ import { IModerationAffectedRow, IPlaceBetEvent, ModerationDecisionReasonCode, M
 import { ClientSession } from "mongoose";
 import { Bet } from "../model/Bet";
 import { ParkedPlaceBet, ParkedPlaceBetStatus } from "../model/ParkedPlaceBet";
-import { facts, ledgerReason, matching, money, positionFilter, selectionFingerprint, staticReason } from "./Evaluation";
+import { facts, ledgerReason, matching, money, positionFilter, requiresStandardMarketTypes, selectionFingerprint, staticReason } from "./Evaluation";
 import { financial, fingerprint, RiskError, Rule, windowStart } from "./Policy";
 import { accountingRuleReady, activityRuleReady, readBook, RiskBaseline, RiskMovement, RiskPosition, RiskState, transaction } from "./Store";
 import { LiveEventMirror } from "../model/LiveEventMirror";
 import { Resulted } from "../model/Resulted";
 import { declineForRisk, ModerationDecision, parseDecisionReason } from "./Decision";
 import { timingFailures } from "./Timing";
+import { builtinMarketId, builtinMarkets } from "./BuiltinMarkets";
 
 const identity = (data: any) => ({
   userId: data.userId, slipId: data.slipId, wager: data.wager,
@@ -109,7 +110,11 @@ export async function terminalRisk(slipId: string, decision: ModerationDecision,
     if (position.state !== "PENDING" || stored.status !== ModerationStatus.RECEIVED) return stored;
     if (now.toISOString() < position.decisionDueAt) throw new RiskError("DECISION_NOT_DUE", "Fixed delay has not elapsed", 409);
     let reason: ModerationDecisionReasonCode | undefined = position.reason ? parseDecisionReason(position.reason) : undefined;
-    const rules = matching(position.policy, position.event.data);
+    const standardRequired = requiresStandardMarketTypes(position.policy, position.event.data);
+    const standardReady = Array.isArray(decision.standardMarketTypes) && decision.standardMarketTypes.length > 0
+      && decision.standardMarketTypes.every(id => builtinMarkets.some(market => market.id === id && market.betKind === "PRE_MATCH"));
+    if (decision.status === ModerationStatus.APPROVED && !reason && standardRequired && !standardReady) reason = "RISK_EVIDENCE_UNAVAILABLE";
+    const rules = matching(position.policy, position.event.data, standardReady ? decision.standardMarketTypes : []);
     if (decision.status === ModerationStatus.APPROVED && !reason) {
       // Always re-evaluate cutoff-independent static rules and dynamic windows
       // under the same contended transaction as conversion of reservations.
@@ -157,6 +162,12 @@ export async function terminalRisk(slipId: string, decision: ModerationDecision,
           if (!Number.isFinite(kickoff) || now.getTime() >= kickoff) veto(row.id, "RISK_EVENT_STARTED");
         } else {
           const market = mirror?.markets?.find((m: any) => m.marketId === row.marketId && m.marketVersion === row.marketVersion);
+          const builtins = position.policy.rules.filter((rule: Rule) => rule.enabled && rule.scope.marketTypes?.some(id => id.startsWith("LIVE:")));
+          if (builtins.length) {
+            const id = builtinMarketId("LIVE", market?.marketType);
+            if (!id) veto(row.id, "RISK_EVIDENCE_UNAVAILABLE");
+            else if (builtins.some((rule: Rule) => rule.scope.marketTypes!.includes(id))) veto(row.id, "RISK_DENY");
+          }
           const selections = market?.selections?.filter((s: any) => row.selectionId ? s.selectionId === row.selectionId : s.side === row.side) ?? [];
           const eligible = mirror && (["FIRST_HALF", "FIRST_HALF_STOPPAGE", "HALF_TIME", "SECOND_HALF", "SECOND_HALF_STOPPAGE"].includes(mirror.phase)
             || (mirror.phase === "PRE_MATCH" && ["KICKOFF_TEAM", "FIRST_MINUTE_GOAL"].includes(market?.marketType)));

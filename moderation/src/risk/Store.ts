@@ -1,5 +1,6 @@
 import mongoose, { ClientSession, Schema } from "mongoose";
 import { catalogue, defaults, financial, fingerprint, key, object, parseRule, Policy, RiskError, Rule, validatePolicy, WINDOWS, windowStart } from "./Policy";
+import { builtinMarkets } from "./BuiltinMarkets";
 
 const document = (name: string, fields: Record<string, any>) =>
   mongoose.model<any>(name, new Schema({ _id: String, schemaVersion: { type: Number, default: 1 }, ...fields }, { strict: true, minimize: false }));
@@ -160,11 +161,11 @@ export async function getPolicy() {
     const stored = await RiskState.findById("active").lean() as any;
     return {
       revision: stored?.revision ?? 1, defaultsVersion: stored?.defaultsVersion ?? 1,
-      rules: stored?.rules ?? defaults(), catalogue: catalogue(), readiness: await readiness(false),
+      rules: stored?.rules ?? defaults(), catalogue: catalogue(), builtinMarkets, readiness: await readiness(false),
     };
   }
   // Transactional read also detects an unavailable/standalone database.
-  return transaction(async (session, policy, clock) => ({ ...policy, catalogue: catalogue(), readiness: await readiness(true, session, clock) }));
+  return transaction(async (session, policy, clock) => ({ ...policy, catalogue: catalogue(), builtinMarkets, readiness: await readiness(true, session, clock) }));
 }
 export type Mutation = "CREATE" | "UPDATE" | "DELETE" | "RESET";
 const operationsInFlight = new Map<string, { hash: string; work: Promise<any> }>();
@@ -204,6 +205,9 @@ export async function mutatePolicy(action: Mutation, value: unknown, pathId?: st
     if (action === "CREATE" || action === "UPDATE") {
       const rule = parseRule(body.rule);
       if (action === "UPDATE" && (rule.id !== pathId || rule.type !== current!.type)) throw new RiskError("RULE_IDENTITY_CONFLICT", "Rule identity and type are immutable", 409);
+      if (action === "UPDATE" && current!.scope.marketTypes && !rule.scope.marketTypes) {
+        throw new RiskError("RULE_SCOPE_CONFLICT", "A built-in market switch cannot become an unscoped rule; remove it instead", 409);
+      }
       if (action === "CREATE" && rules.some(r => r.id === rule.id)) throw new RiskError("RULE_EXISTS", "Rule already exists", 409);
       rules = action === "CREATE" ? [...rules, rule] : rules.map(r => r.id === pathId ? rule : r);
     } else if (action === "DELETE") {
