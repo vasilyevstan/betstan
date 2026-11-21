@@ -25,6 +25,12 @@ const createPolicy = () => {
   });
   return {
     revision: 1, defaultsVersion: 1,
+    builtinMarkets: [
+      { id: 'PRE_MATCH:1X2', name: '1X2', betKind: 'PRE_MATCH' },
+      { id: 'PRE_MATCH:CS', name: 'Correct Score', betKind: 'PRE_MATCH' },
+      { id: 'LIVE:NEXT_CORNER', name: 'Next corner (live)', betKind: 'LIVE' },
+      { id: 'LIVE:SECOND_HALF_TIME_RESULT', name: 'Second half time result (live)', betKind: 'LIVE' },
+    ],
     rules: catalogue.map(item => ({
       id: `default:${item.type}`, type: item.type, enabled: item.defaultEnabled,
       scope: {}, parameters: { ...item.defaultParameters },
@@ -132,6 +138,7 @@ async function installRiskApi(page, { uncertain = false, eventRisk = false } = {
   });
   await page.route('**/api/backoffice/market-templates**', route => reply(route, { enabled: true, starters: [], templates: [
     { templateId: TEMPLATE_ID, archived: false, versions: [{ version: 1, definition: { name: 'Total goals' } }] },
+    { templateId: 'b'.repeat(32), archived: true, versions: [{ version: 1, definition: { name: 'Archived template' } }] },
   ] }));
   return { state, mutations, eventReads };
 }
@@ -257,6 +264,18 @@ for (const theme of ['light', 'dark']) {
       await accounts.getByRole('button', { name: 'Allow customer sign-in' }).click();
       await expect(page.getByText('Customer sign-in is allowed.')).toBeVisible();
       const markets = page.getByRole('region', { name: 'Markets', exact: true });
+      await expect(markets.getByRole('button', { name: 'Turn off Correct Score for all events' })).toBeVisible();
+      await expect(markets.getByRole('button', { name: 'Turn off Second half time result (live) for all events' })).toBeVisible();
+      await expect(markets.getByRole('button', { name: 'Turn off Archived template for all events' }).locator('..')).toContainText('Template / Archived');
+      await markets.getByRole('button', { name: 'Turn off 1X2 for all events' }).click();
+      await expect(page.getByText(/1X2 is off for all events\. New bets on it are declined\. Revision \d+ saved/)).toBeVisible();
+      expect(mutations.at(-1).body.rule).toMatchObject({
+        id: 'market:PRE_MATCH:1X2', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] },
+      });
+      await expect(markets.getByRole('button', { name: 'Turn on 1X2 for all events' }).locator('..').locator('.market-pill')).toHaveText('OFF');
+      await markets.getByRole('button', { name: 'Turn on 1X2 for all events' }).click();
+      await expect(markets.getByRole('button', { name: 'Turn off 1X2 for all events' }).locator('..').locator('.market-pill')).toHaveText('ON');
+      expect(mutations.at(-1)).toMatchObject({ method: 'DELETE', path: `${API}/rules/market:PRE_MATCH:1X2` });
       await markets.getByRole('button', { name: 'Turn off Total goals for all events' }).click();
       await expect(page.getByText(/Total goals is off for all events\. New bets on it are declined\. Revision \d+ saved/)).toBeVisible();
       expect(mutations.at(-1).body.rule).toMatchObject({

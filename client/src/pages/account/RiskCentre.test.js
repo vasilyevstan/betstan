@@ -10,6 +10,11 @@ const API = '/api/backoffice/risk-centre';
 const rule = { id: 'default:MAX_STAKE', type: 'MAX_STAKE', enabled: false, scope: {}, parameters: { limit: 10000 } };
 const snapshot = (revision = 1) => ({
   revision, defaultsVersion: 1, rules: [{ ...rule, parameters: { ...rule.parameters } }],
+  builtinMarkets: [
+    { id: 'PRE_MATCH:1X2', name: '1X2', betKind: 'PRE_MATCH' },
+    { id: 'PRE_MATCH:CS', name: 'Correct Score', betKind: 'PRE_MATCH' },
+    { id: 'LIVE:NEXT_CORNER', name: 'Next corner (live)', betKind: 'LIVE' },
+  ],
   catalogue: [{
     type: 'MAX_STAKE', label: 'Maximum stake', description: 'Whole ticket limit.', category: 'admission',
     defaultParameters: { limit: 10000 }, defaultEnabled: false, defaultScope: {}, locked: false,
@@ -734,7 +739,7 @@ describe('sections, history and all-events switches', () => {
     routes({ '/api/backoffice/market-templates': templates });
     mount();
     expect(await screen.findByText('Total goals')).toBeInTheDocument();
-    expect(screen.queryByText('Archived market')).not.toBeInTheDocument();
+    expect(screen.getByText('Archived market').closest('li')).toHaveTextContent('Template / Archived');
     fireEvent.click(screen.getByRole('button', { name: 'Turn off Total goals for all events' }));
     await screen.findByText('Total goals is off for all events. New bets on it are declined. Revision 2 saved.');
     expect(axios.request.mock.calls[0][0]).toMatchObject({
@@ -746,6 +751,83 @@ describe('sections, history and all-events switches', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Turn on Total goals for all events' }));
     await screen.findByText('Total goals is on for all events. Revision 3 saved.');
     expect(axios.request.mock.calls[1][0]).toMatchObject({ method: 'DELETE', url: `${API}/rules/market:${templateId}`, data: { expectedRevision: 2 } });
+  });
+
+  it('includes built-in pre-match and live markets and switches them without requiring the template catalogue', async () => {
+    mount();
+    for (const name of ['1X2', 'Correct Score', 'Next corner (live)']) {
+      expect(await screen.findByRole('button', { name: `Turn off ${name} for all events` })).toBeInTheDocument();
+    }
+    expect(screen.getByText('1X2').closest('li')).toHaveTextContent('Built-in / Pre-match');
+    expect(screen.getByText('Next corner (live)').closest('li')).toHaveTextContent('Built-in / Live');
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off 1X2 for all events' }));
+    await screen.findByText('1X2 is off for all events. New bets on it are declined. Revision 2 saved.');
+    expect(axios.request.mock.calls[0][0]).toMatchObject({
+      method: 'POST', url: `${API}/rules`,
+      data: { expectedRevision: 1, rule: { id: 'market:PRE_MATCH:1X2', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] }, parameters: {} } },
+    });
+    expect(screen.getByText('1X2').closest('li').querySelector('.market-pill')).toHaveTextContent('OFF');
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on 1X2 for all events' }));
+    await screen.findByText('1X2 is on for all events. Revision 3 saved.');
+    expect(axios.request.mock.calls[1][0]).toMatchObject({ method: 'DELETE', url: `${API}/rules/market:PRE_MATCH:1X2`, data: { expectedRevision: 2 } });
+  });
+
+  it('keeps a same-name saved template distinct from its built-in market', async () => {
+    routes({ '/api/backoffice/market-templates': { ...templates, templates: [{
+      ...templates.templates[0], versions: [{ definition: { name: '1X2' } }],
+    }] } });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Turn off 1X2 (Template) for all events' }));
+    await screen.findByText(/1X2 \(Template\) is off for all events/);
+    expect(axios.request.mock.calls[0][0].data.rule.scope).toEqual({ templateIds: [templateId] });
+    const native = screen.getByRole('button', { name: 'Turn off 1X2 (Built-in / Pre-match) for all events' }).closest('li');
+    expect(native.querySelector('.market-pill')).toHaveTextContent('ON');
+  });
+
+  it('does not overwrite a changed switch or remove another native Block bets rule', async () => {
+    const data = snapshot();
+    data.rules.push(
+      { id: 'another:deny', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] }, parameters: {} },
+      { id: 'market:PRE_MATCH:CS', type: 'DENY', enabled: true, scope: { marketTypes: ['LIVE:NEXT_CORNER'] }, parameters: {} },
+    );
+    routes({ [API]: data });
+    mount();
+    const blocked = (await screen.findByText('1X2')).closest('li');
+    expect(blocked).toHaveTextContent('OFF');
+    expect(blocked).toHaveTextContent('Off by a Block bets rule');
+    expect(blocked.querySelector('button')).toBeNull();
+    const changed = screen.getByText('Correct Score').closest('li');
+    expect(changed).toHaveTextContent('Switch rule changed; manage it in Rules');
+    expect(changed.querySelector('button')).toBeNull();
+    expect(axios.request).not.toHaveBeenCalled();
+  });
+
+  it('reconciles an uncertain native switch using the original operation and keeps its catalogue', async () => {
+    const saved = {
+      requestId: 'save:test-uuid', revision: 2, defaultsVersion: 1, occurredAt: '2026-11-14T21:00:00.000Z',
+      rules: [{ id: 'market:PRE_MATCH:1X2', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] }, parameters: {} }],
+    };
+    routes({ [`${API}/operations/save:test-uuid`]: saved });
+    axios.request.mockRejectedValueOnce(new Error('response lost'));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Turn off 1X2 for all events' }));
+    const check = await screen.findByRole('button', { name: 'Check save result' });
+    await waitFor(() => expect(check).toBeEnabled());
+    fireEvent.click(check);
+    await screen.findByText(/1X2 is off for all events.*Revision 2 saved/);
+    expect(axios.request).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Turn on 1X2 for all events' })).toBeInTheDocument();
+    expect(screen.getByText('Correct Score')).toBeInTheDocument();
+  });
+
+  it('does not invent native switches for an older reader and keeps saved templates usable', async () => {
+    const data = snapshot();
+    delete data.builtinMarkets;
+    routes({ [API]: data, '/api/backoffice/market-templates': templates });
+    mount();
+    expect(await screen.findByText('Built-in market switches are unavailable in this deployment.')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Turn off Total goals for all events' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Turn off 1X2 for all events' })).not.toBeInTheDocument();
   });
 
   it('switches cash back for all events with the expected current value', async () => {
@@ -777,7 +859,7 @@ describe('sections, history and all-events switches', () => {
     view.unmount();
     routes({ [API]: policy });
     mount();
-    await screen.findByText('Markets are unavailable. Try refreshing.');
+    await screen.findByText('Custom market templates are unavailable. Try refreshing.');
     expect(await screen.findByRole('button', { name: new RegExp(`ON Market: ${deletedId}`) })).toBeInTheDocument();
   });
 
@@ -840,7 +922,8 @@ describe('sections, history and all-events switches', () => {
     await screen.findByRole('button', { name: /Maximum stake OFF All bets/ });
     expect(await screen.findByText('Cash-back setting is unavailable. Try refreshing.')).toBeInTheDocument();
     expect(screen.getByText('Account switches are unavailable. Try refreshing.')).toBeInTheDocument();
-    expect(screen.getByText('Markets are unavailable. Try refreshing.')).toBeInTheDocument();
+    expect(screen.getByText('Custom market templates are unavailable. Try refreshing.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Turn off 1X2 for all events' })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

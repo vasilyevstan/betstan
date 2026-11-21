@@ -95,6 +95,41 @@ it("checks current visibility and exact ordinary selection IDs/prices over bound
   } finally { await new Promise<void>(resolve => source.close(() => resolve())); }
 });
 
+it("classifies random native product IDs from Event authority, including Standard selections in a Builder", async () => {
+  const catalogue = {
+    event: { eventId: "event-a", time: new Date(Date.now() + 600000).toISOString(), status: "NO_RESULT", visibility: "ONLINE" },
+    standardMarkets: [{ marketId: "random-product-id", marketType: "CS" }],
+    standardSelections: [{ origin: "STANDARD", marketId: "random-product-id", outcomeKey: "selection", odds: 2 }],
+  };
+  await withEventSource((_req, res) => { res.end(JSON.stringify(catalogue)); }, async () => {
+    const row = { id: "row", productId: "random-product-id", oddsId: "selection", oddsValue: 2, marketType: "1X2", betKind: "PRE_MATCH" };
+    expect(await verifyRiskSource("event-a", [row], new Date(), true)).toMatchObject({ marketTypes: ["PRE_MATCH:CS"] });
+    const builder = { ...row, marketBet: { kind: "BUILDER", selections: [
+      { origin: "STANDARD", marketId: "random-product-id", outcomeKey: "selection" },
+      { origin: "TEMPLATE", marketId: "manual-1x2", outcomeKey: "home" },
+    ] } };
+    expect(await verifyRiskSource("event-a", [builder], new Date(), true)).toMatchObject({ marketTypes: ["PRE_MATCH:CS"] });
+    catalogue.standardMarkets = [];
+    await expect(verifyRiskSource("event-a", [builder], new Date(), true)).rejects.toThrow("Incomplete built-in");
+    expect(await verifyRiskSource("event-a", [row])).not.toHaveProperty("marketTypes");
+  });
+});
+
+it("reflects global native blocks in the event view and refuses missing classification instead of showing on", async () => {
+  await RiskState.updateOne({ _id: "active" }, { $set: { rules: [...defaults(), parseRule({
+    id: "market:PRE_MATCH:1X2", type: "DENY", enabled: true, scope: { marketTypes: ["PRE_MATCH:1X2"] }, parameters: {},
+  })] } });
+  const detail: { event: typeof openEvent; choices: (typeof choice & { marketType?: string })[] } = {
+    event: openEvent, choices: [{ ...choice, marketType: "1X2" }],
+  };
+  await withEventSource((_req, res) => { res.end(JSON.stringify(detail)); }, async () => {
+    const response = await request("GET", "/api/moderation/risk-centre/events/event-a");
+    expect(response).toMatchObject({ status: 200, data: { choices: [{ singleBlockedByOtherRule: true }] } });
+    detail.choices = [choice];
+    expect(await request("GET", "/api/moderation/risk-centre/events/event-a")).toMatchObject({ status: 503 });
+  });
+});
+
 it("reports an aggregate-only read snapshot with whole-book headroom and authoritative baseline shadowing", async () => {
   const fact = (eventId: string) => facts({ rows: [{ eventId, productId: "result", oddsId: "home" }] });
   const position = {

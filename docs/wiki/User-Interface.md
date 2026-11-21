@@ -107,7 +107,10 @@ its own **+ Add rule** list and indented category groups, with left-aligned
 names and settings. Green **ON** and red **OFF** tags identify saved status
 without relying on color alone. All-events switches close or open all
 betting, stop or allow new registrations and customer sign-in, and turn cash
-back, or a Market designer market, off or on for every event. Expanding a revision in
+back, or a market, off or on for every event. Markets includes built-in 1X2,
+Correct Score, registered live types and all saved templates, with archived
+templates marked. Same-name templates stay distinct from built-ins; turning
+on never unarchives a template or overrides another block. Expanding a revision in
 history shows what it changed. Slip and My Bets name recognized rule types
 recorded on a declined bet; older records keep their generic reason. A
 whole-ticket decline is shown once on the slip; a selection-specific reason

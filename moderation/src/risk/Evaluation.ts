@@ -61,7 +61,11 @@ export function selectionFingerprint(data: any): string {
       .sort((a: any, b: any) => fingerprint(a).localeCompare(fingerprint(b))),
   })).sort((a: any, b: any) => fingerprint(a).localeCompare(fingerprint(b))));
 }
-export function matching(policy: Policy, data: any): Rule[] {
+export function requiresStandardMarketTypes(policy: Policy, data: { rows: unknown[]; betKind?: string }): boolean {
+  return policy.rules.some(rule => rule.enabled && rule.scope.marketTypes?.some(id => id.startsWith("PRE_MATCH:")))
+    && [...placementChoices(data).choices.values()].some(choice => choice.origin === "STANDARD");
+}
+export function matching(policy: Policy, data: any, marketTypes: readonly string[] = []): Rule[] {
   const values = facts(data);
   const choices = policy.rules.some(rule => rule.enabled && rule.scope.selectionIds) ? placementChoices(data) : undefined;
   // A Builder combined with other selections is still a Builder ticket for
@@ -70,6 +74,7 @@ export function matching(policy: Policy, data: any): Rule[] {
   const builder = data.rows.some((r: any) => r.marketBet?.kind === "BUILDER") ? { ...values, structure: "BUILDER" } : undefined;
   return policy.rules.filter(rule => {
     if (!rule.enabled) return false;
+    if (rule.scope.marketTypes) return rule.scope.marketTypes.some(id => marketTypes.includes(id));
     const { selectionIds, ...scope } = rule.scope;
     if (selectionIds) {
       const eventId = scope.eventIds![0];

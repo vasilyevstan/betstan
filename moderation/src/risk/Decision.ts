@@ -13,6 +13,7 @@ export interface ModerationDecision {
   moderationTimestamp: string;
   riskReason?: ModerationDecisionReasonCode;
   timingEvidence?: TimingEvidence;
+  standardMarketTypes?: string[];
 }
 export const ruleReason: Record<RuleType, ModerationDecisionReasonCode> = {
   MIN_STAKE: "RISK_MIN_STAKE", MAX_STAKE: "RISK_MAX_STAKE", DELAY_MS: ModerationDeclineReason.RISK_POLICY,

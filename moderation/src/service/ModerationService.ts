@@ -27,7 +27,7 @@ import { replayAccounting } from "../risk/Accounting";
 import { verifyRiskSource } from "../risk/SourceVerifier";
 import { RiskError } from "../risk/Policy";
 import { decisionMetadata, declineForRisk, ModerationDecision, parseDecisionReason } from "../risk/Decision";
-import { matching } from "../risk/Evaluation";
+import { matching, requiresStandardMarketTypes } from "../risk/Evaluation";
 import { timingFailures } from "../risk/Timing";
 import type { Rule } from "../risk/Policy";
 
@@ -978,7 +978,8 @@ class ModerationService {
           betKind: normalized.event.data.betKind, declineReason: expiredEvidence
             ? ModerationDeclineReason.RISK_EVIDENCE_UNAVAILABLE : declineForRisk(parseDecisionReason(receipt.reason)),
         }, ModerationStatus.DECLINED, evaluatedAt.toISOString()) }
-        : await this.evaluate(normalized.event, evaluatedAt, Boolean(receipt), receipt ? matching(receipt.policy, normalized.event.data) : []);
+        : await this.evaluate(normalized.event, evaluatedAt, Boolean(receipt), receipt ? matching(receipt.policy, normalized.event.data) : [],
+          Boolean(receipt && requiresStandardMarketTypes(receipt.policy, normalized.event.data)));
     if (expiredEvidence && evaluation.type === "decision") evaluation.decision.riskReason = "RISK_EVIDENCE_UNAVAILABLE";
 
     if (evaluation.type === "park" && receipt && evaluatedAt.toISOString() >= receipt.evidenceDeadline) {
@@ -1018,7 +1019,8 @@ class ModerationService {
     event: NormalizedPlaceBetEvent,
     evaluatedAt: Date,
     currentSafety = false,
-    rules: Rule[] = []
+    rules: Rule[] = [],
+    standardMarketTypesRequired = false,
   ): Promise<EvaluationResult> {
     try { assertMarketSlipCompatibility(event.data.rows); }
     catch (error) {
@@ -1045,11 +1047,16 @@ class ModerationService {
     const pendingEventIds = new Set<string>();
     const affectedRows: IModerationAffectedRow[] = [];
     const timingEvidence = { kickoffs: {} as Record<string, string> };
+    const standardMarketTypes = new Set<string>();
     if (currentSafety) {
       for (const eventId of eventIds) {
         const rows = event.data.rows.filter(row => row.eventId === eventId);
         try {
-          const source = await verifyRiskSource(eventId, rows, evaluatedAt);
+          const source = await verifyRiskSource(eventId, rows, evaluatedAt, standardMarketTypesRequired);
+          if (standardMarketTypesRequired) {
+            if (!source.marketTypes) throw new Error("Built-in market evidence unavailable");
+            source.marketTypes.forEach(id => standardMarketTypes.add(id));
+          }
           timingEvidence.kickoffs[eventId] = source.kickoffAt;
           affectedRows.push(...source.affectedRows);
         } catch { pendingEventIds.add(eventId); }
@@ -1340,7 +1347,8 @@ class ModerationService {
         },
         ModerationStatus.APPROVED,
         evaluatedAt.toISOString()
-      ), ...(currentSafety ? { timingEvidence } : {}) },
+      ), ...(currentSafety ? { timingEvidence } : {}),
+      ...(standardMarketTypesRequired ? { standardMarketTypes: [...standardMarketTypes].sort() } : {}) },
     };
   }
 

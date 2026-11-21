@@ -1,4 +1,4 @@
-import { facts, matching } from "../Evaluation";
+import { facts, matching, requiresStandardMarketTypes } from "../Evaluation";
 import { analyseChoices, AnalysisChoice, AnalysisPosition, eventExposure } from "../ExposureAnalysis";
 import { parseRule, Policy, RiskError, Rule } from "../Policy";
 import { choiceId, placementChoices } from "../Selections";
@@ -33,6 +33,42 @@ it("matches the complete event/market/choice identity, including nested Builder 
   expect(matching(policy([rule]), { rows: [embedded, row("event-b")] })).toEqual([rule]);
   expect(() => parseRule({ ...rule, type: "MAX_OPERATOR_EXPOSURE", parameters: { limit: 100, perCustomer: false } })).toThrow();
   expect(() => parseRule({ ...rule, scope: { ...rule.scope, eventIds: ["event-a", "event-b"] } })).toThrow();
+});
+
+it("uses native authority for ordinary and nested Builder selections without redefining aggregate scope facts", () => {
+  const native = parseRule({
+    id: "market:PRE_MATCH:1X2", type: "DENY", enabled: true, scope: { marketTypes: ["PRE_MATCH:1X2"] }, parameters: {},
+  });
+  const ordinary = { rows: [{ ...row(), marketType: "1X2" }] };
+  const builder = { rows: [{
+    eventId: "event-a", productId: "builder", oddsValue: 4, marketBet: {
+      kind: "BUILDER", selections: [{ origin: "STANDARD", marketId: "random-product-id", outcomeKey: "home" }],
+    },
+  }, row("event-b")] };
+  for (const data of [ordinary, builder]) {
+    expect(requiresStandardMarketTypes(policy([native]), data)).toBe(true);
+    expect(matching(policy([native]), data)).toEqual([]);
+    expect(matching(policy([native]), data, ["PRE_MATCH:CS"])).toEqual([]);
+    expect(matching(policy([native]), data, ["PRE_MATCH:1X2"])).toEqual([native]);
+  }
+  expect(facts(builder)).toMatchObject({ structure: "ACCUMULATOR", productIds: ["builder", "result"] });
+  expect(requiresStandardMarketTypes(policy([native]), { rows: [{
+    eventId: "event-a", marketBet: { selections: [{ origin: "TEMPLATE", marketId: "goals", outcomeKey: "over" }] },
+  }] })).toBe(false);
+  expect(analyseChoices(policy([native]), [], "event-a", [{ ...choice, builtinMarketId: "PRE_MATCH:1X2" }], 100)[0])
+    .toMatchObject({ off: false, singleBlockedByOtherRule: true });
+});
+
+it.each([[], "PRE_MATCH:1X2", ["PRE_MATCH:unknown"], Array(33).fill("PRE_MATCH:1X2")])(
+  "rejects invalid or unbounded native type selectors: %j", marketTypes => {
+    const native = { id: "market:native", type: "DENY", enabled: true, scope: { marketTypes }, parameters: {} };
+    expect(() => parseRule(native)).toThrow(RiskError);
+  },
+);
+it("permits native selectors only for globally scoped Block bets rules", () => {
+  const native = { id: "market:native", type: "DENY", enabled: true, scope: { marketTypes: ["PRE_MATCH:1X2"] }, parameters: {} };
+  expect(() => parseRule({ ...native, scope: { ...native.scope, eventIds: ["event-a"] } })).toThrow(RiskError);
+  expect(() => parseRule({ ...native, type: "MAX_STAKE", parameters: { limit: 100 } })).toThrow(RiskError);
 });
 
 it("keeps live choice switches stable across market and quote revisions without merging score choices sharing NONE", () => {
