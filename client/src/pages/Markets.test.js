@@ -172,7 +172,7 @@ it('previews generated manual odds without publication and publishes only the re
   });
   renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
   fireEvent.click(await screen.findByRole('button', { name: /Match award.*Draft/ }));
-  fireEvent.click(screen.getByRole('button', { name: 'Generate odds' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use equal chances' }));
   await screen.findByText(/Price preview/);
   expect(axios.put).not.toHaveBeenCalled();
   expect(axios.post).toHaveBeenCalledWith('/api/event/events/event-a/markets/preview', {
@@ -189,6 +189,67 @@ it('previews generated manual odds without publication and publishes only the re
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
   expect(await screen.findByText('Published. It now shows on the match card.')).toBeInTheDocument();
   expect(screen.queryByText(/Publishing\. The market goes live/)).not.toBeInTheDocument();
+});
+
+it('publishes directly entered decimal odds without opening or calling the generator', async () => {
+  market = { ...market, revision: 1, status: 'DRAFT', pricing: undefined, publishedConfiguration: undefined };
+  axios.put.mockImplementation(async (_url, body) => ({ data: { ...market, ...body, revision: 2, status: 'PUBLISHING' } }));
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  fireEvent.click(await screen.findByRole('button', { name: /Match award.*Draft/ }));
+  expect(screen.getByLabelText('Starting point').closest('details')).not.toHaveAttribute('open');
+  fireEvent.change(screen.getByLabelText('Nominee A: decimal odds'), { target: { value: '1.5' } });
+  fireEvent.change(screen.getByLabelText('Nominee B: decimal odds'), { target: { value: '3' } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Publish market' })); });
+  expect(axios.put).toHaveBeenCalledWith('/api/backoffice/events/event-a/markets/market-a', expect.objectContaining({
+    publish: true, pricing: { method: 'OPERATOR', odds: { a: 1.5, b: 3 } },
+  }));
+  expect(axios.post).not.toHaveBeenCalled();
+});
+
+it('reopens saved chances as clean percentages and keeps fractional generation inputs on the wire', async () => {
+  market = { ...market, revision: 1, status: 'DRAFT', publishedConfiguration: undefined, pricing: {
+    method: 'OPERATOR', odds: { a: 3.22, b: 1.32 }, generatedFrom: { method: 'PROBABILITIES', values: { a: 0.29, b: 0.71 } },
+  } };
+  axios.post.mockResolvedValue({ data: { method: 'PROBABILITIES', odds: { a: 3.74, b: 1.25 } } });
+  axios.put.mockImplementation(async (_url, body) => ({ data: { ...market, ...body, revision: 2 } }));
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  fireEvent.click(await screen.findByRole('button', { name: /Match award.*Draft/ }));
+  fireEvent.click(screen.getByText('Generate odds from chances'));
+  expect(screen.getByLabelText('Nominee A: chance (%)')).toHaveValue(29);
+  expect(screen.getByLabelText('Nominee B: chance (%)')).toHaveValue(71);
+  expect(axios.put).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText('Nominee A: chance (%)'), { target: { value: '25' } });
+  fireEvent.change(screen.getByLabelText('Nominee B: chance (%)'), { target: { value: '75' } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Generate odds' })); });
+  expect(axios.post).toHaveBeenCalledWith('/api/event/events/event-a/markets/preview', {
+    definition: manualDefinition, parameters: {}, generation: { method: 'PROBABILITIES', values: { a: 0.25, b: 0.75 } },
+  });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save draft' })); });
+  expect(axios.put).toHaveBeenCalledWith('/api/backoffice/events/event-a/markets/market-a', expect.objectContaining({
+    pricing: { method: 'OPERATOR', odds: { a: 3.74, b: 1.25 },
+      generatedFrom: { method: 'PROBABILITIES', values: { a: 0.25, b: 0.75 } } },
+  }));
+});
+
+it('supports independent partial chances without normalising their total or imposing a minimum probability', async () => {
+  const definition = { ...manualDefinition, outcomeMode: 'INDEPENDENT', coverage: 'PARTIAL' };
+  market = { ...market, revision: 1, status: 'DRAFT', publishedConfiguration: undefined,
+    template: { ...template, definition }, pricing: undefined };
+  axios.post.mockResolvedValue({ data: { method: 'PROBABILITIES', odds: { a: 1000, b: 4.67 } } });
+  renderRoute(<BackofficeMarkets />, '/backoffice/events/event-a/markets');
+  fireEvent.click(await screen.findByRole('button', { name: /Match award.*Draft/ }));
+  expect(screen.queryByRole('button', { name: 'Use equal chances' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText('Generate odds from chances'));
+  fireEvent.change(screen.getByLabelText('Nominee A: chance (%)'), { target: { value: '100' } });
+  fireEvent.change(screen.getByLabelText('Nominee B: chance (%)'), { target: { value: '20' } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Generate odds' })); });
+  expect(await screen.findByRole('alert')).toHaveTextContent('above 0% and below 100%');
+  expect(axios.post).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText('Nominee A: chance (%)'), { target: { value: '0.000001' } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Generate odds' })); });
+  expect(axios.post).toHaveBeenCalledWith('/api/event/events/event-a/markets/preview', {
+    definition, parameters: {}, generation: { method: 'PROBABILITIES', values: { a: 1e-8, b: 0.2 } },
+  });
 });
 
 it('requires a separate immutable manual-result review and keeps the decision locked', async () => {
@@ -342,7 +403,7 @@ it('offers only manual-result templates on an event without a pricing model', as
   expect(await screen.findByText(/Draft created/)).toBeInTheDocument();
   expect(axios.post.mock.calls).toEqual([['/api/backoffice/events/event-a/markets',
     { templateId: 'template-a', templateVersion: 1, parameters: {}, requestId: expect.any(String) }]]);
-  fireEvent.click(screen.getByRole('button', { name: 'Generate odds' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use equal chances' }));
   await screen.findByText(/Price preview/);
   expect(axios.post).toHaveBeenLastCalledWith('/api/event/events/event-a/markets/preview', {
     definition: manualDefinition, parameters: {}, generation: { method: 'EQUAL_CHANCE' },

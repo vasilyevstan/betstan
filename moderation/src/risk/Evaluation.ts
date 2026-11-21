@@ -1,6 +1,7 @@
 import { Facts, fingerprint, matches, Policy, Rule, windowStart } from "./Policy";
 import { fixedOddsReturnMinor, ModerationDecisionReasonCode, nominalStakeMinor, realisedLossMinor } from "@betstan/common";
 import { ruleReason } from "./Decision";
+import { choiceScopeKey, placementChoices } from "./Selections";
 
 const ZERO = BigInt(0);
 const ONE = BigInt(1);
@@ -62,12 +63,23 @@ export function selectionFingerprint(data: any): string {
 }
 export function matching(policy: Policy, data: any): Rule[] {
   const values = facts(data);
+  const choices = policy.rules.some(rule => rule.enabled && rule.scope.selectionIds) ? placementChoices(data) : undefined;
   // A Builder combined with other selections is still a Builder ticket for
   // admission, so adding a leg cannot avoid a Builder-scoped rule. The stored
   // scope facts keep their contract shape (ACCUMULATOR) for history totals.
   const builder = data.rows.some((r: any) => r.marketBet?.kind === "BUILDER") ? { ...values, structure: "BUILDER" } : undefined;
-  return policy.rules.filter(r => r.enabled && (matches(r.scope, values)
-    || (builder !== undefined && r.scope.structure === "BUILDER" && matches(r.scope, builder))));
+  return policy.rules.filter(rule => {
+    if (!rule.enabled) return false;
+    const { selectionIds, ...scope } = rule.scope;
+    if (selectionIds) {
+      const eventId = scope.eventIds![0];
+      return selectionIds.some(id => {
+        const identity = choices!.choices.get(id);
+        return identity?.eventId === eventId && (identity.origin === "LIVE" ? "LIVE" : "PRE_MATCH") === scope.betKind;
+      }) || choices!.unidentified.has(choiceScopeKey(scope.betKind!, eventId));
+    }
+    return matches(scope, values) || (builder !== undefined && scope.structure === "BUILDER" && matches(scope, builder));
+  });
 }
 export function staticReason(rules: Rule[], data: any): ModerationDecisionReasonCode | undefined {
   if (!Number.isFinite(data.wager) || data.wager <= 0 || !data.rows.length
@@ -116,6 +128,13 @@ export interface Position {
   state: string; reserved: boolean; moneyReady: boolean; stakeMinor?: number;
   remainingStakeMinor?: number; returnMinor?: number;
   receiptSequence?: number;
+}
+export function operatorExposure(position: Pick<Position, "state" | "stakeMinor" | "remainingStakeMinor" | "returnMinor">): bigint | undefined {
+  const { stakeMinor, remainingStakeMinor, returnMinor } = position;
+  if (stakeMinor === undefined || remainingStakeMinor === undefined || returnMinor === undefined
+    || [stakeMinor, remainingStakeMinor, returnMinor].some(value => !Number.isSafeInteger(value) || value < 0)) return undefined;
+  const profit = BigInt(returnMinor) - BigInt(stakeMinor);
+  return (profit > ZERO ? profit : ZERO) + (position.state === "PENDING" ? BigInt(remainingStakeMinor) : ZERO);
 }
 /** Query only the union of applicable books/windows; historical closed receipts
  * remain readable without eventually making every enabled rule hit a lifetime
@@ -186,11 +205,13 @@ export function ledgerReason(rules: Rule[], candidate: Position, positions: Posi
       // No outcome-domain authority exists here yet. Never infer a common domain
       // from event names or opposing sides: sum standalone upper bounds.
       peers.filter(p => p.remainingStakeMinor !== 0).forEach(p => {
-        if (p.returnMinor === undefined || p.stakeMinor === undefined || p.remainingStakeMinor === undefined) incomplete = true;
-        else add(Math.max(0, p.returnMinor - p.stakeMinor) + (p.state === "PENDING" ? p.remainingStakeMinor : 0));
+        const exposure = operatorExposure(p);
+        if (exposure === undefined) incomplete = true;
+        else sum += exposure;
       });
-      if (candidate.returnMinor === undefined || candidate.stakeMinor === undefined) incomplete = true;
-      else add(Math.max(0, candidate.returnMinor - candidate.stakeMinor) + (candidate.state === "PENDING" ? candidate.stakeMinor : 0));
+      const exposure = operatorExposure({ ...candidate, remainingStakeMinor: candidate.stakeMinor });
+      if (exposure === undefined) incomplete = true;
+      else sum += exposure;
     }
     if (incomplete) return "RISK_ACCOUNTING_EVIDENCE_UNAVAILABLE";
     if (sum > BigInt(rule.parameters.limit!)) return ruleReason[rule.type];

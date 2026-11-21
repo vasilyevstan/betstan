@@ -496,6 +496,19 @@
   background: transparent;
   font-weight: 600;
 }
+.backoffice-markets .market-odds-generator {
+  margin-block: 0.75rem;
+}
+.backoffice-markets .market-odds-generator > summary {
+  display: list-item;
+  min-height: 2.75rem;
+  padding-block: 0.625rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+.backoffice-markets .market-odds-generator[open] > summary {
+  margin-bottom: 0.5rem;
+}
 .backoffice-markets .market-editor__footer {
   display: flex;
   flex-wrap: wrap;

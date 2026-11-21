@@ -116,9 +116,17 @@ const MarketEditor = ({
     method: 'OPERATOR', odds: Object.fromEntries(definition.outcomes.map((outcome) => [outcome.key, ''])),
   });
   const [availability, setAvailability] = useState(market.availability);
-  const [generation, setGeneration] = useState(market.pricing?.generatedFrom || {
-    method: automatic ? 'SCORE_MODEL' : definition.outcomeMode === 'INDEPENDENT' ? 'PROBABILITIES' : 'EQUAL_CHANCE',
-    values: {},
+  const [generation, setGeneration] = useState(() => {
+    const saved = market.pricing?.generatedFrom;
+    return saved ? {
+      ...saved,
+      values: saved.method === 'PROBABILITIES'
+        ? Object.fromEntries(Object.entries(saved.values).map(([key, value]) => [key, Number((value * 100).toPrecision(15))]))
+        : saved.values || {},
+    } : {
+      method: automatic ? 'SCORE_MODEL' : definition.outcomeMode === 'INDEPENDENT' ? 'PROBABILITIES' : 'EQUAL_CHANCE',
+      values: {},
+    };
   });
   const [preview, setPreview] = useState(null);
   const [reviewedRevision, setReviewedRevision] = useState(market.revision);
@@ -131,20 +139,27 @@ const MarketEditor = ({
     ? (hasRetainedModel === false ? 'This event has no pricing model. Add a manual market instead.'
       : !preview && !market.configuration ? 'Generate odds first.' : '')
     : oddsReady ? '' : `Enter odds from ${MIN_ODDS} to ${MAX_ODDS} for every outcome.`;
-  const generationBody = () => ({
-    method: generation.method,
-    ...(['PROBABILITIES', 'WEIGHTS'].includes(generation.method) ? {
-      values: numericMarketValues(Object.fromEntries(definition.outcomes.map((outcome) => [outcome.key, generation.values?.[outcome.key] ?? '']))),
-    } : {}),
-    ...(generation.method === 'WEIGHTS' && definition.coverage === 'PARTIAL'
-      ? numericMarketValues({ unlistedWeight: generation.unlistedWeight ?? '' }) : {}),
-  });
-  const generate = async () => {
-    const result = await onPreview(() => ({ definition, parameters: numericMarketValues(parameters), generation: generationBody() }));
+  const generationBody = (source = generation) => {
+    const values = ['PROBABILITIES', 'WEIGHTS'].includes(source.method)
+      ? numericMarketValues(Object.fromEntries(definition.outcomes.map((outcome) => [outcome.key, source.values?.[outcome.key] ?? '']))) : null;
+    if (source.method === 'PROBABILITIES' && Object.values(values).some((value) => value <= 0 || value >= 100)) {
+      throw new Error('Enter a chance above 0% and below 100% for every outcome.');
+    }
+    return {
+      method: source.method,
+      ...(values ? { values: source.method === 'PROBABILITIES'
+        ? Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value / 100])) : values } : {}),
+      ...(source.method === 'WEIGHTS' && definition.coverage === 'PARTIAL'
+        ? numericMarketValues({ unlistedWeight: source.unlistedWeight ?? '' }) : {}),
+    };
+  };
+  const generate = async (source = generation) => {
+    const result = await onPreview(() => ({ definition, parameters: numericMarketValues(parameters), generation: generationBody(source) }));
     if (!result) return;
     setPreview(result);
-    setPricing(generation.method === 'SCORE_MODEL' ? { method: 'SCORE_MODEL' }
-      : { method: 'OPERATOR', odds: result.odds, generatedFrom: generationBody() });
+    setGeneration(source);
+    setPricing(source.method === 'SCORE_MODEL' ? { method: 'SCORE_MODEL' }
+      : { method: 'OPERATOR', odds: result.odds, generatedFrom: generationBody(source) });
   };
   const save = async (publish) => {
     const includePricing = pricing.method === 'SCORE_MODEL' || oddsReady;
@@ -197,33 +212,15 @@ const MarketEditor = ({
       </section>
       <section className="market-section" aria-labelledby="market-odds-heading">
         <h3 className="market-subheading" id="market-odds-heading">Odds</h3>
-        <div className="market-generate">
-          {automatic ? <p className="market-help">Odds come from this event's pricing model.</p>
-            : <label>Generate odds from<select className="form-select" value={generation.method}
-              onChange={(event) => updateGeneration({ method: event.target.value, values: {} })}>
-              <option value="EQUAL_CHANCE" disabled={definition.outcomeMode === 'INDEPENDENT'}>Equal chance</option>
-              <option value="PROBABILITIES">Probabilities (0-1)</option>
-              <option value="WEIGHTS" disabled={definition.outcomeMode === 'INDEPENDENT'}>Relative weights</option>
-            </select></label>}
-          <button className={marketActionClass()} type="button" disabled={automatic && hasRetainedModel === false}
-            onClick={generate}>Generate odds</button>
-        </div>
-        {generation.method === 'EQUAL_CHANCE' ? <p className="market-help">Equal chance is a starting point, not a prediction.
-          {definition.coverage === 'PARTIAL' ? ' It includes an unlisted outcome.' : ''} You can edit the odds afterwards.</p> : null}
-        {['PROBABILITIES', 'WEIGHTS'].includes(generation.method) ? <div className="market-form-grid">
-          {definition.outcomes.map((outcome) => <label key={outcome.key}>
-            {outcome.label}: {generation.method === 'PROBABILITIES' ? 'probability (0-1)' : 'relative weight'}
-            <input className="form-control" type="number" step="any" min="0"
-              max={generation.method === 'PROBABILITIES' ? '1' : undefined}
-              value={generation.values?.[outcome.key] ?? ''} onChange={(event) => updateGeneration({
-                ...generation, values: { ...generation.values, [outcome.key]: event.target.value },
-              })} />
-          </label>)}
-          {generation.method === 'WEIGHTS' && definition.coverage === 'PARTIAL' ? <label>Unlisted-outcome weight
-            <input className="form-control" type="number" step="any" min="0" value={generation.unlistedWeight ?? ''}
-              onChange={(event) => updateGeneration({ ...generation, unlistedWeight: event.target.value })} />
-          </label> : null}
-        </div> : null}
+        {automatic ? <div className="market-generate">
+          <p className="market-help">Odds come from this event's pricing model.</p>
+          <button className={marketActionClass()} type="button" disabled={hasRetainedModel === false}
+            onClick={() => generate()}>Generate odds</button>
+        </div> : <div className="market-generate">
+          <p className="market-help">Enter decimal odds below. You can generate a starting point instead.</p>
+          {definition.outcomeMode !== 'INDEPENDENT' ? <button className={marketActionClass()} type="button"
+            onClick={() => generate({ method: 'EQUAL_CHANCE', values: {} })}>Use equal chances</button> : null}
+        </div>}
         <table className="market-odds-table">
           <thead><tr>
             <th scope="col">Outcome</th>
@@ -240,6 +237,39 @@ const MarketEditor = ({
               })} /> : <span className="market-help">Not generated</span>}</td>
           </tr>)}</tbody>
         </table>
+        {!automatic ? <details className="market-odds-generator">
+          <summary>Generate odds from chances</summary>
+          <div className="market-generate">
+            <label>Starting point<select className="form-select" value={generation.method}
+              onChange={(event) => updateGeneration({ method: event.target.value, values: {} })}>
+              <option value="EQUAL_CHANCE" disabled={definition.outcomeMode === 'INDEPENDENT'}>Equal chances</option>
+              <option value="PROBABILITIES">Chances (%)</option>
+              <option value="WEIGHTS" disabled={definition.outcomeMode === 'INDEPENDENT'}>Relative weights</option>
+            </select></label>
+            <button className={marketActionClass()} type="button" onClick={() => generate()}>Generate odds</button>
+          </div>
+          {generation.method === 'EQUAL_CHANCE' ? <p className="market-help">Equal chances are a starting point, not a prediction.
+            {definition.coverage === 'PARTIAL' ? ' This includes an unlisted outcome.' : ''} Review the odds before publishing.</p> : null}
+          {generation.method === 'PROBABILITIES' ? <p className="market-help">Enter percentages, such as 25 for a one-in-four chance.
+            {definition.outcomeMode === 'EXCLUSIVE' ? definition.coverage === 'COMPLETE'
+              ? ' The chances must add up to 100%.' : ' Leave some chance for unlisted outcomes.' : ' Overlapping chances do not need to add up to 100%.'}
+          </p> : null}
+          {generation.method === 'WEIGHTS' ? <p className="market-help">Use 2 for an outcome twice as likely as one weighted 1. No percentage total is needed.</p> : null}
+          {['PROBABILITIES', 'WEIGHTS'].includes(generation.method) ? <div className="market-form-grid">
+            {definition.outcomes.map((outcome) => <label key={outcome.key}>
+              {outcome.label}: {generation.method === 'PROBABILITIES' ? 'chance (%)' : 'relative weight'}
+              <input className="form-control" type="number" step="any" min="0"
+                max={generation.method === 'PROBABILITIES' ? '100' : undefined}
+                value={generation.values?.[outcome.key] ?? ''} onChange={(event) => updateGeneration({
+                  ...generation, values: { ...generation.values, [outcome.key]: event.target.value },
+                })} />
+            </label>)}
+            {generation.method === 'WEIGHTS' && definition.coverage === 'PARTIAL' ? <label>Unlisted-outcome weight
+              <input className="form-control" type="number" step="any" min="0" value={generation.unlistedWeight ?? ''}
+                onChange={(event) => updateGeneration({ ...generation, unlistedWeight: event.target.value })} />
+            </label> : null}
+          </div> : null}
+        </details> : null}
         {automatic && preview ? <label className="market-check-label market-help">
           <input type="checkbox" checked={pricing.method === 'OPERATOR'} onChange={(event) => setPricing(event.target.checked
             ? { method: 'OPERATOR', odds: preview.odds } : { method: 'SCORE_MODEL' })} />

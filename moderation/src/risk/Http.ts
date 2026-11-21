@@ -1,6 +1,7 @@
 import { IncomingMessage, ServerResponse } from "http";
 import { getHistory, getOperation, getPolicy, mutatePolicy, Mutation } from "./Store";
 import { RiskError } from "./Policy";
+import { getEventRisk, listEventRisk } from "./EventRisk";
 
 async function body(request: IncomingMessage): Promise<unknown> {
   if (!request.headers["content-type"]?.startsWith("application/json")) throw new RiskError("INVALID_BODY", "JSON content type required");
@@ -36,6 +37,20 @@ export async function handleRiskHttp(request: IncomingMessage, response: ServerR
         url.searchParams.has("beforeRevision") ? Number(url.searchParams.get("beforeRevision")) : undefined,
         url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined,
       )); return;
+    }
+    if (request.method === "GET" && path === "/events") {
+      if ([...url.searchParams.keys()].some(field => !["after", "limit"].includes(field))
+        || [...url.searchParams.keys()].some(field => url.searchParams.getAll(field).length !== 1)) {
+        throw new RiskError("INVALID_QUERY", "Unsupported event catalogue query");
+      }
+      send(200, await listEventRisk(url.searchParams.get("after") ?? undefined,
+        url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 20)); return;
+    }
+    const event = /^\/events\/([A-Za-z0-9:_.-]+)$/.exec(path);
+    if (request.method === "GET" && event) {
+      if ([...url.searchParams.keys()].some(field => field !== "stakeMinor")
+        || url.searchParams.getAll("stakeMinor").length > 1) throw new RiskError("INVALID_QUERY", "Unsupported event stress query");
+      send(200, await getEventRisk(event[1], url.searchParams.has("stakeMinor") ? Number(url.searchParams.get("stakeMinor")) : 100)); return;
     }
     const operation = /^\/operations\/([A-Za-z0-9:_.-]+)$/.exec(path);
     if (request.method === "GET" && operation) { send(200, await getOperation(operation[1])); return; }

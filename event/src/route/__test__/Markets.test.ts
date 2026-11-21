@@ -2,7 +2,8 @@ import request from "supertest";
 import jwt from "jsonwebtoken";
 import axios from "axios";
 import {
-  APublisher, EventMarketConfiguration, MarketDefinition, messengerWrapper, parseMarketBet,
+  APublisher, BettingStatus, EventMarketConfiguration, EventPhase, EventStatus, EventVisibility,
+  LiveMarketStatus, LiveMarketType, MarketDefinition, messengerWrapper, parseMarketBet, TeamSide,
   priceScoreCombination,
 } from "@betstan/common";
 import { app } from "../../app";
@@ -177,4 +178,68 @@ it("exposes public odds previews but requires the registered owner to issue or r
     .set("Cookie", session("user-a")).expect(200);
   expect(selected.body).toMatchObject({ userId: "user-a", productName: "Custom market", marketBet: quote.body });
   await request(app).get(`/api/event/market-quotes/${quote.body.quoteId}`).set("Cookie", session("user-b")).expect(409);
+});
+
+it("paginates every open event beyond the public horizon, excluding closed and unresolved visibility", async () => {
+  await createEvent();
+  const live = {
+    sequence: 1, occurredAt: new Date().toISOString(), kickoffAt: "2020-01-01T12:00:00.000Z",
+    minute: 70, phase: EventPhase.SECOND_HALF, homeScore: 0, awayScore: 0, bettingStatus: BettingStatus.OPEN,
+    incidentHistory: [], currentMarkets: [],
+  };
+  await Event.create([
+    { eventId: "event-z", name: "Far future", time: "2099-01-01T12:00:00.000Z", products: [] },
+    { eventId: "event-live", name: "Paused live", time: live.kickoffAt, products: [], live, liveEnabled: false },
+    { eventId: "event-offline", name: "Offline", time: "2099-01-01T12:00:00.000Z", products: [], visibility: EventVisibility.OFFLINE },
+    { eventId: "event-resulted", name: "Resulted", time: "2099-01-01T12:00:00.000Z", products: [], status: EventStatus.RESULTED },
+    { eventId: "event-finished", name: "Finished", time: live.kickoffAt, products: [], live: { ...live, phase: EventPhase.FULL_TIME } },
+    { eventId: "event-pending", name: "Pending offline", time: "2099-01-01T12:00:00.000Z", products: [], pendingVisibility: EventVisibility.OFFLINE },
+    { eventId: "event-unresolved", name: "Unresolved", time: "2099-01-01T12:00:00.000Z", products: [], visibilityInitialized: false },
+  ]);
+  const first = await request(app).get("/api/event/risk-events?limit=1").expect(200);
+  expect(first.headers["cache-control"]).toBe("no-store");
+  expect(first.body.events.map((item: { eventId: string }) => item.eventId)).toEqual(["event-a"]);
+  expect(first.body.nextAfter).toBe("event-a");
+  const rest = await request(app).get("/api/event/risk-events?after=event-a&limit=25").expect(200);
+  expect(rest.body.events.map((item: { eventId: string }) => item.eventId)).toEqual(["event-live", "event-z"]);
+  expect(rest.body.nextAfter).toBeNull();
+  await request(app).get("/api/event/risk-events/event-pending").expect(409);
+  await request(app).get("/api/event/risk-events?limit=0").expect(400);
+  await request(app).get("/api/event/risk-events?limit=1&limit=2").expect(400);
+  await request(app).get("/api/event/risk-events?after[$ne]=event-a").expect(400);
+});
+
+it("retains suspended published custom choices alongside exact standard identities", async () => {
+  const event = await createEvent();
+  await enableMarket(manual, "award");
+  await storeMarketConfiguration({ ...configuration(manual, "award"), revision: 2, availability: "SUSPENDED" });
+  const service = worker();
+  await service.replayPending();
+  await service.stop();
+  const response = await request(app).get("/api/event/risk-events/event-a").expect(200);
+  expect(response.body.choices).toEqual(expect.arrayContaining([
+    expect.objectContaining({ origin: "STANDARD", marketId: event.products[0].id,
+      outcomeKey: event.products[0].odds[0].id, sourceOpen: true }),
+    expect.objectContaining({ origin: "TEMPLATE", marketId: "award", outcomeKey: "one", sourceOpen: false }),
+  ]));
+});
+
+it("keeps distinct live score selections and exposes source pauses without dropping the event", async () => {
+  await createEvent();
+  const marketId = `event-a:${LiveMarketType.SECOND_HALF_SCORE}`;
+  await Event.updateOne({ eventId: "event-a" }, { $set: { time: "2020-01-01T12:00:00.000Z", liveEnabled: false, live: {
+    sequence: 1, occurredAt: new Date().toISOString(), kickoffAt: "2020-01-01T12:00:00.000Z",
+    minute: 70, phase: EventPhase.SECOND_HALF, homeScore: 0, awayScore: 0, bettingStatus: BettingStatus.OPEN,
+    incidentHistory: [], currentMarkets: [{
+      marketId, marketType: LiveMarketType.SECOND_HALF_SCORE, marketVersion: 3, quoteVersion: 4,
+      quoteValidUntil: "2099-01-01T12:00:00.000Z", status: LiveMarketStatus.OPEN,
+      selections: ["SCORE_1_0", "SCORE_0_1"].map(key => ({
+        selectionId: `${marketId}:3:${key}`, side: TeamSide.NONE, odds: 5, label: key,
+      })),
+    }],
+  } } });
+  const response = await request(app).get("/api/event/risk-events/event-a").expect(200);
+  expect(response.body.choices.map((item: { outcomeKey: string }) => item.outcomeKey))
+    .toEqual([`${marketId}:3:SCORE_1_0`, `${marketId}:3:SCORE_0_1`]);
+  expect(response.body.choices.every((item: { sourceOpen: boolean }) => !item.sourceOpen)).toBe(true);
 });

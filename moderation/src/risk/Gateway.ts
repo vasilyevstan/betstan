@@ -72,10 +72,10 @@ export async function receiveRisk(event: IPlaceBetEvent, _now: Date, rawData: un
     if (!position.reason && rules.some(r => !activityRuleReady(r, state.activityCoverage, now))) position.reason = "RISK_EVIDENCE_UNAVAILABLE";
     const needsLedger = rules.some(r => ["MAX_SUBMISSIONS", "MAX_TURNOVER", "REPEAT_BET_COOLDOWN_MS", "MAX_OPEN_STAKE", "MAX_OPEN_RETURN", "MAX_OPERATOR_EXPOSURE", "MAX_CUSTOMER_LOSS"].includes(r.type));
     if (!position.reason && needsLedger) {
-      const positions = await readBook(positionFilter(rules, position, now), session);
+      const book = await readBook(positionFilter(rules, position, now), session);
       const movements = await realisedFor(rules, position.userId, now, session);
-      position.reason = positions.length > 10000 || movements.length > 10000 ? "RISK_EVIDENCE_CAPACITY_UNAVAILABLE"
-        : ledgerReason(rules, position, positions as any, now, movements);
+      position.reason = book.capacityExceeded || movements.length > 10000 ? "RISK_EVIDENCE_CAPACITY_UNAVAILABLE"
+        : ledgerReason(rules, position, book.positions, now, movements);
     }
     position.reserved = !position.reason;
     await RiskPosition.create([position], { session });
@@ -119,10 +119,10 @@ export async function terminalRisk(slipId: string, decision: ModerationDecision,
       const activity = (await RiskState.findById("active").session(session).lean() as any)?.activityCoverage;
       if (!reason && rules.some(r => !activityRuleReady(r, activity, now))) reason = "RISK_EVIDENCE_UNAVAILABLE";
       if (!reason && rules.some((r: any) => ["MAX_SUBMISSIONS", "MAX_TURNOVER", "REPEAT_BET_COOLDOWN_MS", "MAX_OPEN_STAKE", "MAX_OPEN_RETURN", "MAX_OPERATOR_EXPOSURE", "MAX_CUSTOMER_LOSS"].includes(r.type))) {
-        const positions = await readBook(positionFilter(rules, position, now), session);
+        const book = await readBook(positionFilter(rules, position, now), session);
         const movements = await realisedFor(rules, position.userId, now, session);
-        reason = positions.length > 10000 || movements.length > 10000 ? "RISK_EVIDENCE_CAPACITY_UNAVAILABLE"
-          : ledgerReason(rules, { ...position, state: "ACCEPTED" }, positions as any, now, movements as any);
+        reason = book.capacityExceeded || movements.length > 10000 ? "RISK_EVIDENCE_CAPACITY_UNAVAILABLE"
+          : ledgerReason(rules, { ...position, state: "ACCEPTED" }, book.positions, now, movements);
       }
     }
     const affectedRows: IModerationAffectedRow[] = reason
