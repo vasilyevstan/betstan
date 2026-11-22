@@ -375,6 +375,16 @@ source digest. Moderation must additionally reconcile its own receipts and
 live overlap before committing readiness. Export alone does not enable a rule,
 and the old overlap-only movement export is not a complete-book certificate.
 
+The protected OCI data workflow has a separate `reconcile-risk-accounting`
+phase, dispatched as `oci-live-data-reconcile-risk-accounting` through the
+canonical release helper. It requires the exact current source, immutable
+build/infrastructure/checkpoint evidence and a successful bound dry-run.
+It uses the existing private source/receiver commands, proves compatible
+deployed snapshot readers and verifies public open-event analysis after
+restoring the unchanged runtime. It is not a deployment or rule activation.
+Unknown older loss windows remain unavailable; complete open positions can
+still make event exposure analysis usable.
+
 Reconciliation currently supports at most 10,000 merged positions and 10,000
 movements, with 16 MiB snapshot and pending-inbox budgets. Admission bounds
 its applicable book/window scan at 10,000 entries. Exceeding these technical

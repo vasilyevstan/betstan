@@ -66,6 +66,7 @@ ROLLBACK_ACTION_PINS = {
   },
   "oci-live-data-rollout" => {
     "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/setup-node" => "a0853c24544627f65ddf259abe73b1d18a591444",
     "actions/download-artifact" => "37930b1c2abaa49bbe596cd826c3c89aef350131",
     "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
@@ -1347,6 +1348,7 @@ def validate_live_data_rollout_workflow!(file, document, content)
   expected_pairs = [
     "dry-run|DRY RUN LIVE DATA EXACT SHA",
     "apply-backfills|APPLY LIVE BACKFILLS EXACT SHA",
+    "reconcile-risk-accounting|RECONCILE RISK ACCOUNTING EXACT SHA",
     "apply-slip-index|APPLY LIVE SLIP INDEX EXACT SHA",
     "apply-slip-index|CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA",
     "apply-slip-index|RESUME APPLIED LIVE DATA EXACT SHA",
@@ -1356,7 +1358,7 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "incident-restore|RESTORE AUTHENTICATED HELD BASELINE EXACT SHA"
   ].sort
   observed_pairs = route.scan(
-    /"((?:dry-run|apply-backfills|apply-slip-index|incident-restore)\|[^"]+)"(?=\s*(?:\||\)))/
+    /"((?:dry-run|apply-backfills|apply-slip-index|reconcile-risk-accounting|incident-restore)\|[^"]+)"(?=\s*(?:\||\)))/
   ).flatten.sort
   unless observed_pairs == expected_pairs &&
          route.include?("Invalid live-data phase/confirmation pair") &&
@@ -1400,15 +1402,22 @@ def validate_live_data_rollout_workflow!(file, document, content)
            dry-run
            apply-backfills
            apply-slip-index
+           reconcile-risk-accounting
            incident-restore
          ]
-    fail_inventory("#{name} must expose only the four reviewed rollout phases")
+    fail_inventory("#{name} must expose only the five reviewed rollout phases")
   end
 
   {
     "DRY RUN LIVE DATA EXACT SHA" => "read-only confirmation",
     "APPLY LIVE BACKFILLS EXACT SHA" => "backfill confirmation",
     "APPLY LIVE SLIP INDEX EXACT SHA" => "index confirmation",
+    "RECONCILE RISK ACCOUNTING EXACT SHA" => "accounting reconciliation confirmation",
+    "protected_operation=oci-live-data-reconcile-risk-accounting" =>
+      "exact-source accounting operation",
+    "risk-accounting-reconciliation-stan.js" =>
+      "bounded private accounting handoff",
+    "--verify-public" => "restored public accounting acceptance",
     "RESTORE AUTHENTICATED HELD BASELINE EXACT SHA" =>
       "bounded incident restoration confirmation",
     "incident_manifest_stan.py" => "fixed incident manifest verification",

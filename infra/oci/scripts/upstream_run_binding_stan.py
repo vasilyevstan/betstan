@@ -6155,14 +6155,19 @@ def current_held_source(repository, source_sha, label, *, native_sources=None):
                 or observed.get("sha") != hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
             ):
                 fail(f"{label} native executed source blob differs from its authenticated tree")
+    actions = set(re.findall(r"(?m)^\s+uses: ([^\s#]+)", workflow))
+    required_actions = {
+        "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+        "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
+        "oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58",
+        "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+    }
     if (
         re.findall(r"(?m)^  ([a-z][a-z-]*):$", workflow.partition("\njobs:\n")[2]) != ["rollout"]
-        or set(re.findall(r"(?m)^\s+uses: ([^\s#]+)", workflow)) != {
-            "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
-            "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
-            "oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58",
-            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
-        }
+        or actions not in (
+            required_actions,
+            required_actions | {"actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444"},
+        )
         or any(token not in producer for token in (
             'destination = root / "resume-images.tsv"',
             'hashlib.sha256(images).hexdigest() != expected[0]',
@@ -6668,6 +6673,10 @@ def validate_held_handoff_native(
         fail(f"{label} complete held producer native inventory differs")
     skipped = {
         "Download failed deploy protected baseline", "Verify reader-qualified released activation state",
+        "Install pinned runtime for private accounting transport",
+        "Restore locked source and receiver dependencies",
+        "Verify restored public accounting and event analysis",
+        "Release accounting HTTP fence after verified lock release",
         "Demote and verify exact retained live-acceptance account",
         "Delete exact orphaned live-acceptance slips", "Capture post-phase runtime baseline",
         "Restore runtime or retain hold if final handoff packaging failed",

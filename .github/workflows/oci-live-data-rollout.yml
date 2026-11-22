@@ -29,13 +29,14 @@ on:
         required: true
         type: string
       phase:
-        description: Read, backfill, create the Slip index, or restore the authenticated held baseline
+        description: Read, backfill, create the Slip index, reconcile risk accounting, or restore the held baseline
         required: true
         type: choice
         options:
           - dry-run
           - apply-backfills
           - apply-slip-index
+          - reconcile-risk-accounting
           - incident-restore
       prerequisite_run_id:
         description: Prior successful phase run ID, or 0 for dry-run
@@ -186,6 +187,7 @@ jobs:
           case "${PHASE}|${CONFIRMATION}" in
             "dry-run|DRY RUN LIVE DATA EXACT SHA" | \
             "apply-backfills|APPLY LIVE BACKFILLS EXACT SHA" | \
+            "reconcile-risk-accounting|RECONCILE RISK ACCOUNTING EXACT SHA" | \
             "apply-slip-index|APPLY LIVE SLIP INDEX EXACT SHA" | \
             "apply-slip-index|CONTINUE SUCCESSFUL HELD LIVE DATA EXACT SHA" | \
             "apply-slip-index|RESUME APPLIED LIVE DATA EXACT SHA" | \
@@ -361,6 +363,15 @@ jobs:
               [ "$RESUME_SOURCE_SHA" = "$SOURCE_SHA" ]
               [ "$CHECKPOINT_SOURCE_SHA" = "$SOURCE_SHA" ]
               protected_operation=oci-live-data-apply-backfills
+              ;;
+            reconcile-risk-accounting)
+              [ "$CONFIRMATION" = "RECONCILE RISK ACCOUNTING EXACT SHA" ]
+              [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [ "$FAILED_DEPLOY_RUN_ID" = "0" ]
+              [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
+              [ "$RESUME_SOURCE_SHA" = "$SOURCE_SHA" ]
+              [ "$CHECKPOINT_SOURCE_SHA" = "$SOURCE_SHA" ]
+              protected_operation=oci-live-data-reconcile-risk-accounting
               ;;
             apply-slip-index)
               [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -1039,6 +1050,20 @@ jobs:
               artifacts/oci-live-data-rollout/images.tsv \
               artifacts/oci-live-data-rollout/resume-images.tsv
           fi
+
+      - name: Install pinned runtime for private accounting transport
+        if: inputs.phase != 'incident-restore' && inputs.phase == 'reconcile-risk-accounting'
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24.22.3"
+
+      - name: Restore locked source and receiver dependencies
+        if: inputs.phase != 'incident-restore' && inputs.phase == 'reconcile-risk-accounting'
+        run: |
+          npm ci --prefix resulting --ignore-scripts --no-audit --no-fund
+          npm ci --prefix moderation --ignore-scripts --no-audit --no-fund
+          (cd resulting && node -r ts-node/register/transpile-only -e "require('./src/scripts/exportAccounting')")
+          (cd moderation && node -r ts-node/register/transpile-only -e "require('./src/scripts/importRiskSnapshot')")
 
       - name: Install pinned OCI CLI
         if: inputs.phase != 'incident-restore'
@@ -2421,7 +2446,16 @@ jobs:
           BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
           DISK_CHECKPOINT_SHA256: ${{ steps.provenance.outputs.disk_checkpoint_sha256 }}
           DISK_CHECKPOINT_DISPOSITION: ${{ steps.provenance.outputs.disk_checkpoint_disposition }}
-        run: ./infra/oci/scripts/live-betting-data-rollout-stan.sh
+        run: |
+          if [ "$PHASE" = "reconcile-risk-accounting" ]; then
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            STATE_FILE="$RUNNER_TEMP/live-data-maintenance.tsv" \
+              node infra/oci/scripts/risk-accounting-reconciliation-stan.js
+          else
+            ./infra/oci/scripts/live-betting-data-rollout-stan.sh
+          fi
 
       - name: Restore runtime or verify final deploy handoff
         id: maintenance
@@ -2435,6 +2469,26 @@ jobs:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
           set -euo pipefail
+          if [ "$PHASE" = "reconcile-risk-accounting" ]; then
+            if [ "$DATA_OUTCOME" = "success" ]; then
+              RESTORE_KEEP_FENCE=true ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+            else
+              ./infra/oci/scripts/live-data-maintenance-stan.sh hold
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
+              LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+              OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+              LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
+              SOURCE_SHA="$SOURCE_SHA" \
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew
+            fi
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
+            exit 0
+          fi
           restore_or_verify_retained_hold() {
             if [ "$PHASE" = "apply-slip-index" ]; then
               ./infra/oci/scripts/live-data-maintenance-stan.sh hold
@@ -2488,6 +2542,14 @@ jobs:
           else
             restore_or_verify_retained_hold
           fi
+
+      - name: Verify restored public accounting and event analysis
+        id: risk_readiness
+        if: inputs.phase != 'incident-restore' && inputs.phase == 'reconcile-risk-accounting' && steps.data.outcome == 'success' && steps.maintenance.outcome == 'success'
+        env:
+          OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OUTPUT_DIR: artifacts/oci-live-data-rollout/evidence
+        run: node infra/oci/scripts/risk-accounting-reconciliation-stan.js --verify-public
 
       - name: Capture post-phase runtime baseline
         if: >-
@@ -2550,8 +2612,11 @@ jobs:
           always() &&
           inputs.phase != 'incident-restore' &&
           (failure() || cancelled()) &&
-          inputs.phase == 'apply-slip-index' &&
-          steps.maintenance_enter.outcome == 'success'
+          ((inputs.phase == 'apply-slip-index' && steps.maintenance_enter.outcome == 'success') ||
+           (inputs.phase == 'reconcile-risk-accounting' &&
+            steps.operation_lock.outcome == 'success' &&
+            steps.maintenance_enter.outcome != 'skipped' &&
+            (steps.data.outcome == 'success' || steps.maintenance.outcome != 'success')))
         env:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
@@ -2571,12 +2636,18 @@ jobs:
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
 
       - name: Release database operation lock unless handed to deploy
+        id: operation_lock_release
         if: >-
           always() &&
           inputs.phase != 'incident-restore' &&
           steps.operation_lock.outcome == 'success' &&
           (inputs.phase != 'apply-slip-index' ||
-           steps.maintenance_enter.outcome != 'success')
+           steps.maintenance_enter.outcome != 'success') &&
+          (inputs.phase != 'reconcile-risk-accounting' ||
+           (steps.data.outcome == 'success' &&
+            steps.maintenance.outcome == 'success' &&
+            steps.risk_readiness.outcome == 'success' &&
+            !failure() && !cancelled()))
         run: |
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
@@ -2588,6 +2659,24 @@ jobs:
           OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
+
+      - name: Release accounting HTTP fence after verified lock release
+        if: >-
+          always() &&
+          inputs.phase != 'incident-restore' &&
+          inputs.phase == 'reconcile-risk-accounting' &&
+          steps.operation_lock_release.outcome == 'success' &&
+          steps.risk_readiness.outcome == 'success' &&
+          !failure() && !cancelled()
+        env:
+          STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
+        run: |
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
+          ./infra/oci/scripts/live-data-maintenance-stan.sh release
 
       - name: Revoke exact runner rule
         if: >-

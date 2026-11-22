@@ -1559,6 +1559,22 @@ Enable prepared controls only after their applicable readiness and end-to-end
 admission evidence pass. These prerequisites do not authorize a production
 operation or relax the canonical exact-source controls.
 
+Use `oci-live-data-reconcile-risk-accounting` for this handoff; it selects
+`reconcile-risk-accounting` in the existing protected OCI data workflow.
+The exact current-master operation binds successful immutable build,
+infrastructure, disk checkpoint and dry-run evidence. It retains the same
+lock and physical maintenance through the final receiver acknowledgement,
+then restores the existing runtime and checks actual public accounting and
+event analysis while retaining the HTTP write fence. After successful proof,
+it releases and verifies the database lock before releasing that fence.
+Failed, cancelled or ambiguous handoffs retain both the lock and physical
+maintenance for explicitly authorized recovery; lease expiry is not recovery.
+Source records remain private; checksummed evidence records
+the source digest, manifest/page hashes and final acknowledgement.
+This phase emits no final-index/deployment certificate and does not deploy
+pending UI changes or modify risk rules. Unsupported open-position evidence
+fails rather than forcing readiness. Old loss-window readiness is independent.
+
 ### Existing live-betting activation
 
 `DEPLOYMENT_PROVENANCE_FILE` and `LIVE_SCHEMA_EVIDENCE_FILE` are the two
