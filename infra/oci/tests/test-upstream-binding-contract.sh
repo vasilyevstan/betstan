@@ -160,8 +160,15 @@ def archive(files):
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as bundle:
         for path, raw in files.items():
-            bundle.writestr(path, raw)
+            # Metadata and downloads must describe one immutable fixture archive.
+            bundle.writestr(zipfile.ZipInfo(path, (2026, 1, 1, 0, 0, 0)), raw)
     return output.getvalue()
+
+with patch("zipfile.time.localtime", return_value=(2026, 1, 1, 0, 0, 0, 3, 1, -1)):
+    first_archive = archive({"fixture.env": b"unchanged content\n"})
+with patch("zipfile.time.localtime", return_value=(2026, 1, 1, 0, 0, 4, 3, 1, -1)):
+    assert archive({"fixture.env": b"unchanged content\n"}) == first_archive
+assert archive({"fixture.env": b"changed content\n"}) != first_archive
 
 def payloads():
     raw = "".join(f"{key}={value}\n" for key, value in values.items()).encode()

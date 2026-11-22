@@ -721,6 +721,34 @@ sanitize_backfill_report() {
     --arg expected_mode "$expected_mode" '
       def nonnegative_integer:
         type == "number" and . >= 0 and . == floor;
+      def snapshot_diagnostic:
+        . as $diagnostic |
+        if .status == "NO_SEALED_SNAPSHOT" then {status}
+        elif .status == "SEALED_SNAPSHOT_DIAGNOSED" and
+          (.snapshotId | type == "string" and test("^risk_[1-9][0-9]*_1$") and length <= 128) and
+          (.cutAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$")) and
+          (.manifestHash | type == "string" and test("^[0-9a-f]{64}$")) and
+          (.openPositions == "COMPLETE" or .openPositions == "UNAVAILABLE") and
+          ([.positions, .movements, .unavailableOpenPositions, .unavailableHistories] |
+            all(nonnegative_integer)) and
+          (.positions + .movements <= 10000) and
+          (.unavailableOpenPositions <= .positions) and
+          (.unavailableHistories <= .positions) and
+          ((.openPositions == "COMPLETE") == (.unavailableOpenPositions == 0)) and
+          ([.missingEvidence.scope, .missingEvidence.placement, .missingEvidence.principal, .missingEvidence.other] |
+            all(nonnegative_integer)) and
+          ([.missingEvidence.scope, .missingEvidence.placement, .missingEvidence.principal, .missingEvidence.other] |
+            max <= $diagnostic.unavailableOpenPositions)
+        then {
+          status, snapshotId, cutAt, manifestHash, openPositions,
+          positions, movements, unavailableOpenPositions, unavailableHistories,
+          missingEvidence: {
+            scope: .missingEvidence.scope, placement: .missingEvidence.placement,
+            principal: .missingEvidence.principal, other: .missingEvidence.other
+          }
+        }
+        else error("Invalid accounting snapshot diagnostic report")
+        end;
       . as $report |
       select(
         ($report.mode == $expected_mode) and
@@ -769,7 +797,10 @@ sanitize_backfill_report() {
             errorCount
           }
         ]
-      }
+      } + (if $service == "resulting" and $expected_mode == "dry-run" and
+        ($report | has("accountingSnapshot"))
+      then {accountingSnapshot: ($report.accountingSnapshot | snapshot_diagnostic)}
+      else {} end)
     ' "$raw_file" >"$temporary" ||
     fail "backfill report contract failed for $service/$stage"
   mv "$temporary" "$output"

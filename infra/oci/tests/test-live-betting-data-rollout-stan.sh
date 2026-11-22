@@ -1825,11 +1825,32 @@ if [[ "${1:-}" == "logs" ]]; then
   if [[ "$scenario" == "duplicates" && "$service" == "slip" ]]; then
     duplicate_json='[{"userId":"secret-user","betKind":"PRE_MATCH","count":2,"slipIds":["secret-slip"]}]'
   fi
+  accounting_json=null
+  if [[ "$service" == "resulting" && "$mode" == "dry-run" ]]; then
+    accounting_json='{"status":"NO_SEALED_SNAPSHOT"}'
+    if [[ "$scenario" == accounting-diagnostics* ]]; then
+      accounting_json='{
+        "status":"SEALED_SNAPSHOT_DIAGNOSED","snapshotId":"risk_101_1",
+        "cutAt":"2020-01-01T00:00:00.000Z",
+        "manifestHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "openPositions":"UNAVAILABLE","positions":4,"movements":1,
+        "unavailableOpenPositions":3,"unavailableHistories":4,
+        "missingEvidence":{"scope":3,"placement":2,"principal":2,"other":0,"rawDocument":"secret-user"},
+        "rawDocument":{"userId":"secret-user","slipId":"secret-slip","wager":10}
+      }'
+      if [[ "$scenario" == "accounting-diagnostics-invalid-count" ]]; then
+        accounting_json="$(jq '.missingEvidence.scope = -1' <<<"$accounting_json")"
+      elif [[ "$scenario" == "accounting-diagnostics-private-id" ]]; then
+        accounting_json="$(jq '.snapshotId = "secret-user"' <<<"$accounting_json")"
+      fi
+    fi
+  fi
   jq -n \
     --arg mode "$mode" \
     --arg service "$service" \
     --argjson matched "$matched" \
     --argjson changed "$changed" \
+    --argjson accounting "$accounting_json" \
     --argjson duplicates "$duplicate_json" '{
       mode:$mode,
       batchSize:100,
@@ -1848,7 +1869,7 @@ if [[ "${1:-}" == "logs" ]]; then
         errorCount:0
       }],
       duplicateDrafts:$duplicates
-    }'
+    } + (if $accounting == null then {} else {accountingSnapshot:$accounting} end)'
   exit 0
 fi
 
@@ -2049,6 +2070,26 @@ if grep -R -E \
     "$pending_output" >/dev/null; then
   fail "sanitized dry-run evidence leaked sensitive data"
 fi
+
+accounting_output="$work_dir/accounting-diagnostics"
+run_phase dry-run accounting-diagnostics 4090 "$accounting_output"
+jq -e '
+  .accountingSnapshot.status == "SEALED_SNAPSHOT_DIAGNOSED" and
+  .accountingSnapshot.snapshotId == "risk_101_1" and
+  .accountingSnapshot.unavailableOpenPositions == 3 and
+  .accountingSnapshot.missingEvidence == {scope:3, placement:2, principal:2, other:0}
+' "$accounting_output/reports/preflight-resulting.json" >/dev/null ||
+  fail "dry-run did not preserve bounded accounting evidence diagnostics"
+if grep -R -E 'secret-user|secret-slip|rawDocument|wager' "$accounting_output" >/dev/null; then
+  fail "accounting diagnostics leaked private source records"
+fi
+for scenario in accounting-diagnostics-invalid-count accounting-diagnostics-private-id; do
+  if run_phase dry-run "$scenario" 4091 "$work_dir/$scenario" >"$work_dir/accounting-failure.log" 2>&1; then
+    fail "invalid accounting diagnostic report was accepted"
+  fi
+  grep -Fq "Invalid accounting snapshot diagnostic report" "$work_dir/accounting-failure.log" ||
+    fail "invalid accounting diagnostics did not fail at the report boundary"
+done
 
 already_applied_output="$work_dir/cleanup-applied"
 run_phase dry-run cleanup-applied 4018 "$already_applied_output"
