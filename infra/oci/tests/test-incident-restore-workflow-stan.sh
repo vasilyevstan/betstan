@@ -42,9 +42,9 @@ end
 
 trigger = document["on"] || document[true]
 inputs = trigger.dig("workflow_dispatch", "inputs")
-phases = %w[dry-run apply-backfills apply-slip-index incident-restore]
+phases = %w[dry-run apply-backfills apply-slip-index reconcile-risk-accounting incident-restore]
 unless inputs.dig("phase", "options") == phases
-  fail_contract("incident phase is not the bounded fourth choice")
+  fail_contract("phase choices differ from the exact reviewed five-phase list")
 end
 {
   "incident_continuation_run_id" => "0",
@@ -89,10 +89,11 @@ valid_pairs = [
     "apply-slip-index",
     "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA",
   ],
+  ["reconcile-risk-accounting", "RECONCILE RISK ACCOUNTING EXACT SHA"],
   ["incident-restore", "RESTORE AUTHENTICATED HELD BASELINE EXACT SHA"],
 ]
 route_pairs = route.scan(
-  /"((?:dry-run|apply-backfills|apply-slip-index|incident-restore)\|[^"]+)"(?=\s*(?:\||\)))/
+  /"((?:dry-run|apply-backfills|apply-slip-index|reconcile-risk-accounting|incident-restore)\|[^"]+)"(?=\s*(?:\||\)))/
 ).flatten.sort
 unless route_pairs == valid_pairs.map { |phase, phrase| "#{phase}|#{phrase}" }.sort
   fail_contract("phase/confirmation allowlist differs from the reviewed cross-product")
