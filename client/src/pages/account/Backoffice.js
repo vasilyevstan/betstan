@@ -283,6 +283,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     const cashBackEnabled = event.cashBackEnabled !== false;
     const cashBackActionId = `cash-back:${event.eventId}`;
     const kickoffLabel = formatKickoff(event.time);
+    const canAnalyse = event.status === 'NO_RESULT' && event.visibility === 'ONLINE';
 
     return <article className="card backoffice-event" key={event.eventId} aria-labelledby={`backoffice-event-${event.eventId}`}>
       <div className="card-body backoffice-event__body">
@@ -359,7 +360,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               {busyAction === resultActionId ? 'Saving...' : 'Save final result'}
             </button>
           </form>
-          <div className="backoffice-event__actions">
+          <div className={`backoffice-event__actions${canAnalyse ? ' backoffice-event__actions--analysis' : ''}`}>
             <button
               type="button"
               className="btn backoffice-control backoffice-action"
@@ -376,6 +377,10 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             <a className="btn backoffice-control backoffice-action"
               href={`/backoffice/events/${encodeURIComponent(event.eventId)}/markets${window.location.search}`}
               aria-label={`Markets for ${eventName}`}>Markets</a>
+            {canAnalyse ? <a
+              className="btn backoffice-control backoffice-action backoffice-analysis-action"
+              href={`/backoffice/events/${encodeURIComponent(event.eventId)}/analysis${window.location.search}`}
+              aria-label={`Black swan analysis for ${eventName}`}>Black swan analysis</a> : null}
             <button type="button" className="btn backoffice-control backoffice-action backoffice-cash-back-action"
               disabled={isResulted || Boolean(busyAction)}
               aria-label={`${cashBackEnabled ? 'Turn off' : 'Allow'} cash back for ${eventName}`}
@@ -399,6 +404,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       </div>
       <a className="btn backoffice-control backoffice-action backoffice-header__action"
         href={`/backoffice/markets${window.location.search}`}>Market designer</a>
+      <a className="btn backoffice-control backoffice-action backoffice-header__action"
+        href={`/backoffice/events/analysis${window.location.search}`}>Black swan analysis</a>
       <a className="btn backoffice-control backoffice-action backoffice-header__action"
         href={`/backoffice/risk-centre${window.location.search}`}>Risk Centre</a>
     </header>

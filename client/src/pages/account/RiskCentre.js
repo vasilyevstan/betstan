@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useParams } from 'react-router-dom';
 import { riskRuleNames } from '../../riskRuleLabels';
 import RiskEvents from './RiskEvents';
 import '../../styles/risk-centre.css';
@@ -31,7 +31,7 @@ const idPattern = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,95}$/;
 const scopeLists = [
   ['eventIds', 'Event IDs'], ['productIds', 'Product IDs'],
   ['marketIds', 'Market IDs'], ['templateIds', 'Template IDs'],
-  ['selectionIds', 'Choice keys (managed in Events)'],
+  ['selectionIds', 'Choice keys (managed in Backoffice Events)'],
   ['marketTypes', 'Built-in types (managed in Markets)'],
 ];
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -249,9 +249,10 @@ function prepareRule(draft, catalogue) {
   return { id: draft.id, type: draft.type, enabled: draft.enabled, scope, parameters };
 }
 
-export default function RiskCentre() {
+export default function RiskCentre({ eventAnalysis = false }) {
   const { search } = useLocation();
-  const [tab, setTab] = useState('rules');
+  const { eventId } = useParams();
+  const pageTitle = eventAnalysis ? 'Black swan analysis' : 'Risk Centre';
   const [snapshot, setSnapshot] = useState(null);
   const snapshotRef = useRef(null);
   const [loading, setLoading] = useState(true);
@@ -305,12 +306,13 @@ export default function RiskCentre() {
       acceptSnapshot(response.data);
     } catch {
       if (mounted.current && sequence === readSequence.current) {
-        setLoadError('Risk Centre could not be loaded. Your input is preserved. Try refreshing.');
+        setLoadError(eventAnalysis ? 'The active policy could not be loaded. Try refreshing before reviewing event analysis.'
+          : 'Risk Centre could not be loaded. Your input is preserved. Try refreshing.');
       }
     } finally {
       if (mounted.current && sequence === readSequence.current) setLoading(false);
     }
-  }, [acceptSnapshot]);
+  }, [acceptSnapshot, eventAnalysis]);
   useEffect(() => {
     mounted.current = true;
     reload();
@@ -327,7 +329,7 @@ export default function RiskCentre() {
     setTemplates(markets.status === 'fulfilled' && validTemplates(markets.value?.data) ? markets.value.data : null);
     setSwitchesLoaded(true);
   }, []);
-  useEffect(() => { loadSwitches(); }, [loadSwitches]);
+  useEffect(() => { if (!eventAnalysis) loadSwitches(); }, [eventAnalysis, loadSwitches]);
   useEffect(() => {
     if (error || message) feedback.current?.focus();
   }, [error, message]);
@@ -584,13 +586,6 @@ export default function RiskCentre() {
       body: { ...body, rule },
     });
   };
-  const changeTab = event => {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-    event.preventDefault();
-    const next = event.key === 'Home' ? 'rules' : event.key === 'End' ? 'events' : tab === 'rules' ? 'events' : 'rules';
-    setTab(next);
-    document.getElementById(`risk-tab-${next}`)?.focus();
-  };
   const switchAccess = async item => {
     if (!access || accessBusy) return;
     const current = access[item.field];
@@ -678,19 +673,25 @@ export default function RiskCentre() {
 
   return <section className="markets-page backoffice-markets risk-centre" aria-labelledby="risk-title">
     <nav className="market-breadcrumb" aria-label="Breadcrumb"><ol>
-      <li><Link to={`/backoffice${search}`}>Backoffice</Link></li><li aria-current="page">Risk Centre</li>
+      <li><Link to={`/backoffice${search}`}>Backoffice</Link></li>
+      {eventAnalysis && eventId ? <li><Link to={`/backoffice/events/analysis${search}`}>Black swan analysis</Link></li> : null}
+      <li aria-current="page">{eventAnalysis && eventId ? 'Event analysis' : pageTitle}</li>
     </ol></nav>
     <header className="market-page-heading">
-      <h1 className="h3" id="risk-title">Risk Centre</h1>
-      <p>{tab === 'rules' ? 'Choose a rule, set its value, then turn it on. Changes apply to new bets, not bets already waiting.'
-        : 'Review event exposure, stress the current odds, and switch individual choices for new bets.'}</p>
+      <h1 className="h3" id="risk-title">{pageTitle}</h1>
+      <p>{eventAnalysis ? 'Review event exposure, stress the current odds, and switch individual choices for new bets.'
+        : 'Choose a rule, set its value, then turn it on. Changes apply to new bets, not bets already waiting.'}</p>
+      {eventAnalysis && eventId ? <p className="market-help">Conservative loss bounds, not a probability forecast.</p> : null}
       <p className="market-help">This simulation's rules are public: anyone can edit them. When rules overlap, the stricter limit applies.</p>
       <div className="market-form-actions">
-        <button type="button" className={action} disabled={loading || busy} onClick={() => { reload(); loadSwitches(); }}>Refresh rules</button>
+        <button type="button" className={action} disabled={loading || busy} onClick={() => { reload(); if (!eventAnalysis) loadSwitches(); }}>
+          {eventAnalysis ? 'Refresh policy' : 'Refresh rules'}
+        </button>
+        {eventAnalysis ? <Link className={action} to={`/backoffice/risk-centre${search}`}>Risk Centre rules</Link> : null}
         {snapshot ? <span>{snapshot.readiness.transactions === 'READY' ? 'Active' : 'Read-only policy'} revision {snapshot.revision} · Defaults version {snapshot.defaultsVersion}</span> : null}
       </div>
     </header>
-    {loading ? <p role="status">Loading rules…</p> : null}
+    {loading ? <p role="status">{eventAnalysis ? 'Loading active policy...' : 'Loading rules…'}</p> : null}
     {loadError ? <p className="market-notice market-notice--danger" role="alert">{loadError}</p> : null}
     {error || message ? <div ref={feedback} id="risk-input-error" tabIndex="-1" role={error ? 'alert' : 'status'}
       className={`market-notice market-notice--${error ? 'danger' : 'positive'}`}>
@@ -703,19 +704,9 @@ export default function RiskCentre() {
     </div> : null}
     {snapshot ? <>
       {snapshot.readiness.transactions !== 'READY' ? <p className="market-notice market-notice--warning" role="status">Rule editing is not available in this deployment. Existing bet validation continues to run.</p> : null}
-      <div className="risk-tabs" role="tablist" aria-label="Risk Centre views">
-        {['rules', 'events'].map(name => <button key={name} type="button" role="tab" id={`risk-tab-${name}`}
-          className={action} aria-selected={tab === name} aria-controls={`risk-panel-${name}`}
-          tabIndex={tab === name ? 0 : -1} onKeyDown={changeTab} onClick={() => setTab(name)}>
-          {name === 'rules' ? 'Rules' : 'Events'}
-        </button>)}
-      </div>
-      <div role="tabpanel" id="risk-panel-events" aria-labelledby="risk-tab-events" hidden={tab !== 'events'}>
-        {tab === 'events' ? <RiskEvents revision={snapshot.revision} disabled={readOnly || frozen}
+      {eventAnalysis ? <RiskEvents eventId={eventId} revision={snapshot.revision} disabled={readOnly || frozen}
           canSwitch={snapshot.readiness.transactions === 'READY' && snapshot.readiness.capabilities.selectionBlocking === true}
-          onSwitch={switchChoice} onRefreshRules={reload} search={search} /> : null}
-      </div>
-      <div role="tabpanel" id="risk-panel-rules" aria-labelledby="risk-tab-rules" hidden={tab !== 'rules'}>
+          onSwitch={switchChoice} onRefreshRules={reload} search={search} /> : <>
       <section className="risk-switches" aria-labelledby="risk-switches-title">
         <h2 className="h5" id="risk-switches-title">All-events switches</h2>
         <section className="risk-switch" aria-labelledby="risk-betting-title">
@@ -927,7 +918,7 @@ export default function RiskCentre() {
                       </div>
                     </details>
                   </fieldset>
-                  {draft.scope.selectionIds ? <p className="market-help">This choice's identity is managed in Events. You can turn this Block bets rule off or remove it here; its scope is read-only.</p> : null}
+                  {draft.scope.selectionIds ? <p className="market-help">This choice's identity is managed in Backoffice Events. You can turn this Block bets rule off or remove it here; its scope is read-only.</p> : null}
                   {activationBlocked ? <p className="market-help" id="risk-activation-reason">
                     Can't turn on yet: {accountingUnavailable ? 'accounting history is not ready' : 'activity history is not ready for this window or cooldown'}. You can save it as off.
                   </p> : null}
@@ -994,7 +985,7 @@ export default function RiskCentre() {
           </details></li>;
         })}</ol> : null}
       </section>
-      </div>
+      </>}
     </> : null}
   </section>;
 }

@@ -3,8 +3,9 @@
 ## Purpose and availability
 
 Risk Centre is the bet-acceptance module inside **Moderation**, not a new
-service. Its public editor opens at `/backoffice/risk-centre`, beside
-**Market designer**. Backoffice proxies bounded management requests to
+service. Its public rule editor opens at `/backoffice/risk-centre`, beside
+**Market designer**. Per-event black-swan analysis belongs to Backoffice Events,
+not a Risk Centre tab. Backoffice proxies bounded management requests to
 Moderation; it does not own another copy of the policy database.
 
 This is a nominal Stanbucks simulation. Anonymous visitors can view and
@@ -73,10 +74,17 @@ Zero configured acceptance delay does not promise an instantaneous response:
 transport and missing-event-evidence retries can keep a bet pending. The
 editor does not mislabel those retries as an active delay rule.
 
-## Events and black-swan stress
+## Backoffice events and black-swan stress
 
-The **Rules** and **Events** tabs separate policy editing from event review.
-Switching tabs preserves an unsaved rule draft. Events lists all online,
+Open **Black swan analysis** from the Backoffice heading to review all open
+events at `/backoffice/events/analysis`. An online, unresulted event card has
+its own **Black swan analysis** action at
+`/backoffice/events/:eventId/analysis`; it opens that event directly, without
+loading another event catalogue. The page links back to event markets and the
+global Risk Centre rule editor. Theme and layout query parameters are retained.
+Risk Centre contains global rules and switches, with no Events tab.
+
+The open-event analysis catalogue lists all online,
 unresulted upcoming and in-play events, without the public event page's time
 horizon. Offline, finished and unresolved-visibility events are excluded.
 Lifecycle-active source pauses remain visible so their choices can be managed.
@@ -122,7 +130,9 @@ new receipts containing them are declined.
 **Manage odds** opens the existing custom-market editor. Standard and live
 prices remain owned by their pricing models; analysis never automatically
 reprices or removes a selection. Rule conflicts and uncertain switches use
-the same revision and operation-recovery protocol as the Rules tab.
+the same existing revision and operation-recovery controller as the global
+rule editor. Moving the view does not change public permissions, exposure
+calculations, backend routes, quotes or stored policies.
 
 Backoffice exposes `GET /api/backoffice/risk-centre/events` and
 `GET /api/backoffice/risk-centre/events/:eventId?stakeMinor=100` through its

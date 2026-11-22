@@ -1917,6 +1917,10 @@ body {
   grid-column: 1 / -1;
 }
 
+.backoffice-event__actions--analysis .backoffice-cash-back-action {
+  grid-column: auto;
+}
+
 .backoffice-scores input {
   text-align: center;
   font-variant-numeric: tabular-nums;
@@ -1955,8 +1959,7 @@ body {
   }
 }
 
-/* Wide cards keep every event action on the two control rows: the actions share
-   the result form's four tracks, so cash back sits directly under Save. */
+/* Wide cards keep event actions on one row beneath the result form. */
 @container (min-width: 58rem) {
   .backoffice-event__body {
     grid-template-columns: minmax(0, 1fr) 32rem;
@@ -1967,6 +1970,15 @@ body {
   }
 
   .backoffice-cash-back-action {
+    grid-column: span 2;
+  }
+
+  .backoffice-event__actions--analysis {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .backoffice-analysis-action,
+  .backoffice-event__actions--analysis .backoffice-cash-back-action {
     grid-column: span 2;
   }
 }
