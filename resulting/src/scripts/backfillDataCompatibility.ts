@@ -1,6 +1,12 @@
 import mongoose from "mongoose";
 import { BetKind } from "@betstan/common";
 import { Bet, BetArchive } from "../model/Bet";
+import {
+  AccountingSnapshot,
+  readAccountingSnapshotManifest,
+  readAccountingSnapshotPage,
+} from "../service/accountingSnapshot";
+import { cashBackHash } from "../service/cashBackIdentity";
 
 const DEFAULT_BATCH_SIZE = 100;
 
@@ -24,6 +30,81 @@ export interface BackfillReport extends CollectionBackfillReport {
   mode: "dry-run" | "apply";
   batchSize: number;
   collections: CollectionBackfillReport[];
+  accountingSnapshot?: AccountingSnapshotDiagnostics;
+}
+
+export type AccountingSnapshotDiagnostics = {
+  status: "NO_SEALED_SNAPSHOT";
+} | {
+  status: "SEALED_SNAPSHOT_DIAGNOSED";
+  snapshotId: string;
+  cutAt: string;
+  manifestHash: string;
+  openPositions: "COMPLETE" | "UNAVAILABLE";
+  positions: number;
+  movements: number;
+  unavailableOpenPositions: number;
+  unavailableHistories: number;
+  missingEvidence: { scope: number; placement: number; principal: number; other: number };
+};
+
+async function inspectAccountingSnapshot(): Promise<AccountingSnapshotDiagnostics> {
+  const snapshot = await AccountingSnapshot.findOne({
+    _id: /^risk_[1-9][0-9]*_1$/, state: "SEALED",
+  }).sort({ cutAt: -1, _id: -1 }).select({ _id: 1 }).lean<{ _id: string }>();
+  if (!snapshot) return { status: "NO_SEALED_SNAPSHOT" };
+  const manifest = await readAccountingSnapshotManifest(snapshot._id);
+  const total = manifest.positions + manifest.movements;
+  const counts = [manifest.positions, manifest.movements, manifest.pageCount,
+    manifest.coverage.unavailableOpenPositions, manifest.coverage.unavailableHistories];
+  if (manifest.snapshotId !== snapshot._id || manifest.schemaVersion !== 1
+    || manifest.source !== "RESULTING" || manifest.status !== "COMPLETE"
+    || !counts.every(value => Number.isSafeInteger(value) && value >= 0)
+    || total > 10000 || manifest.pageCount > Math.max(1, total)
+    || !["COMPLETE", "UNAVAILABLE"].includes(manifest.coverage.openPositions)
+    || !Number.isFinite(Date.parse(manifest.cutAt))
+    || new Date(manifest.cutAt).toISOString() !== manifest.cutAt) {
+    throw new Error("Accounting snapshot diagnostic manifest is invalid");
+  }
+  const missingEvidence = { scope: 0, placement: 0, principal: 0, other: 0 };
+  let positions = 0, movements = 0, unavailableOpenPositions = 0, unavailableHistories = 0, bytes = 0;
+  let previousHash = cashBackHash({ schemaVersion: 1, source: "RESULTING", snapshotId: snapshot._id });
+  for (let number = 1; number <= manifest.pageCount; number++) {
+    const page = await readAccountingSnapshotPage(snapshot._id, number);
+    const size = Buffer.byteLength(JSON.stringify(page));
+    bytes += size;
+    if (!page || page.previousHash !== previousHash || !Array.isArray(page.entries) || page.entries.length > 50
+      || size > 512 * 1024 || bytes > 16 * 1024 * 1024) {
+      throw new Error("Accounting snapshot diagnostic page integrity or budget failed");
+    }
+    previousHash = page.hash;
+    for (const entry of page.entries) {
+      if (entry.kind === "MOVEMENT") { movements++; continue; }
+      if (entry.kind !== "POSITION") throw new Error("Accounting snapshot diagnostic entry is invalid");
+      positions++;
+      if (entry.history === "UNAVAILABLE") unavailableHistories++;
+      if (entry.openExposure !== "UNAVAILABLE") continue;
+      unavailableOpenPositions++;
+      const scope = entry.facts == null;
+      const placement = entry.placementFingerprint == null || entry.originalStakeMinor == null
+        || entry.maximumReturnMinor == null;
+      const principal = entry.remainingStakeMinor == null || entry.expectedRevision == null;
+      if (scope) missingEvidence.scope++;
+      if (placement) missingEvidence.placement++;
+      if (principal) missingEvidence.principal++;
+      if (!scope && !placement && !principal) missingEvidence.other++;
+    }
+  }
+  if (previousHash !== manifest.lastPageHash || positions !== manifest.positions
+    || movements !== manifest.movements || unavailableOpenPositions !== manifest.coverage.unavailableOpenPositions
+    || unavailableHistories !== manifest.coverage.unavailableHistories) {
+    throw new Error("Accounting snapshot diagnostic coverage does not match its sealed manifest");
+  }
+  return {
+    status: "SEALED_SNAPSHOT_DIAGNOSED", snapshotId: snapshot._id, cutAt: manifest.cutAt,
+    manifestHash: cashBackHash(manifest), openPositions: manifest.coverage.openPositions,
+    positions, movements, unavailableOpenPositions, unavailableHistories, missingEvidence,
+  };
 }
 
 const isMissing = (value: unknown): value is null | undefined =>
@@ -217,7 +298,8 @@ export const runDataCompatibilityBackfill = async (
     }),
   ];
 
-  return summariseReports(apply, batchSize, collections);
+  const report = summariseReports(apply, batchSize, collections);
+  return apply ? report : { ...report, accountingSnapshot: await inspectAccountingSnapshot() };
 };
 
 export const runBackfillCli = async (
@@ -231,6 +313,7 @@ export const runBackfillCli = async (
 
   await mongoose.connect(process.env.MONGO_URI, {
     autoIndex: false,
+    autoCreate: false,
   });
   try {
     const report = await runDataCompatibilityBackfill(parsed);

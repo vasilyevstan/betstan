@@ -1575,6 +1575,18 @@ This phase emits no final-index/deployment certificate and does not deploy
 pending UI changes or modify risk rules. Unsupported open-position evidence
 fails rather than forcing readiness. Old loss-window readiness is independent.
 
+Before retrying an unavailable source handoff, use the existing protected
+`dry-run`. Resulting's compatibility report now includes aggregate diagnostics
+from the latest sealed `risk_<run>_1` snapshot. Native manifest and page readers
+verify the complete hash chain without acknowledging pages; extraction is bounded
+to 10,000 entries, 512 KiB per page and 16 MiB total. Missing scope, placement and
+principal evidence counts overlap; `other` identifies unavailable positions
+whose exported fields are present. No identities, amounts or source records
+are published. `NO_SEALED_SNAPSHOT` means no forensic snapshot was available,
+not zero exposure. These are historical-cut diagnostics, not live readiness
+or permission to alter financial records. Dry-run does not enter maintenance,
+import into the receiver, complete the handoff or deploy pending UI changes.
+
 ### Existing live-betting activation
 
 `DEPLOYMENT_PROVENANCE_FILE` and `LIVE_SCHEMA_EVIDENCE_FILE` are the two
