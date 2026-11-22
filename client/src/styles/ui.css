@@ -1902,9 +1902,6 @@ body {
 .backoffice-event__actions {
   align-items: stretch;
 }
-.backoffice-analysis-action {
-  grid-column: 1 / -1;
-}
 .backoffice-create__settings {
   grid-column: 1 / -1;
   display: grid;
@@ -1918,6 +1915,10 @@ body {
 
 .backoffice-cash-back-action {
   grid-column: 1 / -1;
+}
+
+.backoffice-event__actions--analysis .backoffice-cash-back-action {
+  grid-column: auto;
 }
 
 .backoffice-scores input {
@@ -1976,7 +1977,8 @@ body {
     grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 
-  .backoffice-analysis-action {
+  .backoffice-analysis-action,
+  .backoffice-event__actions--analysis .backoffice-cash-back-action {
     grid-column: span 2;
   }
 }
