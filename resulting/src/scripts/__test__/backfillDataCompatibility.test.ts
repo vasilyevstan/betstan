@@ -2,6 +2,14 @@ import mongoose from "mongoose";
 import { BetKind, ResultingStatus } from "@betstan/common";
 import { Bet, BetArchive } from "../../model/Bet";
 import {
+  AccountingSnapshot, AccountingSnapshotPageRecord, acknowledgeAccountingSnapshotPage,
+  createAccountingSnapshot, readAccountingSnapshotPage,
+} from "../../service/accountingSnapshot";
+import * as fence from "../../service/accountingSnapshotFence";
+import { accountingPlacementState } from "../../service/betAccounting";
+import { cashBackHash } from "../../service/cashBackIdentity";
+import { createPlaceBetEvent } from "../../test/resultingTestUtils";
+import {
   parseBackfillArgs,
   runBackfillCli,
   runDataCompatibilityBackfill,
@@ -191,6 +199,7 @@ it("runs the CLI with logging and disconnects even when collections are empty", 
     expect(report.collection).toBe("all");
     expect(connectSpy).toHaveBeenCalledWith(process.env.MONGO_URI, {
       autoIndex: false,
+      autoCreate: false,
     });
     expect(disconnectSpy).toHaveBeenCalledTimes(1);
     expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
@@ -207,5 +216,68 @@ it("fails the CLI when MONGO_URI is missing", async () => {
     await expect(runBackfillCli([])).rejects.toThrow("Missing MONGO_URI variable");
   } finally {
     process.env.MONGO_URI = previousMongoUri;
+  }
+});
+
+it("diagnoses every sealed page without changing financial records or the acknowledgement cursor", async () => {
+  const check = jest.spyOn(fence, "verifyAccountingSnapshotFence").mockResolvedValue({
+    namespace: "test-only", operationId: "test-bootstrap", sourceSha: "a".repeat(40),
+    generation: "1", identityHash: "b".repeat(64),
+  });
+  try {
+    await Bet.collection.insertMany(Array.from({ length: 51 }, (_, number) => ({
+      userId: "private-source-owner", slipId: `private-slip-${number}`,
+      status: ResultingStatus.BET_APPROVED, wager: 10, betKind: BetKind.PRE_MATCH,
+      timestamp: "2020-01-01T00:00:00.000Z", rows: [buildRow(`private-row-${number}`)],
+    })));
+    const event = createPlaceBetEvent({ slipId: "known-open", userId: "private-source-owner" });
+    await Bet.create({
+      ...event.data, ...accountingPlacementState(event.data),
+      timestamp: "2020-01-01T00:00:00.000Z", status: ResultingStatus.BET_APPROVED,
+    });
+    const manifest = await createAccountingSnapshot("risk_101_1", "2019-01-01T00:00:00.000Z");
+    const first = (await readAccountingSnapshotPage(manifest.snapshotId, 1))!;
+    await acknowledgeAccountingSnapshotPage(manifest.snapshotId, 1, first.hash);
+    const jobBefore = await AccountingSnapshot.findById(manifest.snapshotId).lean();
+    const bookBefore = await Bet.collection.find({}).sort({ _id: 1 }).toArray();
+    check.mockRejectedValue(new Error("Original maintenance was released"));
+    const update = jest.spyOn(AccountingSnapshot, "updateOne");
+    const report = await runDataCompatibilityBackfill({ batchSize: 1 });
+    expect(report.accountingSnapshot).toEqual({
+      status: "SEALED_SNAPSHOT_DIAGNOSED", snapshotId: manifest.snapshotId,
+      cutAt: manifest.cutAt, manifestHash: cashBackHash(manifest), openPositions: "UNAVAILABLE",
+      positions: 52, movements: 0, unavailableOpenPositions: 51, unavailableHistories: 51,
+      missingEvidence: { scope: 51, placement: 51, principal: 51, other: 0 },
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(await AccountingSnapshot.findById(manifest.snapshotId).lean()).toEqual(jobBefore);
+    expect(await Bet.collection.find({}).sort({ _id: 1 }).toArray()).toEqual(bookBefore);
+    expect(JSON.stringify(report)).not.toMatch(/private-source-owner|private-slip|private-row|wager|originalStakeMinor/);
+  } finally {
+    jest.restoreAllMocks();
+  }
+});
+
+it("rejects a hash-valid broken page chain without changing the existing apply path", async () => {
+  jest.spyOn(fence, "verifyAccountingSnapshotFence").mockResolvedValue({
+    namespace: "test-only", operationId: "test-bootstrap", sourceSha: "a".repeat(40),
+    generation: "1", identityHash: "b".repeat(64),
+  });
+  try {
+    const event = createPlaceBetEvent({ slipId: "chain" });
+    await Bet.create({
+      ...event.data, ...accountingPlacementState(event.data),
+      timestamp: "2020-01-01T00:00:00.000Z", status: ResultingStatus.BET_APPROVED,
+    });
+    await createAccountingSnapshot("risk_102_1", "2019-01-01T00:00:00.000Z");
+    const { hash, ...payload } = (await readAccountingSnapshotPage("risk_102_1", 1))!;
+    payload.previousHash = "c".repeat(64);
+    await AccountingSnapshotPageRecord.updateOne({ snapshotId: "risk_102_1", page: 1 }, {
+      $set: { data: { ...payload, hash: cashBackHash(payload) } },
+    });
+    await expect(runDataCompatibilityBackfill()).rejects.toThrow("page integrity or budget failed");
+    expect((await runDataCompatibilityBackfill({ apply: true })).accountingSnapshot).toBeUndefined();
+  } finally {
+    jest.restoreAllMocks();
   }
 });
