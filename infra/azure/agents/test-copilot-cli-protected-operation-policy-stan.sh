@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "43" ]] || {
-  echo "expected 43 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "44" ]] || {
+  echo "expected 44 protected operations, got $operation_count" >&2
   exit 1
 }
 
@@ -282,6 +282,17 @@ live_data.reject { |operation, _|
 end
 
 incident_restore = live_data.fetch("oci-live-data-incident-restore")
+reconcile = live_data.fetch("oci-live-data-reconcile-risk-accounting")
+backfills = live_data.fetch("oci-live-data-apply-backfills")
+unless reconcile.fetch("upstreamRunBindings") == backfills.fetch("upstreamRunBindings") &&
+    reconcile.fetch("subjectRelation") == "current" &&
+    reconcile.fetch("derivedOperations") == [] &&
+    reconcile.fetch("fixedInputs") == backfills.fetch("fixedInputs").merge(
+      "phase" => "reconcile-risk-accounting",
+      "confirmation" => "RECONCILE RISK ACCOUNTING EXACT SHA"
+    )
+  fail("accounting reconciliation lost exact-source dry-run prerequisites or gained deployment authority")
+end
 unless incident_restore.fetch("environment") == "oci-migration" &&
     incident_restore.fetch("subjectInput") == "approved_sha" &&
     incident_restore.fetch("subjectRelation") == "current" &&

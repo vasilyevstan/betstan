@@ -25,6 +25,7 @@ export RELEASED_ACTIVATION_QUALIFICATION=none
 export RESUME_PREFLIGHT_OUTCOME=skipped
 
 "$ROOT_DIR/infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh" >/dev/null
+node --test "$ROOT_DIR/infra/oci/tests/test-risk-accounting-reconciliation-stan.js"
 
 mkdir -p "$WORK_PARENT"
 work_dir="$(mktemp -d "$WORK_PARENT/test.XXXXXX")"
@@ -5731,7 +5732,7 @@ for forbidden in (
 
 release = data[
     data.index("- name: Release database operation lock unless handed to deploy"):
-    data.index("- name: Revoke exact runner rule")
+    data.index("- name: Release accounting HTTP fence after verified lock release")
 ]
 if "steps.operation_lock.outcome == 'success'" not in release:
     raise SystemExit("pre-lock rejection may release an inherited operation lock")
@@ -5743,11 +5744,22 @@ for literal in (
 ):
     if literal not in release:
         raise SystemExit(f"data workflow lock release guard is incomplete: {literal}")
+accounting_release_guard = (
+    "(inputs.phase != 'reconcile-risk-accounting' || "
+    "(steps.data.outcome == 'success' && "
+    "steps.maintenance.outcome == 'success' && "
+    "steps.risk_readiness.outcome == 'success' && "
+    "!failure() && !cancelled()))"
+)
+normalized_release = " ".join(release.split())
+if normalized_release.count(accounting_release_guard) != 1:
+    raise SystemExit("accounting lock release lacks its exact final-ACK/readiness guard")
+ordinary_release = normalized_release.replace(accounting_release_guard, "", 1)
 for unsafe in (
     "steps.abort_handoff.outcome == 'success'",
     "steps.data.outcome == 'success'",
 ):
-    if unsafe in release:
+    if unsafe in ordinary_release:
         raise SystemExit(
             f"final cleanup lock release still depends on an unsafe outcome: {unsafe}"
         )

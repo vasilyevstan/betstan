@@ -1305,6 +1305,47 @@ POLICIES = {
             },
         ],
     ),
+    "oci-live-data-reconcile-risk-accounting": dispatch(
+        "oci-live-data-reconcile-risk-accounting",
+        "oci-live-data-rollout.yml",
+        "oci-migration",
+        "oci-live-data reconcile-risk-accounting {subject_sha}",
+        LIVE_DATA_INPUTS,
+        fixed={
+            "phase": "reconcile-risk-accounting",
+            "failed_deploy_run_id": "0",
+            "failed_activation_run_id": "0",
+            "failed_activation_user_id": "0",
+            "confirmation": "RECONCILE RISK ACCOUNTING EXACT SHA",
+        },
+        positive=[
+            "build_run_id", "infrastructure_run_id",
+            "prerequisite_run_id", "disk_checkpoint_run_id",
+        ],
+        zero_or_positive=["baseline_recovery_run_id"],
+        full_shas=["approved_sha", "resume_source_sha", "checkpoint_source_sha"],
+        patterns={
+            "baseline_recovery_source_sha": r"^(?:none|[0-9a-f]{40})$",
+        },
+        templates={
+            "resume_source_sha": "{subject_sha}",
+            "checkpoint_source_sha": "{subject_sha}",
+        },
+        subject_input="approved_sha",
+        subject_relation="current",
+        upstream_run_bindings=[
+            OCI_BUILD_RUN_BINDING,
+            OCI_CURRENT_INFRASTRUCTURE_BINDING,
+            OCI_DISK_CHECKPOINT_BINDING,
+            {
+                **live_data_binding(
+                    "prerequisite_run_id", "dry-run",
+                    expected_head_input="resume_source_sha",
+                ),
+                "afterInput": "disk_checkpoint_run_id",
+            },
+        ],
+    ),
     "oci-live-data-apply-slip-index": dispatch(
         "oci-live-data-apply-slip-index",
         "oci-live-data-rollout.yml",
