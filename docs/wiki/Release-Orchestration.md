@@ -1620,6 +1620,18 @@ re-establishes the hold; a later dispatch for the same failed run may continue
 only after its own expired restore lock. It changes no data and does not
 activate live betting.
 
+The frozen accounting rejection in first-attempt run `45049185347` at source
+`4933dd8b98fd8ab4464c274a544693be05997a07` is a separate qualified case.
+Its exact workflow and bridge blobs, native failed/skipped step evidence and
+immutable checksummed `SOURCE_OPEN_POSITIONS_UNAVAILABLE` result prove the
+receiver was never called. No other accounting failure is qualified. The
+existing restore authenticates its unchanged baseline and expired owned lock,
+restores behind the HTTP fence, verifies baseline readiness, releases the lock
+before the fence and verifies released readiness. It preserves the source's
+snapshot evidence and does not round, repair or import financial records.
+Accounting and event analysis remain unavailable until complete source-owned
+open positions can be proven; restoring service is not accounting activation.
+
 The existing `oci-live-data-resume-activation-released` operation adds one
 disjoint, frozen pre-arm/no-account reader qualification. It binds the complete
 authenticated historical tree and three executable blobs, exact scoped

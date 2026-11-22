@@ -2,7 +2,7 @@ name: oci-restore-held-runtime
 run-name: oci-restore-held-runtime ${{ inputs.approved_sha }}
 
 # Restores the authenticated pre-maintenance baseline after a live-data run
-# failed before any data step and retained the maintenance hold.
+# failed before any data step, or the frozen accounting pre-import rejection.
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       failed_run_id:
-        description: Failed first-attempt oci-live-data-rollout run that retained the hold before any data step
+        description: Failed first-attempt pre-data hold or frozen accounting pre-import rejection
         required: true
         type: string
       confirmation:
@@ -92,31 +92,83 @@ jobs:
             .event == "workflow_dispatch" and .head_branch == "master" and
             .head_repository.full_name == $repo and .status == "completed" and
             .conclusion == "failure" and .run_attempt == 1 and
-            (.display_title | test("^oci-live-data apply-slip-index [0-9a-f]{40}$"))
+            (.display_title | test("^oci-live-data (apply-slip-index|reconcile-risk-accounting) [0-9a-f]{40}$"))
           ' <<<"$run" >/dev/null || {
-            echo "Failed run is not an exact failed first-attempt apply-slip-index run" >&2
+            echo "Failed run is not a qualified failed first-attempt live-data run" >&2
             exit 1
           }
           failed_sha="$(jq -er .head_sha <<<"$run")"
           [[ "$failed_sha" =~ ^[0-9a-f]{40}$ ]]
+          failed_phase="$(jq -er '.display_title | split(" ")[1]' <<<"$run")"
+          if [ "$failed_phase" = "reconcile-risk-accounting" ]; then
+            [ "$FAILED_RUN_ID" = "45049185347" ]
+            [ "$failed_sha" = "4933dd8b98fd8ab4464c274a544693be05997a07" ]
+            git fetch --quiet --no-tags origin "$failed_sha"
+            [ "$(git rev-parse "$failed_sha:.github/workflows/oci-live-data-rollout.yml")" = "608d3d55b7dac9e8b281a76e913d58c2718e4b9f" ]
+            [ "$(git rev-parse "$failed_sha:infra/oci/scripts/risk-accounting-reconciliation-stan.js")" = "7404d4934ebdbc1ca667e2da2a4c06adb13dff82" ]
+          fi
 
-          # Data must not have been touched: maintenance entered, the hold was
-          # retained, and both data-mutating steps were skipped.
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/attempts/1/jobs" |
-            jq -e '
+            jq -e --arg phase "$failed_phase" '
               def step($n): [.jobs[0].steps[] | select(.name == $n) | .conclusion];
               (.jobs | length) == 1 and .jobs[0].name == "rollout" and
               .jobs[0].conclusion == "failure" and
               step("Enter or re-establish live data maintenance") == ["success"] and
               step("Delete exact orphaned live-acceptance slips") == ["skipped"] and
-              step("Execute exact-digest live data phase") == ["skipped"] and
-              step("Restore runtime or retain hold if final handoff packaging failed") == ["success"] and
-              step("Release database operation lock unless handed to deploy") == ["skipped"]
+              step("Release database operation lock unless handed to deploy") == ["skipped"] and
+              if $phase == "reconcile-risk-accounting" then
+                step("Execute exact-digest live data phase") == ["failure"] and
+                step("Restore runtime or verify final deploy handoff") == ["success"] and
+                step("Restore runtime or retain hold if final handoff packaging failed") == ["skipped"] and
+                step("Verify restored public accounting and event analysis") == ["skipped"] and
+                step("Release accounting HTTP fence after verified lock release") == ["skipped"] and
+                step("Capture post-phase runtime baseline") == ["skipped"] and
+                step("Upload exact sanitized data evidence") == ["success"] and
+                step("Upload protected rollout baselines") == ["success"] and
+                step("Close ephemeral OCI Bastion access") == ["success"]
+              else
+                step("Execute exact-digest live data phase") == ["skipped"] and
+                step("Restore runtime or retain hold if final handoff packaging failed") == ["success"]
+              end
             ' >/dev/null || {
-              echo "Failed run does not prove a retained hold before any data step" >&2
+              echo "Failed run does not prove a qualified retained hold" >&2
               exit 1
             }
           echo "FAILED_SOURCE_SHA=$failed_sha" >> "$GITHUB_ENV"
+          echo "FAILED_PHASE=$failed_phase" >> "$GITHUB_ENV"
+
+      - name: Verify frozen accounting rejection before receiver import
+        if: env.FAILED_PHASE == 'reconcile-risk-accounting'
+        run: |
+          set -euo pipefail
+          name="oci-live-data-rollout-$FAILED_RUN_ID-1"
+          artifact="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/artifacts" |
+              jq -c --arg name "$name" --arg sha "$FAILED_SOURCE_SHA" --argjson run "$FAILED_RUN_ID" '
+                [.artifacts[] | select(.name == $name and .expired == false and
+                  .workflow_run.id == $run and .workflow_run.head_sha == $sha)]'
+          )"
+          [ "$(jq length <<<"$artifact")" = "1" ]
+          artifact_id="$(jq -er '.[0].id' <<<"$artifact")"
+          digest="$(jq -er '.[0].digest' <<<"$artifact")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          zip="$RUNNER_TEMP/accounting-pre-import-rejection.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" >"$zip"
+          [ "sha256:$(sha256sum "$zip" | awk '{print $1}')" = "$digest" ]
+          [ "$(unzip -Z1 "$zip" | LC_ALL=C sort)" = "$(printf '%s\n' SHA256SUMS risk-accounting-failure.json)" ]
+          directory=artifacts/failed-accounting-rejection
+          mkdir -p "$directory"
+          unzip -q "$zip" -d "$directory"
+          rm -f "$zip"
+          [ ! -L "$directory/SHA256SUMS" ] && [ ! -L "$directory/risk-accounting-failure.json" ]
+          [ "$(wc -l <"$directory/SHA256SUMS")" -eq 1 ]
+          grep -Eq '^[0-9a-f]{64}  risk-accounting-failure\.json$' "$directory/SHA256SUMS"
+          (cd "$directory" && sha256sum --strict --quiet -c SHA256SUMS)
+          jq -e '
+            .status == "FAIL" and .code == "SOURCE_OPEN_POSITIONS_UNAVAILABLE" and
+            (keys | sort) == ["code", "status"]
+          ' "$directory/risk-accounting-failure.json" >/dev/null
+          echo "ACCOUNTING_REJECTION_VERIFIED=true" >> "$GITHUB_ENV"
 
       - name: Download and verify exact failed-run baseline
         run: |
@@ -290,13 +342,16 @@ jobs:
         id: lock
         run: |
           set -euo pipefail
+          if [ "$FAILED_PHASE" = "reconcile-risk-accounting" ]; then
+            [ "${ACCOUNTING_REJECTION_VERIFIED:-false}" = "true" ]
+          fi
           IFS=$'\t' read -r state holder operation source lease_until < <(
             kubectl get configmap gaming-mongo-migration-lock -n "$OCI_K8S_NAMESPACE" -o json |
               jq -er '.data | [.state, .holder, ."operation-id", ."source-sha", ."lease-until-epoch"] | @tsv'
           )
           [ "$state" = "active" ]
           if [ "$holder" = "live-data-$FAILED_RUN_ID-1" ]; then
-            [ "$operation" = "live-data-apply-slip-index" ]
+            [ "$operation" = "live-data-$FAILED_PHASE" ]
             [ "$source" = "$FAILED_SOURCE_SHA" ]
           else
             # Continue only an interrupted restore of this same failed run.
@@ -344,7 +399,11 @@ jobs:
           OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
-          ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+          if [ "$FAILED_PHASE" = "reconcile-risk-accounting" ]; then
+            ./infra/oci/scripts/live-data-maintenance-stan.sh restore-owned-fenced
+          else
+            ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+          fi
 
       # A readiness failure after the fence is lifted keeps the site up and the
       # lock held for diagnosis rather than taking production down again.
@@ -357,9 +416,15 @@ jobs:
           set -euo pipefail
           ./infra/oci/scripts/live-data-maintenance-stan.sh reconstruct-baseline
           ./infra/oci/scripts/live-data-maintenance-stan.sh verify-baseline-images
-          ./infra/oci/scripts/live-data-maintenance-stan.sh capture-readiness
+          if [ "$FAILED_PHASE" = "reconcile-risk-accounting" ]; then
+            READINESS_FILE=artifacts/oci-restore-held-runtime/held-readiness.tsv \
+              ./infra/oci/scripts/live-data-maintenance-stan.sh capture-held-readiness
+          else
+            ./infra/oci/scripts/live-data-maintenance-stan.sh capture-readiness
+          fi
 
       - name: Release restore lock
+        id: lock_release
         run: |
           set -euo pipefail
           NAMESPACE="$OCI_K8S_NAMESPACE" \
@@ -373,8 +438,35 @@ jobs:
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
 
+      - name: Release verified accounting pre-import restore fence
+        id: accounting_fence
+        if: env.FAILED_PHASE == 'reconcile-risk-accounting' && steps.lock_release.outcome == 'success' && !failure() && !cancelled()
+        run: |
+          set -euo pipefail
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
+          ./infra/oci/scripts/live-data-maintenance-stan.sh release
+
+      - name: Verify released accounting pre-import restore readiness
+        if: env.FAILED_PHASE == 'reconcile-risk-accounting' && steps.accounting_fence.outcome == 'success'
+        env:
+          BASELINE_DEPLOYMENTS_FILE: ${{ env.BASELINE_DIR }}/deployments.tsv
+          BASELINE_LIVE_IMAGES_FILE: ${{ env.BASELINE_DIR }}/live-images.tsv
+          READINESS_FILE: artifacts/oci-restore-held-runtime/readiness.tsv
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/live-data-maintenance-stan.sh reconstruct-baseline
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-baseline-images
+          ./infra/oci/scripts/live-data-maintenance-stan.sh capture-readiness
+
       - name: Re-establish the hold if restoration failed
-        if: (failure() || cancelled()) && steps.lock.outcome == 'success' && steps.restore.outcome != 'success'
+        if: >-
+          (failure() || cancelled()) && steps.lock.outcome == 'success' &&
+          (steps.restore.outcome != 'success' ||
+           (env.FAILED_PHASE == 'reconcile-risk-accounting' && steps.lock_release.outcome != 'success'))
         run: |
           set -euo pipefail
           ./infra/oci/scripts/live-data-maintenance-stan.sh hold
