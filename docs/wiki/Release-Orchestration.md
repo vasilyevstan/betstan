@@ -1632,6 +1632,12 @@ snapshot evidence and does not round, repair or import financial records.
 Accounting and event analysis remain unavailable until complete source-owned
 open positions can be proven; restoring service is not accounting activation.
 
+Before dispatch, check the failed run's last successful native lock renewal
+for the actual expiry. The failure renews a four-hour lease; a completed run
+is not an expired lock. Do not replay a failed restore: its one-use control
+requires a newly accepted current-master generation through the normal
+ancestry-preserving branch flow.
+
 The existing `oci-live-data-resume-activation-released` operation adds one
 disjoint, frozen pre-arm/no-account reader qualification. It binds the complete
 authenticated historical tree and three executable blobs, exact scoped
