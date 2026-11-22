@@ -277,13 +277,19 @@ function restoreAdmissionFixture({ legacy = false, code = "SOURCE_OPEN_POSITIONS
   const artifact = { id: 777, name: `oci-live-data-rollout-${failedRun}-1`, expired: false,
     workflow_run: { id: Number(failedRun), head_sha: failedSha },
     digest: `sha256:${require("node:crypto").createHash("sha256").update(fs.readFileSync(zip)).digest("hex")}` };
-  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  // Git evidence is mocked independently of the runner's checkout depth.
   fs.writeFileSync(path.join(bin, "git"), `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == fetch ]]; then exit 0; fi
 if [[ "$2" == HEAD || "$2" == origin/master ]]; then printf '%s\\n' "$SOURCE_SHA"; exit 0; fi
 if [[ "\${BAD_BLOB:-false}" == true ]]; then printf '%040d\\n' 0; exit 0; fi
-"$REAL_GIT" -C "$REAL_ROOT" "$@"
+case "$2" in
+  4933dd8b98fd8ab4464c274a544693be05997a07:.github/workflows/oci-live-data-rollout.yml)
+    echo 608d3d55b7dac9e8b281a76e913d58c2718e4b9f ;;
+  4933dd8b98fd8ab4464c274a544693be05997a07:infra/oci/scripts/risk-accounting-reconciliation-stan.js)
+    echo 7404d4934ebdbc1ca667e2da2a4c06adb13dff82 ;;
+  *) exit 1 ;;
+esac
 `, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, "gh"), `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -306,7 +312,7 @@ else process.stdout.write(fs.readFileSync("run.json"));
     try {
       execFileSync("bash", ["-euo", "pipefail", "-c", steps.find((step) => step.name === name).run], {
         cwd: directory, stdio: "pipe",
-        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, REAL_GIT: realGit, REAL_ROOT: root,
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`,
           SOURCE_SHA: "a".repeat(40), GITHUB_SHA: "a".repeat(40), GITHUB_EVENT_NAME: "workflow_dispatch",
           GITHUB_REF_NAME: "master", GITHUB_RUN_ATTEMPT: "1", OCI_RUNTIME_MODE: "k3s",
           CONFIRMATION: "RESTORE FAILED HOLD BASELINE", FAILED_RUN_ID: failedRun,
