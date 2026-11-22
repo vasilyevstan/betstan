@@ -66,6 +66,10 @@ async function installRiskApi(page, { uncertain = false, eventRisk = false } = {
     { eventId: 'event-b', name: 'Eastwick - North Christopherborough United', time: '2099-01-02T12:00:00.000Z', phase: 'PRE_MATCH' },
     { eventId: 'event-c', name: 'Westhaven - Southport', time: '2099-01-03T12:00:00.000Z', phase: 'PRE_MATCH' },
   ];
+  if (eventRisk) state.backofficeEvents = events.map(event => ({
+    ...event, home: event.name.split(' - ')[0], away: event.name.split(' - ')[1],
+    status: 'NO_RESULT', visibility: 'ONLINE',
+  }));
   const metrics = { exposureMinor: '100', openTickets: 1, pendingTickets: 0 };
   const report = () => ({ asOf: '2026-11-14T21:00:00.000Z', policyRevision: policy.revision, analysis: { ready: true, code: 'READY' } });
   const offers = [
@@ -145,19 +149,22 @@ async function installRiskApi(page, { uncertain = false, eventRisk = false } = {
 
 for (const theme of ['light', 'dark']) {
   for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }]) {
-    test(`event stress, choice switches and pagination in ${theme} at ${viewport.width}px`, async ({ page }, testInfo) => {
+    test(`Backoffice event stress, choice switches and pagination in ${theme} at ${viewport.width}px`, async ({ page }, testInfo) => {
       await page.setViewportSize(viewport);
       await page.emulateMedia({ reducedMotion: 'reduce' });
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
       const { state, mutations, eventReads } = await installRiskApi(page, { eventRisk: true });
-      await page.goto(`/backoffice/risk-centre?theme=${theme}`);
-      await expect(page.getByRole('tab', { name: 'Rules', exact: true })).toBeVisible();
+      await page.goto(`/backoffice?theme=${theme}`);
+      const direct = page.getByRole('link', { name: 'Black swan analysis for Northport - Lakewood', exact: true });
+      await expect(direct).toBeVisible();
       expect(eventReads).toHaveLength(0);
-      await page.getByRole('tab', { name: 'Rules', exact: true }).focus();
-      await page.keyboard.press('ArrowRight');
-      await expect(page.getByRole('tab', { name: 'Events', exact: true })).toBeFocused();
-      await page.getByRole('button', { name: 'Review risk for Northport - Lakewood' }).click();
+      await page.screenshot({ path: testInfo.outputPath(`backoffice-analysis-entry-${theme}-${viewport.width}.png`), fullPage: true });
+      await direct.focus();
+      await page.keyboard.press('Enter');
+      await expect(page.getByRole('heading', { level: 1, name: 'Black swan analysis' })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 2, name: 'Northport - Lakewood' })).toBeVisible();
+      expect(eventReads.some(url => new URL(url).pathname === `${API}/events`)).toBe(false);
       await expect(page.getByText('Lower odds to 2.50 or less')).toBeVisible();
       await expect(page.getByText('Consider turning off')).toBeVisible();
       await expect(page.getByText('Paused or unavailable at source')).toBeVisible();
@@ -173,9 +180,17 @@ for (const theme of ['light', 'dark']) {
       await expect(choice).toBeEnabled();
       expect(mutations.at(-1)).toMatchObject({ method: 'DELETE', path: `${API}/rules/choice:${'a'.repeat(64)}` });
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
-      const short = await page.locator('.risk-events button, .risk-events input, .risk-events summary').evaluateAll(nodes =>
+      const short = await page.locator('.risk-events a, .risk-events button, .risk-events input, .risk-events summary').evaluateAll(nodes =>
         nodes.filter(node => node.getClientRects().length && !node.disabled && node.getBoundingClientRect().height < 43.5).map(node => node.textContent));
       expect(short).toEqual([]);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: testInfo.outputPath(`backoffice-event-analysis-${theme}-${viewport.width}.png`), fullPage: true });
+      await page.getByLabel('Test stake (Stanbucks)').fill('2');
+      await page.getByRole('button', { name: 'Recalculate', exact: true }).click();
+      await expect(page.getByText('Tested stake: 2.00 Stanbucks')).toBeVisible();
+      expect(eventReads.at(-1)).toContain('stakeMinor=200');
+      await page.getByRole('link', { name: 'Black swan analysis', exact: true }).click();
+      await page.getByRole('button', { name: 'Review risk for Northport - Lakewood' }).click();
       const summary = await page.locator('.risk-event-summary').first().evaluate(node => {
         const [identity, exposure, action] = node.children;
         const text = document.createRange();
@@ -185,12 +200,6 @@ for (const theme of ['light', 'dark']) {
       });
       expect(summary.actionLines).toBe(1);
       if (viewport.width < 760) expect(summary.exposureTop).toBeGreaterThanOrEqual(summary.identityBottom);
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.screenshot({ path: testInfo.outputPath(`risk-events-${theme}-${viewport.width}.png`), fullPage: true });
-      await page.getByLabel('Test stake (Stanbucks)').fill('2');
-      await page.getByRole('button', { name: 'Recalculate', exact: true }).click();
-      await expect(page.getByText('Tested stake: 2.00 Stanbucks')).toBeVisible();
-      expect(eventReads.at(-1)).toContain('stakeMinor=200');
       await page.getByRole('button', { name: 'Next events', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Review risk for Westhaven - Southport' })).toBeVisible();
       expect(eventReads.at(-1)).toContain('after=event-b');

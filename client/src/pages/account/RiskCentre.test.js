@@ -1,7 +1,7 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import RiskCentre, { describeChanges } from './RiskCentre';
 
@@ -90,6 +90,7 @@ beforeEach(() => {
 
 describe('event stress and choice switches', () => {
   const choiceId = 'a'.repeat(64);
+  const mount = () => render(<MemoryRouter><RiskCentre eventAnalysis /></MemoryRouter>);
   const fixture = () => {
     const policy = snapshot();
     policy.readiness.capabilities.selectionBlocking = true;
@@ -124,20 +125,74 @@ describe('event stress and choice switches', () => {
     return state;
   };
   const review = async () => {
-    fireEvent.click(await screen.findByRole('tab', { name: 'Events' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Review risk for Open event' }));
     await screen.findByLabelText('Test stake (Stanbucks)');
   };
 
-  it('loads events lazily, supports keyboard tabs and preserves an unsaved rule draft', async () => {
-    fixture(); mount(); await selectRule(); editLimit('2000');
+  it('keeps global rules in Risk Centre without an event tab or background analysis reads', async () => {
+    fixture();
+    render(<MemoryRouter><RiskCentre /></MemoryRouter>);
+    await selectRule(); editLimit('2000');
     expect(axios.get.mock.calls.some(([url]) => url.startsWith(`${API}/events`))).toBe(false);
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Rules' }), { key: 'ArrowRight' });
-    expect(await screen.findByRole('button', { name: 'Review risk for Open event' })).toBeVisible();
-    expect(screen.getByRole('tab', { name: 'Events' })).toHaveFocus();
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Events' }), { key: 'Home' });
+    expect(screen.queryByRole('tab', { name: 'Events' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(20);
     expect(axios.request).not.toHaveBeenCalled();
+  });
+
+  it('loads open-event analysis without global switch endpoints or a global rule editor', async () => {
+    fixture(); mount(); await review();
+    expect(screen.getByRole('heading', { level: 1, name: 'Black swan analysis' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Risk Centre rules' })).toHaveAttribute('href', '/backoffice/risk-centre');
+    expect(screen.queryByRole('heading', { name: 'All-events switches' })).not.toBeInTheDocument();
+    expect(axios.get.mock.calls.every(([url]) => url === API || url.startsWith(`${API}/events`))).toBe(true);
+  });
+
+  it('opens the selected event directly without fetching another event catalogue and preserves the view query', async () => {
+    fixture();
+    render(<MemoryRouter initialEntries={['/backoffice/events/event-a/analysis?ui=v3&theme=light']}>
+      <Routes><Route path="/backoffice/events/:eventId/analysis" element={<RiskCentre eventAnalysis />} /></Routes>
+    </MemoryRouter>);
+    expect(await screen.findByRole('heading', { level: 2, name: 'Open event' })).toBeVisible();
+    expect(screen.getByText('Lower odds to 2.50 or less')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Event markets' }))
+      .toHaveAttribute('href', '/backoffice/events/event-a/markets?ui=v3&theme=light');
+    expect(axios.get.mock.calls.some(([url]) => url === `${API}/events`)).toBe(false);
+    await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+    await waitFor(() => expect(axios.request).toHaveBeenCalledTimes(1));
+    expect(axios.request.mock.calls[0][0].data.rule.scope).toEqual({
+      betKind: 'PRE_MATCH', eventIds: ['event-a'], selectionIds: [choiceId],
+    });
+  });
+
+  it('ignores an old event response after direct navigation and switches only the current event choice', async () => {
+    const state = fixture();
+    let finishOldRead;
+    const oldRead = new Promise(resolve => { finishOldRead = resolve; });
+    const next = { ...state.detail, event: { ...state.detail.event, eventId: 'event-b', name: 'Second event' },
+      choices: [{ ...state.detail.choices[0], id: 'b'.repeat(64), label: 'Nominee B' }] };
+    axios.get.mockImplementation(async url => {
+      if (url === API) return { data: state.policy };
+      if (url.startsWith(`${API}/events/event-a?`)) return oldRead;
+      if (url.startsWith(`${API}/events/event-b?`)) return { data: next };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const Navigate = () => {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate('/backoffice/events/event-b/analysis')}>Next event</button>;
+    };
+    render(<MemoryRouter initialEntries={['/backoffice/events/event-a/analysis']}>
+      <Navigate /><Routes><Route path="/backoffice/events/:eventId/analysis" element={<RiskCentre eventAnalysis />} /></Routes>
+    </MemoryRouter>);
+    await screen.findByText('Calculating event stress...');
+    fireEvent.click(screen.getByRole('button', { name: 'Next event' }));
+    await screen.findByRole('heading', { level: 2, name: 'Second event' });
+    await act(async () => { finishOldRead({ data: state.detail }); });
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Open event' })).not.toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByRole('switch', { name: 'Allow Nominee B in Match award for Second event' })); });
+    await waitFor(() => expect(axios.request).toHaveBeenCalledTimes(1));
+    expect(axios.request.mock.calls[0][0].data.rule.scope).toEqual({
+      betKind: 'PRE_MATCH', eventIds: ['event-b'], selectionIds: ['b'.repeat(64)],
+    });
   });
 
   it('shows precise large loss bounds and sends only valid minor-unit stress stakes', async () => {
@@ -191,7 +246,7 @@ describe('event stress and choice switches', () => {
     expect(screen.getByText('Another rule still blocks this single')).toBeVisible();
   });
 
-  it('recovers a lost choice-save response by its original operation without optimistically changing the switch or losing a draft', async () => {
+  it('recovers a lost choice-save response by its original operation without optimistically changing the switch', async () => {
     const state = fixture();
     axios.request.mockImplementationOnce(async config => {
       state.operation = { ...result(config).data, rules: [...state.policy.rules, config.data.rule] };
@@ -200,7 +255,7 @@ describe('event stress and choice switches', () => {
         choices: [{ ...state.detail.choices[0], off: true, advice: 'OFF', suggestedOdds: null }] };
       throw new Error('response lost');
     });
-    mount(); await selectRule(); editLimit('2000'); await review();
+    mount(); await review();
     fireEvent.click(await screen.findByRole('switch'));
     expect(await screen.findByRole('alert')).toHaveTextContent('uncertain');
     expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true');
@@ -209,8 +264,6 @@ describe('event stress and choice switches', () => {
     await waitFor(() => expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
     expect(axios.request).toHaveBeenCalledTimes(1);
     expect(axios.get).toHaveBeenCalledWith(`${API}/operations/save:test-uuid`, expect.any(Object));
-    fireEvent.click(screen.getByRole('tab', { name: 'Rules' }));
-    expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(20);
   });
 
   it.each([

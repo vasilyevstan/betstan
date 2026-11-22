@@ -100,6 +100,20 @@ describe('public Backoffice access', () => {
     expect(screen.queryByRole('link', { name: 'Log in' })).not.toBeInTheDocument();
   });
 
+  it('opens all-event analysis and links online, unresulted cards directly to their own analysis', async () => {
+    axios.get.mockResolvedValue({ data: catalog });
+    renderBackoffice();
+    await screen.findByText(event.name);
+    expect(screen.getByRole('link', { name: 'Black swan analysis', exact: true }))
+      .toHaveAttribute('href', '/backoffice/events/analysis');
+    expect(screen.getByRole('link', { name: `Black swan analysis for ${event.name}` }))
+      .toHaveAttribute('href', `/backoffice/events/${event.eventId}/analysis`);
+    expect(screen.queryByRole('link', { name: `Black swan analysis for ${offlineEvent.name}` })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: `Black swan analysis for ${recordedEvent.name}` })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Black swan analysis for Mystery fixture' })).not.toBeInTheDocument();
+    expect(axios.post).not.toHaveBeenCalled();
+  });
+
   it('surfaces event loading failures without hiding the public controls', async () => {
     axios.get.mockRejectedValue(new Error('request failed'));
     renderBackoffice();

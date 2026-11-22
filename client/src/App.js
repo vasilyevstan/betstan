@@ -164,6 +164,8 @@ const App = () => {
               <Route path="/signup" element={<NewUser callback={handleAuthChange} />} />
               <Route path="/backoffice/markets" element={<BackofficeMarketDesigner />} />
               <Route path="/backoffice/risk-centre" element={<RiskCentre />} />
+              <Route path="/backoffice/events/analysis" element={<RiskCentre key="open-event-analysis" eventAnalysis />} />
+              <Route path="/backoffice/events/:eventId/analysis" element={<RiskCentre key="selected-event-analysis" eventAnalysis />} />
               <Route path="/backoffice/events/:eventId/markets" element={<BackofficeMarkets />} />
               <Route path="/logout" element={<LogOut callback={handleAuthChange} />} />
               <Route path="/login" element={<LogIn callback={handleAuthChange} />} />
