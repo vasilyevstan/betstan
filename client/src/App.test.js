@@ -65,10 +65,23 @@ describe('App telemetry routing and page-view reporting', () => {
     ['/BACKOFFICE/MARKETS/', ['admin', 'market-template']],
     ['/BACKOFFICE/RISK-CENTRE/', ['admin', 'risk-centre']],
     ['/backoffice/events/example/markets', ['admin']],
+    ['/backoffice/events/analysis', ['admin']],
+    ['/BACKOFFICE/EVENTS/example/ANALYSIS/', ['admin']],
     ['/backoffice/markets/preview', []],
   ])('classifies the raw direct route %s without counting event editors or previews as templates', async (path, expected) => {
     await act(async () => { renderApp(path); });
     expect(axios.post.mock.calls.map(([, { page }]) => page)).toEqual(expected);
+  });
+
+  it.each([
+    '/backoffice/events/analysis?theme=light',
+    '/backoffice/events/example/analysis?ui=v3',
+  ])('renders Backoffice analysis at %s rather than the player event board', async path => {
+    await act(async () => { renderApp(path); });
+    expect(screen.getByRole('heading', { level: 1, name: 'Black swan analysis' })).toBeVisible();
+    expect(screen.queryByTestId('events')).not.toBeInTheDocument();
+    expect(axios.post).toHaveBeenCalledTimes(1);
+    expect(axios.post).toHaveBeenCalledWith('/api/telemetry/page-view', { page: 'admin' });
   });
 
   it('deduplicates specific page aliases independently of the broad admin stream', async () => {

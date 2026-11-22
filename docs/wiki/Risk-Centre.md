@@ -3,8 +3,9 @@
 ## Purpose and availability
 
 Risk Centre is the bet-acceptance module inside **Moderation**, not a new
-service. Its public editor opens at `/backoffice/risk-centre`, beside
-**Market designer**. Backoffice proxies bounded management requests to
+service. Its public rule editor opens at `/backoffice/risk-centre`, beside
+**Market designer**. Per-event black-swan analysis belongs to Backoffice Events,
+not a Risk Centre tab. Backoffice proxies bounded management requests to
 Moderation; it does not own another copy of the policy database.
 
 This is a nominal Stanbucks simulation. Anonymous visitors can view and
@@ -73,10 +74,17 @@ Zero configured acceptance delay does not promise an instantaneous response:
 transport and missing-event-evidence retries can keep a bet pending. The
 editor does not mislabel those retries as an active delay rule.
 
-## Events and black-swan stress
+## Backoffice events and black-swan stress
 
-The **Rules** and **Events** tabs separate policy editing from event review.
-Switching tabs preserves an unsaved rule draft. Events lists all online,
+Open **Black swan analysis** from the Backoffice heading to review all open
+events at `/backoffice/events/analysis`. An online, unresulted event card has
+its own **Black swan analysis** action at
+`/backoffice/events/:eventId/analysis`; it opens that event directly, without
+loading another event catalogue. The page links back to event markets and the
+global Risk Centre rule editor. Theme and layout query parameters are retained.
+Risk Centre contains global rules and switches, with no Events tab.
+
+The open-event analysis catalogue lists all online,
 unresulted upcoming and in-play events, without the public event page's time
 horizon. Offline, finished and unresolved-visibility events are excluded.
 Lifecycle-active source pauses remain visible so their choices can be managed.
@@ -122,7 +130,9 @@ new receipts containing them are declined.
 **Manage odds** opens the existing custom-market editor. Standard and live
 prices remain owned by their pricing models; analysis never automatically
 reprices or removes a selection. Rule conflicts and uncertain switches use
-the same revision and operation-recovery protocol as the Rules tab.
+the same existing revision and operation-recovery controller as the global
+rule editor. Moving the view does not change public permissions, exposure
+calculations, backend routes, quotes or stored policies.
 
 Backoffice exposes `GET /api/backoffice/risk-centre/events` and
 `GET /api/backoffice/risk-centre/events/:eventId?stakeMinor=100` through its
@@ -222,13 +232,29 @@ being processed can finish, and per-event switches still apply when it is on.
 The switch is a separate Backoffice setting, not a policy revision. A stale
 change returns a conflict and shows the current value.
 
-**Markets** turns a Market designer market off for every event. Turning it off
-saves an enabled **Block bets** rule scoped to that market, so new bets on it
+**Markets** lists built-in 1X2, Correct Score and every registered live market
+type alongside **all saved templates**, including clearly marked archived
+templates. Same-name templates remain distinct from built-ins. Registered
+types are not a promise that every simulation engine or event offers them.
+Turning a market off saves an enabled **Block bets** rule, so new bets on it
 are declined as **Declined: Block bets** while the market stays visible.
-Turning it on removes that rule. Built-in 1X2, Correct Score and live markets
-have no stable cross-event identity yet, so they cannot be switched here.
+The restriction also covers selections inside Builders and accumulators.
+Turning on removes only that market's managed rule; other blocks and event
+availability still apply. It never unarchives a template. A changed managed
+rule must be reviewed in Rules rather than overwritten by its switch.
+Built-ins remain available when the separate template catalogue cannot load.
 If a switched-off market's template is later deleted, its rule stays active
 and is listed as **Market: Deleted market** until it is removed.
+
+Template switches retain `templateIds`. Built-in switches use a DENY-only,
+global `marketTypes` selector: `PRE_MATCH:1X2`, `PRE_MATCH:CS`, or a registered
+`LIVE:<type>`. Native product IDs vary by event. Moderation obtains their types
+from Event's separate `standardMarkets` catalogue metadata, including Standard
+selections inside Builders; it never trusts a submitted name or market type.
+Live enforcement uses the trusted mirror's current type inside the contended
+admission transaction. Missing required classification is unavailable evidence,
+not permission to accept. Events reports reflect these global blocks.
+The existing 32-ID, 128-rule and 48-KiB policy bounds remain unchanged.
 
 ## Acceptance and recovery
 
@@ -349,6 +375,16 @@ source digest. Moderation must additionally reconcile its own receipts and
 live overlap before committing readiness. Export alone does not enable a rule,
 and the old overlap-only movement export is not a complete-book certificate.
 
+The protected OCI data workflow has a separate `reconcile-risk-accounting`
+phase, dispatched as `oci-live-data-reconcile-risk-accounting` through the
+canonical release helper. It requires the exact current source, immutable
+build/infrastructure/checkpoint evidence and a successful bound dry-run.
+It uses the existing private source/receiver commands, proves compatible
+deployed snapshot readers and verifies public open-event analysis after
+restoring the unchanged runtime. It is not a deployment or rule activation.
+Unknown older loss windows remain unavailable; complete open positions can
+still make event exposure analysis usable.
+
 Reconciliation currently supports at most 10,000 merged positions and 10,000
 movements, with 16 MiB snapshot and pending-inbox budgets. Admission bounds
 its applicable book/window scan at 10,000 entries. Exceeding these technical
@@ -387,12 +423,25 @@ replica with `Recreate`; preserve that no-mixed-reader assumption, or design
 an explicit compatibility cutover before changing rollout strategy or scale.
 Event and Backoffice report routes must also be available for the Events view.
 
+Built-in switches similarly add `marketTypes`, without changing shared quotes,
+accounting facts or either placement fingerprint. Deploy capable Event metadata
+and Moderation readers before exposing these switches. The canonical ingress
+write fence and single-reader rollout enforce reader-before-writer ordering;
+do not remove them. The client uses the server's built-in catalogue and does not
+invent switches when that metadata is absent. An older editor cannot strip
+`marketTypes` from a managed rule and turn its restriction into an all-bets deny.
+
 Before reverting to a pre-choice Moderation binary, remove **all** active
 choice-scoped rules, including disabled ones, and resolve receipts pinned to
 enabled choice rules under the capable reader. A feature-off flag does not
 make those receipts compatible. Keep the capable reader or forward-fix when
 that drain cannot be proven; never drop receipts, rewrite pinned policies or
 edit stored accounting facts as a rollback shortcut.
+
+Before downgrading to a pre-built-in-switch reader, remove **all** active
+`marketTypes` rules, including disabled ones, and drain receipts pinned to
+enabled native rules under the capable reader. Keep that reader or forward-fix
+if the drain cannot be proven. Never rewrite policies or pending receipts.
 
 Compatible shared contracts/readers and authoritative accounting come before
 transaction-dependent writers and financial-rule activation. Establish

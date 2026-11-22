@@ -8,6 +8,7 @@ export type AnalysisPosition = Pick<Position,
 export interface AnalysisChoice extends ChoiceIdentity {
   marketName: string; label: string; odds: number; betKind: "PRE_MATCH" | "LIVE"; sourceOpen: boolean;
   templateId?: string; marketVersion?: number; selectionId?: string;
+  builtinMarketId?: string;
 }
 const ZERO = BigInt(0);
 const HUNDRED = BigInt(100);
@@ -52,7 +53,7 @@ export function analyseChoices(policy: Policy, positions: AnalysisPosition[] | u
     const switchConflict = Boolean(owned && (owned.type !== "DENY"
       || canonical(owned.scope) !== canonical(switchRule.scope) || canonical(owned.parameters) !== "{}"));
     const off = Boolean(owned?.enabled && !switchConflict);
-    const rules = matching(policy, single(choice));
+    const rules = matching(policy, single(choice), choice.builtinMarketId ? [choice.builtinMarketId] : []);
     const applicable = limits.filter(rule => rules.some(candidate => candidate.id === rule.id));
     const headrooms = positions ? applicable.map(rule => BigInt(rule.parameters.limit!) - usage.get(rule.id)!) : [];
     const headroom = headrooms.length ? headrooms.reduce((least, value) => value < least ? value : least) : undefined;

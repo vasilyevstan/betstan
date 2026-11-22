@@ -2692,7 +2692,10 @@ for name, value in {
 if "disk_checkpoint_run_id" in inputs and "infrastructure_run_id" in inputs:
     inputs["infrastructure_run_id"] = "47"
 if "prerequisite_run_id" in inputs:
-    if policy["operation"] == "oci-live-data-apply-backfills":
+    if policy["operation"] in (
+        "oci-live-data-apply-backfills",
+        "oci-live-data-reconcile-risk-accounting",
+    ):
         inputs["prerequisite_run_id"] = "49"
     elif policy["operation"] == "oci-live-data-apply-slip-index":
         inputs["prerequisite_run_id"] = "50"

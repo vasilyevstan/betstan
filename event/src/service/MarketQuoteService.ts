@@ -55,6 +55,7 @@ export async function marketCatalog(eventId: string) {
     event: { eventId, name: event.name, time: event.time, status: event.status, visibility: event.visibility,
       ...(event.liveEnabled === false ? { liveEnabled: false } : {}) },
     hasRetainedModel: Boolean(event.pricingModel),
+    standardMarkets: event.products.map(product => ({ marketId: product.id, marketType: product.type })),
     standardSelections: standardSelections(event),
     markets: projections.flatMap(record => record.publication?.kind === "MARKET_AVAILABLE" ? [{
       configuration: record.publication.configuration, preview: record.publication.preview,

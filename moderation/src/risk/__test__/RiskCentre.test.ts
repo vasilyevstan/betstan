@@ -1,5 +1,6 @@
-import { BetKind, ModerationStatus } from "@betstan/common";
+import { BetKind, BettingStatus, EventPhase, LiveMarketStatus, LiveMarketType, ModerationStatus, TeamSide } from "@betstan/common";
 import { Bet } from "../../model/Bet";
+import { LiveEventMirror } from "../../model/LiveEventMirror";
 import { ParkedPlaceBet } from "../../model/ParkedPlaceBet";
 import ModerationService from "../../service/ModerationService";
 import { createPlaceBetEvent } from "../../event/listener/__test__/helpers";
@@ -37,6 +38,9 @@ const event = () => {
   return { ...value, data: { ...value.data, betKind: BetKind.PRE_MATCH,
     rows: value.data.rows.map(r => ({ ...r, betKind: BetKind.PRE_MATCH })) } };
 };
+const builtinRule = (id = "PRE_MATCH:1X2") => parseRule({
+  id: `market:${id}`, type: "DENY", enabled: true, scope: { marketTypes: [id] }, parameters: {},
+});
 
 it("ships zero delay, disabled optional rules, bounded typed predicates and exact money", () => {
   expect(defaults().filter(r => r.enabled).map(r => [r.type, r.parameters.limit])).toEqual([["DELAY_MS", 0]]);
@@ -157,6 +161,97 @@ it("enforces choice off/on for new receipts without rewriting either previously 
   expect(await Bet.findOne({ slipId: allowed.data.slipId }).lean()).toMatchObject({
     status: ModerationStatus.APPROVED, riskPolicyRevision: 3,
   });
+});
+
+it("pins native market off/on and uses source types without changing placement or accounting identity", async () => {
+  const waiting = event();
+  await receiveRisk(waiting, new Date());
+  const closed = builtinRule();
+  await mutatePolicy("CREATE", { expectedRevision: 1, requestId: "native-off", rule: closed });
+  const blocked = event();
+  const receipt = await receiveRisk(blocked, new Date());
+  expect(receipt.reason).toBeUndefined();
+  expect(receipt.accountingFingerprint).toBe((await receiveRisk(blocked, new Date())).accountingFingerprint);
+  expect(Object.keys(receipt.facts).sort()).toEqual(["betKind", "eventIds", "marketIds", "productIds", "structure", "templateIds"]);
+  await mutatePolicy("DELETE", { expectedRevision: 2, requestId: "native-on" }, closed.id);
+  (verifyRiskSource as jest.Mock).mockImplementation(async (_eventId, _rows, _now, required) => ({
+    kickoffAt: new Date(Date.now() + 600000).toISOString(), affectedRows: [],
+    ...(required ? { marketTypes: ["PRE_MATCH:1X2"] } : {}),
+  }));
+  const service = new ModerationService({ publishWithConfirm: async () => undefined });
+  await service.handlePlaceBet(waiting);
+  await service.handlePlaceBet(blocked);
+  const allowed = event();
+  await service.handlePlaceBet(allowed);
+  expect(await Bet.findOne({ slipId: waiting.data.slipId }).lean()).toMatchObject({
+    status: ModerationStatus.APPROVED, riskPolicyRevision: 1,
+  });
+  expect(await Bet.findOne({ slipId: blocked.data.slipId }).lean()).toMatchObject({
+    status: ModerationStatus.DECLINED, riskPolicyRevision: 2, riskReason: "RISK_DENY",
+  });
+  expect(await Bet.findOne({ slipId: allowed.data.slipId }).lean()).toMatchObject({
+    status: ModerationStatus.APPROVED, riskPolicyRevision: 3,
+  });
+  expect((await RiskPosition.findById(blocked.data.slipId).lean<{ accountingFingerprint: string }>())?.accountingFingerprint).toBe(receipt.accountingFingerprint);
+});
+
+it.each([undefined, [], ["PRE_MATCH:unknown"]])("fails closed without valid native classification: %j", async standardMarketTypes => {
+  await mutatePolicy("CREATE", { expectedRevision: 1, requestId: "native-off", rule: builtinRule() });
+  const input = event();
+  await receiveRisk(input, new Date());
+  expect(await terminalRisk(input.data.slipId, {
+    status: ModerationStatus.APPROVED, affectedRows: [], moderationTimestamp: new Date().toISOString(), standardMarketTypes,
+  }, new Date())).toMatchObject({ status: ModerationStatus.DECLINED, riskReason: "RISK_EVIDENCE_UNAVAILABLE" });
+});
+
+it("prevents an older editor from stripping a native selector and broadening its deny", async () => {
+  const closed = builtinRule();
+  await mutatePolicy("CREATE", { expectedRevision: 1, requestId: "native-off", rule: closed });
+  await expect(mutatePolicy("UPDATE", {
+    expectedRevision: 2, requestId: "old-editor", rule: { ...closed, scope: {} },
+  }, closed.id)).rejects.toMatchObject({ code: "RULE_SCOPE_CONFLICT" });
+  const policy = await getPolicy();
+  expect(policy.revision).toBe(2);
+  expect(policy.rules.find((rule: Rule) => rule.id === closed.id)).toEqual(closed);
+});
+
+it("uses the contended live mirror's type, not the submitted type or market ID spelling", async () => {
+  const sample = event();
+  const row = {
+    ...sample.data.rows[0], betKind: BetKind.LIVE, marketId: "random-live-id", marketVersion: 1, quoteVersion: 1,
+    marketType: LiveMarketType.NEXT_YELLOW_CARD, side: TeamSide.HOME, selectionId: "random-live-id:1:HOME",
+    quoteValidUntil: new Date(Date.now() + 600000).toISOString(),
+  };
+  const next = () => {
+    const input = event();
+    input.data.betKind = BetKind.LIVE;
+    input.data.rows = [{ ...row, id: input.data.rows[0].id }];
+    return input;
+  };
+  await LiveEventMirror.create({
+    eventId: row.eventId, sequence: 1, occurredAt: new Date().toISOString(), kickoffAt: new Date(Date.now() - 60000).toISOString(),
+    minute: 1, phase: EventPhase.FIRST_HALF, homeScore: 0, awayScore: 0, bettingStatus: BettingStatus.OPEN,
+    markets: [{
+      marketId: row.marketId, marketType: LiveMarketType.NEXT_CORNER, marketVersion: 1, quoteVersion: 1,
+      quoteValidUntil: row.quoteValidUntil, status: LiveMarketStatus.OPEN,
+      selections: [{ selectionId: row.selectionId, side: row.side, odds: row.oddsValue }],
+    }],
+  });
+  const waiting = next();
+  await receiveRisk(waiting, new Date());
+  await mutatePolicy("CREATE", { expectedRevision: 1, requestId: "live-off", rule: builtinRule("LIVE:NEXT_CORNER") });
+  const finish = async (input: ReturnType<typeof event>) => {
+    await receiveRisk(input, new Date());
+    return terminalRisk(input.data.slipId, {
+      status: ModerationStatus.APPROVED, affectedRows: [], moderationTimestamp: new Date().toISOString(),
+    }, new Date());
+  };
+  expect(await finish(waiting)).toMatchObject({ status: ModerationStatus.APPROVED, riskPolicyRevision: 1 });
+  expect(await finish(next())).toMatchObject({ status: ModerationStatus.DECLINED, riskReason: "RISK_DENY" });
+  await LiveEventMirror.updateOne({ eventId: row.eventId }, { $set: { "markets.0.marketType": LiveMarketType.NEXT_YELLOW_CARD } });
+  expect(await finish(next())).toMatchObject({ status: ModerationStatus.APPROVED });
+  await LiveEventMirror.updateOne({ eventId: row.eventId }, { $unset: { "markets.0.marketType": 1 } });
+  expect(await finish(next())).toMatchObject({ status: ModerationStatus.DECLINED, riskReason: "RISK_EVIDENCE_UNAVAILABLE" });
 });
 
 it("publishes typed whole-ticket net-win declines without reducing wager or payout", async () => {

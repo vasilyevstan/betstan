@@ -1,7 +1,7 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import RiskCentre, { describeChanges } from './RiskCentre';
 
@@ -10,6 +10,11 @@ const API = '/api/backoffice/risk-centre';
 const rule = { id: 'default:MAX_STAKE', type: 'MAX_STAKE', enabled: false, scope: {}, parameters: { limit: 10000 } };
 const snapshot = (revision = 1) => ({
   revision, defaultsVersion: 1, rules: [{ ...rule, parameters: { ...rule.parameters } }],
+  builtinMarkets: [
+    { id: 'PRE_MATCH:1X2', name: '1X2', betKind: 'PRE_MATCH' },
+    { id: 'PRE_MATCH:CS', name: 'Correct Score', betKind: 'PRE_MATCH' },
+    { id: 'LIVE:NEXT_CORNER', name: 'Next corner (live)', betKind: 'LIVE' },
+  ],
   catalogue: [{
     type: 'MAX_STAKE', label: 'Maximum stake', description: 'Whole ticket limit.', category: 'admission',
     defaultParameters: { limit: 10000 }, defaultEnabled: false, defaultScope: {}, locked: false,
@@ -85,6 +90,7 @@ beforeEach(() => {
 
 describe('event stress and choice switches', () => {
   const choiceId = 'a'.repeat(64);
+  const mount = () => render(<MemoryRouter><RiskCentre eventAnalysis /></MemoryRouter>);
   const fixture = () => {
     const policy = snapshot();
     policy.readiness.capabilities.selectionBlocking = true;
@@ -119,20 +125,74 @@ describe('event stress and choice switches', () => {
     return state;
   };
   const review = async () => {
-    fireEvent.click(await screen.findByRole('tab', { name: 'Events' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Review risk for Open event' }));
     await screen.findByLabelText('Test stake (Stanbucks)');
   };
 
-  it('loads events lazily, supports keyboard tabs and preserves an unsaved rule draft', async () => {
-    fixture(); mount(); await selectRule(); editLimit('2000');
+  it('keeps global rules in Risk Centre without an event tab or background analysis reads', async () => {
+    fixture();
+    render(<MemoryRouter><RiskCentre /></MemoryRouter>);
+    await selectRule(); editLimit('2000');
     expect(axios.get.mock.calls.some(([url]) => url.startsWith(`${API}/events`))).toBe(false);
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Rules' }), { key: 'ArrowRight' });
-    expect(await screen.findByRole('button', { name: 'Review risk for Open event' })).toBeVisible();
-    expect(screen.getByRole('tab', { name: 'Events' })).toHaveFocus();
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Events' }), { key: 'Home' });
+    expect(screen.queryByRole('tab', { name: 'Events' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(20);
     expect(axios.request).not.toHaveBeenCalled();
+  });
+
+  it('loads open-event analysis without global switch endpoints or a global rule editor', async () => {
+    fixture(); mount(); await review();
+    expect(screen.getByRole('heading', { level: 1, name: 'Black swan analysis' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Risk Centre rules' })).toHaveAttribute('href', '/backoffice/risk-centre');
+    expect(screen.queryByRole('heading', { name: 'All-events switches' })).not.toBeInTheDocument();
+    expect(axios.get.mock.calls.every(([url]) => url === API || url.startsWith(`${API}/events`))).toBe(true);
+  });
+
+  it('opens the selected event directly without fetching another event catalogue and preserves the view query', async () => {
+    fixture();
+    render(<MemoryRouter initialEntries={['/backoffice/events/event-a/analysis?ui=v3&theme=light']}>
+      <Routes><Route path="/backoffice/events/:eventId/analysis" element={<RiskCentre eventAnalysis />} /></Routes>
+    </MemoryRouter>);
+    expect(await screen.findByRole('heading', { level: 2, name: 'Open event' })).toBeVisible();
+    expect(screen.getByText('Lower odds to 2.50 or less')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Event markets' }))
+      .toHaveAttribute('href', '/backoffice/events/event-a/markets?ui=v3&theme=light');
+    expect(axios.get.mock.calls.some(([url]) => url === `${API}/events`)).toBe(false);
+    await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+    await waitFor(() => expect(axios.request).toHaveBeenCalledTimes(1));
+    expect(axios.request.mock.calls[0][0].data.rule.scope).toEqual({
+      betKind: 'PRE_MATCH', eventIds: ['event-a'], selectionIds: [choiceId],
+    });
+  });
+
+  it('ignores an old event response after direct navigation and switches only the current event choice', async () => {
+    const state = fixture();
+    let finishOldRead;
+    const oldRead = new Promise(resolve => { finishOldRead = resolve; });
+    const next = { ...state.detail, event: { ...state.detail.event, eventId: 'event-b', name: 'Second event' },
+      choices: [{ ...state.detail.choices[0], id: 'b'.repeat(64), label: 'Nominee B' }] };
+    axios.get.mockImplementation(async url => {
+      if (url === API) return { data: state.policy };
+      if (url.startsWith(`${API}/events/event-a?`)) return oldRead;
+      if (url.startsWith(`${API}/events/event-b?`)) return { data: next };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const Navigate = () => {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate('/backoffice/events/event-b/analysis')}>Next event</button>;
+    };
+    render(<MemoryRouter initialEntries={['/backoffice/events/event-a/analysis']}>
+      <Navigate /><Routes><Route path="/backoffice/events/:eventId/analysis" element={<RiskCentre eventAnalysis />} /></Routes>
+    </MemoryRouter>);
+    await screen.findByText('Calculating event stress...');
+    fireEvent.click(screen.getByRole('button', { name: 'Next event' }));
+    await screen.findByRole('heading', { level: 2, name: 'Second event' });
+    await act(async () => { finishOldRead({ data: state.detail }); });
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Open event' })).not.toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByRole('switch', { name: 'Allow Nominee B in Match award for Second event' })); });
+    await waitFor(() => expect(axios.request).toHaveBeenCalledTimes(1));
+    expect(axios.request.mock.calls[0][0].data.rule.scope).toEqual({
+      betKind: 'PRE_MATCH', eventIds: ['event-b'], selectionIds: ['b'.repeat(64)],
+    });
   });
 
   it('shows precise large loss bounds and sends only valid minor-unit stress stakes', async () => {
@@ -186,7 +246,7 @@ describe('event stress and choice switches', () => {
     expect(screen.getByText('Another rule still blocks this single')).toBeVisible();
   });
 
-  it('recovers a lost choice-save response by its original operation without optimistically changing the switch or losing a draft', async () => {
+  it('recovers a lost choice-save response by its original operation without optimistically changing the switch', async () => {
     const state = fixture();
     axios.request.mockImplementationOnce(async config => {
       state.operation = { ...result(config).data, rules: [...state.policy.rules, config.data.rule] };
@@ -195,7 +255,7 @@ describe('event stress and choice switches', () => {
         choices: [{ ...state.detail.choices[0], off: true, advice: 'OFF', suggestedOdds: null }] };
       throw new Error('response lost');
     });
-    mount(); await selectRule(); editLimit('2000'); await review();
+    mount(); await review();
     fireEvent.click(await screen.findByRole('switch'));
     expect(await screen.findByRole('alert')).toHaveTextContent('uncertain');
     expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true');
@@ -204,8 +264,6 @@ describe('event stress and choice switches', () => {
     await waitFor(() => expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
     expect(axios.request).toHaveBeenCalledTimes(1);
     expect(axios.get).toHaveBeenCalledWith(`${API}/operations/save:test-uuid`, expect.any(Object));
-    fireEvent.click(screen.getByRole('tab', { name: 'Rules' }));
-    expect(screen.getByLabelText('Limit (Stanbucks)')).toHaveValue(20);
   });
 
   it.each([
@@ -734,7 +792,7 @@ describe('sections, history and all-events switches', () => {
     routes({ '/api/backoffice/market-templates': templates });
     mount();
     expect(await screen.findByText('Total goals')).toBeInTheDocument();
-    expect(screen.queryByText('Archived market')).not.toBeInTheDocument();
+    expect(screen.getByText('Archived market').closest('li')).toHaveTextContent('Template / Archived');
     fireEvent.click(screen.getByRole('button', { name: 'Turn off Total goals for all events' }));
     await screen.findByText('Total goals is off for all events. New bets on it are declined. Revision 2 saved.');
     expect(axios.request.mock.calls[0][0]).toMatchObject({
@@ -746,6 +804,83 @@ describe('sections, history and all-events switches', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Turn on Total goals for all events' }));
     await screen.findByText('Total goals is on for all events. Revision 3 saved.');
     expect(axios.request.mock.calls[1][0]).toMatchObject({ method: 'DELETE', url: `${API}/rules/market:${templateId}`, data: { expectedRevision: 2 } });
+  });
+
+  it('includes built-in pre-match and live markets and switches them without requiring the template catalogue', async () => {
+    mount();
+    for (const name of ['1X2', 'Correct Score', 'Next corner (live)']) {
+      expect(await screen.findByRole('button', { name: `Turn off ${name} for all events` })).toBeInTheDocument();
+    }
+    expect(screen.getByText('1X2').closest('li')).toHaveTextContent('Built-in / Pre-match');
+    expect(screen.getByText('Next corner (live)').closest('li')).toHaveTextContent('Built-in / Live');
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off 1X2 for all events' }));
+    await screen.findByText('1X2 is off for all events. New bets on it are declined. Revision 2 saved.');
+    expect(axios.request.mock.calls[0][0]).toMatchObject({
+      method: 'POST', url: `${API}/rules`,
+      data: { expectedRevision: 1, rule: { id: 'market:PRE_MATCH:1X2', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] }, parameters: {} } },
+    });
+    expect(screen.getByText('1X2').closest('li').querySelector('.market-pill')).toHaveTextContent('OFF');
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on 1X2 for all events' }));
+    await screen.findByText('1X2 is on for all events. Revision 3 saved.');
+    expect(axios.request.mock.calls[1][0]).toMatchObject({ method: 'DELETE', url: `${API}/rules/market:PRE_MATCH:1X2`, data: { expectedRevision: 2 } });
+  });
+
+  it('keeps a same-name saved template distinct from its built-in market', async () => {
+    routes({ '/api/backoffice/market-templates': { ...templates, templates: [{
+      ...templates.templates[0], versions: [{ definition: { name: '1X2' } }],
+    }] } });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Turn off 1X2 (Template) for all events' }));
+    await screen.findByText(/1X2 \(Template\) is off for all events/);
+    expect(axios.request.mock.calls[0][0].data.rule.scope).toEqual({ templateIds: [templateId] });
+    const native = screen.getByRole('button', { name: 'Turn off 1X2 (Built-in / Pre-match) for all events' }).closest('li');
+    expect(native.querySelector('.market-pill')).toHaveTextContent('ON');
+  });
+
+  it('does not overwrite a changed switch or remove another native Block bets rule', async () => {
+    const data = snapshot();
+    data.rules.push(
+      { id: 'another:deny', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] }, parameters: {} },
+      { id: 'market:PRE_MATCH:CS', type: 'DENY', enabled: true, scope: { marketTypes: ['LIVE:NEXT_CORNER'] }, parameters: {} },
+    );
+    routes({ [API]: data });
+    mount();
+    const blocked = (await screen.findByText('1X2')).closest('li');
+    expect(blocked).toHaveTextContent('OFF');
+    expect(blocked).toHaveTextContent('Off by a Block bets rule');
+    expect(blocked.querySelector('button')).toBeNull();
+    const changed = screen.getByText('Correct Score').closest('li');
+    expect(changed).toHaveTextContent('Switch rule changed; manage it in Rules');
+    expect(changed.querySelector('button')).toBeNull();
+    expect(axios.request).not.toHaveBeenCalled();
+  });
+
+  it('reconciles an uncertain native switch using the original operation and keeps its catalogue', async () => {
+    const saved = {
+      requestId: 'save:test-uuid', revision: 2, defaultsVersion: 1, occurredAt: '2026-11-14T21:00:00.000Z',
+      rules: [{ id: 'market:PRE_MATCH:1X2', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] }, parameters: {} }],
+    };
+    routes({ [`${API}/operations/save:test-uuid`]: saved });
+    axios.request.mockRejectedValueOnce(new Error('response lost'));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Turn off 1X2 for all events' }));
+    const check = await screen.findByRole('button', { name: 'Check save result' });
+    await waitFor(() => expect(check).toBeEnabled());
+    fireEvent.click(check);
+    await screen.findByText(/1X2 is off for all events.*Revision 2 saved/);
+    expect(axios.request).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Turn on 1X2 for all events' })).toBeInTheDocument();
+    expect(screen.getByText('Correct Score')).toBeInTheDocument();
+  });
+
+  it('does not invent native switches for an older reader and keeps saved templates usable', async () => {
+    const data = snapshot();
+    delete data.builtinMarkets;
+    routes({ [API]: data, '/api/backoffice/market-templates': templates });
+    mount();
+    expect(await screen.findByText('Built-in market switches are unavailable in this deployment.')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Turn off Total goals for all events' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Turn off 1X2 for all events' })).not.toBeInTheDocument();
   });
 
   it('switches cash back for all events with the expected current value', async () => {
@@ -777,7 +912,7 @@ describe('sections, history and all-events switches', () => {
     view.unmount();
     routes({ [API]: policy });
     mount();
-    await screen.findByText('Markets are unavailable. Try refreshing.');
+    await screen.findByText('Custom market templates are unavailable. Try refreshing.');
     expect(await screen.findByRole('button', { name: new RegExp(`ON Market: ${deletedId}`) })).toBeInTheDocument();
   });
 
@@ -840,7 +975,8 @@ describe('sections, history and all-events switches', () => {
     await screen.findByRole('button', { name: /Maximum stake OFF All bets/ });
     expect(await screen.findByText('Cash-back setting is unavailable. Try refreshing.')).toBeInTheDocument();
     expect(screen.getByText('Account switches are unavailable. Try refreshing.')).toBeInTheDocument();
-    expect(screen.getByText('Markets are unavailable. Try refreshing.')).toBeInTheDocument();
+    expect(screen.getByText('Custom market templates are unavailable. Try refreshing.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Turn off 1X2 for all events' })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

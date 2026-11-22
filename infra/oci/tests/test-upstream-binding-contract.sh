@@ -49,10 +49,12 @@ ensure_historical_reader_blobs() {
     b587fa03960422a0a73e3dd65b955a3a716c5480
     27a98e345050fefb799c706fde03d8f79e14ed6c
     1752489383424fa4bd55bbc7d36e4cac95e14d31
+    00fe8c05302647c09ebc2ee623699627be002337
   )
   local -a fixture_commits=(
     e524317441d29ddd06ef3196e030442979600eb1
     2a632ebe47c3250c26081a23113fd95390afe912
+    d0c80096a4f9945227ece963263e6918fa693fbc
   )
   for blob in "${blobs[@]}"; do
     git -C "$ROOT_DIR" cat-file -e "$blob^{blob}" 2>/dev/null || missing=true
@@ -5259,7 +5261,12 @@ assert m.current_reader_preflight_aggregation(
 assert m.without_read_only_preflight(serial_workflow, "historical preflight") == serial_workflow
 assert m.current_reader_workflow_v5(current_workflow, "aggregate inverse", inverse=True) == \
     m.current_reader_workflow_v5(serial_workflow, "serial inverse", inverse=True)
-assert blob(m.without_native_deployment_consumer(serial_workflow, "original serial source")) == \
+reviewed_workflow = frozen("00fe8c05302647c09ebc2ee623699627be002337")
+reviewed_serial = m.without_read_only_preflight(reviewed_workflow, "reviewed preflight")
+assert blob(m.without_native_deployment_consumer(reviewed_serial, "original serial source")) == \
+    "5de15ca70b0a22efa284611c316d40c89490715e"
+# A new phase cannot masquerade as this frozen historical reader.
+assert blob(m.without_native_deployment_consumer(serial_workflow, "extended serial source")) != \
     "5de15ca70b0a22efa284611c316d40c89490715e"
 def reject_preflight(candidate, *, inverse=True):
     for check in (
@@ -6810,7 +6817,13 @@ current_workflow = subprocess.check_output([
     source + ":.github/workflows/oci-live-data-rollout.yml",
 ]).decode()
 current_names = re.findall(r"(?m)^      - name: (.+)$", current_workflow)
-current_skipped = held_skipped | {
+accounting_only_steps = {
+    "Install pinned runtime for private accounting transport",
+    "Restore locked source and receiver dependencies",
+    "Verify restored public accounting and event analysis",
+    "Release accounting HTTP fence after verified lock release",
+}
+current_skipped = held_skipped | accounting_only_steps | {
     "Verify reader-qualified released activation state",
     "Verify fixed incident manifest and immutable evidence",
     "Reject competing incident production activity",
@@ -6865,10 +6878,12 @@ def current_producer_job(workflow):
     steps[-2]["number"] = 2 * (len(names) + 1)
     steps[-1]["number"] = steps[-2]["number"] + 1
     return dict(held_original[0], steps=steps,
-                started_at=current_start.isoformat(), completed_at="2026-10-07T09:12:00Z")
+                started_at=current_start.isoformat(), completed_at=steps[-1]["completed_at"])
 current_job = current_producer_job(current_workflow)
 current_steps = current_job["steps"]
-current_metadata = dict(held_metadata, updated_at="2026-10-07T09:12:01Z")
+current_metadata = dict(held_metadata, updated_at=(
+    m.parse_timestamp(current_job["completed_at"], "fixture") + m.dt.timedelta(seconds=1)
+).isoformat())
 renewal_step = next(step for step in current_steps
                     if step["name"] == "Restore runtime or verify final deploy handoff")
 renewal_epoch = int(m.parse_timestamp(renewal_step["started_at"], "fixture").timestamp())
@@ -6898,6 +6913,11 @@ with patch.object(m, "require_fixed_run", return_value=current_metadata), \
     assert observed["_held_complete"] is True
     assert observed["_handoff_deadline"] == renewal_epoch + 1800
     assert current_job["steps"] == current_steps
+    for name in accounting_only_steps:
+        accounting_step = next(step for step in current_steps if step["name"] == name)
+        assert accounting_step["conclusion"] == "skipped"
+        with patch.dict(accounting_step, conclusion="success"):
+            reject(held_native)
     for deadline, generation in (
         (renewal_epoch + 1802, 12), (renewal_epoch + 1800, 11),
         (renewal_epoch + 3600, 12), (renewal_epoch + 7200, 12),

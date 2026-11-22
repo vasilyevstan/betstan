@@ -5,6 +5,7 @@ import { key, parseRule, Policy, RiskError, validatePolicy } from "./Policy";
 import { choiceId, liveOutcomeKey } from "./Selections";
 import { readEventAuthority } from "./SourceVerifier";
 import { getPolicy, readBook, readiness, riskEnabled, RiskState } from "./Store";
+import { builtinMarketId } from "./BuiltinMarkets";
 
 interface EventSummary { eventId: string; name: string; time: string; phase: string }
 interface BookSnapshot {
@@ -31,7 +32,12 @@ function offer(value: unknown, eventId: string): AnalysisChoice {
     || typeof choice.odds !== "number" || !Number.isFinite(choice.odds) || choice.odds < 1
     || typeof choice.sourceOpen !== "boolean"
     || choice.betKind !== (choice.origin === "LIVE" ? "LIVE" : "PRE_MATCH")) return invalidSource();
-  const base = { eventId, marketId: choice.marketId, marketName: choice.marketName, label: choice.label, odds: choice.odds, sourceOpen: choice.sourceOpen };
+  const builtin = choice.origin === "TEMPLATE" ? undefined : builtinMarketId(String(choice.betKind), choice.marketType);
+  if (choice.origin !== "TEMPLATE" && choice.marketType !== undefined && !builtin) return invalidSource();
+  const base = {
+    eventId, marketId: choice.marketId, marketName: choice.marketName, label: choice.label, odds: choice.odds, sourceOpen: choice.sourceOpen,
+    ...(builtin ? { builtinMarketId: builtin } : {}),
+  };
   if (choice.origin === "LIVE") {
     if (typeof choice.marketVersion !== "number" || !text(choice.selectionId) || choice.outcomeKey !== choice.selectionId) return invalidSource();
     const outcomeKey = liveOutcomeKey(choice.marketId, choice.marketVersion, choice.selectionId);
@@ -118,6 +124,10 @@ export async function getEventRisk(eventId: string, stakeMinor: number) {
   const choices = catalogue.choices.map(value => offer(value, eventId));
   if (new Set(choices.map(choiceId)).size !== choices.length) return invalidSource();
   const snapshot = await bookSnapshot();
+  if (choices.some(choice => choice.origin !== "TEMPLATE" && !choice.builtinMarketId
+    && snapshot.policy.rules.some(rule => rule.enabled && rule.scope.marketTypes?.some(id => id.startsWith(`${choice.betKind}:`))))) {
+    return invalidSource();
+  }
   return {
     event, asOf: snapshot.asOf, policyRevision: snapshot.policy.revision, analysis: snapshot.analysis, stakeMinor,
     metrics: eventExposure(eventId, snapshot.positions),

@@ -25,6 +25,12 @@ const createPolicy = () => {
   });
   return {
     revision: 1, defaultsVersion: 1,
+    builtinMarkets: [
+      { id: 'PRE_MATCH:1X2', name: '1X2', betKind: 'PRE_MATCH' },
+      { id: 'PRE_MATCH:CS', name: 'Correct Score', betKind: 'PRE_MATCH' },
+      { id: 'LIVE:NEXT_CORNER', name: 'Next corner (live)', betKind: 'LIVE' },
+      { id: 'LIVE:SECOND_HALF_TIME_RESULT', name: 'Second half time result (live)', betKind: 'LIVE' },
+    ],
     rules: catalogue.map(item => ({
       id: `default:${item.type}`, type: item.type, enabled: item.defaultEnabled,
       scope: {}, parameters: { ...item.defaultParameters },
@@ -60,6 +66,10 @@ async function installRiskApi(page, { uncertain = false, eventRisk = false } = {
     { eventId: 'event-b', name: 'Eastwick - North Christopherborough United', time: '2099-01-02T12:00:00.000Z', phase: 'PRE_MATCH' },
     { eventId: 'event-c', name: 'Westhaven - Southport', time: '2099-01-03T12:00:00.000Z', phase: 'PRE_MATCH' },
   ];
+  if (eventRisk) state.backofficeEvents = events.map(event => ({
+    ...event, home: event.name.split(' - ')[0], away: event.name.split(' - ')[1],
+    status: 'NO_RESULT', visibility: 'ONLINE',
+  }));
   const metrics = { exposureMinor: '100', openTickets: 1, pendingTickets: 0 };
   const report = () => ({ asOf: '2026-11-14T21:00:00.000Z', policyRevision: policy.revision, analysis: { ready: true, code: 'READY' } });
   const offers = [
@@ -132,25 +142,29 @@ async function installRiskApi(page, { uncertain = false, eventRisk = false } = {
   });
   await page.route('**/api/backoffice/market-templates**', route => reply(route, { enabled: true, starters: [], templates: [
     { templateId: TEMPLATE_ID, archived: false, versions: [{ version: 1, definition: { name: 'Total goals' } }] },
+    { templateId: 'b'.repeat(32), archived: true, versions: [{ version: 1, definition: { name: 'Archived template' } }] },
   ] }));
   return { state, mutations, eventReads };
 }
 
 for (const theme of ['light', 'dark']) {
   for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }]) {
-    test(`event stress, choice switches and pagination in ${theme} at ${viewport.width}px`, async ({ page }, testInfo) => {
+    test(`Backoffice event stress, choice switches and pagination in ${theme} at ${viewport.width}px`, async ({ page }, testInfo) => {
       await page.setViewportSize(viewport);
       await page.emulateMedia({ reducedMotion: 'reduce' });
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
       const { state, mutations, eventReads } = await installRiskApi(page, { eventRisk: true });
-      await page.goto(`/backoffice/risk-centre?theme=${theme}`);
-      await expect(page.getByRole('tab', { name: 'Rules', exact: true })).toBeVisible();
+      await page.goto(`/backoffice?theme=${theme}`);
+      const direct = page.getByRole('link', { name: 'Black swan analysis for Northport - Lakewood', exact: true });
+      await expect(direct).toBeVisible();
       expect(eventReads).toHaveLength(0);
-      await page.getByRole('tab', { name: 'Rules', exact: true }).focus();
-      await page.keyboard.press('ArrowRight');
-      await expect(page.getByRole('tab', { name: 'Events', exact: true })).toBeFocused();
-      await page.getByRole('button', { name: 'Review risk for Northport - Lakewood' }).click();
+      await page.screenshot({ path: testInfo.outputPath(`backoffice-analysis-entry-${theme}-${viewport.width}.png`), fullPage: true });
+      await direct.focus();
+      await page.keyboard.press('Enter');
+      await expect(page.getByRole('heading', { level: 1, name: 'Black swan analysis' })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 2, name: 'Northport - Lakewood' })).toBeVisible();
+      expect(eventReads.some(url => new URL(url).pathname === `${API}/events`)).toBe(false);
       await expect(page.getByText('Lower odds to 2.50 or less')).toBeVisible();
       await expect(page.getByText('Consider turning off')).toBeVisible();
       await expect(page.getByText('Paused or unavailable at source')).toBeVisible();
@@ -166,9 +180,17 @@ for (const theme of ['light', 'dark']) {
       await expect(choice).toBeEnabled();
       expect(mutations.at(-1)).toMatchObject({ method: 'DELETE', path: `${API}/rules/choice:${'a'.repeat(64)}` });
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
-      const short = await page.locator('.risk-events button, .risk-events input, .risk-events summary').evaluateAll(nodes =>
+      const short = await page.locator('.risk-events a, .risk-events button, .risk-events input, .risk-events summary').evaluateAll(nodes =>
         nodes.filter(node => node.getClientRects().length && !node.disabled && node.getBoundingClientRect().height < 43.5).map(node => node.textContent));
       expect(short).toEqual([]);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: testInfo.outputPath(`backoffice-event-analysis-${theme}-${viewport.width}.png`), fullPage: true });
+      await page.getByLabel('Test stake (Stanbucks)').fill('2');
+      await page.getByRole('button', { name: 'Recalculate', exact: true }).click();
+      await expect(page.getByText('Tested stake: 2.00 Stanbucks')).toBeVisible();
+      expect(eventReads.at(-1)).toContain('stakeMinor=200');
+      await page.getByRole('link', { name: 'Black swan analysis', exact: true }).click();
+      await page.getByRole('button', { name: 'Review risk for Northport - Lakewood' }).click();
       const summary = await page.locator('.risk-event-summary').first().evaluate(node => {
         const [identity, exposure, action] = node.children;
         const text = document.createRange();
@@ -178,12 +200,6 @@ for (const theme of ['light', 'dark']) {
       });
       expect(summary.actionLines).toBe(1);
       if (viewport.width < 760) expect(summary.exposureTop).toBeGreaterThanOrEqual(summary.identityBottom);
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.screenshot({ path: testInfo.outputPath(`risk-events-${theme}-${viewport.width}.png`), fullPage: true });
-      await page.getByLabel('Test stake (Stanbucks)').fill('2');
-      await page.getByRole('button', { name: 'Recalculate', exact: true }).click();
-      await expect(page.getByText('Tested stake: 2.00 Stanbucks')).toBeVisible();
-      expect(eventReads.at(-1)).toContain('stakeMinor=200');
       await page.getByRole('button', { name: 'Next events', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Review risk for Westhaven - Southport' })).toBeVisible();
       expect(eventReads.at(-1)).toContain('after=event-b');
@@ -257,6 +273,18 @@ for (const theme of ['light', 'dark']) {
       await accounts.getByRole('button', { name: 'Allow customer sign-in' }).click();
       await expect(page.getByText('Customer sign-in is allowed.')).toBeVisible();
       const markets = page.getByRole('region', { name: 'Markets', exact: true });
+      await expect(markets.getByRole('button', { name: 'Turn off Correct Score for all events' })).toBeVisible();
+      await expect(markets.getByRole('button', { name: 'Turn off Second half time result (live) for all events' })).toBeVisible();
+      await expect(markets.getByRole('button', { name: 'Turn off Archived template for all events' }).locator('..')).toContainText('Template / Archived');
+      await markets.getByRole('button', { name: 'Turn off 1X2 for all events' }).click();
+      await expect(page.getByText(/1X2 is off for all events\. New bets on it are declined\. Revision \d+ saved/)).toBeVisible();
+      expect(mutations.at(-1).body.rule).toMatchObject({
+        id: 'market:PRE_MATCH:1X2', type: 'DENY', enabled: true, scope: { marketTypes: ['PRE_MATCH:1X2'] },
+      });
+      await expect(markets.getByRole('button', { name: 'Turn on 1X2 for all events' }).locator('..').locator('.market-pill')).toHaveText('OFF');
+      await markets.getByRole('button', { name: 'Turn on 1X2 for all events' }).click();
+      await expect(markets.getByRole('button', { name: 'Turn off 1X2 for all events' }).locator('..').locator('.market-pill')).toHaveText('ON');
+      expect(mutations.at(-1)).toMatchObject({ method: 'DELETE', path: `${API}/rules/market:PRE_MATCH:1X2` });
       await markets.getByRole('button', { name: 'Turn off Total goals for all events' }).click();
       await expect(page.getByText(/Total goals is off for all events\. New bets on it are declined\. Revision \d+ saved/)).toBeVisible();
       expect(mutations.at(-1).body.rule).toMatchObject({

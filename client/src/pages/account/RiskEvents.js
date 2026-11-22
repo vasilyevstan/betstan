@@ -45,7 +45,7 @@ const unavailable = code => code === 'RISK_DISABLED' ? 'Exposure accounting is n
   : code === 'EXPOSURE_READ_CAPACITY_UNAVAILABLE' ? 'This book exceeds the bounded exposure view.'
     : 'Complete open-position accounting is unavailable.';
 
-function EventAnalysis({ eventId, revision, disabled, canSwitch, onSwitch, onRefreshRules, search }) {
+function EventAnalysis({ eventId, revision, disabled, canSwitch, onSwitch, onRefreshRules, search, showEventHeading = false }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -99,6 +99,11 @@ function EventAnalysis({ eventId, revision, disabled, canSwitch, onSwitch, onRef
     groups.get(key).push(choice);
   });
   return <section className="risk-event-analysis" aria-label="Market choice analysis" aria-busy={loading}>
+    {showEventHeading && data && !error ? <header className="risk-events__heading">
+      <div><h2 className="h5">{data.event.name}</h2>
+        <p className="market-help">{phaseName(data.event.phase)} · {formatTime(data.event.time)}</p></div>
+      <Link className={action} to={`/backoffice/events/${encodeURIComponent(eventId)}/markets${search}`}>Event markets</Link>
+    </header> : null}
     <form className="risk-stress-form" noValidate onSubmit={recalculate}>
       <label>Test stake (Stanbucks)<input className="form-control backoffice-control" type="number" min="0.01" step="0.01"
         value={stake} aria-describedby={stakeError ? 'risk-stake-error' : 'risk-stress-help'}
@@ -130,7 +135,7 @@ function EventAnalysis({ eventId, revision, disabled, canSwitch, onSwitch, onRef
       {[...groups.entries()].map(([key, choices]) => <section className="risk-event-market" key={key} aria-label={`${choices[0].marketName} choices`}>
         <div className="risk-event-market__heading">
           <h3 className="h6">{choices[0].marketName}</h3>
-          {choices[0].origin === 'TEMPLATE' ? <Link to={`/backoffice/events/${encodeURIComponent(eventId)}/markets${search}`}>Manage odds</Link> : null}
+          {choices[0].origin === 'TEMPLATE' ? <Link className={action} to={`/backoffice/events/${encodeURIComponent(eventId)}/markets${search}`}>Manage odds</Link> : null}
         </div>
         <ul className="risk-choice-list">{choices.map(choice => <li className="risk-choice" key={choice.id}>
           <div className="risk-choice__identity"><strong>{choice.label}</strong>
@@ -167,7 +172,7 @@ function EventAnalysis({ eventId, revision, disabled, canSwitch, onSwitch, onRef
   </section>;
 }
 
-export default function RiskEvents({ revision, disabled, canSwitch, onSwitch, onRefreshRules, search }) {
+function OpenEventRisks({ revision, disabled, canSwitch, onSwitch, onRefreshRules, search }) {
   const [page, setPage] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -199,7 +204,7 @@ export default function RiskEvents({ revision, disabled, canSwitch, onSwitch, on
   }, [load, refresh]);
   return <section className="risk-events" aria-labelledby="risk-events-title">
     <div className="risk-events__heading">
-      <div><h2 className="h5" id="risk-events-title">Black-swan stress</h2>
+      <div><h2 className="h5" id="risk-events-title">Open events for betting</h2>
         <p className="market-help">Open upcoming and in-play events. Conservative loss bounds, not a probability forecast.</p></div>
       <button type="button" className={action} disabled={loading} onClick={() => { setSelected(null); setRefresh(value => value + 1); }}>Refresh events</button>
     </div>
@@ -234,11 +239,22 @@ export default function RiskEvents({ revision, disabled, canSwitch, onSwitch, on
         }}>Next events</button>
       </div>
     </> : null}
-    <details className="risk-secondary">
+    <AnalysisNotes />
+  </section>;
+}
+
+function AnalysisNotes() {
+  return <details className="risk-secondary">
       <summary>How to read this analysis</summary>
       <p>Event loss bounds count each open ticket once, retaining full standalone payout bounds after partial closure and pending principal. Multi-event tickets can appear under more than one event; do not add event totals together.</p>
       <p>Odds recommendations test the selected stake against every matching, enabled operator-exposure ceiling across the whole applicable book. No ceiling means no recommendation. Per-customer budgets, correlations and black-swan probabilities are not inferred.</p>
       <p>Choice switches decline new receipts, including Builders and accumulators containing the choice. Choices can remain visible to players. Pending and accepted tickets keep their original policy and price.</p>
-    </details>
-  </section>;
+  </details>;
+}
+
+export default function RiskEvents({ eventId, ...props }) {
+  return eventId ? <div className="risk-events">
+    <EventAnalysis key={eventId} eventId={eventId} showEventHeading {...props} />
+    <AnalysisNotes />
+  </div> : <OpenEventRisks {...props} />;
 }

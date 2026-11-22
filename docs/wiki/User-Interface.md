@@ -45,7 +45,9 @@ Primary routes are:
 | `/profile` | Private display-name editing and personal betting statistics |
 | `/backoffice` | Public event simulation controls |
 | `/backoffice/markets` | Public Market designer and reusable templates |
-| `/backoffice/risk-centre` | Public risk rules, event stress analysis and choice switches; readiness is deployment-gated |
+| `/backoffice/risk-centre` | Public global risk rules and switches; readiness is deployment-gated |
+| `/backoffice/events/analysis` | Backoffice open-event black-swan analysis and choice switches |
+| `/backoffice/events/:eventId/analysis` | Direct analysis for the selected Backoffice event |
 | `/telemetry` | Fourteen-day activity graphs and current service health |
 | `/signup` | Account creation |
 | `/login` | Login |
@@ -102,29 +104,34 @@ Accounting readiness is explicit, and informational netting is not presented
 as spendable admission capacity. See [[Risk Centre]] for the rules and
 public-write limitations.
 
-The **Rules** tab has **All events**, **Pre-match** and **Live** sections, each with
+The rule editor has **All events**, **Pre-match** and **Live** sections, each with
 its own **+ Add rule** list and indented category groups, with left-aligned
 names and settings. Green **ON** and red **OFF** tags identify saved status
 without relying on color alone. All-events switches close or open all
 betting, stop or allow new registrations and customer sign-in, and turn cash
-back, or a Market designer market, off or on for every event. Expanding a revision in
+back, or a market, off or on for every event. Markets includes built-in 1X2,
+Correct Score, registered live types and all saved templates, with archived
+templates marked. Same-name templates stay distinct from built-ins; turning
+on never unarchives a template or overrides another block. Expanding a revision in
 history shows what it changed. Slip and My Bets name recognized rule types
 recorded on a declined bet; older records keep their generic reason. A
 whole-ticket decline is shown once on the slip; a selection-specific reason
 stays on its row.
 
-The **Events** tab lists online upcoming and in-play events with conservative
-loss bounds. Expand an event to test a new single at an explicit stake, see
+**Black swan analysis** lives in Backoffice Events, not a Risk Centre tab.
+The Backoffice heading opens all online upcoming and in-play events with
+conservative loss bounds. Each online, unresulted event card also opens its
+own analysis directly. Review an event to test a new single at an explicit stake, see
 lower-odds or turn-off guidance, and switch individual market choices.
 The analysis is not a probability forecast or automatic repricing. Missing
 accounting or an applicable book ceiling never implies safe odds. Switching
 on removes only the choice's own block; other rules and source pauses remain.
-Tab changes preserve unsaved rule input. Keyboard arrows, Home and End move
-between tabs. Stale reports, failed reads and uncertain writes disable the
+The event page links to its market editor and global Risk Centre rules,
+retaining theme and layout choices. Stale reports, failed reads and uncertain writes disable the
 relevant switches until their state is reconciled.
 
-On wide Backoffice event cards, the result form and the visibility, Markets
-and cash-back actions share two rows; narrower cards stack them.
+On wide Backoffice event cards, the result form and the visibility, Markets,
+black-swan analysis and cash-back actions share two rows; narrower cards stack them.
 
 ## Manual market odds
 
@@ -671,6 +678,11 @@ The `/backoffice` center panel uses full-width event cards within the shared
 Match Desk shell. Anonymous, ordinary, legacy roleless, and administrator
 visitors retain the same catalog and controls in all three layouts and both
 themes.
+
+**Black swan analysis** in the heading opens the complete open-event catalogue.
+Online, unresulted cards place their own analysis action beside **Markets**;
+offline or recorded cards do not imply that betting remains open. Event
+authority still checks the selected event when its analysis is requested.
 
 **Create new event** stays expanded and states the server-defined 15-minute
 kickoff lead time. **Event mode** defaults to **Pre-match and live game**.
