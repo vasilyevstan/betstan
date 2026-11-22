@@ -260,6 +260,31 @@ current_epoch() {
   fi
 }
 
+verify_owned_restore_lock() {
+  [[ "${GITHUB_ACTIONS:-}" == "true" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
+     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ &&
+     "${SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ && -z "$NOW_EPOCH" ]] ||
+    fail "owned fenced restoration requires an exact first-attempt workflow"
+  [[ "${SHARED_MONGO_LOCK_OPERATION:-}" == "restore-held-45049185347" &&
+     "${FAILED_RUN_ID:-}" == "45049185347" &&
+     "${ACCOUNTING_REJECTION_VERIFIED:-}" == "true" &&
+     "${SHARED_MONGO_LOCK_TOKEN:-}" == "restore-held-$GITHUB_RUN_ID-1" ]] ||
+    fail "pre-import restoration ownership mismatch"
+  NAMESPACE="$OCI_K8S_NAMESPACE" \
+  LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+  OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+  SOURCE_SHA="$SOURCE_SHA" \
+    "$OCI_ROOT_DIR/infra/azure/agents/shared-mongo-operation-lock-stan.sh" verify
+}
+
+verify_fenced_restore_lock() {
+  case "${1:-incident}" in
+    incident) verify_incident_lock ;;
+    owned) verify_owned_restore_lock ;;
+    *) fail "unknown fenced restoration lock qualification" ;;
+  esac
+}
+
 verify_incident_lock() {
   [[ "$INCIDENT_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ &&
      "$INCIDENT_OWNER_RUN_ID" =~ ^[1-9][0-9]*$ &&
@@ -601,7 +626,7 @@ hold_runtime() {
 }
 
 restore_runtime() {
-  local service replicas image version
+  local service replicas image version lock_qualification="${1:-incident}"
   validate_state
   version="$(awk -F '\t' '$1 == "state_version" {print $2}' "$STATE_FILE")"
   if [[ "$version" = "2" ]]; then
@@ -609,7 +634,7 @@ restore_runtime() {
        "$(runtime_fence_status)" == "true" ]] ||
       fail "authenticated baseline restoration requires the active HTTP fence"
     if [[ "$RESTORE_KEEP_FENCE" = "true" ]]; then
-      verify_incident_lock
+      verify_fenced_restore_lock "$lock_qualification"
     fi
     for service in "${reader_services[@]}"; do
       replicas="$(state_replicas "$service")"
@@ -624,7 +649,7 @@ restore_runtime() {
       scale_service "$service" "$replicas" "$image"
     done
     if [[ "$RESTORE_KEEP_FENCE" = "true" ]]; then
-      verify_incident_lock
+      verify_fenced_restore_lock "$lock_qualification"
       [[ "$(fence_config_status)" == "true" &&
          "$(runtime_fence_status)" == "true" ]] ||
         fail "authenticated baseline restoration lost the HTTP fence"
@@ -671,16 +696,18 @@ release_runtime() {
 }
 
 capture_readiness() {
-  local temporary service replicas image
+  local temporary service replicas image expected_fence="${1:-false}"
   validate_state
   [[ "$(awk -F '\t' '$1 == "state_version" {print $2}' "$STATE_FILE")" = "2" ]] ||
     fail "readiness capture requires authenticated baseline state"
   [[ -n "$READINESS_FILE" && "$READINESS_FILE" != "/" &&
      "$READINESS_FILE" != "." && ! -L "$READINESS_FILE" ]] ||
     fail "READINESS_FILE is required and must be a specific regular path"
-  [[ "$(fence_config_status)" == "false" &&
-     "$(runtime_fence_status)" == "false" ]] ||
-    fail "readiness capture requires the released HTTP fence"
+  [[ "$expected_fence" == "true" || "$expected_fence" == "false" ]] ||
+    fail "readiness fence qualification is invalid"
+  [[ "$(fence_config_status)" == "$expected_fence" &&
+     "$(runtime_fence_status)" == "$expected_fence" ]] ||
+    fail "readiness capture HTTP fence does not match its qualification"
   temporary="${READINESS_FILE}.tmp"
   mkdir -p "$(dirname "$READINESS_FILE")"
   rm -f -- "$temporary"
@@ -696,7 +723,7 @@ capture_readiness() {
     done
   } >"$temporary"
   mv "$temporary" "$READINESS_FILE"
-  rm -f -- "$STATE_FILE"
+  [[ "$expected_fence" == "true" ]] || rm -f -- "$STATE_FILE"
 }
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
@@ -766,8 +793,20 @@ case "$ACTION" in
     capture_readiness
     echo "live_data_maintenance=capture-readiness status=PASS authenticated_services=${#all_services[@]}"
     ;;
+  capture-held-readiness)
+    capture_readiness true
+    echo "live_data_maintenance=capture-held-readiness status=PASS http_mutation_fence=true authenticated_services=${#all_services[@]}"
+    ;;
+  restore-owned-fenced)
+    validate_state
+    [[ "$(awk -F '\t' '$1 == "state_version" {print $2}' "$STATE_FILE")" == "2" ]] ||
+      fail "owned fenced restoration requires an authenticated baseline"
+    RESTORE_KEEP_FENCE=true
+    restore_runtime owned
+    echo "live_data_maintenance=restore-owned-fenced status=PASS http_mutation_fence=true"
+    ;;
   *)
-    echo "usage: $0 {reconstruct-baseline|verify-baseline-images|fence-writes|enter|verify-held|verify-quiesced|fence-status|restore|reconcile-incident-writers|hold|release|capture-readiness}" >&2
+    echo "usage: $0 {reconstruct-baseline|verify-baseline-images|fence-writes|enter|verify-held|verify-quiesced|fence-status|restore|restore-owned-fenced|reconcile-incident-writers|hold|release|capture-readiness|capture-held-readiness}" >&2
     exit 2
     ;;
 esac
