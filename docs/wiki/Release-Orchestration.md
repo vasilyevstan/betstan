@@ -1587,6 +1587,13 @@ not zero exposure. These are historical-cut diagnostics, not live readiness
 or permission to alter financial records. Dry-run does not enter maintenance,
 import into the receiver, complete the handoff or deploy pending UI changes.
 
+Exported nulls alone do not distinguish absent evidence from failed validation.
+The optional `sourceEvidence` inventory reads Resulting's active/archive records
+only when their economic fingerprint still matches the sealed cut. It reports
+fixed stored-reason counts, missing placement bases and the presence of original
+cash-back manifests/principal snapshots. Changed or missing records are explicit;
+presence is not validation, permission to repair, or live readiness.
+
 ### Existing live-betting activation
 
 `DEPLOYMENT_PROVENANCE_FILE` and `LIVE_SCHEMA_EVIDENCE_FILE` are the two

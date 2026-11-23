@@ -1836,12 +1836,27 @@ if [[ "${1:-}" == "logs" ]]; then
         "openPositions":"UNAVAILABLE","positions":4,"movements":1,
         "unavailableOpenPositions":3,"unavailableHistories":4,
         "missingEvidence":{"scope":3,"placement":2,"principal":2,"other":0,"rawDocument":"secret-user"},
+        "sourceEvidence":{
+          "matchedCut":1,"changedSinceCut":1,"missingSource":1,"missingBasis":1,
+          "originalManifestPresent":1,"principalSnapshotPresent":1,"rawDocument":"secret-user",
+          "accountingReasons":{
+            "NOT_RECORDED":1,"COMPLETE":0,"HISTORY_MISSING":0,"AUTHORITY_UNAVAILABLE":0,
+            "LEGACY_PRECISION_UNSUPPORTED":0,"AMOUNT_UNSUPPORTED":0,"INVALID":0,
+            "rawReason":"secret-user"
+          }
+        },
         "rawDocument":{"userId":"secret-user","slipId":"secret-slip","wager":10}
       }'
       if [[ "$scenario" == "accounting-diagnostics-invalid-count" ]]; then
         accounting_json="$(jq '.missingEvidence.scope = -1' <<<"$accounting_json")"
       elif [[ "$scenario" == "accounting-diagnostics-private-id" ]]; then
         accounting_json="$(jq '.snapshotId = "secret-user"' <<<"$accounting_json")"
+      elif [[ "$scenario" == "accounting-diagnostics-invalid-source-count" ]]; then
+        accounting_json="$(jq '.sourceEvidence.matchedCut = -1' <<<"$accounting_json")"
+      elif [[ "$scenario" == "accounting-diagnostics-invalid-source-reasons" ]]; then
+        accounting_json="$(jq '.sourceEvidence.accountingReasons.NOT_RECORDED = 2' <<<"$accounting_json")"
+      elif [[ "$scenario" == "accounting-diagnostics-predecessor" ]]; then
+        accounting_json="$(jq 'del(.sourceEvidence)' <<<"$accounting_json")"
       fi
     fi
   fi
@@ -2077,7 +2092,15 @@ jq -e '
   .accountingSnapshot.status == "SEALED_SNAPSHOT_DIAGNOSED" and
   .accountingSnapshot.snapshotId == "risk_101_1" and
   .accountingSnapshot.unavailableOpenPositions == 3 and
-  .accountingSnapshot.missingEvidence == {scope:3, placement:2, principal:2, other:0}
+  .accountingSnapshot.missingEvidence == {scope:3, placement:2, principal:2, other:0} and
+  .accountingSnapshot.sourceEvidence == {
+    matchedCut:1, changedSinceCut:1, missingSource:1, missingBasis:1,
+    originalManifestPresent:1, principalSnapshotPresent:1,
+    accountingReasons:{
+      NOT_RECORDED:1, COMPLETE:0, HISTORY_MISSING:0, AUTHORITY_UNAVAILABLE:0,
+      LEGACY_PRECISION_UNSUPPORTED:0, AMOUNT_UNSUPPORTED:0, INVALID:0
+    }
+  }
 ' "$accounting_output/reports/preflight-resulting.json" >/dev/null ||
   fail "dry-run did not preserve bounded accounting evidence diagnostics"
 if grep -R -E 'secret-user|secret-slip|rawDocument|wager' "$accounting_output" >/dev/null; then
@@ -2090,6 +2113,19 @@ for scenario in accounting-diagnostics-invalid-count accounting-diagnostics-priv
   grep -Fq "Invalid accounting snapshot diagnostic report" "$work_dir/accounting-failure.log" ||
     fail "invalid accounting diagnostics did not fail at the report boundary"
 done
+for scenario in accounting-diagnostics-invalid-source-count accounting-diagnostics-invalid-source-reasons; do
+  if run_phase dry-run "$scenario" 4092 "$work_dir/$scenario" >"$work_dir/accounting-failure.log" 2>&1; then
+    fail "invalid accounting source evidence was accepted"
+  fi
+  grep -Fq "Invalid accounting source evidence diagnostic report" "$work_dir/accounting-failure.log" ||
+    fail "invalid accounting source evidence did not fail at the report boundary"
+done
+predecessor_accounting_output="$work_dir/accounting-diagnostics-predecessor"
+run_phase dry-run accounting-diagnostics-predecessor 4093 "$predecessor_accounting_output"
+jq -e '.accountingSnapshot.status == "SEALED_SNAPSHOT_DIAGNOSED" and
+  (.accountingSnapshot | has("sourceEvidence") | not)' \
+  "$predecessor_accounting_output/reports/preflight-resulting.json" >/dev/null ||
+  fail "predecessor accounting diagnostic reports became incompatible"
 
 already_applied_output="$work_dir/cleanup-applied"
 run_phase dry-run cleanup-applied 4018 "$already_applied_output"

@@ -721,6 +721,25 @@ sanitize_backfill_report() {
     --arg expected_mode "$expected_mode" '
       def nonnegative_integer:
         type == "number" and . >= 0 and . == floor;
+      def source_evidence($unavailable):
+        {
+          matchedCut, changedSinceCut, missingSource, missingBasis,
+          originalManifestPresent, principalSnapshotPresent,
+          accountingReasons: (.accountingReasons | {
+            NOT_RECORDED, COMPLETE, HISTORY_MISSING, AUTHORITY_UNAVAILABLE,
+            LEGACY_PRECISION_UNSUPPORTED, AMOUNT_UNSUPPORTED, INVALID
+          })
+        } as $evidence |
+        if ([$evidence.matchedCut, $evidence.changedSinceCut, $evidence.missingSource,
+              $evidence.missingBasis, $evidence.originalManifestPresent, $evidence.principalSnapshotPresent,
+              $evidence.accountingReasons[]] | all(nonnegative_integer)) and
+          ($evidence.matchedCut + $evidence.changedSinceCut + $evidence.missingSource == $unavailable) and
+          ([$evidence.accountingReasons[]] | add == $evidence.matchedCut) and
+          ([$evidence.missingBasis, $evidence.originalManifestPresent, $evidence.principalSnapshotPresent] |
+            max <= $evidence.matchedCut)
+        then $evidence
+        else error("Invalid accounting source evidence diagnostic report")
+        end;
       def snapshot_diagnostic:
         . as $diagnostic |
         if .status == "NO_SEALED_SNAPSHOT" then {status}
@@ -746,7 +765,9 @@ sanitize_backfill_report() {
             scope: .missingEvidence.scope, placement: .missingEvidence.placement,
             principal: .missingEvidence.principal, other: .missingEvidence.other
           }
-        }
+        } + (if has("sourceEvidence") then {
+          sourceEvidence: (.sourceEvidence | source_evidence($diagnostic.unavailableOpenPositions))
+        } else {} end)
         else error("Invalid accounting snapshot diagnostic report")
         end;
       . as $report |
