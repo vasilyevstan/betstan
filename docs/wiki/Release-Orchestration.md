@@ -1609,6 +1609,8 @@ Source change during preflight is `INCONCLUSIVE`. These explicit diagnostic
 states do not block basic deployment or authorize accounting activation.
 Reconciliation still requires a fresh passing preflight. An exported
 null or absent movement alone does not prove zero prior payouts.
+Private command failures require exactly one allowlisted code independently of
+Node warnings; otherwise they remain transport failures. Stderr stays private.
 
 A consistent durable intake receipt preserves its recorded placement fingerprint.
 An approved legacy ticket without that receipt receives an explicitly tagged,
