@@ -1052,13 +1052,13 @@ jobs:
           fi
 
       - name: Install pinned runtime for private accounting transport
-        if: inputs.phase == 'dry-run' || inputs.phase == 'reconcile-risk-accounting'
+        if: inputs.phase != 'incident-restore' && (inputs.phase == 'dry-run' || inputs.phase == 'reconcile-risk-accounting')
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24.22.3"
 
       - name: Restore locked source and receiver dependencies
-        if: inputs.phase == 'dry-run' || inputs.phase == 'reconcile-risk-accounting'
+        if: inputs.phase != 'incident-restore' && (inputs.phase == 'dry-run' || inputs.phase == 'reconcile-risk-accounting')
         run: |
           npm ci --prefix resulting --ignore-scripts --no-audit --no-fund
           npm ci --prefix moderation --ignore-scripts --no-audit --no-fund
@@ -2311,7 +2311,7 @@ jobs:
 
       - name: Verify legacy accounting originals before maintenance
         id: accounting_preflight
-        if: inputs.phase == 'reconcile-risk-accounting'
+        if: inputs.phase != 'incident-restore' && inputs.phase == 'reconcile-risk-accounting'
         env:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
