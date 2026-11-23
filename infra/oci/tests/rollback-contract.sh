@@ -819,6 +819,7 @@ case "${1:-} ${2:-}" in
         --argjson expired "$expired" \
         '{
           artifacts:[{
+            id:9001601,
             name:$name,
             expired:$expired,
             created_at:$recent,
@@ -849,8 +850,41 @@ case "${1:-} ${2:-}" in
     ;;
   "api repos/example/repo/actions/runs/${STUB_UNBUILT_DEPLOY_RUN_ID:-none}/artifacts")
     jq -n --arg name "oci-deploy-provenance-${STUB_UNBUILT_DEPLOY_RUN_ID}-1" --arg recent "$recent" '{
-      artifacts:[{name:$name, expired:false, created_at:$recent, updated_at:$recent}]
+      artifacts:[{id:9001602, name:$name, expired:false, created_at:$recent, updated_at:$recent}]
     }'
+    ;;
+  "api repos/example/repo/actions/artifacts/9001601/zip"|"api repos/example/repo/actions/artifacts/9001602/zip")
+    python3 - "$2" <<'PY'
+import io
+import os
+from pathlib import Path
+import re
+import sys
+import zipfile
+
+unbuilt = sys.argv[1].endswith("/9001602/zip")
+fixture = Path(os.environ["STUB_BASELINE_FIXTURE"] if unbuilt else
+               os.environ.get("STUB_DEPLOY_PROVENANCE_FIXTURE", os.environ["STUB_BASELINE_FIXTURE"]))
+provenance = (fixture / "trusted-deploy-provenance.txt").read_bytes()
+if unbuilt:
+    provenance = re.sub(rb"(?m)^source_sha=.*$",
+                        b"source_sha=" + os.environ["STUB_UNBUILT_SOURCE_SHA"].encode(), provenance)
+    provenance = re.sub(rb"(?m)^deployment_run_id=.*$",
+                        b"deployment_run_id=" + os.environ["STUB_UNBUILT_DEPLOY_RUN_ID"].encode(), provenance)
+files = {
+    "images.tsv": (fixture / "images.tsv").read_bytes(),
+    "provenance.txt": provenance,
+    "rabbitmq-baseline.txt": Path(os.environ["STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE"]).read_bytes(),
+}
+tamper = os.environ.get("STUB_TAMPER_FILE")
+if tamper:
+    files[tamper] = files.get(tamper, b"") + b"tampered\n"
+buffer = io.BytesIO()
+with zipfile.ZipFile(buffer, "w") as archive:
+    for name, raw in files.items():
+        archive.writestr(name, raw)
+sys.stdout.buffer.write(buffer.getvalue())
+PY
     ;;
   *)
     if [[ "${1:-} ${2:-}" == "run list" ]]; then
