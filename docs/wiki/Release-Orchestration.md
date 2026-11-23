@@ -400,6 +400,11 @@ These are transport retries, not protected-workflow reruns or
 reuse of consumed authority, and do not establish that an unclassified failure
 would recover.
 
+Rollback-baseline deployment artifact reads use that same bounded transport and
+ZIP validator, checking the published digest when present. Both unique required
+members are validated before either is written; failed or partial reads cannot
+publish baseline provenance. Existing run, retention and live-digest checks remain.
+
 **Upstream JSON read batches.** Native batched `gh api` reads retry only
 classifier-positive, unambiguous HTTP 500/502/503/504 or the classifier's exact
 transient timeout/reset signatures, with at most three actual executions per
