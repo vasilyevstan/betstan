@@ -1,4 +1,5 @@
 import { assertBetAccountingEvidence, BetAccountingMovement, ModerationStatus } from "@betstan/common";
+import { ClientSession } from "mongoose";
 import { Bet } from "../model/Bet";
 import { applyMovementPrefix, completeEvidence } from "./Accounting";
 import { facts, money } from "./Evaluation";
@@ -83,6 +84,88 @@ function movementData(row: any): BetAccountingMovement {
     revision: row.revision, occurredAt: row.occurredAt, closedStakeMinor: row.closedStakeMinor, returnMinor: row.returnMinor,
     remainingStakeMinor: row.remainingStakeMinor, originalStakeMinor: row.originalStakeMinor,
     source: row.source, placementFingerprint: row.placementFingerprint };
+}
+
+export function verifyLegacySnapshotPlacement(
+  original: { wager: number; rows: readonly unknown[]; betKind?: string | null; placementFingerprint?: string | null },
+  source: SnapshotPosition
+): void {
+  validatePosition(source);
+  const amount = money(original);
+  const unknownClosed = source.state === "TERMINAL"
+    && source.openExposure === "NONE" && source.history === "UNAVAILABLE";
+  if (unknownClosed) {
+    // A sealed closed-state assertion is not payout evidence. Check every
+    // available original fact, but never fill missing history or create credit.
+    if ((source.originalStakeMinor !== null && (!amount.moneyReady || source.originalStakeMinor !== amount.stakeMinor))
+      || (source.maximumReturnMinor !== null && (!amount.moneyReady || source.maximumReturnMinor !== amount.returnMinor))
+      || (source.facts !== null && fingerprint(source.facts) !== fingerprint(facts(original)))
+      || (source.placementFingerprint !== null && original.placementFingerprint
+        && source.placementFingerprint !== original.placementFingerprint)) {
+      fail("Closed legacy receiver placement conflicts with available source evidence");
+    }
+    return;
+  }
+  if (!amount.moneyReady || source.originalStakeMinor !== amount.stakeMinor
+    || source.maximumReturnMinor !== amount.returnMinor
+    || fingerprint(source.facts) !== fingerprint(facts(original))
+    || (source.placementFingerprint !== null && original.placementFingerprint
+      && source.placementFingerprint !== original.placementFingerprint)) {
+    fail("Legacy receiver placement lacks matching immutable source evidence");
+  }
+}
+
+/** Read-only intake checks shared by preflight and the transactional finalizer. */
+export async function verifySnapshotIntake(
+  positions: ReadonlyMap<string, SnapshotPosition>, session?: ClientSession
+) {
+  const live = await RiskPosition.find({}).select({
+    userId: 1, accountingFingerprint: 1, state: 1, moneyReady: 1, facts: 1,
+    accountingRevision: 1, remainingStakeMinor: 1, stakeMinor: 1, returnMinor: 1,
+  }).limit(MAX_POSITIONS + 1).session(session ?? null).lean() as any[];
+  const baselines = await RiskBaseline.find({}).limit(MAX_POSITIONS + 1).session(session ?? null).lean() as any[];
+  const local = await Bet.find({ status: { $in: [ModerationStatus.APPROVED, ModerationStatus.RECEIVED] } })
+    .select({ slipId: 1, userId: 1, placementFingerprint: 1, status: 1 })
+    .limit(MAX_POSITIONS + 1).session(session ?? null).lean() as any[];
+  if (live.length > MAX_POSITIONS || baselines.length > MAX_POSITIONS || local.length > MAX_POSITIONS) {
+    fail("Receiver reconciliation exceeds supported bound");
+  }
+  const liveById = new Map(live.map(p => [p._id, p]));
+  const baselineById = new Map(baselines.map(p => [p._id, p]));
+  if (new Set([...positions.keys(), ...liveById.keys()]).size > MAX_POSITIONS) fail("Merged receiver book exceeds supported position bound");
+  if (baselines.some(p => !text(p._id) || (!positions.has(p._id) && !liveById.has(p._id)))) fail("Previously imported exposure is absent from the new source cut");
+  for (const prior of baselines) {
+    const p = positions.get(prior._id);
+    if (!p) continue; // An immutable live receipt may have replaced source-pending exposure.
+    if (p.userId !== prior.userId || (p.placementFingerprint && prior.accountingFingerprint && p.placementFingerprint !== prior.accountingFingerprint)
+      || (p.originalStakeMinor !== null && prior.stakeMinor != null && p.originalStakeMinor !== prior.stakeMinor)
+      || (p.maximumReturnMinor !== null && prior.returnMinor != null && p.maximumReturnMinor !== prior.returnMinor)
+      || (p.facts && prior.facts && fingerprint(p.facts) !== fingerprint(prior.facts))
+      || (prior.state === "ACCEPTED" && ["PENDING", "DECLINED"].includes(p.state))) fail("Imported immutable placement or terminal state regressed");
+  }
+  for (const p of live) {
+    const source = positions.get(p._id);
+    if (source && (source.userId !== p.userId || (source.placementFingerprint && source.placementFingerprint !== p.accountingFingerprint)
+      || (p.state === "DECLINED" && !["DECLINED", "PENDING"].includes(source.state))
+      || (p.state === "PENDING" && ["ACCEPTED", "TERMINAL"].includes(source.state))
+      || (p.state === "ACCEPTED" && source.state === "DECLINED"))) fail("Receiver/source placement conflict");
+    if (p.state === "ACCEPTED" && !local.some(b => b.slipId === p._id && b.status === ModerationStatus.APPROVED)) fail("Accepted receipt lacks its terminal outbox");
+  }
+  for (const bet of local) {
+    const receipt = liveById.get(bet.slipId);
+    const source = positions.get(bet.slipId);
+    if (receipt) {
+      if (receipt.userId !== bet.userId || bet.placementFingerprint !== receipt.accountingFingerprint
+        || (bet.status === ModerationStatus.APPROVED && receipt.state !== "ACCEPTED")) fail("Terminal receipt/outbox identity conflict");
+      continue; // Own immutable full reserves also cover not-yet-published approvals.
+    }
+    if (!source || source.userId !== bet.userId
+      || (bet.status === ModerationStatus.APPROVED && !["ACCEPTED", "TERMINAL"].includes(source.state))) fail("Receiver historical intake is absent from source cut");
+    const original = await Bet.findById(bet._id).session(session ?? null).lean();
+    if (!original) fail("Legacy receiver original placement is missing");
+    verifyLegacySnapshotPlacement(original, source);
+  }
+  return { liveById, baselineById };
 }
 
 export async function beginSnapshotImport(value: unknown) {
@@ -216,13 +299,7 @@ async function finishSnapshotImport(completion: SnapshotCompletion) {
         || (p.originalStakeMinor !== null && m.originalStakeMinor !== p.originalStakeMinor)
         || (p.placementFingerprint !== null && m.placementFingerprint !== p.placementFingerprint)) fail("Movement/position identity mismatch");
     }
-    const live = await RiskPosition.find({}).select({
-      userId: 1, accountingFingerprint: 1, state: 1, moneyReady: 1, facts: 1,
-      accountingRevision: 1, remainingStakeMinor: 1, stakeMinor: 1, returnMinor: 1,
-    }).limit(MAX_POSITIONS + 1).session(session).lean() as any[];
-    const baselines = await RiskBaseline.find({}).limit(MAX_POSITIONS + 1).session(session).lean() as any[];
-    const local = await Bet.find({ status: { $in: [ModerationStatus.APPROVED, ModerationStatus.RECEIVED] } })
-      .select({ slipId: 1, userId: 1, placementFingerprint: 1, status: 1 }).limit(MAX_POSITIONS + 1).session(session).lean() as any[];
+    const { liveById, baselineById } = await verifySnapshotIntake(positions, session);
     const inboxSize = await RiskAccountingInbox.aggregate([
       { $match: { applied: false } }, { $group: { _id: null, bytes: { $sum: { $bsonSize: "$$ROOT" } } } },
     ]).session(session);
@@ -233,46 +310,7 @@ async function finishSnapshotImport(completion: SnapshotCompletion) {
       closedStakeMinor: 1, returnMinor: 1, remainingStakeMinor: 1, originalStakeMinor: 1,
       source: 1, placementFingerprint: 1, fingerprint: 1,
     }).limit(MAX_MOVEMENTS + 1).session(session).lean() as any[];
-    if (live.length > MAX_POSITIONS || baselines.length > MAX_POSITIONS || local.length > MAX_POSITIONS
-      || inboxes.length > MAX_MOVEMENTS || retained.length > MAX_MOVEMENTS) fail("Receiver reconciliation exceeds supported bound");
-    const liveById = new Map(live.map(p => [p._id, p]));
-    const baselineById = new Map(baselines.map(p => [p._id, p]));
-    if (new Set([...positions.keys(), ...liveById.keys()]).size > MAX_POSITIONS) fail("Merged receiver book exceeds supported position bound");
-    if (baselines.some(p => !text(p._id) || (!positions.has(p._id) && !liveById.has(p._id)))) fail("Previously imported exposure is absent from the new source cut");
-    for (const prior of baselines) {
-      const p = positions.get(prior._id);
-      if (!p) continue; // An immutable live receipt may have replaced source-pending exposure.
-      if (p.userId !== prior.userId || (p.placementFingerprint && prior.accountingFingerprint && p.placementFingerprint !== prior.accountingFingerprint)
-        || (p.originalStakeMinor !== null && prior.stakeMinor != null && p.originalStakeMinor !== prior.stakeMinor)
-        || (p.maximumReturnMinor !== null && prior.returnMinor != null && p.maximumReturnMinor !== prior.returnMinor)
-        || (p.facts && prior.facts && fingerprint(p.facts) !== fingerprint(prior.facts))
-        || (prior.state === "ACCEPTED" && ["PENDING", "DECLINED"].includes(p.state))) fail("Imported immutable placement or terminal state regressed");
-    }
-    for (const p of live) {
-      const source = positions.get(p._id);
-      if (source && (source.userId !== p.userId || (source.placementFingerprint && source.placementFingerprint !== p.accountingFingerprint)
-        || (p.state === "DECLINED" && !["DECLINED", "PENDING"].includes(source.state))
-        || (p.state === "PENDING" && ["ACCEPTED", "TERMINAL"].includes(source.state))
-        || (p.state === "ACCEPTED" && source.state === "DECLINED"))) fail("Receiver/source placement conflict");
-      if (p.state === "ACCEPTED" && !local.some(b => b.slipId === p._id && b.status === ModerationStatus.APPROVED)) fail("Accepted receipt lacks its terminal outbox");
-    }
-    for (const bet of local) {
-      const receipt = liveById.get(bet.slipId);
-      const source = positions.get(bet.slipId);
-      if (receipt) {
-        if (receipt.userId !== bet.userId || bet.placementFingerprint !== receipt.accountingFingerprint
-          || (bet.status === ModerationStatus.APPROVED && receipt.state !== "ACCEPTED")) fail("Terminal receipt/outbox identity conflict");
-        continue; // Own immutable full reserves also cover not-yet-published approvals.
-      }
-      if (!source || source.userId !== bet.userId
-        || (bet.status === ModerationStatus.APPROVED && !["ACCEPTED", "TERMINAL"].includes(source.state))) fail("Receiver historical intake is absent from source cut");
-      // Explicit legacy fallback uses retained IDs/amounts, never names, mutable
-      // envelope time, or a guessed placement fingerprint.
-      const original = await Bet.findById(bet._id).session(session).lean();
-      const amount = money(original);
-      if (!amount.moneyReady || source.originalStakeMinor !== amount.stakeMinor || source.maximumReturnMinor !== amount.returnMinor
-        || fingerprint(source.facts) !== fingerprint(facts(original))) fail("Legacy receiver placement lacks matching immutable source evidence");
-    }
+    if (inboxes.length > MAX_MOVEMENTS || retained.length > MAX_MOVEMENTS) fail("Receiver reconciliation exceeds supported bound");
     const joined = new Map([...sourceMoves].map(([id, list]) => [id, [...list]]));
     for (const row of retained) {
       const m = movementData(row);

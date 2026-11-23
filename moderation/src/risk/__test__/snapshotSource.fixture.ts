@@ -14,7 +14,7 @@ if (process.env.RISK_SOURCE_FIXTURE === "true" && process.send) {
       const fence = require(resolve(source, "src/service/accountingSnapshotFence"));
       fence.verifyAccountingSnapshotFence = async () => input.authority;
       const { Bet, BetArchive } = require(resolve(source, "src/model/Bet"));
-      const { accountingPlacementState, accountingClosureState } = require(resolve(source, "src/service/betAccounting"));
+      const { accountingPlacementState, accountingPlacementBasis, accountingClosureState } = require(resolve(source, "src/service/betAccounting"));
       const { retainAccountingHistory } = require(resolve(source, "src/service/accountingHistory"));
       const snapshot = require(resolve(source, "src/service/accountingSnapshot"));
       const { cashBackHash } = require(resolve(source, "src/service/cashBackIdentity"));
@@ -23,6 +23,9 @@ if (process.env.RISK_SOURCE_FIXTURE === "true" && process.send) {
       for (const item of input.positions) {
         let record = { ...item.data, ...accountingPlacementState(item.data),
           timestamp: "2020-01-01T00:00:00.000Z", status: item.pending ? "BET_PENDING" : "BET_APPROVED" };
+        if (item.legacyPlacementFingerprint) {
+          record = { ...record, ...accountingPlacementBasis(item.data, item.legacyPlacementFingerprint) };
+        }
         for (const movement of item.closes ?? []) {
           record = { ...record, ...accountingClosureState(record, movement.source,
             movement.closed, movement.returned, movement.occurredAt) };

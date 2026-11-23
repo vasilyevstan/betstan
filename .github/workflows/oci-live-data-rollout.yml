@@ -1052,18 +1052,20 @@ jobs:
           fi
 
       - name: Install pinned runtime for private accounting transport
-        if: inputs.phase != 'incident-restore' && inputs.phase == 'reconcile-risk-accounting'
+        if: inputs.phase != 'incident-restore' && (inputs.phase == 'dry-run' || inputs.phase == 'reconcile-risk-accounting')
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24.22.3"
 
       - name: Restore locked source and receiver dependencies
-        if: inputs.phase != 'incident-restore' && inputs.phase == 'reconcile-risk-accounting'
+        if: inputs.phase != 'incident-restore' && (inputs.phase == 'dry-run' || inputs.phase == 'reconcile-risk-accounting')
         run: |
           npm ci --prefix resulting --ignore-scripts --no-audit --no-fund
           npm ci --prefix moderation --ignore-scripts --no-audit --no-fund
           (cd resulting && node -r ts-node/register/transpile-only -e "require('./src/scripts/exportAccounting')")
           (cd moderation && node -r ts-node/register/transpile-only -e "require('./src/scripts/importRiskSnapshot')")
+          (cd resulting && node -r ts-node/register/transpile-only -e "require('./src/scripts/reconcileLegacyAccounting')")
+          (cd moderation && node -r ts-node/register/transpile-only -e "require('./src/scripts/reconcileLegacyAccounting')")
 
       - name: Install pinned OCI CLI
         if: inputs.phase != 'incident-restore'
@@ -2307,6 +2309,18 @@ jobs:
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
 
+      - name: Verify legacy accounting originals before maintenance
+        id: accounting_preflight
+        if: inputs.phase != 'incident-restore' && inputs.phase == 'reconcile-risk-accounting'
+        env:
+          STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
+        run: |
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          OUTPUT_DIR="$PWD/artifacts/oci-live-data-rollout/evidence" \
+            node ./infra/oci/scripts/risk-accounting-reconciliation-stan.js --preflight-legacy
+
       - name: Enter or re-establish live data maintenance
         id: maintenance_enter
         if: inputs.phase != 'incident-restore' && inputs.phase != 'dry-run'
@@ -2455,6 +2469,14 @@ jobs:
               node infra/oci/scripts/risk-accounting-reconciliation-stan.js
           else
             ./infra/oci/scripts/live-betting-data-rollout-stan.sh
+            if [ "$PHASE" = "dry-run" ]; then
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
+              LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+              OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+              STATE_FILE="$RUNNER_TEMP/live-data-maintenance.tsv" \
+              OUTPUT_DIR="$PWD/artifacts/oci-live-data-rollout/evidence" \
+                node ./infra/oci/scripts/risk-accounting-reconciliation-stan.js --preflight-legacy
+            fi
           fi
 
       - name: Restore runtime or verify final deploy handoff
@@ -2644,6 +2666,8 @@ jobs:
           (inputs.phase != 'apply-slip-index' ||
            steps.maintenance_enter.outcome != 'success') &&
           (inputs.phase != 'reconcile-risk-accounting' ||
+           (steps.maintenance_enter.outcome == 'skipped' &&
+            steps.data.outcome == 'skipped') ||
            (steps.data.outcome == 'success' &&
             steps.maintenance.outcome == 'success' &&
             steps.risk_readiness.outcome == 'success' &&
