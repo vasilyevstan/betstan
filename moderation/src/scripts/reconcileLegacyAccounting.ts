@@ -18,6 +18,7 @@ type Terms = Pick<IPlaceBetEvent["data"], "wager" | "betKind"> & {
 };
 interface Candidate {
   slipId: string; userId: string; sourceStatus: string; sourceFingerprint: string;
+  sourceRowIds: string[];
 }
 interface Packet {
   schemaVersion: 1; sourceSha: string; sourceDigest: string;
@@ -26,6 +27,7 @@ interface Packet {
 interface Original extends Candidate {
   terms: Terms; placementFingerprint: string; originalModerationFingerprint: string;
   identityOrigin: "RECORDED_PLACEMENT" | "LEGACY_RECONCILIATION";
+  rowIdentityOrigin: "MODERATION_ROW_IDS" | "SOURCE_PLACEMENT_ROW_IDS";
 }
 interface Plan extends Packet { originals: Original[]; planHash: string }
 class LegacyAccountingError extends Error {}
@@ -35,6 +37,8 @@ function requireProof(value: unknown, code: string): asserts value {
 const object = (value: unknown): value is Raw => !!value && typeof value === "object" && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 256;
 const hash = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+const validRowIds = (value: unknown): value is string[] => Array.isArray(value)
+  && value.length > 0 && value.length <= MAX_ITEMS && value.every(text) && new Set(value).size === value.length;
 function bounded(value: unknown): void {
   requireProof(Buffer.byteLength(JSON.stringify(value) ?? "") <= MAX_BYTES, "LEGACY_ACCOUNTING_BYTE_BUDGET");
 }
@@ -47,21 +51,36 @@ function assertPacket(value: unknown): asserts value is Packet {
     && new Set(packet.candidates.map(item => item?.slipId)).size === packet.candidates.length
     && new Set(packet.positions.map(item => item?.slipId)).size === packet.positions.length
     && packet.candidates.every(item => item && text(item.slipId) && text(item.userId)
-      && hash(item.sourceFingerprint) && ["BET_PENDING", "BET_APPROVED"].includes(item.sourceStatus)),
+      && hash(item.sourceFingerprint) && validRowIds(item.sourceRowIds)
+      && ["BET_PENDING", "BET_APPROVED"].includes(item.sourceStatus)),
   "LEGACY_PACKET_INVALID");
 }
-function originalTerms(stored: Raw): Terms {
+function originalTerms(stored: Raw, sourceRowIds: string[], mayBindLegacyRows: boolean): Pick<Original, "terms" | "rowIdentityOrigin"> {
   requireProof(typeof stored.wager === "number" && Array.isArray(stored.rows)
     && stored.rows.length > 0 && stored.rows.length <= MAX_ITEMS
     && (stored.betKind == null || stored.betKind === BetKind.PRE_MATCH || stored.betKind === BetKind.LIVE),
   "LEGACY_ORIGINAL_TERMS_INVALID");
+  requireProof(sourceRowIds.length === stored.rows.length, "LEGACY_ORIGINAL_SOURCE_CONFLICT");
   const betKind = stored.betKind ?? BetKind.PRE_MATCH;
-  const fields = ["id", "eventId", "productId", "oddsId", "oddsValue", "marketId", "marketType",
-    "marketVersion", "quoteVersion", "selectionId", "side", "selectedAt", "quoteValidUntil", "marketBet"] as const;
-  const rows = stored.rows.map((row: unknown) => {
+  const quoteFields = ["marketId", "marketType", "marketVersion", "quoteVersion", "selectionId",
+    "side", "selectedAt", "quoteValidUntil", "marketBet"] as const;
+  const fields = ["id", "eventId", "productId", "oddsId", "oddsValue", ...quoteFields] as const;
+  const legacy = mayBindLegacyRows && betKind === BetKind.PRE_MATCH && stored.rows.every(row => object(row)
+    && !Object.prototype.hasOwnProperty.call(row, "id") && row._id instanceof mongoose.Types.ObjectId
+    && (row.betKind == null || row.betKind === BetKind.PRE_MATCH)
+    && quoteFields.every(field => row[field] == null));
+  const nativeRowIds: string[] = [];
+  const rows = stored.rows.map((row: unknown, index) => {
     requireProof(object(row), "LEGACY_ORIGINAL_ROW_INVALID");
+    // The predecessor schema dropped submitted IDs; native _ids are not those IDs.
+    // Source's sealed IDs are bound by order, then checked against exact economics.
+    const id = legacy ? sourceRowIds[index] : row.id;
+    requireProof(text(id), "LEGACY_ORIGINAL_ROW_ID_INVALID");
+    if (legacy) {
+      requireProof(row._id instanceof mongoose.Types.ObjectId, "LEGACY_ORIGINAL_ROW_ID_INVALID");
+      nativeRowIds.push(row._id.toHexString());
+    }
     for (const [field, code] of [
-      ["id", "LEGACY_ORIGINAL_ROW_ID_INVALID"],
       ["eventId", "LEGACY_ORIGINAL_ROW_EVENT_ID_INVALID"],
       ["productId", "LEGACY_ORIGINAL_ROW_PRODUCT_ID_INVALID"],
       ["oddsId", "LEGACY_ORIGINAL_ROW_ODDS_ID_INVALID"],
@@ -71,17 +90,22 @@ function originalTerms(stored: Raw): Terms {
       "LEGACY_ORIGINAL_ROW_BET_KIND_INVALID");
     return {
       ...Object.fromEntries(fields.filter(field => row[field] != null).map(field => [field, row[field]])),
-      id: row.id,
+      id,
       betKind: row.betKind ?? betKind,
     };
   });
   requireProof(new Set(rows.map(row => row.id)).size === rows.length, "LEGACY_ORIGINAL_ROW_CONFLICT");
+  if (legacy) {
+    requireProof(new Set(nativeRowIds).size === rows.length
+      && new Set(rows.map(row => fingerprint({ ...row, id: undefined }))).size === rows.length,
+    "LEGACY_ORIGINAL_ROW_CONFLICT");
+  }
   // Names and publisher metadata are not financial terms or reconstructed data.
   const terms = { wager: stored.wager, betKind, rows } as Terms;
   const amount = money(terms);
   requireProof(amount.moneyReady && amount.stakeMinor !== undefined && amount.stakeMinor > 0,
     "LEGACY_ORIGINAL_MONEY_UNAVAILABLE");
-  return terms;
+  return { terms, rowIdentityOrigin: legacy ? "SOURCE_PLACEMENT_ROW_IDS" : "MODERATION_ROW_IDS" };
 }
 export async function readLegacyOriginals(value: unknown): Promise<Packet & { originals: Original[] }> {
   assertPacket(value);
@@ -91,11 +115,13 @@ export async function readLegacyOriginals(value: unknown): Promise<Packet & { or
     const status = candidate.sourceStatus === "BET_APPROVED" ? ModerationStatus.APPROVED : ModerationStatus.RECEIVED;
     requireProof(stored && stored.userId === candidate.userId && stored.status === status,
       "LEGACY_ORIGINAL_ADMISSION_UNAVAILABLE");
-    const terms = originalTerms(stored), amount = money(terms);
+    const receipt = await RiskPosition.findById(candidate.slipId).lean<Raw>();
+    const { terms, rowIdentityOrigin } = originalTerms(stored, candidate.sourceRowIds,
+      !receipt && stored.placementFingerprint == null && status === ModerationStatus.APPROVED);
+    const amount = money(terms);
     requireProof(!await RiskMovement.exists({ slipId: candidate.slipId })
       && !await RiskAccountingInbox.exists({ slipId: candidate.slipId })
       && !await RiskBaseline.exists({ _id: candidate.slipId }), "LEGACY_EXISTING_RECEIVER_ACCOUNTING");
-    const receipt = await RiskPosition.findById(candidate.slipId).lean<Raw>();
     let identityOrigin: Original["identityOrigin"], accountingFingerprint: string;
     const originalModerationFingerprint = placementFingerprint(stored);
     if (receipt) {
@@ -119,7 +145,7 @@ export async function readLegacyOriginals(value: unknown): Promise<Packet & { or
       });
     }
     originals.push({ ...candidate, terms, placementFingerprint: accountingFingerprint,
-      originalModerationFingerprint, identityOrigin });
+      originalModerationFingerprint, identityOrigin, rowIdentityOrigin });
   }
   const result = { ...value, originals };
   bounded(result);

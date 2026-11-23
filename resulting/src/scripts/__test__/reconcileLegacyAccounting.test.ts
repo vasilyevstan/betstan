@@ -38,14 +38,17 @@ afterAll(async () => {
   await mongo.stop();
   delete process.env.CASH_BACK_INTEGRATION;
 });
-async function legacy(slipId = "legacy") {
+async function legacy(slipId = "legacy", multiRow = false) {
+  const rows = [createPreMatchRow({ id: `${slipId}-row`, eventId: `${slipId}-event`, oddsValue: 2 })];
+  if (multiRow) rows.push(createPreMatchRow({ id: `${slipId}-second-row`, eventId: `${slipId}-second-event`, oddsValue: 3 }));
   const event = createPlaceBetEvent({ slipId, userId: "source-owner", wager: 10,
-    rows: [createPreMatchRow({ id: `${slipId}-row`, eventId: `${slipId}-event`, oddsValue: 2 })] });
+    rows });
   const bet = await Bet.create({ ...event.data, timestamp: "2020-01-01T00:00:00.000Z",
     status: ResultingStatus.BET_APPROVED });
   return { event, bet };
 }
-async function plan(records: Awaited<ReturnType<typeof legacy>>[]) {
+async function plan(records: Awaited<ReturnType<typeof legacy>>[],
+  rowIdentityOrigin: "MODERATION_ROW_IDS" | "SOURCE_PLACEMENT_ROW_IDS" = "MODERATION_ROW_IDS") {
   const packet = await prepareLegacyAccounting(SHA);
   const originals = packet.candidates.map(candidate => {
     const data = records.find(record => record.event.data.slipId === candidate.slipId)!.event.data;
@@ -54,7 +57,7 @@ async function plan(records: Awaited<ReturnType<typeof legacy>>[]) {
         ({ id, eventId, productId, oddsId, oddsValue, betKind })) };
     const originalModerationFingerprint = cashBackHash({ userId: data.userId, slipId: data.slipId, ...terms });
     return { ...candidate, terms, originalModerationFingerprint,
-      identityOrigin: "LEGACY_RECONCILIATION" as const,
+      identityOrigin: "LEGACY_RECONCILIATION" as const, rowIdentityOrigin,
       placementFingerprint: cashBackHash({ schemaVersion: 1, kind: "LEGACY_ACCOUNTING_BASIS",
         userId: data.userId, slipId: data.slipId, originalModerationFingerprint }) };
   });
@@ -142,9 +145,61 @@ it("rejects original row or accepted-price disagreement without altering Source 
   expect((await Bet.findById(original.bet._id).lean())?.accountingBasis).toBeUndefined();
 });
 
+it("persists Source-bound identity provenance without changing retained row IDs, prices or opaque history", async () => {
+  const original = await legacy("legacy", true);
+  const before = await Bet.findById(original.bet._id).lean();
+  const prepared = await plan([original], "SOURCE_PLACEMENT_ROW_IDS");
+  expect(prepared.positions[0]).toMatchObject({
+    openExposure: "COMPLETE", history: "UNAVAILABLE", originalStakeMinor: 1000, maximumReturnMinor: 6000,
+  });
+  await applyLegacyAccounting(prepared);
+  const after = await Bet.findById(original.bet._id).lean();
+  expect(after?.rows).toEqual(before?.rows);
+  expect(after?.wager).toBe(before?.wager);
+  expect(after?.accountingBasis.legacyReconciliation).toMatchObject({
+    rowIdentityOrigin: "SOURCE_PLACEMENT_ROW_IDS", identityOrigin: "LEGACY_RECONCILIATION",
+  });
+  expect(after?.accountingBasis.rows.map((row: { id: string }) => row.id)).toEqual(original.event.data.rows.map(row => row.id));
+  expect(after?.cashBackFinancial).toBeUndefined();
+  expect(await AccountingMovement.countDocuments()).toBe(0);
+});
+
+it("rejects reordered financial rows bound to different Source IDs rather than ignoring the IDs", async () => {
+  const original = await legacy("legacy", true);
+  const prepared = await plan([original], "SOURCE_PLACEMENT_ROW_IDS");
+  const rows = prepared.originals[0].terms.rows;
+  prepared.originals[0].terms.rows = [{ ...rows[1], id: rows[0].id }, { ...rows[0], id: rows[1].id }];
+  await expect(planLegacyAccounting(prepared)).rejects.toThrow("LEGACY_ORIGINAL_SOURCE_CONFLICT");
+  expect((await Bet.findById(original.bet._id).lean())?.accountingBasis).toBeUndefined();
+});
+
+it.each(["retained-id", "supplied-binding"])("rejects a changed %s before any metadata write", async mode => {
+  const original = await legacy();
+  const prepared = await plan([original], "SOURCE_PLACEMENT_ROW_IDS");
+  if (mode === "retained-id") {
+    await Bet.collection.updateOne({ _id: original.bet._id }, { $set: { "rows.0.id": "changed-source-id" } });
+  } else {
+    prepared.originals[0].sourceRowIds[0] = "foreign-source-id";
+    prepared.originals[0].terms.rows[0].id = "foreign-source-id";
+  }
+  await expect(applyLegacyAccounting(prepared)).rejects.toThrow(mode === "retained-id"
+    ? "LEGACY_SOURCE_CHANGED" : "LEGACY_ORIGINAL_COVERAGE_INVALID");
+  expect((await Bet.findById(original.bet._id).lean())?.accountingBasis).toBeUndefined();
+  expect(await AccountingMovement.countDocuments()).toBe(0);
+});
+
+it("never substitutes a native Source row _id when the submitted ID is missing", async () => {
+  const original = await legacy();
+  await Bet.collection.updateOne({ _id: original.bet._id }, {
+    $unset: { "rows.0.id": "" }, $set: { "rows.0._id": new mongoose.Types.ObjectId() },
+  });
+  await expect(prepareLegacyAccounting(SHA)).rejects.toThrow("LEGACY_ORIGINAL_SOURCE_CONFLICT");
+  expect((await Bet.findById(original.bet._id).lean())?.accountingBasis).toBeUndefined();
+});
+
 it("rolls back every metadata update if the physical fence changes inside the real transaction", async () => {
   const records = await Promise.all([legacy("first"), legacy("second")]);
-  const prepared = await plan(records);
+  const prepared = await plan(records, "SOURCE_PLACEMENT_ROW_IDS");
   (fence.verifyAccountingSnapshotFence as jest.Mock)
     .mockResolvedValueOnce(authority).mockResolvedValueOnce({ ...authority, identityHash: "c".repeat(64) });
   await expect(applyLegacyAccounting(prepared)).rejects.toThrow("LEGACY_FENCE_CHANGED");
