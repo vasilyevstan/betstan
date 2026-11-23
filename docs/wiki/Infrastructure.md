@@ -292,6 +292,12 @@ failure remains fatal after evidence capture and finalization where possible.
 Standalone finalization preload and CRI reclaim are unchanged, and CRI reclaim
 cannot create a release checkpoint.
 
+After a partial preload, image inventory may have changed even when runtime
+deployments did not. Reclaim needs a fresh bound diagnosis, not the pre-pull
+snapshot; spent one-use bindings require a new current-master control generation.
+An unbound diagnosis's CRI candidate count is not conclusive: only bound GHCR
+protected generations and the digest map establish exact owned-unused image IDs.
+
 Preload completion is not release authority. Root and persistent-data mount
 identities, workload and queue health, public reads, and protected running,
 candidate, and rollback image references remain fail-closed. Eligible
