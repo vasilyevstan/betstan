@@ -41,6 +41,14 @@ affected consumer, not only a historical service list. Repository-only
 evidence and runtime acceptance are distinct phases; each retains its
 applicable checks.
 
+Before running a check, the owner confirms its exact acceptance goal,
+simplifies unnecessary scope or setup, validates required inputs and
+prerequisites, and selects the smallest existing complete command. Reuse
+unchanged authenticated evidence only where the current controls permit it.
+This is a brief owner preflight, not another review or approval stage.
+Failures require a root-cause fix and focused revalidation; never weaken
+assertions, required coverage or exact-SHA gates merely to obtain success.
+
 After each push, inspect all native runs and check suites for the exact head,
 including zero-job workflow-definition failures, before waiting for known PR
 jobs. Successful local lint or existing protected jobs does not establish that
