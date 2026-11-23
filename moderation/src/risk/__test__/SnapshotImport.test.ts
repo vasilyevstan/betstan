@@ -215,7 +215,8 @@ it("imports a tagged legacy reconciliation identity and consumes its later real 
   const originals = await readLegacyOriginals({
     schemaVersion: 1, sourceSha: authority.sourceSha, sourceDigest: "c".repeat(64), positions: [],
     candidates: [{ slipId: input.data.slipId, userId: input.data.userId,
-      sourceStatus: "BET_APPROVED", sourceFingerprint: "d".repeat(64) }],
+      sourceStatus: "BET_APPROVED", sourceFingerprint: "d".repeat(64),
+      sourceRowIds: input.data.rows.map(row => row.id) }],
   });
   const legacyPlacementFingerprint = originals.originals[0].placementFingerprint;
   await complete(await source([{ data: input.data, legacyPlacementFingerprint }]));

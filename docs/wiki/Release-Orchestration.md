@@ -1602,8 +1602,8 @@ presence is not validation, permission to repair, or live readiness.
 #### Legacy accounting bases
 
 The same protected `dry-run` also runs a bounded, read-only two-owner preflight.
-Moderation supplies its retained immutable original wager, row identities and
-accepted prices. Resulting requires matching intact Source terms, missing
+Moderation supplies its retained immutable original wager, accepted prices and
+recorded placement row IDs. Resulting requires matching intact Source terms, missing
 accounting fields, and no retained movement, accepted cash-back outcome,
 unresolved financial authority or previous closure indicators. Every active/
 archive copy must agree. Existing financial metadata is never overwritten.
@@ -1618,6 +1618,15 @@ Reconciliation still requires a fresh passing preflight. An exported
 null or absent movement alone does not prove zero prior payouts.
 Private command failures require exactly one allowlisted code independently of
 Node warnings; otherwise they remain transport failures. Stderr stays private.
+
+The predecessor PRE_MATCH schema discarded submitted row IDs; its native Mongo
+row `_id` is not a substitute. Only approved, receipt-free originals with unique
+native identities, unique financial tuples and no market/quote authority can
+bind existing, unique Source IDs in retained original row order. Full Source
+fingerprints, copy agreement and exact economic comparison **including IDs**
+remain required; ambiguous, malformed, mixed or mismatched rows refuse.
+The new basis records `rowIdentityOrigin=SOURCE_PLACEMENT_ROW_IDS`; modern
+originals keep their recorded IDs. Original records and fingerprints never change.
 
 A consistent durable intake receipt preserves its recorded placement fingerprint.
 An approved legacy ticket without that receipt receives an explicitly tagged,

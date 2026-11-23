@@ -15,6 +15,7 @@ type SourceRecord = Raw & { _id: mongoose.Types.ObjectId; __v?: number };
 type Terms = AccountingPlacementTerms;
 interface Candidate {
   slipId: string; userId: string; sourceStatus: string; sourceFingerprint: string;
+  sourceRowIds: string[];
 }
 interface Packet {
   schemaVersion: 1; sourceSha: string; sourceDigest: string;
@@ -23,6 +24,7 @@ interface Packet {
 interface Original extends Candidate {
   terms: Terms; placementFingerprint: string; originalModerationFingerprint: string;
   identityOrigin: "RECORDED_PLACEMENT" | "LEGACY_RECONCILIATION";
+  rowIdentityOrigin: "MODERATION_ROW_IDS" | "SOURCE_PLACEMENT_ROW_IDS";
 }
 interface Plan extends Packet { originals: Original[]; planHash: string }
 class LegacyAccountingError extends Error {}
@@ -32,6 +34,8 @@ function requireProof(value: unknown, code: string): asserts value {
 const object = (value: unknown): value is Raw => !!value && typeof value === "object" && !Array.isArray(value);
 const hash = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 256;
+const validRowIds = (value: unknown): value is string[] => Array.isArray(value)
+  && value.length > 0 && value.length <= MAX_ITEMS && value.every(text) && new Set(value).size === value.length;
 const missing = (value: unknown) => value === undefined || value === null;
 function bounded(value: unknown, maximum = MAX_BYTES): void {
   requireProof(Buffer.byteLength(JSON.stringify(value) ?? "") <= maximum, "LEGACY_ACCOUNTING_BYTE_BUDGET");
@@ -126,7 +130,11 @@ async function collect(sourceSha: string, session?: ClientSession) {
     digest.push([slipId, fingerprint, group.length]);
     if (position.openExposure !== "UNAVAILABLE") continue;
     for (const copy of group) await noPriorClosures(copy.record, session);
-    candidates.push({ slipId, userId: position.userId, sourceStatus: position.sourceStatus, sourceFingerprint: fingerprint });
+    requireProof(Array.isArray(record.rows), "LEGACY_ORIGINAL_SOURCE_CONFLICT");
+    const sourceRowIds = record.rows.map(row => object(row) ? row.id : undefined);
+    requireProof(validRowIds(sourceRowIds), "LEGACY_ORIGINAL_SOURCE_CONFLICT");
+    candidates.push({ slipId, userId: position.userId, sourceStatus: position.sourceStatus,
+      sourceFingerprint: fingerprint, sourceRowIds });
   }
   const packet: Packet = { schemaVersion: 1, sourceSha, sourceDigest: cashBackHash(digest), candidates, positions };
   bounded(packet);
@@ -140,15 +148,18 @@ function assertPacket(value: unknown): asserts value is Packet {
     && packet.candidates.length <= MAX_ITEMS && packet.positions.length <= MAX_ITEMS
     && new Set(packet.candidates.map(item => item?.slipId)).size === packet.candidates.length
     && packet.candidates.every(item => item && text(item.slipId) && text(item.userId)
-      && hash(item.sourceFingerprint) && ["BET_PENDING", "BET_APPROVED"].includes(item.sourceStatus)),
+      && hash(item.sourceFingerprint) && validRowIds(item.sourceRowIds)
+      && ["BET_PENDING", "BET_APPROVED"].includes(item.sourceStatus)),
   "LEGACY_PACKET_INVALID");
 }
 function assertOriginals(value: unknown): asserts value is Original[] {
   bounded(value);
   requireProof(Array.isArray(value) && value.length <= MAX_ITEMS
     && value.every(item => object(item) && text(item.slipId) && text(item.userId) && hash(item.sourceFingerprint)
+      && validRowIds(item.sourceRowIds)
       && hash(item.placementFingerprint) && hash(item.originalModerationFingerprint)
       && ["RECORDED_PLACEMENT", "LEGACY_RECONCILIATION"].includes(String(item.identityOrigin))
+      && ["MODERATION_ROW_IDS", "SOURCE_PLACEMENT_ROW_IDS"].includes(String(item.rowIdentityOrigin))
       && object(item.terms) && typeof item.terms.wager === "number" && Array.isArray(item.terms.rows)),
   "LEGACY_ORIGINAL_PROOF_INVALID");
 }
@@ -158,6 +169,8 @@ function fieldsFor(record: Raw, original: Original) {
     && record.wager === original.terms.wager
     && economicTerms({ wager: record.wager, betKind: record.betKind, rows: record.rows }) === economicTerms(original.terms),
   "LEGACY_ORIGINAL_SOURCE_CONFLICT");
+  requireProof(original.rowIdentityOrigin !== "SOURCE_PLACEMENT_ROW_IDS"
+    || original.identityOrigin === "LEGACY_RECONCILIATION", "LEGACY_RECONCILIATION_IDENTITY_INVALID");
   if (original.identityOrigin === "LEGACY_RECONCILIATION") {
     // This is a new accounting identity, never a recovered raw-message hash.
     requireProof(original.placementFingerprint === cashBackHash({
@@ -175,7 +188,7 @@ function planFor(packet: Packet, copies: Awaited<ReturnType<typeof collect>>["co
     && new Set(originals.map(item => item.slipId)).size === originals.length
     && originals.every(original => packet.candidates.some(candidate => cashBackHash(candidate) === cashBackHash({
       slipId: original.slipId, userId: original.userId, sourceStatus: original.sourceStatus,
-      sourceFingerprint: original.sourceFingerprint,
+      sourceFingerprint: original.sourceFingerprint, sourceRowIds: original.sourceRowIds,
     }))), "LEGACY_ORIGINAL_COVERAGE_INVALID");
   const positions = packet.positions.map(position => {
     const original = originals.find(item => item.slipId === position.slipId);
@@ -229,7 +242,8 @@ export async function applyLegacyAccounting(value: unknown) {
             ...fields,
             accountingBasis: { ...fields.accountingBasis, legacyReconciliation: {
               schemaVersion: 1, sourceSha: input.sourceSha, planHash: input.planHash,
-              identityOrigin: original.identityOrigin, sourceFingerprint: original.sourceFingerprint,
+              identityOrigin: original.identityOrigin, rowIdentityOrigin: original.rowIdentityOrigin,
+              sourceFingerprint: original.sourceFingerprint,
               originalModerationFingerprint: original.originalModerationFingerprint,
             } },
           }, $inc: { __v: 1 } }, { session });
