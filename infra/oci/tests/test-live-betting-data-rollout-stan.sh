@@ -5823,6 +5823,8 @@ for literal in (
         raise SystemExit(f"data workflow lock release guard is incomplete: {literal}")
 accounting_release_guard = (
     "(inputs.phase != 'reconcile-risk-accounting' || "
+    "(steps.maintenance_enter.outcome == 'skipped' && "
+    "steps.data.outcome == 'skipped') || "
     "(steps.data.outcome == 'success' && "
     "steps.maintenance.outcome == 'success' && "
     "steps.risk_readiness.outcome == 'success' && "
@@ -5830,7 +5832,7 @@ accounting_release_guard = (
 )
 normalized_release = " ".join(release.split())
 if normalized_release.count(accounting_release_guard) != 1:
-    raise SystemExit("accounting lock release lacks its exact final-ACK/readiness guard")
+    raise SystemExit("accounting lock release lacks its exact pre-maintenance/final-ACK/readiness guard")
 ordinary_release = normalized_release.replace(accounting_release_guard, "", 1)
 for unsafe in (
     "steps.abort_handoff.outcome == 'success'",

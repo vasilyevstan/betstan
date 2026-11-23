@@ -17,6 +17,7 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Persist publication intent; duplicates, delays and reordering are normal. Broker readiness is not consumer readiness.
 - A new listener needs its `oci_application_rabbitmq_queue_names` entry, or the deploy fails fenced.
 - Scope mutations atomically by identity, owner, state, revision and fingerprint; handle versionless rows and empty terminal aggregates.
+- [Legacy finance](docs/wiki/Release-Orchestration.md#legacy-accounting-bases).
 
 ## Betting integrity
 

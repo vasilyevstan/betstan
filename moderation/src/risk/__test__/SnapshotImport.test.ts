@@ -4,8 +4,8 @@ import mongoose from "mongoose";
 import { BetKind, ModerationStatus } from "@betstan/common";
 import { createPlaceBetEvent } from "../../event/listener/__test__/helpers";
 import { Bet } from "../../model/Bet";
-import { beginSnapshotImport, finalizeSnapshotImport, importSnapshotPage } from "../SnapshotImport";
-import { SnapshotCompletion, SnapshotManifest, SnapshotPage } from "../SnapshotContract";
+import { beginSnapshotImport, finalizeSnapshotImport, importSnapshotPage, verifyLegacySnapshotPlacement } from "../SnapshotImport";
+import { SnapshotCompletion, SnapshotManifest, SnapshotPage, SnapshotPosition } from "../SnapshotContract";
 import * as fence from "../SnapshotFence";
 import { fingerprint, parseRule } from "../Policy";
 import { getPolicy, initializeRisk, mutatePolicy, RiskAccountingInbox, RiskBaseline, RiskMovement, RiskPosition, RiskState } from "../Store";
@@ -13,6 +13,7 @@ import { receiveRisk, terminalRisk } from "../Gateway";
 import { applyAccountingInbox, receiveAccounting, replayAccounting } from "../Accounting";
 import ModerationService from "../../service/ModerationService";
 import { catalogue, WINDOWS } from "../Policy";
+import { readLegacyOriginals } from "../../scripts/reconcileLegacyAccounting";
 
 const authority = { namespace: "test-only", operationId: "test-bootstrap", sourceSha: "a".repeat(40), generation: "1", identityHash: "b".repeat(64) };
 const actualFenceCheck = fence.verifyReceiverFence;
@@ -196,6 +197,60 @@ it("keeps missing legacy history unavailable for past windows but validates open
   await mutatePolicy("CREATE", { expectedRevision: 2, requestId: "loss-after-coverage", rule: cap("MAX_CUSTOMER_LOSS", 5000) });
 });
 
+it.each([10, 0.015])("accepts an owned closed legacy original (%s stake) without inventing monetary history", async wager => {
+  const input = event(wager);
+  await Bet.create({ ...input.data, timestamp: "2020-01-01T00:00:00.000Z", status: ModerationStatus.APPROVED });
+  await complete(await source([{ data: input.data, legacy: true }]));
+  expect((await getPolicy()).readiness.accounting).toMatchObject({
+    openPositionsReady: true, ready: false, readyLossWindows: [],
+  });
+  expect(await RiskMovement.countDocuments()).toBe(0);
+  expect(await RiskPosition.countDocuments()).toBe(0);
+  expect(await RiskBaseline.countDocuments()).toBe(0);
+});
+
+it("imports a tagged legacy reconciliation identity and consumes its later real Source settlement once", async () => {
+  const input = event();
+  await Bet.create({ ...input.data, timestamp: "2020-01-01T00:00:00.000Z", status: ModerationStatus.APPROVED });
+  const originals = await readLegacyOriginals({
+    schemaVersion: 1, sourceSha: authority.sourceSha, sourceDigest: "c".repeat(64), positions: [],
+    candidates: [{ slipId: input.data.slipId, userId: input.data.userId,
+      sourceStatus: "BET_APPROVED", sourceFingerprint: "d".repeat(64) }],
+  });
+  const legacyPlacementFingerprint = originals.originals[0].placementFingerprint;
+  await complete(await source([{ data: input.data, legacyPlacementFingerprint }]));
+  expect(await RiskBaseline.findById(input.data.slipId).lean()).toMatchObject({
+    accountingFingerprint: legacyPlacementFingerprint, remainingStakeMinor: 1000,
+  });
+  const settled = await source([{ data: input.data, legacyPlacementFingerprint, closes: [{
+    source: "SETTLEMENT", closed: 1000, returned: 2000, occurredAt: "2020-01-01T00:00:00.000Z",
+  }] }]);
+  const entry = settled.pages.flatMap(page => page.entries).find(item => item.kind === "MOVEMENT")!;
+  if (entry.kind !== "MOVEMENT") throw new Error("Expected real Source settlement");
+  const evidence = { schemaVersion: 1, status: "COMPLETE", movements: [entry.movement] };
+  await receiveAccounting(input.data.slipId, evidence);
+  await replayAccounting();
+  await receiveAccounting(input.data.slipId, evidence);
+  await replayAccounting();
+  expect(await RiskMovement.countDocuments()).toBe(1);
+  expect(await RiskBaseline.findById(input.data.slipId).lean()).toMatchObject({ remainingStakeMinor: 0 });
+});
+it("still rejects present original-fact conflicts and open legacy unknown amounts", async () => {
+  const input = event();
+  const snapshot = await source([{ data: input.data, legacy: true }]);
+  const position = snapshot.pages.flatMap(page => page.entries).find(
+    (entry): entry is SnapshotPosition => entry.kind === "POSITION"
+  )!;
+  expect(() => verifyLegacySnapshotPlacement(input.data, { ...position, originalStakeMinor: 999 }))
+    .toThrow("conflicts");
+  expect(() => verifyLegacySnapshotPlacement(input.data, { ...position, facts: {
+    betKind: "PRE_MATCH", structure: "SINGLE", eventIds: ["wrong-event"],
+    productIds: [input.data.rows[0].productId], marketIds: [], templateIds: [],
+  } })).toThrow("conflicts");
+  expect(() => verifyLegacySnapshotPlacement(input.data, {
+    ...position, state: "ACCEPTED", sourceStatus: "BET_APPROVED", openExposure: "UNAVAILABLE",
+  })).toThrow();
+});
 it("does not backdate activity at import; complete windows warm up, reset preserves usage, feature-off breaks continuity", async () => {
   const historical = event();
   const snapshot = await source([{ data: historical.data }]);
@@ -267,6 +322,7 @@ it("cannot silently drop an imported position at a later snapshot", async () => 
 it("does not release a prior full reserve when a later terminal source record lacks monetary proof", async () => {
   const input = event();
   await complete(await source([{ data: input.data }]));
+  await Bet.create({ ...input.data, timestamp: "2020-01-01T00:00:00.000Z", status: ModerationStatus.APPROVED });
   await complete(await source([{ data: input.data, legacy: true }]));
   expect((await RiskBaseline.findById(input.data.slipId).lean() as any).remainingStakeMinor).toBe(1000);
   expect(await RiskMovement.countDocuments()).toBe(0);

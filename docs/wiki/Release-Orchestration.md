@@ -1594,6 +1594,52 @@ fixed stored-reason counts, missing placement bases and the presence of original
 cash-back manifests/principal snapshots. Changed or missing records are explicit;
 presence is not validation, permission to repair, or live readiness.
 
+#### Legacy accounting bases
+
+The same protected `dry-run` also runs a bounded, read-only two-owner preflight.
+Moderation supplies its retained immutable original wager, row identities and
+accepted prices. Resulting requires matching intact Source terms, missing
+accounting fields, and no retained movement, accepted cash-back outcome,
+unresolved financial authority or previous closure indicators. Every active/
+archive copy must agree. Existing financial metadata is never overwritten.
+Outer cash-back outcomes, receipts and retained stages must agree; an accepted
+indication or unknown discriminator blocks eligibility even without a receipt.
+Missing or conflicting original authority marks accounting `BLOCKED`; a live
+Source change during preflight is `INCONCLUSIVE`. These explicit diagnostic
+states do not block basic deployment or authorize accounting activation.
+Reconciliation still requires a fresh passing preflight. An exported
+null or absent movement alone does not prove zero prior payouts.
+Private command failures require exactly one allowlisted code independently of
+Node warnings; otherwise they remain transport failures. Stderr stays private.
+
+A consistent durable intake receipt preserves its recorded placement fingerprint.
+An approved legacy ticket without that receipt receives an explicitly tagged,
+domain-separated **new reconciliation identity**, bound to its retained
+Moderation original. This is not a reconstructed raw placement-message hash.
+Pending tickets require their original raw receipt. The repair never invents
+customer names, changes wagers or accepted odds, creates payouts/movements,
+initializes cash-back eligibility, or claims that old monetary history is known.
+Closed legacy positions with unavailable history add no monetary credit;
+any previously imported full reserve is preserved.
+
+Deploy compatible application readers, including pending Backoffice UI changes,
+before reconciliation. Dry-run reports reader compatibility but does not require
+it; the reconciliation preflight requires all seven pinned reader blobs to match
+the deployed runtime **before maintenance starts**. A failed read-only preflight
+releases only its owned database lock. Under verified physical maintenance,
+preflight is regenerated and the exact Source plan is applied atomically before
+the unchanged sealed snapshot/page/ACK/final-handoff protocol.
+
+Checksummed public evidence contains only aggregates, Source/plan hashes and
+metadata-write outcome. A lost write acknowledgement is `UNKNOWN`, not
+negative-import proof. Failure after maintenance retains the fence and owned
+lease. The frozen recovery proof for the earlier pre-import failure does not
+authorize recovery of this metadata write. Do not replay a write, delete its
+provenance, revert financial metadata, or roll back to incompatible readers.
+Resolve ambiguous commits by authorized read-only Source inspection before
+selecting a compatible recovery; readiness remains unavailable until the full
+native handoff and actual public event metrics pass.
+
 ### Existing live-betting activation
 
 `DEPLOYMENT_PROVENANCE_FILE` and `LIVE_SCHEMA_EVIDENCE_FILE` are the two
