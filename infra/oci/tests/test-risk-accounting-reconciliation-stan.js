@@ -6,8 +6,88 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 const vm = require("node:vm");
-const { reconcile, localMongo, assertPublicReadiness, forward, stopChildren } = require("../scripts/risk-accounting-reconciliation-stan");
+const { reconcile, preflightLegacy, applyLegacy, execute, localMongo, assertPublicReadiness, writeEvidence, forward, stopChildren } = require("../scripts/risk-accounting-reconciliation-stan");
 
+function legacyFixture() {
+  const packet = { schemaVersion: 1, sourceSha: "a".repeat(40), sourceDigest: "b".repeat(64),
+    positions: [], candidates: [{ slipId: "PRIVATE_TICKET" }] };
+  const enriched = { ...packet, originals: [{ slipId: "PRIVATE_TICKET" }] };
+  const plan = { ...enriched, planHash: "c".repeat(64) };
+  return { packet, enriched, plan, calls: [] };
+}
+
+test("legacy preflight is read-only and requires current original authority and exact native intake echo", async () => {
+  const value = legacyFixture();
+  const source = async (stage) => {
+    value.calls.push(stage);
+    return stage === "prepare" ? value.packet : value.plan;
+  };
+  const receiver = async (stage) => {
+    value.calls.push(stage);
+    return stage === "originals" ? value.enriched : {
+      schemaVersion: 1, sourceSha: value.plan.sourceSha, planHash: value.plan.planHash, intakeVerified: true,
+    };
+  };
+  assert.deepEqual(await preflightLegacy(source, receiver, value.plan.sourceSha), value.plan);
+  assert.deepEqual(value.calls, ["prepare", "originals", "plan", "preflight"]);
+  await assert.rejects(preflightLegacy(source, async (stage) => stage === "originals" ? value.enriched
+    : { schemaVersion: 1, sourceSha: value.plan.sourceSha, planHash: "d".repeat(64), intakeVerified: true },
+  value.plan.sourceSha), /LEGACY_RECEIVER_PREFLIGHT_INVALID/);
+  assert.equal(value.calls.includes("apply"), false);
+});
+
+test("a metadata commit is UNKNOWN until exact acknowledgement, including a lost or changed reply", async () => {
+  const { plan } = legacyFixture();
+  for (const lost of [true, false]) {
+    const states = [];
+    await assert.rejects(applyLegacy(async stage => {
+      assert.equal(stage, "apply");
+      assert.equal(states[0].outcome, "UNKNOWN");
+      if (lost) throw new Error("acknowledgement lost");
+      return { schemaVersion: 1, sourceSha: plan.sourceSha, planHash: "d".repeat(64),
+        applied: true, positions: 1, documents: 1 };
+    }, plan, state => states.push(state)), /acknowledgement lost|LEGACY_WRITE_ACK_INVALID/);
+    assert.deepEqual(states.map(state => state.outcome), ["UNKNOWN"]);
+  }
+  const states = [];
+  await applyLegacy(async () => ({ schemaVersion: 1, sourceSha: plan.sourceSha, planHash: plan.planHash,
+    applied: true, positions: 1, documents: 2 }), plan, state => states.push(state));
+  assert.deepEqual(states.map(state => state.outcome), ["UNKNOWN", "CONFIRMED"]);
+});
+
+test("adding accounting evidence preserves and updates the existing full checksum inventory", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "betstan-risk-evidence-"));
+  try {
+    const prior = `${"a".repeat(64)}  reports/original.json\n`;
+    fs.writeFileSync(path.join(directory, "SHA256SUMS"), prior);
+    writeEvidence(directory, "risk-accounting-legacy-preflight.json", { status: "PASS" });
+    writeEvidence(directory, "risk-accounting-legacy-preflight.json", { status: "FAIL" });
+    const lines = fs.readFileSync(path.join(directory, "SHA256SUMS"), "utf8").trim().split("\n");
+    assert.equal(lines.filter(line => line.endsWith("  reports/original.json")).length, 1);
+    assert.equal(lines.filter(line => line.endsWith("  risk-accounting-legacy-preflight.json")).length, 1);
+    const actual = require("node:crypto").createHash("sha256")
+      .update(fs.readFileSync(path.join(directory, "risk-accounting-legacy-preflight.json"))).digest("hex");
+    assert.equal(lines.includes(`${actual}  risk-accounting-legacy-preflight.json`), true);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("ordinary Node warnings do not turn a known financial block into a private transport failure", async () => {
+  await assert.rejects(execute(process.execPath, ["-e", `
+    process.emitWarning("ordinary dependency warning", "DeprecationWarning", "DEP0040");
+    setImmediate(() => {
+      console.error("LEGACY_ORIGINAL_ADMISSION_UNAVAILABLE");
+      process.exitCode = 1;
+    });
+  `], { legacyErrors: true }), error => error.safeCode === "LEGACY_ORIGINAL_ADMISSION_UNAVAILABLE");
+});
+
+test("unknown or ambiguous private error codes are never published as trusted financial blocks", async () => {
+  for (const message of ["LEGACY_NOT_REVIEWED", ["LEGACY_SOURCE_CHANGED", "LEGACY_ORIGINAL_ADMISSION_UNAVAILABLE"].join("\n")]) {
+    await assert.rejects(execute(process.execPath, ["-e",
+      `console.error(${JSON.stringify(message)}); process.exitCode = 1;`], { legacyErrors: true }),
+    error => error.safeCode === "PRIVATE_COMMAND_FAILED");
+  }
+});
 function fixture({ unavailable = false, pageAck = true, finalized = true } = {}) {
   const calls = [];
   const snapshotId = "risk_123_1";
@@ -124,8 +204,10 @@ test("the Mongo proxy retains exact source ownership and never substitutes anoth
 test("public acceptance requires usable exposure, not complete older loss windows or HTTP alone", () => {
   const policy = { readiness: { transactions: "READY",
     accounting: { ready: false, openPositionsReady: true, readyLossWindows: [], code: "HISTORY_WINDOW_UNAVAILABLE" } } };
-  const catalogue = { analysis: { ready: true, code: "READY" } };
+  const catalogue = { analysis: { ready: true, code: "READY" },
+    events: [{ metrics: { openTickets: 1, pendingTickets: 0, exposureMinor: "2000" } }] };
   assert.equal(assertPublicReadiness(policy, catalogue).openPositionsReady, true);
+  assert.throws(() => assertPublicReadiness(policy, { ...catalogue, events: [{ metrics: null }] }), /PUBLIC_EVENT_METRICS_UNAVAILABLE/);
   assert.throws(() => assertPublicReadiness(policy, { analysis: { ready: false } }), /PUBLIC_ACCOUNTING_NOT_READY/);
   policy.readiness.accounting.openPositionsReady = false;
   assert.throws(() => assertPublicReadiness(policy, catalogue), /PUBLIC_ACCOUNTING_NOT_READY/);
@@ -238,6 +320,20 @@ test("proven success restores under the HTTP fence and releases the lock before 
   } finally { value.cleanup(); }
 });
 
+test("read-only preflight failure before maintenance releases only the owned lock, never a physical fence", () => {
+  const value = workflowFixture();
+  try {
+    const outcomes = { operation_lock: "success", accounting_preflight: "failure", maintenance_enter: "skipped",
+      data: "skipped", maintenance: "skipped", risk_readiness: "skipped", operation_lock_release: "success" };
+    const release = value.selected("Release database operation lock unless handed to deploy");
+    const fence = value.selected("Release accounting HTTP fence after verified lock release");
+    assert.equal(value.allows(release, outcomes, true), true);
+    assert.equal(value.allows(fence, outcomes, true), false);
+    value.run(release, "skipped");
+    assert.deepEqual(value.trace(), ["lock:release", "lock:verify-released"]);
+    assert.equal(value.allows(release, { ...outcomes, maintenance_enter: "failure" }, true), false);
+  } finally { value.cleanup(); }
+});
 function restoreAdmissionFixture({ legacy = false, code = "SOURCE_OPEN_POSITIONS_UNAVAILABLE" } = {}) {
   const root = path.resolve(__dirname, "../../..");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "betstan-pre-import-"));

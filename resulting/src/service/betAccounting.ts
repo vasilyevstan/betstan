@@ -13,6 +13,12 @@ export interface AccountingBasis {
   /** One factor per row: a Builder is one composite exposure. */
   rows: { id: string; odds: string }[];
 }
+export type AccountingPlacementTerms = Pick<IPlaceBetEvent["data"], "wager" | "betKind"> & {
+  rows: Pick<IPlaceBetEvent["data"]["rows"][number],
+    "id" | "eventId" | "productId" | "oddsId" | "oddsValue" | "betKind"
+    | "marketId" | "marketType" | "marketVersion" | "quoteVersion" | "selectionId"
+    | "side" | "selectedAt" | "quoteValidUntil" | "marketBet">[];
+};
 export interface AccountingClosureState {
   accounting: BetAccountingEvidence;
   accountingRevision?: number;
@@ -36,35 +42,49 @@ function unavailable(error: unknown): BetAccountingEvidence {
   );
 }
 
+/** Financial terms only: the caller must establish identity and closure history. */
+export function accountingPlacementBasis(
+  data: AccountingPlacementTerms,
+  placementFingerprint: string
+): {
+  accountingBasis: AccountingBasis; accountingPayoutBound: BetPayoutBound;
+  accountingScope?: RetainedAccountingScope;
+} {
+  const originalStakeMinor = nominalStakeMinor(data.wager);
+  if (!/^[0-9a-f]{64}$/.test(placementFingerprint) || !data.rows.length
+    || new Set(data.rows.map(row => row.id)).size !== data.rows.length) {
+    throw new Error("AUTHORITY_UNAVAILABLE");
+  }
+  const rows = data.rows.map(row => {
+    if (!row.id) throw new Error("AUTHORITY_UNAVAILABLE");
+    if (row.marketBet !== undefined) {
+      const quote = parseMarketBet(row.marketBet);
+      if (quote.odds !== row.oddsValue || quote.eventId !== row.eventId) throw new Error("AUTHORITY_UNAVAILABLE");
+    }
+    return { id: row.id, odds: canonicalOdds(row.oddsValue) };
+  });
+  const maximumReturnMinor = fixedOddsReturnMinor(originalStakeMinor, rows.map(row => row.odds));
+  const facts = placementAccountingScope(data);
+  return {
+    accountingBasis: { originalStakeMinor, placementFingerprint, rows },
+    ...(facts ? { accountingScope: { schemaVersion: 1 as const, placementFingerprint, facts } } : {}),
+    accountingPayoutBound: {
+      schemaVersion: 1, method: "STANDALONE_FIXED_ODDS",
+      originalStakeMinor, maximumReturnMinor, placementFingerprint,
+    },
+  };
+}
+
 export function accountingPlacementState(data: IPlaceBetEvent["data"]): {
   accounting: BetAccountingEvidence; accountingBasis?: AccountingBasis; accountingPayoutBound?: BetPayoutBound;
   accountingScope?: RetainedAccountingScope;
 } {
   try {
-    const originalStakeMinor = nominalStakeMinor(data.wager);
-    if (!data.rows.length || new Set(data.rows.map(row => row.id)).size !== data.rows.length) {
-      throw new Error("AUTHORITY_UNAVAILABLE");
-    }
-    const rows = data.rows.map(row => {
-      if (!row.id) throw new Error("AUTHORITY_UNAVAILABLE");
-      if (row.marketBet !== undefined) {
-        const quote = parseMarketBet(row.marketBet);
-        if (quote.odds !== row.oddsValue || quote.eventId !== row.eventId) throw new Error("AUTHORITY_UNAVAILABLE");
-      }
-      return { id: row.id, odds: canonicalOdds(row.oddsValue) };
-    });
     // Fingerprint excludes publisher envelope metadata, includes exact placement content.
     const placementFingerprint = cashBackHash(data);
-    const maximumReturnMinor = fixedOddsReturnMinor(originalStakeMinor, rows.map(row => row.odds));
-    const facts = placementAccountingScope(data);
     return {
       accounting: { schemaVersion: 1, status: "COMPLETE", movements: [] },
-      accountingBasis: { originalStakeMinor, placementFingerprint, rows },
-      ...(facts ? { accountingScope: { schemaVersion: 1 as const, placementFingerprint, facts } } : {}),
-      accountingPayoutBound: {
-        schemaVersion: 1, method: "STANDALONE_FIXED_ODDS",
-        originalStakeMinor, maximumReturnMinor, placementFingerprint,
-      },
+      ...accountingPlacementBasis(data, placementFingerprint),
     };
   } catch (error) {
     return { accounting: unavailable(error) };

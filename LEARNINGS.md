@@ -17,6 +17,9 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Persist publication intent; duplicates, delays and reordering are normal. Broker readiness is not consumer readiness.
 - A new listener needs its `oci_application_rabbitmq_queue_names` entry, or the deploy fails fenced.
 - Scope mutations atomically by identity, owner, state, revision and fingerprint; handle versionless rows and empty terminal aggregates.
+- Legacy accounting needs retained original economics and closure proof; tag a new reconciliation identity rather than guessing a raw publisher fingerprint.
+- Validate cash-back outer outcome, receipt and retained stage together. A missing receipt never negates an accepted or unknown outcome.
+- Private CLI failures use exactly one allowlisted code independent of dependency warnings; ambiguous codes fail closed and stderr stays private.
 
 ## Betting integrity
 

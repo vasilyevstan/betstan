@@ -103,7 +103,8 @@ function identity(id: string) {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error("Invalid accounting snapshot identity");
 }
 
-function positionFor(bet: any): { data: AccountingSnapshotPosition; validation: any } {
+/** Pure projection; only the sealed snapshot validates coverage and history. */
+export function positionFor(bet: any): { data: AccountingSnapshotPosition; validation: any } {
   if (!bet.slipId || !bet.userId) throw new Error("Accounting source owner missing");
   const state = terminal.has(bet.status) ? "TERMINAL"
     : bet.status === ResultingStatus.BET_APPROVED ? "ACCEPTED"
