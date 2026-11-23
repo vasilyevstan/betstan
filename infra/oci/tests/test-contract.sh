@@ -1126,6 +1126,87 @@ grep -Fq '"@${expected_digests[$service]}" ||' "$OCI_DIR/scripts/deploy.sh" ||
 grep -Fq 'image_id.endswith('\''@'\'' + manifest_digest)' \
   "$OCI_DIR/scripts/baseline-capture-stan.sh" ||
   fail "OCI baseline capture does not accept a CRI-reported immutable manifest digest"
+python3 -B - "$OCI_DIR/scripts" "$WORK_DIR" <<'PY_BASELINE_ARTIFACT'
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+from unittest.mock import patch
+import zipfile
+
+scripts, work = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location(
+    "baseline_transport", scripts / "upstream_run_binding_stan.py",
+)
+binding = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(binding)
+source = (scripts / "baseline-capture-stan.sh").read_text()
+body, = re.findall(r"<<'PY_DEPLOY_ARTIFACT'\n(.*?)\nPY_DEPLOY_ARTIFACT", source, re.S)
+code = compile(body, "baseline deployment artifact reader", "exec")
+expected = {"images.tsv": b"immutable images\n", "provenance.txt": b"exact provenance\n"}
+
+def archive(files):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        for name, raw in files.items():
+            bundle.writestr(name, raw)
+    return buffer.getvalue()
+
+valid = archive(expected)
+cases = [
+    ("valid", valid, None, False, True),
+    ("transient", valid, b"gh: Bad Gateway (HTTP 502)\n", False, True),
+    ("permanent", valid, b"gh: Forbidden (HTTP 403)\n", False, False),
+    ("digest", valid, None, True, False),
+    ("ambiguous", archive({**expected, "nested/images.tsv": b"other\n"}), None, False, False),
+    ("missing", archive({"images.tsv": expected["images.tsv"]}), None, False, False),
+]
+endpoint = "repos/example/repo/actions/artifacts/9001/zip"
+for name, raw, failure, wrong_digest, accepted in cases:
+    root = work / ("baseline-artifact-" + name)
+    output = root / "download"
+    output.mkdir(parents=True)
+    listing = root / "artifacts.json"
+    digest = "0" * 64 if wrong_digest else hashlib.sha256(raw).hexdigest()
+    listing.write_text(json.dumps({"artifacts": [{
+        "id": 9001, "name": "oci-deploy-provenance-77-1", "digest": "sha256:" + digest,
+    }]}))
+    responses = []
+    if failure:
+        responses.append(subprocess.CompletedProcess(
+            ["gh", "api", endpoint], 1, b"discarded partial archive", failure,
+        ))
+    responses.append(subprocess.CompletedProcess(["gh", "api", endpoint], 0, raw, b""))
+    stderr = io.StringIO()
+    with patch.dict(sys.modules, {"upstream_run_binding_stan": binding}), \
+            patch.object(sys, "argv", [
+                "-", str(scripts), "example/repo", str(listing),
+                "oci-deploy-provenance-77-1", str(output),
+            ]), patch.object(binding, "_native_run", side_effect=responses) as read, \
+            patch.object(binding.time, "sleep") as sleep, \
+            contextlib.redirect_stderr(stderr):
+        try:
+            exec(code, {"__name__": "__main__"})
+        except SystemExit as error:
+            assert not accepted and error.code == 1, name
+        else:
+            assert accepted, name
+    expected_reads = 2 if name == "transient" else 1
+    assert read.call_count == expected_reads, name
+    for call in read.call_args_list:
+        assert call.args == (["gh", "api", endpoint],), name
+        assert call.kwargs == {"capture_output": True, "check": False, "timeout": 120}, name
+    assert [call.args for call in sleep.call_args_list] == ([(1,)] if name == "transient" else []), name
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == (
+        expected if accepted else {}
+    ), name
+print("baseline_deployment_artifact_transport=PASS cases=6")
+PY_BASELINE_ARTIFACT
 for queue_probe in \
   "$OCI_DIR/scripts/baseline-capture-stan.sh" \
   "$OCI_DIR/scripts/rollback-readiness-stan.sh" \

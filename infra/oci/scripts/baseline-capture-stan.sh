@@ -940,9 +940,29 @@ while IFS= read -r run_id; do
   fi
   candidate_dir="$WORK_DIR/candidate-${run_id}"
   prepare_private_dir "$candidate_dir"
-  gh run download "$run_id" --repo "$REPO" --name "$artifact_name" --dir "$candidate_dir" >/dev/null
-  candidate_images_file="$(find "$candidate_dir" -type f -name images.tsv | head -n 1)"
-  candidate_provenance_file="$(find "$candidate_dir" -type f -name provenance.txt | head -n 1)"
+  python3 - "$SCRIPT_DIR" "$REPO" "$artifacts_file" "$artifact_name" "$candidate_dir" <<'PY_DEPLOY_ARTIFACT'
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import upstream_run_binding_stan as binding
+
+repository, listing, artifact_name, output = sys.argv[2:]
+artifact, = [
+    item for item in json.loads(Path(listing).read_text())["artifacts"]
+    if item.get("name") == artifact_name
+]
+files = binding.artifact_files(repository, artifact, "baseline deployment")
+selected = {
+    name: binding.unique_artifact_file(files, name, "baseline deployment")[1]
+    for name in ("images.tsv", "provenance.txt")
+}
+for name, raw in selected.items():
+    (Path(output) / name).write_bytes(raw)
+PY_DEPLOY_ARTIFACT
+  candidate_images_file="$candidate_dir/images.tsv"
+  candidate_provenance_file="$candidate_dir/provenance.txt"
   [[ -f "$candidate_images_file" && -f "$candidate_provenance_file" ]] || continue
   if ! validate_ghcr_image_inventory "$candidate_images_file"; then
     continue
