@@ -40,5 +40,5 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Disable `oci-live-data-rollout` once its run has a real job (its guard fails after 180 s); dispatch `oci-production-deploy` before the handoff lease expires. `release-chain-stan.sh --chain` does both; see its [stage budgets](docs/wiki/Release-Orchestration.md).
 - Fenced data recovery stops every writer: use it only for data, never for an app, probe or telemetry fault.
 - Live acceptance tolerates legal transient states (resulted fixtures, retryable authority) via bounded reason-specific retries.
-- k3s keeps released images until a governed CRI reclaim; a withheld checkpoint (`candidate_preload`) needs reclaim, then a new SHA.
+- A withheld k3s checkpoint may recover via APT/journal at the same SHA; CRI reclaim needs a new SHA.
 - Read failures mean unknown. Bind cloud credentials on every Actions step. Redirects exempt `/.well-known/acme-challenge/`; prove renewal.
