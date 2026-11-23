@@ -248,11 +248,57 @@ it("diagnoses every sealed page without changing financial records or the acknow
       cutAt: manifest.cutAt, manifestHash: cashBackHash(manifest), openPositions: "UNAVAILABLE",
       positions: 52, movements: 0, unavailableOpenPositions: 51, unavailableHistories: 51,
       missingEvidence: { scope: 51, placement: 51, principal: 51, other: 0 },
+      sourceEvidence: {
+        matchedCut: 51, changedSinceCut: 0, missingSource: 0, missingBasis: 51,
+        originalManifestPresent: 0, principalSnapshotPresent: 0,
+        accountingReasons: {
+          NOT_RECORDED: 51, COMPLETE: 0, HISTORY_MISSING: 0, AUTHORITY_UNAVAILABLE: 0,
+          LEGACY_PRECISION_UNSUPPORTED: 0, AMOUNT_UNSUPPORTED: 0, INVALID: 0,
+        },
+      },
     });
     expect(update).not.toHaveBeenCalled();
     expect(await AccountingSnapshot.findById(manifest.snapshotId).lean()).toEqual(jobBefore);
     expect(await Bet.collection.find({}).sort({ _id: 1 }).toArray()).toEqual(bookBefore);
     expect(JSON.stringify(report)).not.toMatch(/private-source-owner|private-slip|private-row|wager|originalStakeMinor/);
+  } finally {
+    jest.restoreAllMocks();
+  }
+});
+
+it("reports only exact-cut stored reasons and authority presence, not changed or missing sources", async () => {
+  jest.spyOn(fence, "verifyAccountingSnapshotFence").mockResolvedValue({
+    namespace: "test-only", operationId: "test-bootstrap", sourceSha: "a".repeat(40),
+    generation: "1", identityHash: "b".repeat(64),
+  });
+  try {
+    await Bet.collection.insertMany(["legacy", "precision", "changed", "missing"].map(slipId => ({
+      userId: "private-source-owner", slipId, status: ResultingStatus.BET_APPROVED,
+      wager: slipId === "precision" ? 10.123 : 10, betKind: BetKind.PRE_MATCH,
+      timestamp: "2020-01-01T00:00:00.000Z", rows: [buildRow(`private-${slipId}`)],
+      ...(slipId === "precision" ? {
+        accounting: { schemaVersion: 1, status: "UNAVAILABLE", reason: "LEGACY_PRECISION_UNSUPPORTED" },
+        cashBackOriginalManifest: { fingerprint: "a".repeat(64), selections: [] },
+        cashBackFinancial: { revision: 0 },
+      } : {}),
+    })));
+    await createAccountingSnapshot("risk_103_1", "2019-01-01T00:00:00.000Z");
+    await Bet.collection.updateOne({ slipId: "changed" }, { $set: { wager: 11 } });
+    await Bet.collection.deleteOne({ slipId: "missing" });
+    const before = await Bet.collection.find({}).sort({ _id: 1 }).toArray();
+    const report = await runDataCompatibilityBackfill();
+    expect(report.accountingSnapshot).toMatchObject({
+      sourceEvidence: {
+        matchedCut: 2, changedSinceCut: 1, missingSource: 1, missingBasis: 2,
+        originalManifestPresent: 1, principalSnapshotPresent: 1,
+        accountingReasons: {
+          NOT_RECORDED: 1, COMPLETE: 0, HISTORY_MISSING: 0, AUTHORITY_UNAVAILABLE: 0,
+          LEGACY_PRECISION_UNSUPPORTED: 1, AMOUNT_UNSUPPORTED: 0, INVALID: 0,
+        },
+      },
+    });
+    expect(await Bet.collection.find({}).sort({ _id: 1 }).toArray()).toEqual(before);
+    expect(JSON.stringify(report)).not.toMatch(/private-source-owner|private-legacy|selections|wager/);
   } finally {
     jest.restoreAllMocks();
   }
