@@ -56,6 +56,26 @@ it("rejects missing admission, unsupported precision and pending originals witho
   await expect(readLegacyOriginals(packet(input, true))).rejects.toThrow("LEGACY_RECORDED_RECEIPT_MISSING");
 });
 
+it.each([
+  { field: "id", value: null, code: "LEGACY_ORIGINAL_ROW_ID_INVALID" },
+  { field: "eventId", value: 123, code: "LEGACY_ORIGINAL_ROW_EVENT_ID_INVALID" },
+  { field: "productId", value: "", code: "LEGACY_ORIGINAL_ROW_PRODUCT_ID_INVALID" },
+  { field: "oddsId", value: { privateValue: "PRIVATE_ORIGINAL_ROW" }, code: "LEGACY_ORIGINAL_ROW_ODDS_ID_INVALID" },
+  { field: "oddsValue", value: "2", code: "LEGACY_ORIGINAL_ROW_ODDS_VALUE_INVALID" },
+  { field: "betKind", value: "UNKNOWN", code: "LEGACY_ORIGINAL_ROW_BET_KIND_INVALID" },
+])("identifies invalid legacy $field without exposing or modifying its stored value", async ({ field, value, code }) => {
+  const input = event();
+  const stored = await Bet.create({ ...input.data, timestamp: "2020-01-01T00:00:00.000Z",
+    status: ModerationStatus.APPROVED });
+  await Bet.collection.updateOne({ _id: stored._id }, { $set: { [`rows.0.${field}`]: value } });
+  const before = await Bet.findById(stored._id).lean();
+  await expect(readLegacyOriginals(packet(input))).rejects.toThrow(new Error(code));
+  expect(await Bet.findById(stored._id).lean()).toEqual(before);
+  expect(await RiskMovement.countDocuments()).toBe(0);
+  expect(await RiskBaseline.countDocuments()).toBe(0);
+  expect(await RiskPosition.countDocuments()).toBe(0);
+});
+
 it("refuses existing receiver accounting instead of replacing its reserve or past movements", async () => {
   const input = event();
   await Bet.create({ ...input.data, timestamp: "2020-01-01T00:00:00.000Z", status: ModerationStatus.APPROVED });

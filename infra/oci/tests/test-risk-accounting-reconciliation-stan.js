@@ -81,6 +81,17 @@ test("ordinary Node warnings do not turn a known financial block into a private 
   `], { legacyErrors: true }), error => error.safeCode === "LEGACY_ORIGINAL_ADMISSION_UNAVAILABLE");
 });
 
+test("field-specific original-row refusals cross private transport without publishing stored values", async () => {
+  for (const field of ["ID", "EVENT_ID", "PRODUCT_ID", "ODDS_ID", "ODDS_VALUE", "BET_KIND"]) {
+    const code = `LEGACY_ORIGINAL_ROW_${field}_INVALID`;
+    await assert.rejects(execute(process.execPath, ["-e", `
+      console.error("PRIVATE_ORIGINAL_ROW");
+      console.error(${JSON.stringify(code)});
+      process.exitCode = 1;
+    `], { legacyErrors: true }), error => error.safeCode === code && error.message === code);
+  }
+});
+
 test("unknown or ambiguous private error codes are never published as trusted financial blocks", async () => {
   for (const message of ["LEGACY_NOT_REVIEWED", ["LEGACY_SOURCE_CHANGED", "LEGACY_ORIGINAL_ADMISSION_UNAVAILABLE"].join("\n")]) {
     await assert.rejects(execute(process.execPath, ["-e",
