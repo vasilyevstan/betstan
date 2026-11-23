@@ -59,10 +59,16 @@ function originalTerms(stored: Raw): Terms {
   const fields = ["id", "eventId", "productId", "oddsId", "oddsValue", "marketId", "marketType",
     "marketVersion", "quoteVersion", "selectionId", "side", "selectedAt", "quoteValidUntil", "marketBet"] as const;
   const rows = stored.rows.map((row: unknown) => {
-    requireProof(object(row) && ["id", "eventId", "productId", "oddsId"].every(field => text(row[field]))
-      && typeof row.oddsValue === "number"
-      && (row.betKind == null || row.betKind === BetKind.PRE_MATCH || row.betKind === BetKind.LIVE),
-    "LEGACY_ORIGINAL_ROW_INVALID");
+    requireProof(object(row), "LEGACY_ORIGINAL_ROW_INVALID");
+    for (const [field, code] of [
+      ["id", "LEGACY_ORIGINAL_ROW_ID_INVALID"],
+      ["eventId", "LEGACY_ORIGINAL_ROW_EVENT_ID_INVALID"],
+      ["productId", "LEGACY_ORIGINAL_ROW_PRODUCT_ID_INVALID"],
+      ["oddsId", "LEGACY_ORIGINAL_ROW_ODDS_ID_INVALID"],
+    ] as const) requireProof(text(row[field]), code);
+    requireProof(typeof row.oddsValue === "number", "LEGACY_ORIGINAL_ROW_ODDS_VALUE_INVALID");
+    requireProof(row.betKind == null || row.betKind === BetKind.PRE_MATCH || row.betKind === BetKind.LIVE,
+      "LEGACY_ORIGINAL_ROW_BET_KIND_INVALID");
     return {
       ...Object.fromEntries(fields.filter(field => row[field] != null).map(field => [field, row[field]])),
       id: row.id,

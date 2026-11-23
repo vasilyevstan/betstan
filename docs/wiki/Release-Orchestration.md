@@ -1607,6 +1607,8 @@ indication or unknown discriminator blocks eligibility even without a receipt.
 Missing or conflicting original authority marks accounting `BLOCKED`; a live
 Source change during preflight is `INCONCLUSIVE`. These explicit diagnostic
 states do not block basic deployment or authorize accounting activation.
+An original-row blocker names the rejected field, never its stored value;
+it remains a refusal, not repair eligibility.
 Reconciliation still requires a fresh passing preflight. An exported
 null or absent movement alone does not prove zero prior payouts.
 Private command failures require exactly one allowlisted code independently of
