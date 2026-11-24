@@ -46,6 +46,12 @@ const claimGuestDraft = async (
     });
   }
 
+  // Placement may have won the race after the first check; nothing was applied,
+  // so keep the guest draft for a later load.
+  if (await Slip.exists(buildSlipScope(SlipStatus.SUBMITTED, betKind, userId))) {
+    return;
+  }
+
   // Scoped to the revision that was merged: a guest write that landed in the
   // meantime keeps the draft for the next claim instead of losing that row.
   await Slip.deleteOne({

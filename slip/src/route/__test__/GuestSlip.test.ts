@@ -764,6 +764,29 @@ describe("claiming the guest slip on login", () => {
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
   });
 
+  it("keeps the guest draft when placement submits the user's board after the first check", async () => {
+    const guestSlip = await createSlip({
+      ownerId: guestPrincipal,
+      rows: [preMatchRow("odds-guest")],
+    });
+    const realExists = Slip.exists.bind(Slip);
+    jest.spyOn(Slip, "exists").mockImplementationOnce(((
+      filter: Record<string, unknown>
+    ) =>
+      realExists(filter).then(async (found) => {
+        await createSlip({
+          ownerId: userId,
+          status: SlipStatus.SUBMITTED,
+          rows: [preMatchRow("odds-in-flight")],
+        });
+        return found;
+      })) as never);
+
+    await getBoards(signedIn).expect(200);
+
+    expect(await Slip.findById(guestSlip.id).lean()).not.toBeNull();
+  });
+
   it("keeps a guest draft that changed while it was merged and claims it on the next load", async () => {
     const guestSlip = await createSlip({
       ownerId: guestPrincipal,
