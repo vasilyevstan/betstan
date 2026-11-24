@@ -10,14 +10,13 @@ const Header = ({ currentUser, uiVariant, theme }) => {
     const routeIdentity = getRouteIdentity(location.pathname);
     const themeOptions = ['dark', 'light'];
     const explicitRouteIdentities = new Set([
-       '/backoffice', '/bets', '/profile', '/login', '/logout', '/signup', '/telemetry',
+       '/backoffice', '/bets', '/profile', '/login', '/logout', '/signup', '/forgot-password', '/telemetry',
     ]);
     const isEventsRoute = routeIdentity === '/' || !explicitRouteIdentities.has(routeIdentity);
 
     const links = [
        { label: 'Backoffice', href: '/backoffice', icon: '/icons/backoffice.svg', showLabel: true },
        { label: 'Telemetry', href: '/telemetry', icon: '/icons/telemetry.svg', showLabel: true },
-       !currentUser && { label: 'Create account', href: '/signup', icon: '/icons/signup.svg' },
        !currentUser && { label: 'Log in', href: '/login', icon: '/icons/login.svg' },
        currentUser && { label: 'My bets', href: '/bets', icon: '/icons/bets.svg' },
        currentUser && { label: 'Log out', href: '/logout', icon: '/icons/logout.svg' }
@@ -131,7 +130,9 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                    </div>
                    <ul className="navbar-nav app-navbar__links">
                        {links.map(({ label, href, icon, showLabel }) => {
-                           const isCurrent = routeIdentity === getRouteIdentity(href);
+                           // /signup is the Create account tab of the page the Log in icon opens.
+                           const isCurrent = routeIdentity === getRouteIdentity(href)
+                               || (href === '/login' && routeIdentity === '/signup');
                            return <li key={href} className="nav-item">
                                <Link
                                    aria-current={isCurrent ? 'page' : undefined}

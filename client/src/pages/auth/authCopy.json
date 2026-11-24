@@ -1,10 +1,17 @@
 {
   "login": {
     "title": "Log in to your account",
+    "tab": "Log in",
     "submit": "Log in"
   },
   "signup": {
     "title": "Create an account",
+    "tab": "Create account",
     "submit": "Create account"
+  },
+  "forgotPassword": {
+    "title": "Reset your password",
+    "submit": "Reset password",
+    "confirmation": "If that account exists, its password is now abcdef. Log in with it."
   }
 }

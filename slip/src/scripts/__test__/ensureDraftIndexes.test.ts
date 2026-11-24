@@ -5,10 +5,15 @@ import {
   SLIP_DRAFT_UNIQUE_INDEX_KEYS,
   SLIP_DRAFT_UNIQUE_INDEX_NAME,
   SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+  SLIP_GUEST_EXPIRY_INDEX_KEYS,
+  SLIP_GUEST_EXPIRY_INDEX_NAME,
+  SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER,
+  SLIP_GUEST_EXPIRY_INDEX_TTL_SECONDS,
 } from "../../model/Slip";
 import { runDataCompatibilityBackfill } from "../backfillDataCompatibility";
 import {
   ensureSlipDraftIndex,
+  ensureSlipGuestExpiryIndex,
   parseEnsureArgs,
   runEnsureDraftIndexCli,
   scanDraftNormalization,
@@ -310,4 +315,146 @@ it("parses ensure args and runs the CLI with fail-closed reporting", async () =>
   });
   expect(disconnectSpy).toHaveBeenCalled();
   expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
+});
+
+describe("guest expiry TTL index", () => {
+  const guestExpiryIndexes = async () =>
+    (await Slip.collection.indexes()).filter(
+      (index) => index.name === SLIP_GUEST_EXPIRY_INDEX_NAME
+    );
+
+  it("pins the index definition that guest drafts expire with", () => {
+    expect(SLIP_GUEST_EXPIRY_INDEX_NAME).toBe("slip_guest_expiry_ttl");
+    expect(SLIP_GUEST_EXPIRY_INDEX_KEYS).toEqual({ guestExpiresAt: 1 });
+    expect(SLIP_GUEST_EXPIRY_INDEX_TTL_SECONDS).toBe(0);
+    expect(SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER).toEqual({
+      guestExpiresAt: { $type: "date" },
+    });
+  });
+
+  it("creates the partial TTL index only on apply and keeps repeated apply a no-op", async () => {
+    const dryRun = await ensureSlipGuestExpiryIndex();
+    expect(dryRun).toEqual({
+      mode: "dry-run",
+      ready: true,
+      changed: 0,
+      existingIndex: "missing",
+      indexName: SLIP_GUEST_EXPIRY_INDEX_NAME,
+    });
+    expect(await guestExpiryIndexes()).toHaveLength(0);
+
+    const created = await ensureSlipGuestExpiryIndex({ apply: true });
+    expect(created).toEqual({
+      mode: "apply",
+      ready: true,
+      changed: 1,
+      existingIndex: "missing",
+      indexName: SLIP_GUEST_EXPIRY_INDEX_NAME,
+    });
+    const [index, ...others] = await guestExpiryIndexes();
+    expect(others).toHaveLength(0);
+    expect(index.key).toEqual({ guestExpiresAt: 1 });
+    expect(index.expireAfterSeconds).toBe(0);
+    expect(index.partialFilterExpression).toEqual({
+      guestExpiresAt: { $type: "date" },
+    });
+    expect(index.unique).toBeUndefined();
+
+    const repeated = await ensureSlipGuestExpiryIndex({ apply: true });
+    expect(repeated.ready).toBe(true);
+    expect(repeated.changed).toBe(0);
+    expect(repeated.existingIndex).toBe("matching");
+    expect(await guestExpiryIndexes()).toHaveLength(1);
+
+    const verified = await ensureSlipGuestExpiryIndex();
+    expect(verified.changed).toBe(0);
+    expect(verified.existingIndex).toBe("matching");
+  });
+
+  it("creates the TTL index when the slips collection does not exist yet", async () => {
+    await Slip.collection.drop();
+
+    const report = await ensureSlipGuestExpiryIndex({ apply: true });
+
+    expect(report.ready).toBe(true);
+    expect(report.changed).toBe(1);
+    expect(report.existingIndex).toBe("missing");
+    expect(await guestExpiryIndexes()).toHaveLength(1);
+  });
+
+  it("fails closed and leaves a same-named index with different options untouched", async () => {
+    await Slip.collection.createIndex(SLIP_GUEST_EXPIRY_INDEX_KEYS, {
+      name: SLIP_GUEST_EXPIRY_INDEX_NAME,
+      expireAfterSeconds: 5,
+      partialFilterExpression: SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER,
+    });
+
+    const report = await ensureSlipGuestExpiryIndex({ apply: true });
+
+    expect(report.ready).toBe(false);
+    expect(report.changed).toBe(0);
+    expect(report.existingIndex).toBe("conflicting");
+    const [index] = await guestExpiryIndexes();
+    expect(index.expireAfterSeconds).toBe(5);
+  });
+
+  it("fails closed when the same key already exists under another name", async () => {
+    await Slip.collection.createIndex(SLIP_GUEST_EXPIRY_INDEX_KEYS, {
+      name: "guest_expiry_legacy_name",
+    });
+
+    const report = await ensureSlipGuestExpiryIndex({ apply: true });
+
+    expect(report.ready).toBe(false);
+    expect(report.changed).toBe(0);
+    expect(report.existingIndex).toBe("conflicting");
+    expect(await guestExpiryIndexes()).toHaveLength(0);
+  });
+
+  it("classifies malformed and look-alike indexes without touching the collection", async () => {
+    const indexesSpy = jest.spyOn(Slip.collection, "indexes");
+    const matching = {
+      name: SLIP_GUEST_EXPIRY_INDEX_NAME,
+      key: { guestExpiresAt: 1 },
+      expireAfterSeconds: 0,
+      partialFilterExpression: { guestExpiresAt: { $type: "date" } },
+    };
+    const classify = async (indexes: unknown[]) => {
+      indexesSpy.mockResolvedValueOnce(indexes as any);
+      return (await ensureSlipGuestExpiryIndex()).existingIndex;
+    };
+
+    expect(await classify([matching])).toBe("matching");
+    expect(await classify([{ name: "other", key: { userId: 1 } }])).toBe(
+      "missing"
+    );
+    for (const lookAlike of [
+      { ...matching, expireAfterSeconds: 60 },
+      { ...matching, expireAfterSeconds: undefined },
+      { ...matching, partialFilterExpression: undefined },
+      {
+        ...matching,
+        partialFilterExpression: { guestExpiresAt: { $type: "string" } },
+      },
+      { ...matching, key: { guestExpiresAt: -1 } },
+      { ...matching, key: { guestExpiresAt: 1, userId: 1 } },
+      { ...matching, key: { userId: 1 } },
+      { ...matching, name: "other_name" },
+    ]) {
+      expect(await classify([lookAlike])).toBe("conflicting");
+    }
+  });
+
+  it("keeps the draft index report independent of the TTL index", async () => {
+    await ensureSlipGuestExpiryIndex({ apply: true });
+
+    const draftReport = await ensureSlipDraftIndex({ apply: true });
+
+    expect(draftReport.ready).toBe(true);
+    expect(draftReport.changed).toBe(1);
+    expect(draftReport.existingIndex).toBe("missing");
+    expect(draftReport.indexName).toBe(SLIP_DRAFT_UNIQUE_INDEX_NAME);
+    expect(await guardedIndex()).toBeTruthy();
+    expect(await guestExpiryIndexes()).toHaveLength(1);
+  });
 });

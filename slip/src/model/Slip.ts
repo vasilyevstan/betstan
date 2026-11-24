@@ -21,6 +21,17 @@ const SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER = {
   },
 } as const;
 
+const SLIP_GUEST_EXPIRY_INDEX_NAME = "slip_guest_expiry_ttl";
+const SLIP_GUEST_EXPIRY_INDEX_KEYS = {
+  guestExpiresAt: 1,
+} as const;
+const SLIP_GUEST_EXPIRY_INDEX_TTL_SECONDS = 0;
+const SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER = {
+  guestExpiresAt: {
+    $type: "date",
+  },
+} as const;
+
 const affectedRowSchema = new Schema(
   {
     reasonCodes: { type: [String], default: undefined },
@@ -359,6 +370,9 @@ const slipSchema = new Schema({
   legacyBoardConfirmedAt: {
     type: String,
   },
+  guestExpiresAt: {
+    type: Date,
+  },
   legacyBoardConfirmations: {
     type: [legacyBoardConfirmationSchema],
     default: undefined,
@@ -399,4 +413,8 @@ export {
   SLIP_DRAFT_UNIQUE_INDEX_NAME,
   SLIP_DRAFT_UNIQUE_INDEX_KEYS,
   SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+  SLIP_GUEST_EXPIRY_INDEX_NAME,
+  SLIP_GUEST_EXPIRY_INDEX_KEYS,
+  SLIP_GUEST_EXPIRY_INDEX_TTL_SECONDS,
+  SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER,
 };

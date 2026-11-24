@@ -3,6 +3,7 @@ import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import axios from 'axios';
 import ProductCS from './ProductCS';
+import { BET_KIND } from '../../../liveBettingUtils';
 
 jest.mock('axios', () => ({
   post: jest.fn(),
@@ -58,6 +59,8 @@ describe('ProductCS', () => {
         oddsId: 'home',
       });
       expect(onSelectionPlaced).toHaveBeenCalledTimes(1);
+      // The slip opens its Pre-match tab for a pre-match pick.
+      expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
     });
   });
 
@@ -166,6 +169,7 @@ describe('ProductCS', () => {
       await latestRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('button', {
       name: 'Select Correct score 1-1 at 6',
@@ -220,6 +224,7 @@ describe('ProductCS', () => {
       await olderRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Selection could not be added to your slip. Please try again.'
     );

@@ -48,7 +48,7 @@ Use references in this order:
 1. Accepted product semantics and information that affects a betting decision.
 2. Shared application shell, navigation, global variables, and repeated
    components.
-3. Stable patterns repeated across `/`, `/bets`, `/login`, `/signup`, and
+3. Stable patterns repeated across `/`, `/bets`, `/login` (with its `/signup` alias), and
    `/backoffice`.
 4. The closest sibling component with the same purpose and state model.
 5. Supplied screenshots or design examples.
@@ -90,7 +90,11 @@ may include:
 - Standard, Compact, and Spacious (`ui=v1`, `ui=v2`, and `ui=v3`) plus
   light/dark only where the changed primitive is shared;
 - anonymous, ordinary-user, and backoffice visibility where authorization
-  changes presentation.
+  changes presentation; an anonymous slip can hold picks but shows
+  **Log in to bet** instead of placement;
+- tabbed surfaces (the Slip's Pre-match/Live tabs and the authentication
+  page's Log in/Create account tabs) share one `TabList` component, so verify
+  roles, active state and keyboard behavior once for the shared primitive.
 
 Do not demand a full Cartesian test matrix when the same shared primitive and
 evidence prove several cells. Choose representative layout/theme/state samples

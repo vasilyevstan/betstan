@@ -1,8 +1,7 @@
 
 import React, { useState } from "react";
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import UseRequest from "../../hook/UseRequest";
-import AuthPanel from "./AuthPanel";
 import authCopy from "./authCopy.json";
 
 const HandleNewUser = ({ callback }) => {
@@ -29,68 +28,51 @@ const HandleNewUser = ({ callback }) => {
   };
 
   return (
-    <AuthPanel
-      icon="/icons/signup.svg"
-      title={authCopy.signup.title}
-      subtitle="Choose a username and password to get started."
-      footer={(
-        <>
-          <span>Already have an account?</span>
-          <Link
-            className="auth-card__link inline-control-target"
-            to={{ pathname: '/login', search: location.search }}
-          >
-            Log in
-          </Link>
-        </>
-      )}
-    >
-      <form className="auth-form" onSubmit={onSubmit}>
-        <div className="auth-field">
-          <label className="auth-label" htmlFor="signup-identifier">Username</label>
-          <input
-            id="signup-identifier"
-            name="username"
-            type="text"
-            value={identifier}
-            onChange={(event) => setIdentifier(event.target.value)}
-            className="form-control auth-control"
-            aria-describedby="signup-identifier-hint"
-            autoComplete="username"
-            autoCapitalize="none"
-            spellCheck={false}
-            minLength={3}
-            maxLength={40}
-            pattern="[A-Za-z0-9][A-Za-z0-9._%+@-]*"
-            required
-          />
-          <span className="auth-field__hint" id="signup-identifier-hint">
-            3–40 characters, no spaces
-          </span>
-        </div>
-        <div className="auth-field">
-          <label className="auth-label" htmlFor="signup-password">Password</label>
-          <input
-            id="signup-password"
-            name="password"
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            className="form-control auth-control"
-            aria-describedby="signup-password-hint"
-            autoComplete="new-password"
-            minLength={4}
-            maxLength={20}
-            required
-          />
-          <span className="auth-field__hint" id="signup-password-hint">
-            4–20 characters
-          </span>
-        </div>
-        <div className="auth-errors" aria-live="polite">{errors}</div>
-        <button className="btn auth-submit w-100" type="submit">{authCopy.signup.submit}</button>
-      </form>
-    </AuthPanel>
+    <form className="auth-form" onSubmit={onSubmit}>
+      <div className="auth-field">
+        <label className="auth-label" htmlFor="signup-identifier">Username</label>
+        <input
+          id="signup-identifier"
+          name="username"
+          type="text"
+          value={identifier}
+          onChange={(event) => setIdentifier(event.target.value)}
+          className="form-control auth-control"
+          aria-describedby="signup-identifier-hint"
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+          minLength={3}
+          maxLength={40}
+          pattern="[A-Za-z0-9][A-Za-z0-9._%+@-]*"
+          required
+        />
+        <span className="auth-field__hint" id="signup-identifier-hint">
+          3–40 characters, no spaces
+        </span>
+      </div>
+      <div className="auth-field">
+        <label className="auth-label" htmlFor="signup-password">Password</label>
+        <input
+          id="signup-password"
+          name="password"
+          type="password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          className="form-control auth-control"
+          aria-describedby="signup-password-hint"
+          autoComplete="new-password"
+          minLength={4}
+          maxLength={20}
+          required
+        />
+        <span className="auth-field__hint" id="signup-password-hint">
+          4–20 characters
+        </span>
+      </div>
+      <div className="auth-errors" aria-live="polite">{errors}</div>
+      <button className="btn auth-submit w-100" type="submit">{authCopy.signup.submit}</button>
+    </form>
   );
 };
 

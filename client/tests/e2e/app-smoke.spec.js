@@ -15,6 +15,15 @@ const prepareShell = async (page, overrides = {}) => {
   return state;
 };
 
+// One header icon opens the tabbed login page; Create account is a tab there, not a second icon.
+const expectSingleLogInEntry = async (page) => {
+  const header = page.getByRole('navigation', { name: 'Primary navigation' });
+  await expect(header.getByRole('link', { name: 'Log in', exact: true })).toHaveCount(1);
+  await expect(page.getByTitle('Log in')).toHaveCount(1);
+  await expect(header.getByRole('link', { name: 'Create account' })).toHaveCount(0);
+  await expect(header.getByTitle('Create account')).toHaveCount(0);
+};
+
 test('approved blue header and compact Backoffice controls retain representative geometry and contrast', async ({ page }, testInfo) => {
   const state = await prepareShell(page);
   state.backofficeEvents = createBackofficeEvents();
@@ -265,8 +274,8 @@ test('home page responds and renders shell', async ({ page }) => {
   await prepareShell(page);
 
   await page.goto('/', { waitUntil: 'domcontentloaded' });
-  await expect(page.locator('body')).toContainText('Create account');
   await expect(page.locator('body')).toContainText('Log in');
+  await expectSingleLogInEntry(page);
   expect(pageErrors).toEqual([]);
 });
 
@@ -276,7 +285,7 @@ test('variant query param keeps app functional', async ({ page }) => {
   await prepareShell(page);
 
   await page.goto('/?ui=v3', { waitUntil: 'domcontentloaded' });
-  await expect(page.locator('body')).toContainText('Create account');
+  await expectSingleLogInEntry(page);
   expect(pageErrors).toEqual([]);
 });
 
@@ -316,9 +325,7 @@ test('essential auth links meet the mobile target in every density profile', asy
   const state = await prepareShell(page);
   await page.setViewportSize({ width: 390, height: 844 });
 
-  const expectTarget = async (target, href) => {
-    await expect(target).toBeVisible();
-    await expect(target).toHaveAttribute('href', href);
+  const expectMeasuredTarget = async (target) => {
     const metrics = await target.evaluate((element) => {
       const bounds = element.getBoundingClientRect();
       return {
@@ -332,28 +339,41 @@ test('essential auth links meet the mobile target in every density profile', asy
     expect(metrics.overflow).toBeLessThanOrEqual(1);
   };
 
+  const expectTarget = async (target, href) => {
+    await expect(target).toBeVisible();
+    await expect(target).toHaveAttribute('href', href);
+    await expectMeasuredTarget(target);
+  };
+
+  // A tab is a button with no href, so activating it must reach the destination the link used to.
+  const expectTab = async (tab, destination) => {
+    await expect(tab).toBeVisible();
+    await expect(tab).toHaveAttribute('aria-selected', 'false');
+    await expectMeasuredTarget(tab);
+    await tab.click();
+    await expect(page).toHaveURL(destination);
+  };
+
   for (const uiVariant of ['v1', 'v2', 'v3']) {
     const query = `?ui=${uiVariant}&theme=light&review=auth-target`;
-    for (const { path, title, linkName, destination } of [
-      {
-        path: '/login',
-        title: authCopy.login.title,
-        linkName: 'Create an account',
-        destination: '/signup',
-      },
-      {
-        path: '/signup',
-        title: authCopy.signup.title,
-        linkName: 'Log in',
-        destination: '/login',
-      },
+    // The Create account and Log in cross-links are now the tabs of one page; Forgot password?
+    // and Back to log in are the essential links that remain.
+    for (const { path, title, tab, link, destination } of [
+      { path: '/login', title: authCopy.login.title, tab: 'Create account', destination: '/signup' },
+      { path: '/login', title: authCopy.login.title, link: 'Forgot password?', destination: '/forgot-password' },
+      { path: '/signup', title: authCopy.signup.title, tab: 'Log in', destination: '/login' },
+      { path: '/forgot-password', title: authCopy.forgotPassword.title, link: 'Back to log in', destination: '/login' },
     ]) {
       await page.goto(`${path}${query}`, { waitUntil: 'domcontentloaded' });
       await expect(page.getByRole('heading', { name: title })).toBeVisible();
-      await expectTarget(
-        page.locator('.auth-card__link.inline-control-target').filter({ hasText: linkName }),
-        `${destination}${query}`,
-      );
+      if (tab) {
+        await expectTab(page.getByRole('tab', { name: tab, exact: true }), `${destination}${query}`);
+      } else {
+        await expectTarget(
+          page.locator('.auth-card__link.inline-control-target').filter({ hasText: link }),
+          `${destination}${query}`,
+        );
+      }
     }
   }
 
@@ -411,7 +431,6 @@ test('expanded mobile navigation scrolls away without hiding labelled controls o
     'Light',
     'Backoffice',
     'Telemetry',
-    'Create account',
     'Log in',
   ];
 

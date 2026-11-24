@@ -13,6 +13,12 @@ import {
   normalizeBetKind,
 } from "../../model/slipSupport";
 import {
+  GUEST_DRAFT_ROW_CAP,
+  GUEST_PRINCIPAL_PREFIX,
+  isGuestPrincipal,
+  nextGuestExpiry,
+} from "../../service/guestIdentity";
+import {
   DraftTelemetryReporter,
   SlipTelemetryReporter,
 } from "../../service/TelemetryReporter";
@@ -78,13 +84,32 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
       return;
     }
 
+    const isGuest =
+      typeof userId === "string" && userId.startsWith(GUEST_PRINCIPAL_PREFIX);
+
+    // Custom-market quotes are user-only: a guest row would later be merged into
+    // a user draft without the authoritative quote validation.
+    if (
+      isGuest
+      && (!isGuestPrincipal(userId) || event.data.marketBet !== undefined)
+    ) {
+      console.warn("slip_guest_selection_dropped");
+      this.ack(msg);
+      return;
+    }
+
     const { wasInserted, accepted } = await upsertDraftSlipRow(
       userId,
       betKind,
-      buildSlipRow(event, betKind)
+      buildSlipRow(event, betKind),
+      undefined,
+      isGuest
+        ? { maxRows: GUEST_DRAFT_ROW_CAP, expiresAt: nextGuestExpiry() }
+        : undefined
     );
     if (!accepted) console.warn("slip_selection_not_applied_review_current_board");
-    if (wasInserted) {
+    // SLIP_CREATED keeps meaning "authenticated draft created".
+    if (wasInserted && !isGuest) {
       try {
         this.telemetry.reportSlipCreated();
       } catch {

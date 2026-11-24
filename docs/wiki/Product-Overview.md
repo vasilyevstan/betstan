@@ -18,7 +18,7 @@ contain a deposit, withdrawal, card-payment, or external-wallet integration.
 | Event catalog | Upcoming fixtures show kickoff time, teams, 1X2, and Correct Score markets. |
 | Live football | A scheduled event moves into a live area and progresses through two halves, stoppage time, realistic restart incidents, a rotating maximum-six product set, and full-time. |
 | Countdown markets | Ten minutes before kickoff, the next event exposes a countdown and the Kickoff Team and Goal in First Minute products. |
-| Betting slips | Signed-in users can keep independent `PRE_MATCH` and `LIVE` slips open at the same time. A submitted slip can contain only one kind. |
+| Betting slips | One Slip window with **Pre-match** and **Live** tabs holds independent `PRE_MATCH` and `LIVE` drafts. Visitors can add picks as guest drafts that merge into their account on login; placing a bet requires login. A submitted slip can contain only one kind. |
 | Moderation | Every submitted slip is checked against current event phase, market status, selection identity, quote version, and quote lifetime. |
 | Risk Centre | Deployment-gated public rule management beside Market designer: acceptance delays, stake/product restrictions and accounting-backed admission controls inside Moderation; see [[Risk Centre]]. |
 | Settlement | Pre-match and live rows are settled from authoritative match and market outcomes, then rolled up into the final bet result. |
@@ -82,7 +82,8 @@ A visitor can:
 1. Browse upcoming, countdown, live, and recently finished events.
 2. Watch live scores, incidents, and markets update over Server-Sent Events.
 3. Open the public Backoffice and use its bounded event controls.
-4. Sign up or sign in before submitting a wager.
+4. Add picks to the Slip as a guest, then log in or create an account before
+   placing a wager.
 
 ### Signed-in player
 

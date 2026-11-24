@@ -10,6 +10,10 @@ import {
 const BOARD_KINDS = [BET_KIND.PRE_MATCH, BET_KIND.LIVE];
 const POLL_INTERVAL_MS = 2000;
 const REFRESH_DELAY_MS = 250;
+// A guest is identified by an HttpOnly cookie the client never sees, so this marker only
+// distinguishes the guest session from a signed-in user's id inside the hook.
+const GUEST_PRINCIPAL = 'guest';
+const GUEST_LOAD_ERROR = 'Unable to load your slip right now.';
 const SLIP_STATUS = Object.freeze({
   DRAFT: 'DRAFT',
   SUBMITTED: 'SUBMITTED',
@@ -41,6 +45,7 @@ const CHANGED_PLACEMENT_ERROR = 'This slip changed after a previous placement at
 const RELOAD_REQUIRED_PLACEMENT_ERROR = 'This slip changed before placement. Review the latest selections and try again.';
 const BOARD_CONFIRMATION_MISSING_ERROR = 'Slip is refreshing. Wait for the latest selections before placing it again.';
 
+const isUserPrincipal = (principal) => Boolean(principal) && principal !== GUEST_PRINCIPAL;
 const getBoardId = (board) => board?._id ?? board?.id ?? null;
 const getRowId = (row) => row?._id ?? row?.id ?? null;
 const isSubmittedBoard = (board) => board?.status === SLIP_STATUS.SUBMITTED;
@@ -336,11 +341,14 @@ const mergePendingBoards = (authoritativeBoards, bets, previousPendingBoards) =>
   };
 };
 
-const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
+const useSlipBoards = ({ currentUser, isCurrentUserResolved, refreshSignal, onBoardSubmitted }) => {
   const [boards, setBoards] = useState(EMPTY_BOARDS);
   const [wagers, setWagers] = useState(EMPTY_WAGERS);
   const [errors, setErrors] = useState(EMPTY_ERRORS);
+  const [loadError, setLoadError] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  // The principal the stored boards, errors and pending state belong to.
+  const [dataPrincipal, setDataPrincipal] = useState('');
   const [pendingBoards, setPendingBoards] = useState({});
   const [submittingBoards, setSubmittingBoards] = useState({});
 
@@ -348,15 +356,24 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
   const mountedRef = useRef(false);
   const authContextRef = useRef({
-    userId: currentUserId,
+    principal: '',
     generation: 0,
   });
-  if (authContextRef.current.userId !== currentUserId) {
+  // The principal is the signed-in user's id, or the guest marker once auth has resolved with no
+  // user. While auth re-resolves with no user (for example during login) the previous principal
+  // is kept, so a guest's slip is not reloaded for nothing. Every change starts a new generation.
+  const nextPrincipal = currentUserId || (isCurrentUserResolved ? GUEST_PRINCIPAL : authContextRef.current.principal);
+  if (authContextRef.current.principal !== nextPrincipal) {
     authContextRef.current = {
-      userId: currentUserId,
+      principal: nextPrincipal,
       generation: authContextRef.current.generation + 1,
     };
   }
+  const principal = authContextRef.current.principal;
+  // After the principal changes, the previous principal's records are not exposed (not even for one
+  // commit) while the effect below resets them and the new principal's slip loads.
+  const isDataStale = Boolean(principal) && dataPrincipal !== principal;
+  const previousPrincipalRef = useRef('');
   const pollTimerRef = useRef(null);
   const refreshTimerRef = useRef(null);
   const pendingBoardsRef = useRef({});
@@ -387,7 +404,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
   const hasActiveAuthContext = useCallback((authContext) => (
     mountedRef.current
-    && authContextRef.current.userId === authContext.userId
+    && authContextRef.current.principal === authContext.principal
     && authContextRef.current.generation === authContext.generation
   ), []);
 
@@ -516,7 +533,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
   const loadBoards = useCallback(async ({ includeBets = true, authContext = getAuthContext() } = {}) => {
     const requestedAuthContext = authContext;
-    if (!requestedAuthContext.userId) {
+    if (!requestedAuthContext.principal) {
       return;
     }
 
@@ -539,10 +556,12 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
       pendingBoardsRef.current = merged.pendingBoards;
       setBoards(merged.boards);
       setPendingBoards(merged.pendingBoards);
+      setLoadError(null);
       setIsLoading(false);
 
       if (
         includeBets
+        && isUserPrincipal(requestedAuthContext.principal)
         && (hasTrackedPendingBoards(merged.pendingBoards) || hasAuthoritativeSubmittedBoards(authoritativeBoards))
       ) {
         void enrichBoardsWithHistory({ requestId, requestedAuthContext, authoritativeBoards });
@@ -550,6 +569,10 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     } catch (error) {
       if (canApplyRequest(requestId, requestedAuthContext)) {
         appliedRequestSequenceRef.current = requestId;
+        // A guest slip is never polled, so a failed load must not read as an empty slip.
+        if (requestedAuthContext.principal === GUEST_PRINCIPAL) {
+          setLoadError(GUEST_LOAD_ERROR);
+        }
         setIsLoading(false);
       }
     }
@@ -578,27 +601,35 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   }, [clearScheduledRefresh, stopPolling]);
 
   useEffect(() => {
+    const previousPrincipal = previousPrincipalRef.current;
+    previousPrincipalRef.current = principal;
+
     requestSequenceRef.current += 1;
     appliedRequestSequenceRef.current = requestSequenceRef.current;
     clearScheduledRefresh();
     stopPolling();
 
-    if (!currentUserId) {
-      pendingBoardsRef.current = {};
-      setPendingBoards({});
-      setBoards(EMPTY_BOARDS);
-      setErrors(EMPTY_ERRORS);
-      setWagers(EMPTY_WAGERS);
-      setSubmittingBoards({});
-      placementAttemptsRef.current = {};
-      setIsLoading(false);
+    // Auth has not resolved yet: nothing can be loaded, and the slip stays in its loading state.
+    if (!principal) {
       return;
     }
 
+    pendingBoardsRef.current = {};
+    setPendingBoards({});
+    setBoards(EMPTY_BOARDS);
     setErrors(EMPTY_ERRORS);
+    setLoadError(null);
+    setSubmittingBoards({});
+    setDataPrincipal(principal);
+    placementAttemptsRef.current = {};
+    // Wagers typed as a guest carry over to the signed-in user's matching slip; ending or
+    // switching a user's session clears them.
+    if (isUserPrincipal(previousPrincipal)) {
+      setWagers(EMPTY_WAGERS);
+    }
     setIsLoading(true);
     void loadBoards({ includeBets: true, authContext: getAuthContext() });
-  }, [clearScheduledRefresh, currentUserId, getAuthContext, loadBoards, stopPolling]);
+  }, [clearScheduledRefresh, getAuthContext, loadBoards, principal, stopPolling]);
 
   useEffect(() => {
     if (previousRefreshSignalRef.current === refreshSignal) {
@@ -610,7 +641,8 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   }, [refreshSignal, scheduleRefresh]);
 
   useEffect(() => {
-    if (!hasTrackedPendingBoards(pendingBoards)) {
+    // Only a signed-in user can have a submitted board to wait on; a guest slip is never polled.
+    if (!isUserPrincipal(principal) || !hasTrackedPendingBoards(pendingBoards)) {
       stopPolling();
       return undefined;
     }
@@ -629,9 +661,10 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     return () => {
       stopPolling();
     };
-  }, [getAuthContext, hasActiveAuthContext, loadBoards, pendingBoards, stopPolling]);
+  }, [getAuthContext, hasActiveAuthContext, loadBoards, pendingBoards, principal, stopPolling]);
 
-  const selectedSelectionKeys = useMemo(() => extractSelectionKeysFromBoards(boards), [boards]);
+  const visibleBoards = isDataStale ? EMPTY_BOARDS : boards;
+  const selectedSelectionKeys = useMemo(() => extractSelectionKeysFromBoards(visibleBoards), [visibleBoards]);
 
   const updateWager = useCallback((betKind, value) => {
     setWagers((currentWagers) => ({
@@ -850,10 +883,12 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   }), [pendingBoards, submittingBoards]);
 
   return {
-    boards,
+    boards: visibleBoards,
     wagers,
     errors,
-    isLoading,
+    isGuest: principal === GUEST_PRINCIPAL,
+    isLoading: isLoading || isDataStale,
+    loadError: isDataStale ? null : loadError,
     boardStateByKind,
     selectedSelectionKeys,
     updateWager,
@@ -866,6 +901,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 export default useSlipBoards;
 export {
   BOARD_KINDS,
+  GUEST_LOAD_ERROR,
   POLL_INTERVAL_MS,
   REFRESH_DELAY_MS,
   SLIP_STATUS,

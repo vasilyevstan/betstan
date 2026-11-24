@@ -5,6 +5,7 @@ import ProductsList from './product/ProductsList';
 import useLiveEvents from './useLiveEvents';
 import useNow from '../../hook/useNow';
 import {
+  BET_KIND,
   buildFinishedMatchTimeline,
   buildLiveMarketButtonLabel,
   formatCountdownDuration,
@@ -164,7 +165,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError('');
       }
-      onSelectionPlaced?.();
+      onSelectionPlaced?.(BET_KIND.LIVE);
     } catch {
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError(PLACEMENT_ERROR);

@@ -8,12 +8,22 @@ import {
   parseRequestedBetKind,
   persistSlipBoardIdentityIfNeeded,
 } from "../model/slipSupport";
+import { claimGuestDrafts } from "../service/guestClaim";
+import {
+  GUEST_PRINCIPAL_PREFIX,
+  SlipOwner,
+  clearGuestCookie,
+  readGuestCookie,
+  resolveSlipOwner,
+  toOwnerFacingSlip,
+} from "../service/guestIdentity";
 
 const router = express.Router();
 
 const prepareSlipForResponse = async (
   slip: Parameters<typeof normalizeSlip>[0],
   betKind: Parameters<typeof normalizeSlip>[1],
+  owner: SlipOwner,
   legacyConfirmationScope: string | null = null
 ) => {
   const authoritativeSlip = await persistSlipBoardIdentityIfNeeded(slip, {
@@ -23,30 +33,65 @@ const prepareSlipForResponse = async (
         : null,
   });
   normalizeSlip(authoritativeSlip, betKind);
-  return authoritativeSlip;
+  return toOwnerFacingSlip(owner, authoritativeSlip);
+};
+
+// Legacy confirmations belong to signed-in sessions; a guest never records one.
+const legacyConfirmationScopeFor = (owner: SlipOwner, req: Request) =>
+  owner.isGuest ? null : buildLegacyBoardSessionScope(req.session?.jwt);
+
+const claimGuestSlipOnLogin = async (
+  req: Request,
+  res: Response,
+  userId: string
+) => {
+  const guestId = readGuestCookie(req);
+
+  if (!guestId) {
+    return;
+  }
+
+  try {
+    const { remaining } = await claimGuestDrafts(
+      userId,
+      `${GUEST_PRINCIPAL_PREFIX}${guestId}`
+    );
+
+    if (!remaining) {
+      clearGuestCookie(res);
+    }
+  } catch {
+    // The signed-in boards must still load; the claim is retried on a later load.
+    console.error("slip_guest_claim_failed");
+  }
 };
 
 router.get("/api/slip/boards", async (req: Request, res: Response) => {
-  if (!req.currentUser) {
+  const owner = resolveSlipOwner(req);
+
+  if (!owner) {
     return res.send({
       [BetKind.PRE_MATCH]: null,
       [BetKind.LIVE]: null,
     });
   }
 
+  if (!owner.isGuest) {
+    await claimGuestSlipOnLogin(req, res, owner.id);
+  }
+
   const [foundPreMatchSlip, foundLiveSlip] = await Promise.all([
-    findActiveSlipForUser(req.currentUser.id, BetKind.PRE_MATCH),
-    findActiveSlipForUser(req.currentUser.id, BetKind.LIVE),
+    findActiveSlipForUser(owner.id, BetKind.PRE_MATCH),
+    findActiveSlipForUser(owner.id, BetKind.LIVE),
   ]);
-  const legacyConfirmationScope = buildLegacyBoardSessionScope(
-    req.session?.jwt
-  );
+  const legacyConfirmationScope = legacyConfirmationScopeFor(owner, req);
 
   const [preMatchSlip, liveSlip] = await Promise.all([
     foundPreMatchSlip
       ? prepareSlipForResponse(
           foundPreMatchSlip,
           BetKind.PRE_MATCH,
+          owner,
           legacyConfirmationScope
         )
       : Promise.resolve(null),
@@ -54,6 +99,7 @@ router.get("/api/slip/boards", async (req: Request, res: Response) => {
       ? prepareSlipForResponse(
           foundLiveSlip,
           BetKind.LIVE,
+          owner,
           legacyConfirmationScope
         )
       : Promise.resolve(null),
@@ -66,7 +112,9 @@ router.get("/api/slip/boards", async (req: Request, res: Response) => {
 });
 
 router.get("/api/slip", async (req: Request, res: Response) => {
-  if (!req.currentUser) {
+  const owner = resolveSlipOwner(req);
+
+  if (!owner) {
     return res.send({});
   }
 
@@ -76,14 +124,13 @@ router.get("/api/slip", async (req: Request, res: Response) => {
     return res.status(400).send({ message: "Invalid bet kind" });
   }
 
-  const foundSlip = await findDraftSlipForUser(req.currentUser.id, betKind);
-  const legacyConfirmationScope = buildLegacyBoardSessionScope(
-    req.session?.jwt
-  );
+  const foundSlip = await findDraftSlipForUser(owner.id, betKind);
+  const legacyConfirmationScope = legacyConfirmationScopeFor(owner, req);
   const slip = foundSlip
     ? await prepareSlipForResponse(
         foundSlip,
         betKind,
+        owner,
         legacyConfirmationScope
       )
     : null;

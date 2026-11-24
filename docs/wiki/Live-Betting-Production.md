@@ -3,7 +3,7 @@
 BetStan simulates a persisted, restart-safe football match over ten real
 minutes. Gamemaster owns the deterministic timeline, incidents, score, market
 versions, quote revisions, and final result. Event owns the public read model
-and SSE snapshots. Slip keeps independent live and pre-match boards.
+and SSE snapshots. Slip keeps independent live and pre-match drafts as tabs of one Slip window.
 Moderation revalidates phase and quote authority, Resulting settles market
 versions, and Bet exposes labelled history.
 
@@ -27,8 +27,8 @@ named-reference, cross-state, exception, and exact-head UX review contract.
   after `FIRST_MINUTE_ELAPSED`. The in-play set then rotates deterministically
   as next-incident markets settle, while terminal market versions remain in
   the authoritative snapshot for audit and settlement replay.
-- Live and pre-match selections never mix in one slip. Both boards may stay
-  open and retain independent wagers and submission state.
+- Live and pre-match selections never mix in one placed bet. Both tabs of the
+  one Slip window may stay open and retain independent wagers and submission state.
 - Live incidents include goals, yellow and red cards, corner kicks, notable
   free kicks, throw-ins, goal kicks, penalties, half-time, stoppage-time
   announcements, second-half kickoff, and full-time. Not every incident type

@@ -27,12 +27,32 @@ credentials, private data, or unredacted production evidence in an issue.
 - Login creates a signed JWT carried in the application session cookie.
 - Backend middleware verifies the JWT before attaching a current user.
 - User-scoped slips and bet history are queried by the verified user ID.
+- Visitors without a session may hold guest slip drafts, identified by an
+  `HttpOnly`, `SameSite=Lax`, 30-day `betstan_guest` cookie (`Secure` behind
+  HTTPS). The id is a bearer credential that is never returned to the browser.
+  Guest drafts are capped, expire, and cannot place bets or add custom-market
+  selections.
 - Session freshness and role changes are rechecked by Auth for privileged
   acceptance-only operations.
 - Client-side visibility is never treated as an authorization boundary.
 
 The shared JWT signing material is supplied from protected runtime secrets and
 is not stored in source or documentation.
+
+## Known risk: unauthenticated password reset
+
+`POST /api/auth/forgot-password` with `{email}` (a username or an email) is a
+deliberate product decision and a known security risk. The endpoint is
+unauthenticated and resets **any** account, including `ADMIN` accounts, to a
+public constant, `abcdef`, with no proof of ownership. It returns the same
+`200` reply whether or not the account exists. There is no email, token, rate
+limit or lockout, and sessions issued before the reset stay valid for up to 12
+hours.
+
+Anyone who knows or guesses an identifier can therefore take over that
+account. Do not treat accounts, including administrator accounts, as protected
+by their password in this product. The simulation uses nominal Stanbucks only.
+Access controls in [[Risk Centre]] do not gate this endpoint.
 
 ## Public Backoffice boundary
 
@@ -94,7 +114,8 @@ uploaded recovery evidence.
 
 ## Betting integrity
 
-- Live and pre-match rows cannot be mixed in one submitted slip.
+- Live and pre-match rows cannot be mixed in one submitted slip, even though
+  both kinds appear as tabs of one Slip window.
 - The server validates event phase, market status, market version, quote
   version, quote expiry, and selection identity.
 - A board revision and fingerprint bind placement to the board the user saw.

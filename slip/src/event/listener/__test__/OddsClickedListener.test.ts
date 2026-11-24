@@ -538,3 +538,319 @@ it("does not await optional telemetry initialization and contains its rejection"
     "private telemetry failure"
   );
 });
+
+describe("guest selections", () => {
+  const guestId = "0123456789abcdef0123456789abcdef";
+  const guestPrincipal = `guest:${guestId}`;
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+
+  const buildLiveEvent = (
+    userId: string,
+    index: number,
+    overrides: Partial<IEventOddsSelectedEvent["data"]> = {}
+  ) => {
+    const marketId = `event-live:MARKET_${index}`;
+
+    return buildEvent(userId, {
+      eventId: "event-live",
+      betKind: BetKind.LIVE,
+      marketId,
+      marketType: LiveMarketType.NEXT_CORNER,
+      marketVersion: 1,
+      quoteVersion: 1,
+      selectionId: `${marketId}:1:HOME`,
+      oddsId: `${marketId}:HOME`,
+      ...overrides,
+    });
+  };
+
+  const seedGuestLiveDraft = async (rowCount: number) => {
+    const timestamp = new Date().toISOString();
+
+    await Slip.collection.insertOne({
+      userId: guestPrincipal,
+      status: SlipStatus.DRAFT,
+      betKind: BetKind.LIVE,
+      draftKey: BetKind.LIVE,
+      timestamp,
+      boardRevision: 1,
+      boardFingerprint: "seed-fingerprint",
+      rows: Array.from({ length: rowCount }, (_value, index) => ({
+        _id: new mongoose.Types.ObjectId(),
+        eventId: "event-live",
+        eventName: "Team A - Team B",
+        oddsId: `event-live:MARKET_${index}:HOME`,
+        oddsValue: 1.5,
+        oddsName: "Team A",
+        productName: "NEXT_CORNER",
+        productId: `event-live:MARKET_${index}`,
+        timestamp,
+        betKind: BetKind.LIVE,
+        marketId: `event-live:MARKET_${index}`,
+        marketType: LiveMarketType.NEXT_CORNER,
+        marketVersion: 1,
+        quoteVersion: 1,
+        selectionId: `event-live:MARKET_${index}:1:HOME`,
+      })),
+    });
+  };
+
+  const guestDrafts = (betKind: BetKind) =>
+    Slip.find({
+      userId: guestPrincipal,
+      status: SlipStatus.DRAFT,
+      betKind,
+    }).lean();
+
+  it("stores a guest selection under the guest principal with a 30 day expiry", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    const ack = jest.spyOn(listener, "ack");
+    const msg = buildMessage();
+    await listener.init();
+
+    const before = Date.now();
+    await listener.onMessage(buildEvent(guestPrincipal), msg);
+    const after = Date.now();
+
+    const drafts = await Slip.find({ userId: guestPrincipal }).lean();
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].status).toEqual(SlipStatus.DRAFT);
+    expect(drafts[0].betKind).toEqual(BetKind.PRE_MATCH);
+    expect(drafts[0].rows).toHaveLength(1);
+    expect(drafts[0].guestExpiresAt).toBeInstanceOf(Date);
+    const expiresAt = drafts[0].guestExpiresAt!.getTime();
+    expect(expiresAt).toBeGreaterThanOrEqual(before + thirtyDaysMs);
+    expect(expiresAt).toBeLessThanOrEqual(after + thirtyDaysMs);
+    expect(ack).toHaveBeenCalledWith(msg);
+  });
+
+  it("keeps a guest's PRE_MATCH and LIVE drafts separate", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    await listener.init();
+
+    await listener.onMessage(buildEvent(guestPrincipal), buildMessage());
+    await listener.onMessage(buildLiveEvent(guestPrincipal, 1), buildMessage());
+
+    expect(await guestDrafts(BetKind.PRE_MATCH)).toHaveLength(1);
+    expect(await guestDrafts(BetKind.LIVE)).toHaveLength(1);
+  });
+
+  it("refreshes the expiry on every guest write", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    await listener.init();
+    const event = buildEvent(guestPrincipal);
+    await listener.onMessage(event, buildMessage());
+
+    const nearExpiry = new Date(Date.now() + 60_000);
+    await Slip.collection.updateOne(
+      { userId: guestPrincipal },
+      { $set: { guestExpiresAt: nearExpiry } }
+    );
+
+    await listener.onMessage(event, buildMessage());
+
+    const [draft] = await Slip.find({ userId: guestPrincipal }).lean();
+    expect(draft.rows).toHaveLength(1);
+    expect(draft.guestExpiresAt!.getTime()).toBeGreaterThan(
+      Date.now() + thirtyDaysMs - 60_000
+    );
+  });
+
+  it("applies the user draft rules to guest clicks: duplicates are no-ops and a LIVE market is replaced", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    await listener.init();
+
+    const duplicate = buildEvent(guestPrincipal);
+    await listener.onMessage(duplicate, buildMessage());
+    const [afterFirst] = await guestDrafts(BetKind.PRE_MATCH);
+    await listener.onMessage(duplicate, buildMessage());
+    const [afterDuplicate] = await guestDrafts(BetKind.PRE_MATCH);
+
+    expect(afterDuplicate.rows).toHaveLength(1);
+    expect(afterDuplicate.boardRevision).toEqual(afterFirst.boardRevision);
+    expect(afterDuplicate.boardFingerprint).toEqual(
+      afterFirst.boardFingerprint
+    );
+
+    await listener.onMessage(buildLiveEvent(guestPrincipal, 1), buildMessage());
+    await listener.onMessage(
+      buildLiveEvent(guestPrincipal, 1, {
+        oddsId: "event-live:MARKET_1:AWAY",
+        selectionId: "event-live:MARKET_1:1:AWAY",
+        oddsValue: 2.25,
+      }),
+      buildMessage()
+    );
+
+    const [liveDraft] = await guestDrafts(BetKind.LIVE);
+    expect(liveDraft.rows).toHaveLength(1);
+    expect(liveDraft.rows[0].oddsValue).toEqual(2.25);
+    expect(liveDraft.rows[0].selectionId).toEqual("event-live:MARKET_1:1:AWAY");
+  });
+
+  it("coalesces simultaneous guest clicks into one shared draft", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    await listener.init();
+    await createGuardedDraftIndex();
+
+    await Promise.all([
+      listener.onMessage(buildEvent(guestPrincipal), buildMessage()),
+      listener.onMessage(buildEvent(guestPrincipal), buildMessage()),
+    ]);
+
+    const drafts = await guestDrafts(BetKind.PRE_MATCH);
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].rows).toHaveLength(2);
+  });
+
+  it("drops a click that would add a row beyond 50 and still updates an existing market", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    const ack = jest.spyOn(listener, "ack");
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    await listener.init();
+    await seedGuestLiveDraft(49);
+
+    await listener.onMessage(buildLiveEvent(guestPrincipal, 49), buildMessage());
+    const [full] = await guestDrafts(BetKind.LIVE);
+    expect(full.rows).toHaveLength(50);
+
+    const overflow = buildMessage();
+    await listener.onMessage(buildLiveEvent(guestPrincipal, 50), overflow);
+
+    const [afterOverflow] = await guestDrafts(BetKind.LIVE);
+    expect(afterOverflow.rows).toHaveLength(50);
+    expect(
+      afterOverflow.rows.some((row) => row.marketId === "event-live:MARKET_50")
+    ).toBe(false);
+    expect(afterOverflow.boardRevision).toEqual(full.boardRevision);
+    expect(afterOverflow.boardFingerprint).toEqual(full.boardFingerprint);
+    expect(ack).toHaveBeenCalledWith(overflow);
+    expect(warn).toHaveBeenCalledWith(
+      "slip_selection_not_applied_review_current_board"
+    );
+
+    await listener.onMessage(
+      buildLiveEvent(guestPrincipal, 3, {
+        oddsId: "event-live:MARKET_3:AWAY",
+        selectionId: "event-live:MARKET_3:1:AWAY",
+        oddsValue: 3.1,
+      }),
+      buildMessage()
+    );
+
+    const [afterUpdate] = await guestDrafts(BetKind.LIVE);
+    expect(afterUpdate.rows).toHaveLength(50);
+    expect(
+      afterUpdate.rows.find((row) => row.marketId === "event-live:MARKET_3")
+    ).toMatchObject({ oddsValue: 3.1, oddsId: "event-live:MARKET_3:AWAY" });
+    expect(afterUpdate.boardRevision).toBeGreaterThan(full.boardRevision!);
+
+    await listener.onMessage(buildEvent(guestPrincipal), buildMessage());
+    expect(await guestDrafts(BetKind.PRE_MATCH)).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it("never lets simultaneous guest clicks exceed the cap", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    await listener.init();
+    await seedGuestLiveDraft(45);
+
+    await Promise.all(
+      Array.from({ length: 12 }, (_value, index) =>
+        listener.onMessage(
+          buildLiveEvent(guestPrincipal, 100 + index),
+          buildMessage()
+        )
+      )
+    );
+
+    const [draft] = await guestDrafts(BetKind.LIVE);
+    expect(draft.rows).toHaveLength(50);
+    warn.mockRestore();
+  });
+
+  it("reports SLIP_CREATED for a new user draft but never for a guest draft", async () => {
+    const telemetry = {
+      initialize: jest.fn().mockResolvedValue(undefined),
+      reportSlipCreated: jest.fn(),
+    };
+    const listener = new OddsClickedListener(
+      messengerWrapper.connection,
+      telemetry
+    );
+    await listener.init();
+
+    await listener.onMessage(buildEvent(guestPrincipal), buildMessage());
+    await listener.onMessage(buildLiveEvent(guestPrincipal, 1), buildMessage());
+    expect(telemetry.reportSlipCreated).not.toHaveBeenCalled();
+
+    const userId = new mongoose.Types.ObjectId().toHexString();
+    await listener.onMessage(buildEvent(userId), buildMessage());
+    expect(telemetry.reportSlipCreated).toHaveBeenCalledTimes(1);
+
+    const userDraft = await Slip.collection.findOne({ userId });
+    expect(userDraft).not.toBeNull();
+    expect(userDraft).not.toHaveProperty("guestExpiresAt");
+  });
+
+  it("still drops and acknowledges an empty userId", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    const ack = jest.spyOn(listener, "ack");
+    const msg = buildMessage();
+    await listener.init();
+
+    await listener.onMessage(buildEvent(""), msg);
+
+    expect(await Slip.countDocuments({})).toEqual(0);
+    expect(ack).toHaveBeenCalledWith(msg);
+  });
+
+  it.each([
+    ["only the prefix", "guest:"],
+    ["a short id", `guest:${guestId.slice(1)}`],
+    ["a long id", `guest:${guestId}0`],
+    ["an uppercase id", `guest:${guestId.toUpperCase()}`],
+    ["a non-hex id", `guest:${"z".repeat(32)}`],
+    ["a trailing newline", `guest:${guestId}\n`],
+    ["an embedded separator", `guest:${guestId.slice(0, 16)}:${guestId.slice(16)}`],
+  ])("drops and acknowledges a malformed guest principal: %s", async (_name, userId) => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    const ack = jest.spyOn(listener, "ack");
+    const msg = buildMessage();
+    await listener.init();
+
+    await listener.onMessage(buildEvent(userId), msg);
+
+    expect(await Slip.countDocuments({})).toEqual(0);
+    expect(ack).toHaveBeenCalledWith(msg);
+  });
+
+  it("keeps treating other non-empty ids as ordinary users", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    await listener.init();
+
+    await listener.onMessage(buildEvent("Guest:not-a-guest"), buildMessage());
+
+    const draft = await Slip.collection.findOne({ userId: "Guest:not-a-guest" });
+    expect(draft).not.toBeNull();
+    expect(draft).not.toHaveProperty("guestExpiresAt");
+  });
+
+  it("drops a guest selection that carries a custom market quote", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    const ack = jest.spyOn(listener, "ack");
+    const msg = buildMessage();
+    await listener.init();
+
+    await listener.onMessage(
+      buildEvent(guestPrincipal, {
+        marketBet: { quoteId: "quote-1" } as never,
+      }),
+      msg
+    );
+
+    expect(await Slip.countDocuments({})).toEqual(0);
+    expect(ack).toHaveBeenCalledWith(msg);
+  });
+});

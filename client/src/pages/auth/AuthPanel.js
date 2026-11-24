@@ -11,7 +11,7 @@ const AuthPanel = ({ icon, title, subtitle, children, footer }) => (
         <p className="auth-card__subtitle">{subtitle}</p>
       </header>
       {children}
-      <footer className="auth-card__footer">{footer}</footer>
+      {footer ? <footer className="auth-card__footer">{footer}</footer> : null}
     </div>
   </section>
 );

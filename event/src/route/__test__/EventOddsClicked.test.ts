@@ -940,3 +940,239 @@ it("rejects a pre-kickoff market selection once it has closed at kickoff", async
 
   expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
 });
+
+describe("guest identity stamping", () => {
+  const GUEST_COOKIE = "betstan_guest";
+  const GUEST_ID = "0123456789abcdef0123456789abcdef";
+  const OTHER_GUEST_ID = "fedcba9876543210fedcba9876543210";
+  const GUEST_ID_FORMAT = /^[a-f0-9]{32}$/;
+  const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60;
+
+  const livePick = {
+    eventId: "test-event-id",
+    marketId: "market-1",
+    marketVersion: 2,
+    quoteVersion: 4,
+    selectionId: "home",
+  };
+  const preMatchPick = {
+    eventId: "test-event-id",
+    productId: "product-1",
+    oddsId: "odds-1",
+  };
+
+  const clickPaths = [
+    { label: "live", seed: () => createLiveEvent(), pick: livePick },
+    { label: "pre-match", seed: () => createPreMatchEvent(), pick: preMatchPick },
+  ];
+
+  const publishedUserIds = () =>
+    jest
+      .mocked(EventOddsSelectedPublisher.prototype.publish)
+      .mock.calls.map(([published]) => published.data.userId);
+
+  const parseSetCookie = (setCookie: string) => {
+    const [pair, ...rest] = setCookie.split(";").map((part) => part.trim());
+    const attributes: Record<string, string> = {};
+    for (const attribute of rest) {
+      const separator = attribute.indexOf("=");
+      const key = separator === -1 ? attribute : attribute.slice(0, separator);
+      attributes[key.toLowerCase()] =
+        separator === -1 ? "" : attribute.slice(separator + 1);
+    }
+    const separator = pair.indexOf("=");
+    return {
+      name: pair.slice(0, separator),
+      value: pair.slice(separator + 1),
+      attributes,
+    };
+  };
+
+  /** Asserts the one and only Set-Cookie is the guest cookie and returns its id. */
+  const expectOnlyGuestCookie = (
+    response: request.Response,
+    { secure = false } = {}
+  ): string => {
+    const setCookie = response.get("Set-Cookie") ?? [];
+    expect(setCookie).toHaveLength(1);
+
+    const cookie = parseSetCookie(setCookie[0]);
+    expect(cookie.name).toBe(GUEST_COOKIE);
+    expect(cookie.value).toMatch(GUEST_ID_FORMAT);
+    expect(Object.keys(cookie.attributes).sort()).toEqual(
+      ["expires", "httponly", "max-age", "path", "samesite", ...(secure ? ["secure"] : [])].sort()
+    );
+    expect(cookie.attributes).toMatchObject({
+      httponly: "",
+      samesite: "Lax",
+      path: "/",
+      "max-age": String(THIRTY_DAYS_SECONDS),
+    });
+    expect(
+      Math.abs(
+        Date.parse(cookie.attributes.expires) - (Date.now() + THIRTY_DAYS_SECONDS * 1000)
+      )
+    ).toBeLessThan(60_000);
+
+    return cookie.value;
+  };
+
+  describe.each(clickPaths)("on the $label path", ({ seed, pick }) => {
+    it.each([
+      ["without a guest cookie", undefined],
+      ["with a valid guest cookie", `${GUEST_COOKIE}=${GUEST_ID}`],
+    ])("stamps a signed-in user and never touches the guest cookie %s", async (_label, guestCookie) => {
+      await seed();
+      const cookies = [buildSessionCookie("USER")[0], guestCookie]
+        .filter(Boolean)
+        .join("; ");
+
+      const response = await request(app)
+        .post("/api/event/odds")
+        .set("Cookie", cookies)
+        .send(pick)
+        .expect(200);
+
+      expect(response.headers["set-cookie"]).toBeUndefined();
+      expect(publishedUserIds()).toEqual(["user-id"]);
+    });
+
+    it("mints a distinct guest identity for each cookie-less guest click", async () => {
+      await seed();
+
+      const first = await request(app).post("/api/event/odds").send(pick).expect(200);
+      const second = await request(app).post("/api/event/odds").send(pick).expect(200);
+
+      const firstId = expectOnlyGuestCookie(first);
+      const secondId = expectOnlyGuestCookie(second);
+      expect(secondId).not.toBe(firstId);
+      expect(publishedUserIds()).toEqual([`guest:${firstId}`, `guest:${secondId}`]);
+    });
+
+    it("reuses a valid guest cookie and refreshes it", async () => {
+      await seed();
+
+      const response = await request(app)
+        .post("/api/event/odds")
+        .set("Cookie", `theme=dark; ${GUEST_COOKIE}=${GUEST_ID}; other=1`)
+        .send(pick)
+        .expect(200);
+
+      expect(expectOnlyGuestCookie(response)).toBe(GUEST_ID);
+      expect(publishedUserIds()).toEqual([`guest:${GUEST_ID}`]);
+    });
+
+    it.each([
+      ["uppercase hex", GUEST_ID.toUpperCase()],
+      ["a short id", GUEST_ID.slice(1)],
+      ["a long id", `${GUEST_ID}0`],
+      ["non-hex text", "g".repeat(32)],
+      ["a principal-prefixed id", `guest:${GUEST_ID}`],
+      ["an empty value", ""],
+    ])("replaces a malformed guest cookie (%s)", async (_label, malformed) => {
+      await seed();
+
+      const response = await request(app)
+        .post("/api/event/odds")
+        .set("Cookie", `${GUEST_COOKIE}=${malformed}`)
+        .send(pick)
+        .expect(200);
+
+      const mintedId = expectOnlyGuestCookie(response);
+      expect(mintedId).not.toBe(malformed);
+      expect(publishedUserIds()).toEqual([`guest:${mintedId}`]);
+    });
+
+    it("takes the first guest cookie, and does not fall through when it is malformed", async () => {
+      await seed();
+
+      const valid = await request(app)
+        .post("/api/event/odds")
+        .set("Cookie", `${GUEST_COOKIE}=${GUEST_ID}; ${GUEST_COOKIE}=${OTHER_GUEST_ID}`)
+        .send(pick)
+        .expect(200);
+      const malformedFirst = await request(app)
+        .post("/api/event/odds")
+        .set("Cookie", `${GUEST_COOKIE}=nope; ${GUEST_COOKIE}=${OTHER_GUEST_ID}`)
+        .send(pick)
+        .expect(200);
+
+      expect(expectOnlyGuestCookie(valid)).toBe(GUEST_ID);
+      const replacementId = expectOnlyGuestCookie(malformedFirst);
+      expect(replacementId).not.toBe(OTHER_GUEST_ID);
+      expect(publishedUserIds()).toEqual([`guest:${GUEST_ID}`, `guest:${replacementId}`]);
+    });
+
+    it.each([
+      ["https", true],
+      ["HTTPS", true],
+      ["https,http", true],
+      ["http", false],
+      ["http,https", false],
+      [undefined, false],
+    ])("sets Secure only when x-forwarded-proto is https (%s)", async (proto, secure) => {
+      await seed();
+      const click = request(app).post("/api/event/odds");
+      if (proto !== undefined) {
+        click.set("x-forwarded-proto", proto);
+      }
+
+      const response = await click.send(pick).expect(200);
+
+      expectOnlyGuestCookie(response, { secure });
+    });
+  });
+
+  it.each([
+    ["a missing event id", async () => undefined, { productId: "product-1", oddsId: "odds-1" }, 400],
+    ["an unknown event", () => createPreMatchEvent(), { ...preMatchPick, eventId: "nonexistent" }, 400],
+    [
+      "an offline event",
+      async () => {
+        const event = await createPreMatchEvent();
+        event.visibility = EventVisibility.OFFLINE;
+        await event.save();
+      },
+      preMatchPick,
+      401,
+    ],
+    ["unknown pre-match odds", () => createPreMatchEvent(), { ...preMatchPick, oddsId: "missing-odds" }, 400],
+    [
+      "a pre-match pick at kickoff",
+      () => createPreMatchEvent(new Date(Date.now() - 1000)),
+      preMatchPick,
+      400,
+    ],
+    ["a live market version mismatch", () => createLiveEvent(), { ...livePick, marketVersion: 3 }, 400],
+    [
+      "a stale live quote",
+      async () => {
+        await createLiveEvent();
+        await Event.updateOne(
+          { eventId: "test-event-id" },
+          {
+            $set: {
+              "live.currentMarkets.0.quoteValidUntil": new Date(Date.now() - 1_000).toISOString(),
+            },
+          }
+        );
+      },
+      livePick,
+      400,
+    ],
+  ])("sets no guest cookie and publishes nothing for %s", async (_label, seed, body, status) => {
+    await seed();
+
+    for (const cookie of [undefined, `${GUEST_COOKIE}=${GUEST_ID}`, `${GUEST_COOKIE}=nope`]) {
+      const click = request(app).post("/api/event/odds");
+      if (cookie !== undefined) {
+        click.set("Cookie", cookie);
+      }
+
+      const response = await click.send(body).expect(status);
+
+      expect(response.headers["set-cookie"]).toBeUndefined();
+    }
+    expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
+  });
+});

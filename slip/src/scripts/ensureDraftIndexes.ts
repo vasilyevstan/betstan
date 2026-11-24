@@ -5,6 +5,10 @@ import {
   SLIP_DRAFT_UNIQUE_INDEX_KEYS,
   SLIP_DRAFT_UNIQUE_INDEX_NAME,
   SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+  SLIP_GUEST_EXPIRY_INDEX_KEYS,
+  SLIP_GUEST_EXPIRY_INDEX_NAME,
+  SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER,
+  SLIP_GUEST_EXPIRY_INDEX_TTL_SECONDS,
 } from "../model/Slip";
 import { findDuplicateDrafts } from "./backfillDataCompatibility";
 
@@ -38,6 +42,14 @@ export interface DraftIndexReport {
   existingIndex: "missing" | "matching" | "conflicting";
   indexName: string;
   blocking: DraftNormalizationCounts;
+}
+
+export interface GuestExpiryIndexReport {
+  mode: "dry-run" | "apply";
+  ready: boolean;
+  changed: number;
+  existingIndex: "missing" | "matching" | "conflicting";
+  indexName: string;
 }
 
 type RawDocument = Record<string, unknown>;
@@ -86,6 +98,32 @@ const detectExistingIndex = (indexes: any[]): DraftIndexReport["existingIndex"] 
   }
 
   return "missing";
+};
+
+const isSingleGuestExpiryKey = (index: any): boolean =>
+  index?.key?.guestExpiresAt === SLIP_GUEST_EXPIRY_INDEX_KEYS.guestExpiresAt
+  && Object.keys(index.key).length === 1;
+
+const isMatchingGuestExpiryIndex = (index: any): boolean =>
+  index?.name === SLIP_GUEST_EXPIRY_INDEX_NAME
+  && isSingleGuestExpiryKey(index)
+  && index?.expireAfterSeconds === SLIP_GUEST_EXPIRY_INDEX_TTL_SECONDS
+  && index?.partialFilterExpression?.guestExpiresAt?.$type
+    === SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER.guestExpiresAt.$type;
+
+const detectExistingGuestExpiryIndex = (
+  indexes: any[]
+): GuestExpiryIndexReport["existingIndex"] => {
+  const namedIndex = indexes.find(
+    (index) => index?.name === SLIP_GUEST_EXPIRY_INDEX_NAME
+  );
+
+  if (namedIndex) {
+    return isMatchingGuestExpiryIndex(namedIndex) ? "matching" : "conflicting";
+  }
+
+  // The same key under another name cannot be created next to it.
+  return indexes.some(isSingleGuestExpiryKey) ? "conflicting" : "missing";
 };
 
 const listExistingIndexes = async (): Promise<any[]> => {
@@ -281,6 +319,33 @@ export const ensureSlipDraftIndex = async (
     existingIndex,
     indexName: SLIP_DRAFT_UNIQUE_INDEX_NAME,
     blocking,
+  };
+};
+
+export const ensureSlipGuestExpiryIndex = async (
+  options: Partial<ParsedEnsureArgs> = {}
+): Promise<GuestExpiryIndexReport> => {
+  const apply = options.apply ?? false;
+  const existingIndex = detectExistingGuestExpiryIndex(
+    await listExistingIndexes()
+  );
+  const ready = existingIndex !== "conflicting";
+  const shouldCreate = ready && apply && existingIndex === "missing";
+
+  if (shouldCreate) {
+    await Slip.collection.createIndex(SLIP_GUEST_EXPIRY_INDEX_KEYS, {
+      name: SLIP_GUEST_EXPIRY_INDEX_NAME,
+      expireAfterSeconds: SLIP_GUEST_EXPIRY_INDEX_TTL_SECONDS,
+      partialFilterExpression: SLIP_GUEST_EXPIRY_INDEX_PARTIAL_FILTER,
+    });
+  }
+
+  return {
+    mode: apply ? "apply" : "dry-run",
+    ready,
+    changed: shouldCreate ? 1 : 0,
+    existingIndex,
+    indexName: SLIP_GUEST_EXPIRY_INDEX_NAME,
   };
 };
 
