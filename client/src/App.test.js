@@ -26,6 +26,7 @@ jest.mock('./pages/Slip', () => (props) => (
     data-testid="slip"
     data-refresh-signal={props.refreshSignal}
     data-resolved={String(props.isCurrentUserResolved)}
+    data-lookup-failed={String(props.isCurrentUserLookupFailed)}
     data-tab-kind={props.tabRequest?.betKind ?? ''}
     data-tab-nonce={props.tabRequest?.nonce ?? ''}
   >
@@ -327,7 +328,54 @@ describe('App slip window requests', () => {
     await act(async () => { renderApp('/'); });
 
     expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
     expect(slip()).toHaveAttribute('data-tab-nonce', '');
+  });
+
+  it('tells the slip that a failed login lookup is not a guest', async () => {
+    axios.get.mockRejectedValue(new Error('auth unavailable'));
+
+    await act(async () => { renderApp('/'); });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'true');
+  });
+
+  it('clears the failed-lookup flag when the next lookup starts, and keeps it clear once that succeeds', async () => {
+    axios.get.mockRejectedValueOnce(new Error('auth unavailable'));
+    await act(async () => { renderApp('/login?ui=v2&theme=dark'); });
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'true');
+
+    let finishLookup;
+    axios.get.mockImplementationOnce(() => new Promise((resolve) => { finishLookup = resolve; }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete auth' }));
+    });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'false');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
+
+    await act(async () => { finishLookup({ data: { currentUser: { id: 'user-1' } } }); });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
+  });
+
+  it('ignores the failure of a lookup that a newer lookup has replaced', async () => {
+    let failFirstLookup;
+    axios.get.mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirstLookup = reject; }));
+    await act(async () => { renderApp('/login?ui=v2&theme=dark'); });
+    expect(slip()).toHaveAttribute('data-resolved', 'false');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete auth' }));
+    });
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+
+    await act(async () => { failFirstLookup(new Error('auth unavailable')); });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
   });
 
   it.each([

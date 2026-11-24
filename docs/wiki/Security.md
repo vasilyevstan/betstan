@@ -29,9 +29,19 @@ credentials, private data, or unredacted production evidence in an issue.
 - User-scoped slips and bet history are queried by the verified user ID.
 - Visitors without a session may hold guest slip drafts, identified by an
   `HttpOnly`, `SameSite=Lax`, 30-day `betstan_guest` cookie (`Secure` behind
-  HTTPS). The id is a bearer credential that is never returned to the browser.
-  Guest drafts are capped, expire, and cannot place bets or add custom-market
+  HTTPS). The cookie is a bearer credential. The slip principal is
+  `guest:<sha256 of the cookie>`; the raw cookie is never published, logged or
+  stored, and neither it nor the principal is returned to the browser. Guest
+  drafts are capped, expire, and cannot place bets or add custom-market
   selections.
+- On login, guest rows merge into the user's board, a guest live pick replaces the user's
+  pick on the same market, rows the user's board refuses are dropped, and the merged guest draft is deleted. The claim does not clear
+  the cookie; the 30-day TTL removes leftovers.
+
+Known risk: a guest pick without a cookie mints a new guest draft each time.
+The only bounds are the 30-day TTL and the 50-row cap per draft; there is no
+rate limit (ingress rate limiting is a follow-up). Two simultaneous first
+picks without a cookie can also lose one pick.
 - Session freshness and role changes are rechecked by Auth for privileged
   acceptance-only operations.
 - Client-side visibility is never treated as an authorization boundary.

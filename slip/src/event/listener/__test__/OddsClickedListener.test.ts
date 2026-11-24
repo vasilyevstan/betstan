@@ -540,8 +540,12 @@ it("does not await optional telemetry initialization and contains its rejection"
 });
 
 describe("guest selections", () => {
-  const guestId = "0123456789abcdef0123456789abcdef";
-  const guestPrincipal = `guest:${guestId}`;
+  // The event service publishes "guest:" + the SHA-256 hex digest of the cookie
+  // value, never the cookie value itself.
+  const guestDigest =
+    "3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9";
+  const rawCookieValue = "0123456789abcdef0123456789abcdef";
+  const guestPrincipal = `guest:${guestDigest}`;
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
   const buildLiveEvent = (
@@ -622,6 +626,17 @@ describe("guest selections", () => {
     expect(expiresAt).toBeGreaterThanOrEqual(before + thirtyDaysMs);
     expect(expiresAt).toBeLessThanOrEqual(after + thirtyDaysMs);
     expect(ack).toHaveBeenCalledWith(msg);
+  });
+
+  it("stores the published principal verbatim and nothing derived from the raw cookie value", async () => {
+    const listener = new OddsClickedListener(messengerWrapper.connection);
+    await listener.init();
+
+    await listener.onMessage(buildEvent(guestPrincipal), buildMessage());
+
+    const stored = await Slip.collection.find({}).toArray();
+    expect(stored.map((slip) => slip.userId)).toEqual([guestPrincipal]);
+    expect(JSON.stringify(stored)).not.toContain(rawCookieValue);
   });
 
   it("keeps a guest's PRE_MATCH and LIVE drafts separate", async () => {
@@ -808,12 +823,16 @@ describe("guest selections", () => {
 
   it.each([
     ["only the prefix", "guest:"],
-    ["a short id", `guest:${guestId.slice(1)}`],
-    ["a long id", `guest:${guestId}0`],
-    ["an uppercase id", `guest:${guestId.toUpperCase()}`],
-    ["a non-hex id", `guest:${"z".repeat(32)}`],
-    ["a trailing newline", `guest:${guestId}\n`],
-    ["an embedded separator", `guest:${guestId.slice(0, 16)}:${guestId.slice(16)}`],
+    ["a short digest", `guest:${guestDigest.slice(1)}`],
+    ["a long digest", `guest:${guestDigest}0`],
+    ["an uppercase digest", `guest:${guestDigest.toUpperCase()}`],
+    ["a non-hex digest", `guest:${"z".repeat(64)}`],
+    ["a trailing newline", `guest:${guestDigest}\n`],
+    [
+      "an embedded separator",
+      `guest:${guestDigest.slice(0, 32)}:${guestDigest.slice(32)}`,
+    ],
+    ["the raw 32 character cookie value", `guest:${rawCookieValue}`],
   ])("drops and acknowledges a malformed guest principal: %s", async (_name, userId) => {
     const listener = new OddsClickedListener(messengerWrapper.connection);
     const ack = jest.spyOn(listener, "ack");

@@ -7,7 +7,8 @@ const {
 } = require('./support/mockAppApi');
 
 // Browser-only claims for the unified Slip window: computed layout, the focus ring, the hidden
-// panel and real routing. Tab semantics and keyboard behaviour are proven by the unit tests.
+// panel, real routing and the order of requests around a login. Tab semantics and keyboard
+// behaviour are proven by the unit tests.
 const PRE_MATCH_DRAW = { eventId: 'prematch-1', productId: 'prematch-1x2', oddsId: 'draw' };
 const PRE_MATCH_HOME = { eventId: 'prematch-1', productId: 'prematch-1x2', oddsId: 'home' };
 const LIVE_CORNER_HOME = {
@@ -237,6 +238,55 @@ test('a guest builds a pre-match and a live slip that survive a reload, then "Lo
   await expect(page.getByRole('complementary', { name: 'Slip' }).getByRole('alert')).toHaveCount(0);
   expect(state.requestCount('POST /api/auth/login')).toBe(1);
   expect(state.requestCount('POST /api/slip/bet')).toBe(0);
+  expect(state.unhandledRequests).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});
+
+test('a login whose current-user lookup is still pending reads no boards as a guest, then loads the account slip once', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  const account = state.currentUser;
+  state.currentUser = null;
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const liveFeed = await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+  await mockSignIn(page, state, { account, heldPick: PRE_MATCH_HOME });
+  // The lookup that follows the login is held back, as on a slow connection.
+  let releaseLookup;
+  const lookupHeld = new Promise((resolve) => { releaseLookup = resolve; });
+  let lookupAfterLogin = false;
+  await page.route('**/api/auth/currentuser', async (route) => {
+    if (state.currentUser) {
+      lookupAfterLogin = true;
+      await lookupHeld;
+    }
+    await route.fallback();
+  });
+  await page.goto('/login?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expect(slipBoard(page, BET_KIND.PRE_MATCH)).toContainText('Build your pre-match slip');
+  const readsBeforeLogin = state.requestCount('GET /api/slip/boards');
+
+  await page.getByLabel('Username or email').fill(account.email);
+  await page.getByLabel('Password', { exact: true }).fill('Password123!');
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
+  await expect.poll(() => lookupAfterLogin).toBe(true);
+
+  // The slip refreshes 250 ms after a login. The server already answers for the account by then, so boards read
+  // before the lookup settles would show the account's slip as a guest's: nothing may be read for a whole second.
+  await page.waitForTimeout(1000);
+  expect(state.requestCount('GET /api/slip/boards')).toBe(readsBeforeLogin);
+  await expect(slipBoard(page, BET_KIND.PRE_MATCH)).toContainText('Build your pre-match slip');
+  await expect(slipTab(page, PRE_MATCH_TAB)).toHaveAccessibleName(/^Pre-match$/);
+
+  releaseLookup();
+  await expect(page).toHaveURL(/\/\?ui=v2&theme=dark$/);
+  await liveFeed.waitForSource();
+  await liveFeed.openAll();
+  await expect(slipTab(page, PRE_MATCH_TAB)).toHaveAccessibleName('Pre-match (1)');
+  await expect(slipBoard(page, BET_KIND.PRE_MATCH).locator('.slip-row-card__selection')).toHaveText('Falcons');
+  await expect(slipBoard(page, BET_KIND.PRE_MATCH).getByRole('button', { name: 'BET!', exact: true })).toBeEnabled();
+  await expect(page.locator('button', { hasText: 'Log in to bet' })).toHaveCount(0);
+  expect(state.requestCount('GET /api/slip/boards')).toBe(readsBeforeLogin + 1);
   expect(state.unhandledRequests).toEqual([]);
   expect(pageErrors).toEqual([]);
 });

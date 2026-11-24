@@ -631,14 +631,15 @@ selections use a balanced two-column grid inside that card.
 
 ### Betting slips
 
-One **Slip** window holds **Pre-match** and **Live** tabs, each with a count
-badge. Each tab keeps its own wager, errors, **BET** and **CLEAN** controls,
+One **Slip** window holds **Pre-match** and **Live** tabs; a tab shows a count
+badge only when it holds at least one pick. Each tab keeps its own wager,
+errors, **BET!** (signed-in) and **CLEAN** controls,
 and pending state; both panels stay mounted, so a typed wager survives a tab
 switch. Adding a pick jumps the window to the tab for that pick's kind. Bets are
 still placed per kind: the UI never merges the tabs into one combined
 placement.
 
-Signed-out visitors can add, remove and clear picks. Their **BET** control
+Signed-out visitors can add, remove and clear picks. Their bet control
 reads **Log in to bet** and opens `/login`; placing a bet and adding a
 custom-market selection both require login. After login the visitor's picks
 appear in the account's slip (see [[Application Processes]]).

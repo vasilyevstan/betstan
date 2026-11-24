@@ -10,10 +10,8 @@ import {
 } from "../model/slipSupport";
 import { claimGuestDrafts } from "../service/guestClaim";
 import {
-  GUEST_PRINCIPAL_PREFIX,
   SlipOwner,
-  clearGuestCookie,
-  readGuestCookie,
+  readGuestPrincipal,
   resolveSlipOwner,
   toOwnerFacingSlip,
 } from "../service/guestIdentity";
@@ -40,26 +38,17 @@ const prepareSlipForResponse = async (
 const legacyConfirmationScopeFor = (owner: SlipOwner, req: Request) =>
   owner.isGuest ? null : buildLegacyBoardSessionScope(req.session?.jwt);
 
-const claimGuestSlipOnLogin = async (
-  req: Request,
-  res: Response,
-  userId: string
-) => {
-  const guestId = readGuestCookie(req);
+// The guest cookie is left in place: a pick still in flight when the claim ran
+// is merged by the next load, and the TTL removes whatever is never claimed.
+const claimGuestSlipOnLogin = async (req: Request, userId: string) => {
+  const guestPrincipal = readGuestPrincipal(req);
 
-  if (!guestId) {
+  if (!guestPrincipal) {
     return;
   }
 
   try {
-    const { remaining } = await claimGuestDrafts(
-      userId,
-      `${GUEST_PRINCIPAL_PREFIX}${guestId}`
-    );
-
-    if (!remaining) {
-      clearGuestCookie(res);
-    }
+    await claimGuestDrafts(userId, guestPrincipal);
   } catch {
     // The signed-in boards must still load; the claim is retried on a later load.
     console.error("slip_guest_claim_failed");
@@ -77,7 +66,7 @@ router.get("/api/slip/boards", async (req: Request, res: Response) => {
   }
 
   if (!owner.isGuest) {
-    await claimGuestSlipOnLogin(req, res, owner.id);
+    await claimGuestSlipOnLogin(req, owner.id);
   }
 
   const [foundPreMatchSlip, foundLiveSlip] = await Promise.all([

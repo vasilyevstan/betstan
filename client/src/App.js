@@ -45,6 +45,9 @@ const App = () => {
 
   const [currentUser, setCurrentUser] = useState();
   const [isCurrentUserResolved, setIsCurrentUserResolved] = useState(false);
+  // A failed lookup still resolves (so account pages carry on as signed out), but it does not
+  // prove a guest: the slip must not load a guest's boards on its strength.
+  const [isCurrentUserLookupFailed, setIsCurrentUserLookupFailed] = useState(false);
   const [selectedSelectionKeys, setSelectedSelectionKeys] = useState(new Set());
   const [slipRefreshSignal, setSlipRefreshSignal] = useState(0);
   // The kind of the pick just placed; the nonce lets the same kind twice in a row re-activate its tab.
@@ -66,13 +69,17 @@ const App = () => {
   const fetchData = useCallback(async () => {
     const requestSequence = ++authRequestSequence.current;
     setIsCurrentUserResolved(false);
+    setIsCurrentUserLookupFailed(false);
     try {
       const response = await axios.get('/api/auth/currentuser');
       if (requestSequence !== authRequestSequence.current) return undefined;
       setCurrentUser(response.data.currentUser);
       return response.data.currentUser;
     } catch {
-      if (requestSequence === authRequestSequence.current) setCurrentUser();
+      if (requestSequence === authRequestSequence.current) {
+        setCurrentUser();
+        setIsCurrentUserLookupFailed(true);
+      }
     } finally {
       if (requestSequence === authRequestSequence.current) setIsCurrentUserResolved(true);
     }
@@ -218,6 +225,7 @@ const App = () => {
               <h2 className="app-sidebar__title" id="slips-region-heading">Slip</h2>
               <Slip
                 currentUser={currentUser}
+                isCurrentUserLookupFailed={isCurrentUserLookupFailed}
                 isCurrentUserResolved={isCurrentUserResolved}
                 onBoardSubmitted={refreshStats}
                 onSelectionKeysChange={setSelectedSelectionKeys}

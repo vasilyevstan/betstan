@@ -478,9 +478,10 @@ checks phase, market status, market and quote versions, quote expiry, and the
 selection inside the current market.
 
 Event resolves the principal for each click. A signed-in user is published as
-their user ID. A visitor without a session is published as `guest:<id>`: Event
-reuses a valid `betstan_guest` cookie or generates a new 32-hex id, and sets
-the cookie only once the click is accepted. The cookie is `HttpOnly`,
+their user ID. A visitor without a session is published as
+`guest:<sha256 of the cookie>`: Event reuses a valid `betstan_guest` cookie or
+generates a new 32-hex id, and sets the cookie only once the click is
+accepted. The raw cookie value is never published, logged or stored. The cookie is `HttpOnly`,
 `SameSite=Lax`, lasts 30 days and is `Secure` behind HTTPS.
 
 Slip upserts the selection into the draft whose kind matches the selection:
@@ -499,16 +500,18 @@ Guest drafts live in the same Slip collection under the guest principal.
 - Each guest write refreshes a 30-day expiry, enforced by the TTL index
   `slip_guest_expiry_ttl`.
 - Guest drafts do not emit `SLIP_CREATED`.
-- The guest id is a bearer credential in the HttpOnly cookie; Slip never
-  returns it, or the expiry, to the browser.
+- The cookie is a bearer credential held in an HttpOnly cookie. The guest
+  principal is a SHA-256 of it, and Slip never returns the principal or the
+  expiry to the browser.
 - Guests can add, remove and clear picks but cannot place bets or add
   custom-market selections.
 
 When a signed-in user calls `GET /api/slip/boards` carrying the guest cookie,
-Slip merges each guest draft into the user's draft of the same kind. On the
-same market the guest row wins. A kind where the user has a `SUBMITTED` slip is
-skipped and retried on a later load. Once no guest draft remains, the cookie is
-cleared; a failed merge never blocks loading the boards.
+Slip merges each guest draft into the user's draft of the same kind and then
+always deletes the merged guest draft; for the same market the guest's newer
+live pick replaces the user's, and a row the user's board refuses is dropped. A kind where the user has a `SUBMITTED` slip is skipped and
+retried on a later load. The claim does not clear the cookie; the TTL removes
+any leftover guest drafts. A failed merge never blocks loading the boards.
 
 ## Submitting a slip
 

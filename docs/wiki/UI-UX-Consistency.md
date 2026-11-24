@@ -94,7 +94,10 @@ may include:
   **Log in to bet** instead of placement;
 - tabbed surfaces (the Slip's Pre-match/Live tabs and the authentication
   page's Log in/Create account tabs) share one `TabList` component, so verify
-  roles, active state and keyboard behavior once for the shared primitive.
+  roles, active state and keyboard behavior once for the shared primitive;
+- the Slip reads boards only after the current-user lookup settles, and a
+  failed lookup is not treated as a guest. A failed load shows one alert and no
+  empty prompt. An active tab panel with nothing focusable takes `tabindex=0`.
 
 Do not demand a full Cartesian test matrix when the same shared primitive and
 evidence prove several cells. Choose representative layout/theme/state samples

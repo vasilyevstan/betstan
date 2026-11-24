@@ -96,6 +96,7 @@ const SlipBoardPanel = ({
   board,
   boardState,
   error,
+  hasLoadError,
   isGuest,
   onDeleteRow,
   onCleanBoard,
@@ -130,10 +131,11 @@ const SlipBoardPanel = ({
         <div id={`slip-board-title-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
         <span className={`bet-kind-badge bet-kind-badge--${betKind.toLowerCase()}`}>{getBetKindLabel(betKind)}</span>
       </div>
-      <div className="card card-body empty-state-card slip-board__empty-state">
+      {/* The prompt is for a board that loaded empty; a failed load says nothing about the board. */}
+      {hasLoadError ? null : <div className="card card-body empty-state-card slip-board__empty-state">
         <div className="slip-board__empty-main">{prompt.title}</div>
         <small className="text-secondary">{prompt.body}</small>
-      </div>
+      </div>}
       {error ? <div className="alert alert-danger slip-board__error" role="alert">{error}</div> : null}
     </section>;
   }
@@ -232,8 +234,15 @@ const SlipBoardPanel = ({
 
 const getRowCount = (board) => (Array.isArray(board?.rows) ? board.rows.length : 0);
 
+// A populated board is controls all the way down, but every one of them is disabled while it is
+// busy. A panel with nothing focusable in it is reachable only if it is itself focusable.
+const hasFocusableControls = (board, boardState) => (
+  getRowCount(board) > 0 && !boardState?.isSubmitting && !boardState?.isAwaitingDecision
+);
+
 const HandleSlip = ({
   currentUser,
+  isCurrentUserLookupFailed,
   isCurrentUserResolved,
   onBoardSubmitted,
   onSelectionKeysChange,
@@ -254,7 +263,13 @@ const HandleSlip = ({
     submitBoard,
     updateWager,
     wagers,
-  } = useSlipBoards({ currentUser, isCurrentUserResolved, refreshSignal, onBoardSubmitted });
+  } = useSlipBoards({
+    currentUser,
+    isCurrentUserLookupFailed,
+    isCurrentUserResolved,
+    refreshSignal,
+    onBoardSubmitted,
+  });
   const [activeKind, setActiveKind] = useState(BET_KIND.PRE_MATCH);
   // The first-load rule below must never override a tab the user (or a placed pick) already chose.
   const tabChosenRef = useRef(false);
@@ -279,7 +294,8 @@ const HandleSlip = ({
   }, [tabRequest]);
 
   useEffect(() => {
-    if (isLoading || initialTabResolvedRef.current) {
+    // A failed load has not shown the first boards yet, so the rule waits for one that did.
+    if (isLoading || loadError || initialTabResolvedRef.current) {
       return;
     }
 
@@ -291,7 +307,7 @@ const HandleSlip = ({
     ) {
       setActiveKind(BET_KIND.LIVE);
     }
-  }, [boards, isLoading]);
+  }, [boards, isLoading, loadError]);
 
   const selectTab = (betKind) => {
     tabChosenRef.current = true;
@@ -308,13 +324,18 @@ const HandleSlip = ({
   return <div className={`slip-boards slip-boards--${uiVariant}`}>
     {loadError ? <div className="alert alert-danger slip-board__error" role="alert">{loadError}</div> : null}
     <TabList idPrefix="slip" label="Slip" tabs={tabs} activeId={activeKind} onChange={selectTab} />
-    {BOARD_KINDS.map((betKind) => (
-      <div
+    {BOARD_KINDS.map((betKind) => {
+      const isActive = betKind === activeKind;
+      // WAI-ARIA tabs pattern: a shown panel with nothing focusable in it joins the tab sequence itself.
+      const hasFocusableContent = !isLoading && hasFocusableControls(boards[betKind], boardStateByKind[betKind]);
+
+      return <div
         key={betKind}
         role="tabpanel"
         id={`slip-panel-${betKind}`}
         aria-labelledby={`slip-tab-${betKind}`}
-        hidden={betKind !== activeKind}
+        hidden={!isActive}
+        tabIndex={isActive && !hasFocusableContent ? 0 : undefined}
       >
         {isLoading ? (
           <section
@@ -331,6 +352,7 @@ const HandleSlip = ({
             board={boards[betKind]}
             boardState={boardStateByKind[betKind]}
             error={errors[betKind]}
+            hasLoadError={Boolean(loadError)}
             isGuest={isGuest}
             onCleanBoard={cleanBoard}
             onDeleteRow={deleteRow}
@@ -340,8 +362,8 @@ const HandleSlip = ({
             wager={wagers[betKind]}
           />
         )}
-      </div>
-    ))}
+      </div>;
+    })}
   </div>;
 };
 

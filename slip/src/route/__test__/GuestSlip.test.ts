@@ -1,5 +1,6 @@
 import request from "supertest";
 import mongoose from "mongoose";
+import { createHash } from "crypto";
 import { app } from "../../app";
 import {
   Slip,
@@ -7,17 +8,28 @@ import {
   SLIP_DRAFT_UNIQUE_INDEX_NAME,
   SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
 } from "../../model/Slip";
-import { BetKind, SlipStatus } from "@betstan/common";
+import { PlainSlipRow, upsertDraftSlipRow } from "../../model/slipSupport";
+import { claimGuestDrafts } from "../../service/guestClaim";
+import {
+  GUEST_DRAFT_ROW_CAP,
+  nextGuestExpiry,
+} from "../../service/guestIdentity";
+import { BetKind, MarketBet, SlipStatus } from "@betstan/common";
 
+const sha256Hex = (value: string) =>
+  createHash("sha256").update(value).digest("hex");
+
+// The cookie values are what a browser holds; the slip service stores and
+// resolves only guest:<sha256 of the cookie value>.
 const guestId = "0123456789abcdef0123456789abcdef";
 const otherGuestId = "fedcba9876543210fedcba9876543210";
-const guestPrincipal = `guest:${guestId}`;
-const otherGuestPrincipal = `guest:${otherGuestId}`;
+const guestHash = sha256Hex(guestId);
+const otherGuestHash = sha256Hex(otherGuestId);
+const guestPrincipal = `guest:${guestHash}`;
+const otherGuestPrincipal = `guest:${otherGuestHash}`;
 const guestCookie = `betstan_guest=${guestId}`;
 const userId = new mongoose.Types.ObjectId().toHexString();
 const currentUserHeader = JSON.stringify({ id: userId, email: "test@test.com" });
-const clearedGuestCookie =
-  "betstan_guest=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax";
 
 const preMatchRow = (oddsId = new mongoose.Types.ObjectId().toHexString()) => ({
   _id: new mongoose.Types.ObjectId(),
@@ -52,6 +64,52 @@ const liveRow = (
   quoteVersion: 1,
   selectionId: `event-live:MARKET_${market}:1:${side}`,
 });
+
+// A custom-market pre-match row: the user's board refuses any other row on its
+// event, which is how a merged guest row ends up refused.
+const customMarketRow = (eventId: string): PlainSlipRow => {
+  const now = Date.now();
+  const quote: MarketBet = {
+    schemaVersion: 1,
+    kind: "SINGLE",
+    eventId,
+    quoteId: "quote-a",
+    issuedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 30_000).toISOString(),
+    odds: 2,
+    selections: [
+      {
+        origin: "TEMPLATE",
+        marketId: "manual-a",
+        outcomeKey: "a",
+        rulesRevision: 1,
+        quoteRevision: 2,
+        templateId: "template-a",
+        templateVersion: 1,
+        marketName: "Custom market",
+        label: "Home",
+        terms: "Operator declares the winner",
+        settlementMode: "MANUAL",
+        pricingMethod: "OPERATOR",
+      },
+    ],
+  };
+
+  return {
+    _id: new mongoose.Types.ObjectId(),
+    eventId,
+    eventName: "Home - Away",
+    oddsId: "market-odds",
+    oddsValue: quote.odds,
+    oddsName: "Home",
+    productName: "Custom market",
+    productId: "manual-a",
+    timestamp: "2030-01-01T12:00:00.000Z",
+    eventTime: "2030-01-01T12:00:00.000Z",
+    betKind: BetKind.PRE_MATCH,
+    marketBet: quote,
+  };
+};
 
 const createSlip = async ({
   ownerId,
@@ -227,6 +285,31 @@ describe("guest owner resolution", () => {
     expect(response.body._id).toEqual(userSlip.id);
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(1);
     expect(response.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("resolves the cookie value X to the owner guest:sha256(X), never to guest:X", async () => {
+    const hashed = await createSlip({
+      ownerId: guestPrincipal,
+      rows: [preMatchRow("odds-hashed")],
+    });
+    const decoyRow = preMatchRow("odds-decoy");
+    const decoy = await createSlip({
+      ownerId: `guest:${guestId}`,
+      rows: [decoyRow],
+    });
+
+    const boards = await getBoards({ Cookie: guestCookie }).expect(200);
+    const removal = await request(app)
+      .post("/api/slip/row")
+      .set("Cookie", guestCookie)
+      .send({ slipId: decoy.id, slipRowId: decoyRow._id.toString() })
+      .expect(400);
+
+    expect(guestPrincipal).toEqual(`guest:${sha256Hex(guestId)}`);
+    expect(boards.body.PRE_MATCH._id).toEqual(hashed.id);
+    expect(oddsIdsOf(boards.body.PRE_MATCH)).toEqual(["odds-hashed"]);
+    expect(removal.body.message).toEqual("slip does not exist");
+    expect((await Slip.findById(decoy.id))!.rows).toHaveLength(1);
   });
 
   describe("row removal", () => {
@@ -466,7 +549,7 @@ describe("claiming the guest slip on login", () => {
     expect(response.body.LIVE.userId).toEqual(userId);
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
     expect(await Slip.countDocuments({ userId })).toEqual(2);
-    expect(guestCookieHeaders(response)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(response)).toEqual([]);
   });
 
   it("moves a guest draft to a user without drafts and never gives the user's draft an expiry", async () => {
@@ -487,10 +570,10 @@ describe("claiming the guest slip on login", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]).not.toHaveProperty("guestExpiresAt");
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
-    expect(guestCookieHeaders(response)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(response)).toEqual([]);
   });
 
-  it("adds the Secure attribute to the clearing cookie only behind https", async () => {
+  it("never sets or clears the guest cookie while claiming, with or without https", async () => {
     await createSlip({ ownerId: guestPrincipal, rows: [preMatchRow()] });
 
     const secure = await getBoards({
@@ -503,10 +586,9 @@ describe("claiming the guest slip on login", () => {
       "x-forwarded-proto": "http",
     }).expect(200);
 
-    expect(guestCookieHeaders(secure)).toEqual([
-      "betstan_guest=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax",
-    ]);
-    expect(guestCookieHeaders(plain)).toEqual([clearedGuestCookie]);
+    expect(secure.headers["set-cookie"]).toBeUndefined();
+    expect(plain.headers["set-cookie"]).toBeUndefined();
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
   });
 
   it("skips a bet kind with a submitted board, leaves its guest draft and keeps the cookie", async () => {
@@ -552,7 +634,7 @@ describe("claiming the guest slip on login", () => {
     expect(oddsIdsOf(retried.body.PRE_MATCH)).toEqual(["odds-guest"]);
     expect(retried.body.PRE_MATCH.status).toEqual(SlipStatus.DRAFT);
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
-    expect(guestCookieHeaders(retried)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(retried)).toEqual([]);
   });
 
   it("also skips the bet kind when the user holds a draft next to the submitted board", async () => {
@@ -580,7 +662,7 @@ describe("claiming the guest slip on login", () => {
     expect(guestCookieHeaders(response)).toEqual([]);
   });
 
-  it("is idempotent: a repeated load changes nothing and still clears the cookie", async () => {
+  it("is idempotent: a repeated load changes nothing and leaves the cookie alone", async () => {
     await createSlip({
       ownerId: userId,
       rows: [preMatchRow("odds-user")],
@@ -601,8 +683,8 @@ describe("claiming the guest slip on login", () => {
     expect(second.body).toEqual(first.body);
     expect(await Slip.countDocuments({ userId })).toEqual(2);
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
-    expect(guestCookieHeaders(first)).toEqual([clearedGuestCookie]);
-    expect(guestCookieHeaders(second)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(first)).toEqual([]);
+    expect(guestCookieHeaders(second)).toEqual([]);
   });
 
   it("re-running a claim that stopped before deleting the guest draft yields the same boards", async () => {
@@ -633,7 +715,7 @@ describe("claiming the guest slip on login", () => {
     expect(response.body.LIVE.rows).toHaveLength(1);
     expect(response.body.LIVE.rows[0]._id).toEqual(mergedLive._id.toString());
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
-    expect(guestCookieHeaders(response)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(response)).toEqual([]);
   });
 
   it("copes with simultaneous loads of the same signed-in guest session", async () => {
@@ -716,16 +798,16 @@ describe("claiming the guest slip on login", () => {
       "odds-late",
     ]);
     expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
-    expect(guestCookieHeaders(second)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(second)).toEqual([]);
   });
 
-  it("clears a stale guest cookie when nothing is left to claim", async () => {
+  it("leaves a stale guest cookie alone when there is nothing to claim", async () => {
     await createSlip({ ownerId: userId, rows: [preMatchRow("odds-user")] });
 
     const response = await getBoards(signedIn).expect(200);
 
     expect(oddsIdsOf(response.body.PRE_MATCH)).toEqual(["odds-user"]);
-    expect(guestCookieHeaders(response)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(response)).toEqual([]);
   });
 
   it("does nothing without a guest cookie", async () => {
@@ -813,6 +895,184 @@ describe("claiming the guest slip on login", () => {
       "database unavailable"
     );
   });
+
+  it("drops a guest draft even when the user's board refused one of its rows, so a removed row never returns", async () => {
+    // The user's custom-market pick owns event-a: the guest's plain odds on that
+    // event are refused, the guest's pick on another event is accepted.
+    await upsertDraftSlipRow(userId, BetKind.PRE_MATCH, customMarketRow("event-a"), {
+      expectedBoardRevision: null,
+      expectedBoardFingerprint: null,
+      replaceEventSelections: false,
+    });
+    const refused = { ...preMatchRow("odds-x"), eventId: "event-a" };
+    await createSlip({
+      ownerId: guestPrincipal,
+      rows: [refused, preMatchRow("odds-y")],
+    });
+
+    const first = await getBoards(signedIn).expect(200);
+
+    expect(oddsIdsOf(first.body.PRE_MATCH).sort()).toEqual([
+      "market-odds",
+      "odds-y",
+    ]);
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
+
+    const pickY = first.body.PRE_MATCH.rows.find(
+      (row: { oddsId: string }) => row.oddsId === "odds-y"
+    );
+    await request(app)
+      .post("/api/slip/row")
+      .set("currentUser", currentUserHeader)
+      .send({ slipId: first.body.PRE_MATCH._id, slipRowId: pickY._id })
+      .expect(200);
+
+    const second = await getBoards(signedIn).expect(200);
+
+    expect(oddsIdsOf(second.body.PRE_MATCH)).toEqual(["market-odds"]);
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
+  });
+
+  it("does not bring a replaced pick back when an interrupted claim is retried", async () => {
+    await createSlip({
+      ownerId: guestPrincipal,
+      rows: [preMatchRow("odds-guest")],
+    });
+    await createSlip({
+      ownerId: guestPrincipal,
+      betKind: BetKind.LIVE,
+      rows: [liveRow(1)],
+    });
+    // The pre-match draft is merged and deleted, then the claim dies before the
+    // live draft is reached.
+    const realDeleteOne = Slip.deleteOne.bind(Slip);
+    jest.spyOn(Slip, "deleteOne").mockImplementationOnce(((
+      filter: Record<string, unknown>
+    ) =>
+      realDeleteOne(filter).then(() => {
+        throw new Error("connection lost");
+      })) as never);
+    jest.spyOn(console, "error").mockImplementation(() => {});
+
+    const interrupted = await getBoards(signedIn).expect(200);
+
+    expect(oddsIdsOf(interrupted.body.PRE_MATCH)).toEqual(["odds-guest"]);
+    expect(interrupted.body.LIVE).toBeNull();
+    expect(
+      await Slip.countDocuments({
+        userId: guestPrincipal,
+        betKind: BetKind.PRE_MATCH,
+      })
+    ).toEqual(0);
+    expect(
+      await Slip.countDocuments({
+        userId: guestPrincipal,
+        betKind: BetKind.LIVE,
+      })
+    ).toEqual(1);
+
+    // Before the retry the user swaps the claimed pick for another one.
+    await upsertDraftSlipRow(
+      userId,
+      BetKind.PRE_MATCH,
+      preMatchRow("odds-replacement")
+    );
+    const claimedPick = interrupted.body.PRE_MATCH.rows[0];
+    await request(app)
+      .post("/api/slip/row")
+      .set("currentUser", currentUserHeader)
+      .send({
+        slipId: interrupted.body.PRE_MATCH._id,
+        slipRowId: claimedPick._id,
+      })
+      .expect(200);
+
+    const retried = await getBoards(signedIn).expect(200);
+
+    expect(oddsIdsOf(retried.body.PRE_MATCH)).toEqual(["odds-replacement"]);
+    expect(retried.body.LIVE.rows).toHaveLength(1);
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
+  });
+
+  it("claims a pick that was still in flight at login on the next load, without touching the cookie", async () => {
+    await createSlip({
+      ownerId: guestPrincipal,
+      rows: [preMatchRow("odds-early")],
+    });
+
+    const first = await getBoards(signedIn).expect(200);
+
+    expect(oddsIdsOf(first.body.PRE_MATCH)).toEqual(["odds-early"]);
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
+    expect(guestCookieHeaders(first)).toEqual([]);
+
+    // The message for a click made before the login is only consumed now.
+    await upsertDraftSlipRow(
+      guestPrincipal,
+      BetKind.PRE_MATCH,
+      preMatchRow("odds-late"),
+      undefined,
+      { maxRows: GUEST_DRAFT_ROW_CAP, expiresAt: nextGuestExpiry() }
+    );
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(1);
+
+    const second = await getBoards(signedIn).expect(200);
+
+    expect(oddsIdsOf(second.body.PRE_MATCH).sort()).toEqual([
+      "odds-early",
+      "odds-late",
+    ]);
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
+    expect(guestCookieHeaders(second)).toEqual([]);
+  });
+
+  it("never claims a draft stored under the raw cookie value", async () => {
+    const decoy = await createSlip({
+      ownerId: `guest:${guestId}`,
+      rows: [preMatchRow("odds-decoy")],
+    });
+
+    const response = await getBoards(signedIn).expect(200);
+
+    expect(response.body).toEqual({ PRE_MATCH: null, LIVE: null });
+    expect(await Slip.findById(decoy.id)).not.toBeNull();
+    expect(await Slip.countDocuments({ userId })).toEqual(0);
+  });
+});
+
+describe("claimGuestDrafts", () => {
+  it("is a no-op when the guest has no draft, whatever the user's boards hold", async () => {
+    const userSlip = await createSlip({
+      ownerId: userId,
+      rows: [preMatchRow("odds-user")],
+    });
+    const before = await Slip.collection.findOne({ _id: userSlip._id });
+
+    await expect(
+      claimGuestDrafts(userId, guestPrincipal)
+    ).resolves.toBeUndefined();
+    await expect(
+      claimGuestDrafts(userId, guestPrincipal)
+    ).resolves.toBeUndefined();
+
+    expect(await Slip.collection.findOne({ _id: userSlip._id })).toEqual(before);
+    expect(await Slip.countDocuments({})).toEqual(1);
+  });
+
+  it("merges a guest draft once and leaves nothing to merge afterwards", async () => {
+    await createSlip({
+      ownerId: guestPrincipal,
+      rows: [preMatchRow("odds-guest")],
+    });
+
+    await claimGuestDrafts(userId, guestPrincipal);
+    const claimed = await Slip.collection.findOne({ userId });
+    await claimGuestDrafts(userId, guestPrincipal);
+
+    expect(oddsIdsOf(claimed as never)).toEqual(["odds-guest"]);
+    expect(await Slip.collection.findOne({ userId })).toEqual(claimed);
+    expect(await Slip.countDocuments({ userId: guestPrincipal })).toEqual(0);
+  });
 });
 
 describe("guest identity in responses", () => {
@@ -826,6 +1086,8 @@ describe("guest identity in responses", () => {
     expect(wire).not.toContain(guestId);
     expect(wire).not.toContain(guestId.toUpperCase());
     expect(wire).not.toContain(otherGuestId);
+    expect(wire).not.toContain(guestHash);
+    expect(wire).not.toContain(otherGuestHash);
     expect(wire).not.toContain("guestExpiresAt");
     expect(response.text).not.toMatch(/[a-f0-9]{32}/);
   };
@@ -1032,7 +1294,54 @@ describe("guest identity in responses", () => {
     expect(response.body.LIVE.rows).toHaveLength(1);
     expect(response.body.PRE_MATCH.userId).toEqual(userId);
     expect(response.body.LIVE.userId).toEqual(userId);
-    expect(guestCookieHeaders(response)).toEqual([clearedGuestCookie]);
+    expect(guestCookieHeaders(response)).toEqual([]);
     expectNoGuestIdentity(response);
+  });
+
+  it("keeps the raw cookie value out of stored drafts, responses and logs", async () => {
+    const sinks = (["log", "info", "warn", "error", "debug"] as const).map(
+      (method) => jest.spyOn(console, method).mockImplementation(() => {})
+    );
+    // The bet in flight keeps the guest's pre-match draft in place after the claim.
+    await createSlip({
+      ownerId: userId,
+      status: SlipStatus.SUBMITTED,
+      rows: [preMatchRow("odds-in-flight")],
+    });
+    const dropped = preMatchRow("odds-dropped");
+    const guestPreMatch = await createSlip({
+      ownerId: guestPrincipal,
+      rows: [preMatchRow("odds-kept"), dropped],
+    });
+    await createSlip({
+      ownerId: guestPrincipal,
+      betKind: BetKind.LIVE,
+      rows: [liveRow(1)],
+    });
+
+    const responses = [
+      await getBoards({ Cookie: guestCookie }).expect(200),
+      await request(app)
+        .post("/api/slip/row")
+        .set("Cookie", guestCookie)
+        .send({ slipId: guestPreMatch.id, slipRowId: dropped._id.toString() })
+        .expect(200),
+      await getBoards({
+        currentUser: currentUserHeader,
+        Cookie: guestCookie,
+      }).expect(200),
+    ];
+
+    for (const response of responses) {
+      expectNoGuestIdentity(response);
+    }
+    const storedDocuments = JSON.stringify(
+      await Slip.collection.find({}).toArray()
+    );
+    expect(storedDocuments).not.toContain(guestId);
+    expect(storedDocuments).toContain(guestHash);
+    const logged = JSON.stringify(sinks.map((sink) => sink.mock.calls));
+    expect(logged).not.toContain(guestId);
+    expect(logged).not.toContain(guestHash);
   });
 });

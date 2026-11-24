@@ -5,7 +5,13 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import Slip from './Slip';
 import { BET_KIND, BET_STATUS, getLiveSelectionKey, getPreMatchSelectionKey } from '../liveBettingUtils';
-import { GUEST_LOAD_ERROR, POLL_INTERVAL_MS, REFRESH_DELAY_MS, SLIP_STATUS } from '../hook/useSlipBoards';
+import {
+  LOGIN_UNCONFIRMED_ERROR,
+  POLL_INTERVAL_MS,
+  REFRESH_DELAY_MS,
+  SLIP_LOAD_ERROR,
+  SLIP_STATUS,
+} from '../hook/useSlipBoards';
 
 jest.mock('axios', () => ({
   get: jest.fn(),
@@ -294,6 +300,7 @@ describe('Slip', () => {
     rerender(
       <Slip
         currentUser={{ id: 'user-1' }}
+        isCurrentUserResolved
         onBoardSubmitted={jest.fn()}
         onSelectionKeysChange={jest.fn()}
         refreshSignal={1}
@@ -1102,6 +1109,7 @@ describe('Slip', () => {
     rerender(
       <Slip
         currentUser={{ id: 'user-1' }}
+        isCurrentUserResolved
         onBoardSubmitted={jest.fn()}
         onSelectionKeysChange={jest.fn()}
         refreshSignal={1}
@@ -1364,6 +1372,70 @@ describe('Slip', () => {
       fireEvent.keyDown(preMatchTab, { key: 'End' });
       expect(liveTab).toHaveFocus();
       expect(liveTab).toHaveAttribute('aria-selected', 'true');
+    });
+  });
+
+  describe('tabpanel focus', () => {
+    const panel = (betKind) => document.getElementById(`slip-panel-${betKind}`);
+
+    it('keeps a populated panel out of the tab sequence: its own controls are focusable', async () => {
+      await renderSlip();
+      await screen.findByLabelText('Wager for PRE-MATCH SLIP');
+
+      expect(panel(BET_KIND.PRE_MATCH)).toBeVisible();
+      expect(panel(BET_KIND.PRE_MATCH)).not.toHaveAttribute('tabindex');
+      expect(panel(BET_KIND.LIVE)).toHaveAttribute('hidden');
+      expect(panel(BET_KIND.LIVE)).not.toHaveAttribute('tabindex');
+    });
+
+    it('makes an empty shown panel focusable and moves that along with the tab', async () => {
+      boardsResponse = getBoardsPayload({ [BET_KIND.LIVE]: null });
+      await renderSlip();
+      await screen.findByLabelText('Wager for PRE-MATCH SLIP');
+
+      expect(panel(BET_KIND.PRE_MATCH)).not.toHaveAttribute('tabindex');
+      expect(panel(BET_KIND.LIVE)).not.toHaveAttribute('tabindex');
+
+      openTab('Live');
+
+      expect(screen.getByText('Build your live slip')).toBeVisible();
+      expect(panel(BET_KIND.LIVE)).not.toHaveAttribute('hidden');
+      expect(panel(BET_KIND.LIVE)).toHaveAttribute('tabindex', '0');
+      expect(panel(BET_KIND.PRE_MATCH)).toHaveAttribute('hidden');
+      expect(panel(BET_KIND.PRE_MATCH)).not.toHaveAttribute('tabindex');
+      panel(BET_KIND.LIVE).focus();
+      expect(panel(BET_KIND.LIVE)).toHaveFocus();
+
+      openTab('Pre-match');
+
+      expect(panel(BET_KIND.LIVE)).toHaveAttribute('hidden');
+      expect(panel(BET_KIND.LIVE)).not.toHaveAttribute('tabindex');
+      expect(panel(BET_KIND.PRE_MATCH)).not.toHaveAttribute('tabindex');
+    });
+
+    it('makes the shown panel focusable while the slip is loading', async () => {
+      await renderRouted({ isCurrentUserResolved: false });
+
+      expect(screen.getByText('Loading pre-match slip…')).toBeInTheDocument();
+      expect(panel(BET_KIND.PRE_MATCH)).toHaveAttribute('tabindex', '0');
+      expect(panel(BET_KIND.LIVE)).toHaveAttribute('hidden');
+      expect(panel(BET_KIND.LIVE)).not.toHaveAttribute('tabindex');
+    });
+
+    it('makes a populated panel focusable while every control in it is disabled', async () => {
+      boardsResponse = getBoardsPayload({
+        [BET_KIND.LIVE]: getSubmittedBoard(BET_KIND.LIVE, { _id: 'live-submitted-1' }),
+      });
+      betsResponse = [{ slipId: 'live-submitted-1', status: BET_STATUS.PENDING }];
+
+      await renderSlip();
+      await screen.findByText('Awaiting live moderation and approval…');
+      openTab('Live');
+
+      expect(screen.getByRole('button', { name: 'Awaiting review…' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'CLEAN' })).toBeDisabled();
+      expect(panel(BET_KIND.LIVE)).toHaveAttribute('tabindex', '0');
+      expect(panel(BET_KIND.PRE_MATCH)).not.toHaveAttribute('tabindex');
     });
   });
 
@@ -1818,7 +1890,7 @@ describe('Slip', () => {
 
       const { rerender } = await renderRouted();
 
-      expect(await screen.findByRole('alert')).toHaveTextContent(GUEST_LOAD_ERROR);
+      expect(await screen.findByRole('alert')).toHaveTextContent(SLIP_LOAD_ERROR);
       expect(screen.getByRole('tablist', { name: 'Slip' })).toBeInTheDocument();
 
       boardsAvailable = true;
@@ -1826,6 +1898,112 @@ describe('Slip', () => {
       await advanceTime(REFRESH_DELAY_MS);
 
       await screen.findByLabelText('Wager for PRE-MATCH SLIP');
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('load failures', () => {
+    const failBoards = () => {
+      axios.get.mockImplementation((url) => (
+        url === '/api/slip/boards'
+          ? Promise.reject(buildAxiosError({ status: 503 }))
+          : Promise.reject(new Error(`Unexpected GET ${url}`))
+      ));
+    };
+    const user = { id: 'user-1' };
+
+    it.each([
+      ['a guest', null],
+      ['a signed-in user', user],
+    ])('shows %s one alert and no empty-slip prompt when the slip cannot be loaded', async (_label, currentUser) => {
+      failBoards();
+
+      await renderRouted({ currentUser });
+
+      const alerts = await screen.findAllByRole('alert');
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toHaveTextContent(SLIP_LOAD_ERROR);
+      // Neither panel, shown or hidden, offers to build a slip as if it had loaded empty.
+      expect(screen.queryAllByText(/^Build your/)).toHaveLength(0);
+      expect(screen.queryAllByText(/compose your slip|keep live bets separate/)).toHaveLength(0);
+      expect(screen.queryAllByText(/^Loading /)).toHaveLength(0);
+      // The panels keep the headings the release gate selects, and the shown one stays reachable by keyboard.
+      expect(screen.getByRole('tablist', { name: 'Slip' })).toBeInTheDocument();
+      expect(document.querySelector('section[aria-labelledby="slip-board-title-PRE_MATCH"]')).toBeInTheDocument();
+      expect(document.querySelector('section[aria-labelledby="slip-board-title-LIVE"]')).toBeInTheDocument();
+      expect(document.getElementById('slip-panel-PRE_MATCH')).toHaveAttribute('tabindex', '0');
+      expect(screen.queryByRole('button', { name: 'Log in to bet' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'BET!' })).not.toBeInTheDocument();
+    });
+
+    it.each([
+      ['a guest', null],
+      ['a signed-in user', user],
+    ])('offers the empty-slip prompt to %s only once a read succeeds with an empty board', async (_label, currentUser) => {
+      let boardsAvailable = false;
+      axios.get.mockImplementation((url) => {
+        if (url === '/api/slip/boards') {
+          return boardsAvailable
+            ? Promise.resolve({ data: { [BET_KIND.PRE_MATCH]: null, [BET_KIND.LIVE]: null } })
+            : Promise.reject(buildAxiosError({ status: 503 }));
+        }
+
+        return Promise.reject(new Error(`Unexpected GET ${url}`));
+      });
+
+      const { rerender } = await renderRouted({ currentUser });
+      expect(await screen.findByRole('alert')).toHaveTextContent(SLIP_LOAD_ERROR);
+      expect(screen.queryAllByText(/^Build your/)).toHaveLength(0);
+
+      boardsAvailable = true;
+      rerender(routedElement({ currentUser, refreshSignal: 1 }));
+      await advanceTime(REFRESH_DELAY_MS);
+
+      expect(await screen.findByText('Build your pre-match slip')).toBeInTheDocument();
+      expect(screen.getByText('Build your live slip')).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(document.getElementById('slip-panel-PRE_MATCH')).toHaveAttribute('tabindex', '0');
+    });
+
+    it('keeps the rows it already shows and raises one alert when a later read fails', async () => {
+      const { rerender } = await renderRouted({ currentUser: user });
+      await screen.findByLabelText('Wager for PRE-MATCH SLIP');
+
+      failBoards();
+      rerender(routedElement({ currentUser: user, refreshSignal: 1 }));
+      await advanceTime(REFRESH_DELAY_MS);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(SLIP_LOAD_ERROR);
+      expect(screen.getAllByRole('alert')).toHaveLength(1);
+      expect(screen.getByText('Pre-match Clash')).toBeInTheDocument();
+      expect(screen.getByLabelText('Wager for PRE-MATCH SLIP')).toBeEnabled();
+      expect(screen.getByRole('tab', { name: 'Pre-match (1)' })).toBeInTheDocument();
+      expect(document.getElementById('slip-panel-PRE_MATCH')).not.toHaveAttribute('tabindex');
+    });
+
+    it('waits for a board that loaded before choosing the first tab', async () => {
+      let boardsAvailable = false;
+      axios.get.mockImplementation((url) => {
+        if (url === '/api/slip/boards') {
+          return boardsAvailable
+            ? Promise.resolve({ data: boardsResponse })
+            : Promise.reject(buildAxiosError({ status: 503 }));
+        }
+
+        return Promise.reject(new Error(`Unexpected GET ${url}`));
+      });
+      boardsResponse = getBoardsPayload({ [BET_KIND.PRE_MATCH]: null });
+
+      const { rerender } = await renderRouted({ currentUser: user });
+      await screen.findByRole('alert');
+      expect(screen.getByRole('tab', { name: 'Pre-match' })).toHaveAttribute('aria-selected', 'true');
+
+      boardsAvailable = true;
+      rerender(routedElement({ currentUser: user, refreshSignal: 1 }));
+      await advanceTime(REFRESH_DELAY_MS);
+
+      await screen.findByLabelText('Wager for LIVE SLIP');
+      expect(screen.getByRole('tab', { name: 'Live (1)' })).toHaveAttribute('aria-selected', 'true');
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
   });
@@ -1981,6 +2159,214 @@ describe('Slip', () => {
       openTab('Live');
       expect(screen.getByLabelText('Wager for LIVE SLIP')).toHaveValue(null);
       expect(screen.getByLabelText('Wager for LIVE SLIP')).toBeEnabled();
+    });
+  });
+
+  describe('current-user lookup', () => {
+    const user = { id: 'user-1' };
+    const panel = (betKind) => document.getElementById(`slip-panel-${betKind}`);
+    const slipWith = (...oddsNames) => getBoardsPayload({
+      [BET_KIND.PRE_MATCH]: buildBoard(BET_KIND.PRE_MATCH, {
+        _id: 'pre-match-slip-1',
+        rows: oddsNames.map((oddsName) => buildRow({ oddsName })),
+      }),
+    });
+    // The first read answers from `firstRead`; later reads answer from `boardsResponse`.
+    const holdFirstRead = () => {
+      const firstRead = createDeferred();
+      let reads = 0;
+      axios.get.mockImplementation((url) => {
+        if (url !== '/api/slip/boards') {
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        }
+
+        reads += 1;
+        return reads === 1 ? firstRead.promise : Promise.resolve({ data: boardsResponse });
+      });
+
+      return { firstRead, readCount: () => reads };
+    };
+
+    it('reads nothing as a guest when a scheduled refresh fires while the login lookup is pending', async () => {
+      const { rerender } = await renderRouted();
+      await screen.findByLabelText('Wager for PRE-MATCH SLIP');
+      expect(getRequestCount('/api/slip/boards')).toBe(1);
+
+      // After the login the server already answers for the user, so whatever is read as a guest now
+      // would be the user's slip shown as a guest's.
+      boardsResponse = slipWith('Team A', 'Held Team');
+      // App starts the /currentuser lookup and asks for a refresh in the same render; the lookup is slow.
+      rerender(routedElement({ isCurrentUserResolved: false, refreshSignal: 1 }));
+      await advanceTime(REFRESH_DELAY_MS * 4);
+
+      expect(getRequestCount('/api/slip/boards')).toBe(1);
+      expect(screen.queryByText('Held Team')).not.toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Pre-match (1)' })).toBeInTheDocument();
+
+      await act(async () => {
+        rerender(routedElement({ currentUser: user, isCurrentUserResolved: true, refreshSignal: 1 }));
+      });
+
+      expect(await screen.findByText('Held Team')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'BET!' })).toBeEnabled();
+      expect(screen.queryByRole('button', { name: 'Log in to bet' })).not.toBeInTheDocument();
+      // One read for the user: the held-back refresh is neither replayed as a guest nor on top of the user's load.
+      await advanceTime(REFRESH_DELAY_MS * 4);
+      expect(getRequestCount('/api/slip/boards')).toBe(2);
+    });
+
+    it('does not make the first read for a known user until the lookup has settled', async () => {
+      const { rerender } = await renderRouted({ currentUser: user, isCurrentUserResolved: false });
+      await advanceTime(REFRESH_DELAY_MS * 4);
+
+      expect(getRequestCount('/api/slip/boards')).toBe(0);
+      expect(screen.getByText('Loading pre-match slip…')).toBeInTheDocument();
+
+      await act(async () => {
+        rerender(routedElement({ currentUser: user, isCurrentUserResolved: true }));
+      });
+
+      await screen.findByLabelText('Wager for PRE-MATCH SLIP');
+      expect(getRequestCount('/api/slip/boards')).toBe(1);
+    });
+
+    it('holds a refresh back during the lookup and reads once when it settles with the same guest', async () => {
+      const { rerender } = await renderRouted();
+      await screen.findByLabelText('Wager for PRE-MATCH SLIP');
+
+      rerender(routedElement({ isCurrentUserResolved: false, refreshSignal: 1 }));
+      await advanceTime(REFRESH_DELAY_MS * 2);
+      expect(getRequestCount('/api/slip/boards')).toBe(1);
+
+      boardsResponse = slipWith('Team A', 'Team C');
+      await act(async () => {
+        rerender(routedElement({ isCurrentUserResolved: true, refreshSignal: 1 }));
+      });
+
+      expect(await screen.findByText('Team C')).toBeInTheDocument();
+      await advanceTime(POLL_INTERVAL_MS * 3);
+      expect(getRequestCount('/api/slip/boards')).toBe(2);
+    });
+
+    it('drops a guest read still in flight when the lookup starts, then reads for the user', async () => {
+      const { firstRead, readCount } = holdFirstRead();
+      const { rerender } = await renderRouted();
+      expect(readCount()).toBe(1);
+
+      rerender(routedElement({ isCurrentUserResolved: false, refreshSignal: 1 }));
+      await act(async () => {
+        firstRead.resolve({ data: slipWith('Guest Team') });
+      });
+
+      // The answer predates the lookup, so it cannot be attributed to a principal.
+      expect(screen.queryByText('Guest Team')).not.toBeInTheDocument();
+      expect(screen.getByText('Loading pre-match slip…')).toBeInTheDocument();
+
+      boardsResponse = slipWith('User Team');
+      await act(async () => {
+        rerender(routedElement({ currentUser: user, isCurrentUserResolved: true, refreshSignal: 1 }));
+      });
+
+      expect(await screen.findByText('User Team')).toBeInTheDocument();
+      expect(screen.queryByText('Guest Team')).not.toBeInTheDocument();
+      expect(readCount()).toBe(2);
+    });
+
+    it('reads again, rather than staying in loading, when the dropped read belonged to a principal that stays', async () => {
+      const { firstRead, readCount } = holdFirstRead();
+      const { rerender } = await renderRouted();
+
+      rerender(routedElement({ isCurrentUserResolved: false }));
+      await act(async () => {
+        firstRead.resolve({ data: slipWith('Old Answer') });
+      });
+      expect(screen.queryByText('Old Answer')).not.toBeInTheDocument();
+
+      boardsResponse = slipWith('Fresh Answer');
+      await act(async () => {
+        rerender(routedElement({ isCurrentUserResolved: true }));
+      });
+
+      expect(await screen.findByText('Fresh Answer')).toBeInTheDocument();
+      expect(screen.queryByText('Old Answer')).not.toBeInTheDocument();
+      expect(screen.queryAllByText(/^Loading /)).toHaveLength(0);
+      expect(readCount()).toBe(2);
+    });
+
+    it('does not take a failed lookup for a guest: nothing is read, one alert, no guest controls', async () => {
+      await renderRouted({ isCurrentUserLookupFailed: true });
+
+      expect(screen.getAllByRole('alert')).toHaveLength(1);
+      expect(screen.getByRole('alert')).toHaveTextContent(LOGIN_UNCONFIRMED_ERROR);
+      expect(screen.queryAllByText(/^Build your/)).toHaveLength(0);
+      expect(screen.queryAllByText(/^Loading /)).toHaveLength(0);
+      expect(screen.queryByRole('button', { name: 'Log in to bet' })).not.toBeInTheDocument();
+      expect(screen.getByRole('tablist', { name: 'Slip' })).toBeInTheDocument();
+      expect(panel(BET_KIND.PRE_MATCH)).toHaveAttribute('tabindex', '0');
+
+      await advanceTime(POLL_INTERVAL_MS * 3);
+      expect(axios.get).not.toHaveBeenCalled();
+    });
+
+    it('evicts the slip, wager, highlights and polling of a user whose login can no longer be confirmed', async () => {
+      boardsResponse = getBoardsPayload({
+        [BET_KIND.LIVE]: getSubmittedBoard(BET_KIND.LIVE, { _id: 'live-submitted-1' }),
+      });
+      betsResponse = [{ slipId: 'live-submitted-1', status: BET_STATUS.PENDING }];
+      const onSelectionKeysChange = jest.fn();
+      const { rerender } = await renderRouted({ currentUser: user, onSelectionKeysChange });
+      await screen.findByText('Awaiting live moderation and approval…');
+      fireEvent.change(screen.getByLabelText('Wager for PRE-MATCH SLIP'), { target: { value: '12' } });
+      await flushAsync();
+      const readsBefore = axios.get.mock.calls.length;
+      const highlightReportsBefore = onSelectionKeysChange.mock.calls.length;
+
+      await act(async () => {
+        rerender(routedElement({ currentUser: null, isCurrentUserLookupFailed: true, onSelectionKeysChange }));
+      });
+
+      expect(screen.getAllByRole('alert')).toHaveLength(1);
+      expect(screen.getByRole('alert')).toHaveTextContent(LOGIN_UNCONFIRMED_ERROR);
+      expect(screen.queryByText('Pre-match Clash')).not.toBeInTheDocument();
+      expect(screen.queryByText('Awaiting live moderation and approval…')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Log in to bet' })).not.toBeInTheDocument();
+      expect(screen.queryAllByText(/^Build your/)).toHaveLength(0);
+      const highlightReports = onSelectionKeysChange.mock.calls.slice(highlightReportsBefore);
+      expect(highlightReports.length).toBeGreaterThan(0);
+      highlightReports.forEach(([keys]) => expect(keys.size).toBe(0));
+      await advanceTime(POLL_INTERVAL_MS * 3);
+      expect(axios.get.mock.calls.length).toBe(readsBefore);
+
+      // The lookup recovers with the same user: the slip loads again and the old wager is gone.
+      boardsResponse = getBoardsPayload();
+      await act(async () => {
+        rerender(routedElement({ currentUser: user, onSelectionKeysChange }));
+      });
+
+      expect(await screen.findByLabelText('Wager for PRE-MATCH SLIP')).toHaveValue(null);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(getRequestCount('/api/slip/boards')).toBe(2);
+    });
+
+    it('shows loading, not an empty slip, while a failed lookup is retried, then loads whoever it finds', async () => {
+      const { rerender } = await renderRouted({ isCurrentUserLookupFailed: true });
+      expect(screen.getByRole('alert')).toHaveTextContent(LOGIN_UNCONFIRMED_ERROR);
+
+      // App starts the lookup again: the failure is not shown while it runs, and nothing is read yet.
+      rerender(routedElement({ isCurrentUserResolved: false }));
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByText('Loading pre-match slip…')).toBeInTheDocument();
+      expect(screen.queryAllByText(/^Build your/)).toHaveLength(0);
+      expect(getRequestCount('/api/slip/boards')).toBe(0);
+
+      await act(async () => {
+        rerender(routedElement({ currentUser: user }));
+      });
+
+      expect(await screen.findByLabelText('Wager for PRE-MATCH SLIP')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'BET!' })).toBeEnabled();
+      expect(getRequestCount('/api/slip/boards')).toBe(1);
     });
   });
 });

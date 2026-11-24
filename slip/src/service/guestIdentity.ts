@@ -1,9 +1,12 @@
-import { Request, Response } from "express";
+import { createHash } from "crypto";
+import { Request } from "express";
 
 export const GUEST_COOKIE_NAME = "betstan_guest";
 export const GUEST_COOKIE_PATTERN = /^[a-f0-9]{32}$/;
 export const GUEST_PRINCIPAL_PREFIX = "guest:";
-const GUEST_PRINCIPAL_PATTERN = /^guest:[a-f0-9]{32}$/;
+// The principal is "guest:" + the lowercase hex SHA-256 of the cookie value, the
+// same string the event service publishes.
+const GUEST_PRINCIPAL_PATTERN = /^guest:[a-f0-9]{64}$/;
 export const GUEST_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const GUEST_DRAFT_ROW_CAP = 50;
 
@@ -38,22 +41,32 @@ export const readGuestCookie = (req: Request): string | undefined => {
 export const isGuestPrincipal = (userId: unknown): userId is string =>
   typeof userId === "string" && GUEST_PRINCIPAL_PATTERN.test(userId);
 
+// The cookie value is a bearer credential: only its digest is stored or published.
+export const guestPrincipalOf = (cookieValue: string): string =>
+  `${GUEST_PRINCIPAL_PREFIX}${createHash("sha256")
+    .update(cookieValue, "utf8")
+    .digest("hex")}`;
+
+export const readGuestPrincipal = (req: Request): string | undefined => {
+  const cookieValue = readGuestCookie(req);
+
+  return cookieValue ? guestPrincipalOf(cookieValue) : undefined;
+};
+
 export const resolveSlipOwner = (req: Request): SlipOwner | undefined => {
   if (req.currentUser) {
     return { id: req.currentUser.id, isGuest: false };
   }
 
-  const guestId = readGuestCookie(req);
+  const guestPrincipal = readGuestPrincipal(req);
 
-  return guestId
-    ? { id: `${GUEST_PRINCIPAL_PREFIX}${guestId}`, isGuest: true }
-    : undefined;
+  return guestPrincipal ? { id: guestPrincipal, isGuest: true } : undefined;
 };
 
-// The guest id is a bearer credential kept in an HttpOnly cookie, so a slip
-// echoed to the page must carry neither the principal nor the retention clock.
-// Copying from the serialized form also covers a slip that is still a Mongoose
-// document; a signed-in owner's slip is returned untouched.
+// The guest principal is a stable digest of a bearer credential kept in an
+// HttpOnly cookie, so a slip echoed to the page must carry neither it nor the
+// retention clock. Copying from the serialized form also covers a slip that is
+// still a Mongoose document; a signed-in owner's slip is returned untouched.
 export const toOwnerFacingSlip = (owner: SlipOwner, slip: object): object => {
   if (!owner.isGuest) {
     return slip;
@@ -64,18 +77,4 @@ export const toOwnerFacingSlip = (owner: SlipOwner, slip: object): object => {
   delete facing.guestExpiresAt;
 
   return facing;
-};
-
-export const clearGuestCookie = (res: Response) => {
-  const forwardedProto = res.req.headers["x-forwarded-proto"];
-  const proto = Array.isArray(forwardedProto)
-    ? forwardedProto[0]
-    : forwardedProto;
-
-  res.clearCookie(GUEST_COOKIE_NAME, {
-    path: "/",
-    httpOnly: true,
-    sameSite: "lax",
-    secure: proto?.split(",")[0].trim().toLowerCase() === "https",
-  });
 };

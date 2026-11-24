@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { Request, Response } from "express";
 import {
   GUEST_COOKIE_NAME,
@@ -10,6 +11,12 @@ import {
 
 const GUEST_ID = "0123456789abcdef0123456789abcdef";
 const OTHER_GUEST_ID = "fedcba9876543210fedcba9876543210";
+// Known answers computed outside the code under test: printf '%s' <cookie text> | shasum -a 256
+const GUEST_PRINCIPAL = "guest:3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9";
+const OTHER_GUEST_PRINCIPAL = "guest:4ba68aa8767bde72e8c798ee82d1275291cea73e72ad74d35ecf48e41386eb82";
+const GUEST_PRINCIPAL_FORMAT = /^guest:[a-f0-9]{64}$/;
+
+const sha256Hex = (input: string | Buffer) => createHash("sha256").update(input).digest("hex");
 
 const requestWith = (
   headers: Record<string, string> = {},
@@ -53,6 +60,8 @@ describe("readGuestId", () => {
     ["a 33 character id", `${GUEST_ID}0`],
     ["non-hex text", "g".repeat(32)],
     ["a principal-prefixed id", `${GUEST_PRINCIPAL_PREFIX}${GUEST_ID}`],
+    ["a published guest principal", GUEST_PRINCIPAL],
+    ["the 64 character hash inside a principal", sha256Hex(GUEST_ID)],
     ["a quoted id", `"${GUEST_ID}"`],
     ["an id with inner whitespace", `${GUEST_ID.slice(0, 16)} ${GUEST_ID.slice(17)}`],
     ["an empty value", ""],
@@ -80,23 +89,42 @@ describe("resolveOddsPrincipal", () => {
     expect(resolveOddsPrincipal(req)).toEqual({ userId: "user-1", guestId: null });
   });
 
-  it("reuses a valid guest cookie", () => {
-    expect(
-      resolveOddsPrincipal(requestWith({ cookie: `${GUEST_COOKIE_NAME}=${GUEST_ID}` }))
-    ).toEqual({ userId: `guest:${GUEST_ID}`, guestId: GUEST_ID });
+  it("reuses a valid guest cookie and publishes only its hash", () => {
+    const principal = resolveOddsPrincipal(
+      requestWith({ cookie: `${GUEST_COOKIE_NAME}=${GUEST_ID}` })
+    );
+
+    expect(principal).toEqual({ userId: GUEST_PRINCIPAL, guestId: GUEST_ID });
+    expect(principal.userId).toMatch(GUEST_PRINCIPAL_FORMAT);
+    expect(principal.userId).not.toContain(GUEST_ID);
   });
 
-  it("mints a fresh strict id for a guest without a usable cookie", () => {
+  it("derives one stable principal per cookie text, not from its decoded bytes", () => {
+    const principalOf = (id: string) =>
+      resolveOddsPrincipal(requestWith({ cookie: `${GUEST_COOKIE_NAME}=${id}` })).userId;
+
+    expect(principalOf(GUEST_ID)).toBe(principalOf(GUEST_ID));
+    expect(principalOf(OTHER_GUEST_ID)).toBe(OTHER_GUEST_PRINCIPAL);
+    expect(principalOf(OTHER_GUEST_ID)).not.toBe(principalOf(GUEST_ID));
+    // Hashing the decoded bytes instead would split one guest across the event and slip services.
+    expect(principalOf(GUEST_ID)).not.toBe(`guest:${sha256Hex(Buffer.from(GUEST_ID, "hex"))}`);
+  });
+
+  it("mints a fresh strict id for a guest without a usable cookie and still publishes only its hash", () => {
     const missing = resolveOddsPrincipal(requestWith());
     const malformed = resolveOddsPrincipal(
       requestWith({ cookie: `${GUEST_COOKIE_NAME}=${GUEST_ID.toUpperCase()}` })
     );
 
     for (const principal of [missing, malformed]) {
-      expect(principal.guestId).toMatch(GUEST_ID_PATTERN);
-      expect(principal.userId).toBe(`guest:${principal.guestId}`);
+      const guestId = principal.guestId as string;
+      expect(guestId).toMatch(GUEST_ID_PATTERN);
+      expect(principal.userId).toMatch(GUEST_PRINCIPAL_FORMAT);
+      expect(principal.userId).toBe(`guest:${sha256Hex(guestId)}`);
+      expect(principal.userId).not.toContain(guestId);
     }
     expect(missing.guestId).not.toBe(malformed.guestId);
+    expect(missing.userId).not.toBe(malformed.userId);
   });
 });
 
@@ -106,7 +134,11 @@ describe("refreshGuestCookie", () => {
     refreshGuestCookie(
       requestWith(headers),
       { cookie } as unknown as Response,
-      { userId: guestId ? `guest:${guestId}` : "user-1", guestId }
+      resolveOddsPrincipal(
+        guestId
+          ? requestWith({ cookie: `${GUEST_COOKIE_NAME}=${guestId}` })
+          : requestWith({}, { id: "user-1", email: "user-1" })
+      )
     );
     return cookie;
   };

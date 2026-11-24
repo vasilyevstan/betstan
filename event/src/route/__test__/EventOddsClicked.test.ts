@@ -1,5 +1,6 @@
 import request from "supertest";
 import jwt from "jsonwebtoken";
+import { createHash } from "crypto";
 import { app } from "../../app";
 import { Event } from "../../model/Event";
 import {
@@ -947,6 +948,12 @@ describe("guest identity stamping", () => {
   const OTHER_GUEST_ID = "fedcba9876543210fedcba9876543210";
   const GUEST_ID_FORMAT = /^[a-f0-9]{32}$/;
   const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60;
+  // The published principal is a one-way hash of the cookie text, because publishers log the payload.
+  // Known answer computed outside the code under test: printf '%s' <GUEST_ID> | shasum -a 256
+  const GUEST_PRINCIPAL = "guest:3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9";
+  const GUEST_PRINCIPAL_FORMAT = /^guest:[a-f0-9]{64}$/;
+  const sha256Hex = (text: string) => createHash("sha256").update(text).digest("hex");
+  const guestPrincipalOf = (cookieValue: string) => `guest:${sha256Hex(cookieValue)}`;
 
   const livePick = {
     eventId: "test-event-id",
@@ -966,10 +973,20 @@ describe("guest identity stamping", () => {
     { label: "pre-match", seed: () => createPreMatchEvent(), pick: preMatchPick },
   ];
 
-  const publishedUserIds = () =>
+  const publishedPayloads = () =>
     jest
       .mocked(EventOddsSelectedPublisher.prototype.publish)
-      .mock.calls.map(([published]) => published.data.userId);
+      .mock.calls.map(([published]) => published);
+
+  const publishedUserIds = () => publishedPayloads().map((published) => published.data.userId);
+
+  /** The raw cookie value is a bearer credential: it may travel only in Set-Cookie, never in what is published and logged. */
+  const expectPayloadsOmit = (...secrets: string[]) => {
+    const published = JSON.stringify(publishedPayloads());
+    for (const secret of secrets) {
+      expect(published).not.toContain(secret);
+    }
+  };
 
   const parseSetCookie = (setCookie: string) => {
     const [pair, ...rest] = setCookie.split(";").map((part) => part.trim());
@@ -1035,6 +1052,7 @@ describe("guest identity stamping", () => {
 
       expect(response.headers["set-cookie"]).toBeUndefined();
       expect(publishedUserIds()).toEqual(["user-id"]);
+      expectPayloadsOmit(GUEST_ID, sha256Hex(GUEST_ID));
     });
 
     it("mints a distinct guest identity for each cookie-less guest click", async () => {
@@ -1046,7 +1064,53 @@ describe("guest identity stamping", () => {
       const firstId = expectOnlyGuestCookie(first);
       const secondId = expectOnlyGuestCookie(second);
       expect(secondId).not.toBe(firstId);
-      expect(publishedUserIds()).toEqual([`guest:${firstId}`, `guest:${secondId}`]);
+      expect(publishedUserIds()).toEqual([guestPrincipalOf(firstId), guestPrincipalOf(secondId)]);
+      expectPayloadsOmit(firstId, secondId);
+    });
+
+    it.each([
+      ["a new guest", undefined],
+      ["a guest with an existing cookie", GUEST_ID],
+    ])(
+      "publishes only guest:<sha256 of the cookie> for %s, never the cookie value",
+      async (_label, existingId) => {
+        await seed();
+        const click = request(app).post("/api/event/odds");
+        if (existingId !== undefined) {
+          click.set("Cookie", `${GUEST_COOKIE}=${existingId}`);
+        }
+
+        const response = await click.send(pick).expect(200);
+
+        const cookieValue = expectOnlyGuestCookie(response);
+        if (existingId !== undefined) {
+          expect(cookieValue).toBe(existingId);
+        }
+        const [published] = publishedPayloads();
+        expect(publishedPayloads()).toHaveLength(1);
+        expect(published.data.userId).toMatch(GUEST_PRINCIPAL_FORMAT);
+        expect(published.data.userId).toBe(guestPrincipalOf(cookieValue));
+        expect(JSON.stringify(published)).not.toContain(cookieValue);
+      }
+    );
+
+    it("publishes the same principal on every click with the same cookie and another one for another cookie", async () => {
+      await seed();
+
+      for (const id of [GUEST_ID, GUEST_ID, OTHER_GUEST_ID]) {
+        await request(app)
+          .post("/api/event/odds")
+          .set("Cookie", `${GUEST_COOKIE}=${id}`)
+          .send(pick)
+          .expect(200);
+      }
+
+      expect(publishedUserIds()).toEqual([
+        GUEST_PRINCIPAL,
+        GUEST_PRINCIPAL,
+        guestPrincipalOf(OTHER_GUEST_ID),
+      ]);
+      expectPayloadsOmit(GUEST_ID, OTHER_GUEST_ID);
     });
 
     it("reuses a valid guest cookie and refreshes it", async () => {
@@ -1059,7 +1123,8 @@ describe("guest identity stamping", () => {
         .expect(200);
 
       expect(expectOnlyGuestCookie(response)).toBe(GUEST_ID);
-      expect(publishedUserIds()).toEqual([`guest:${GUEST_ID}`]);
+      expect(publishedUserIds()).toEqual([GUEST_PRINCIPAL]);
+      expectPayloadsOmit(GUEST_ID);
     });
 
     it.each([
@@ -1068,6 +1133,8 @@ describe("guest identity stamping", () => {
       ["a long id", `${GUEST_ID}0`],
       ["non-hex text", "g".repeat(32)],
       ["a principal-prefixed id", `guest:${GUEST_ID}`],
+      ["a published guest principal", GUEST_PRINCIPAL],
+      ["the 64 character hash inside a principal", sha256Hex(GUEST_ID)],
       ["an empty value", ""],
     ])("replaces a malformed guest cookie (%s)", async (_label, malformed) => {
       await seed();
@@ -1080,7 +1147,8 @@ describe("guest identity stamping", () => {
 
       const mintedId = expectOnlyGuestCookie(response);
       expect(mintedId).not.toBe(malformed);
-      expect(publishedUserIds()).toEqual([`guest:${mintedId}`]);
+      expect(publishedUserIds()).toEqual([guestPrincipalOf(mintedId)]);
+      expectPayloadsOmit(mintedId);
     });
 
     it("takes the first guest cookie, and does not fall through when it is malformed", async () => {
@@ -1100,7 +1168,8 @@ describe("guest identity stamping", () => {
       expect(expectOnlyGuestCookie(valid)).toBe(GUEST_ID);
       const replacementId = expectOnlyGuestCookie(malformedFirst);
       expect(replacementId).not.toBe(OTHER_GUEST_ID);
-      expect(publishedUserIds()).toEqual([`guest:${GUEST_ID}`, `guest:${replacementId}`]);
+      expect(publishedUserIds()).toEqual([GUEST_PRINCIPAL, guestPrincipalOf(replacementId)]);
+      expectPayloadsOmit(GUEST_ID, OTHER_GUEST_ID, replacementId);
     });
 
     it.each([

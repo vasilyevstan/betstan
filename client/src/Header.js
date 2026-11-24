@@ -129,13 +129,10 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                        </div>
                    </div>
                    <ul className="navbar-nav app-navbar__links">
-                       {links.map(({ label, href, icon, showLabel }) => {
-                           // /signup is the Create account tab of the page the Log in icon opens.
-                           const isCurrent = routeIdentity === getRouteIdentity(href)
-                               || (href === '/login' && routeIdentity === '/signup');
-                           return <li key={href} className="nav-item">
+                       {links.map(({ label, href, icon, showLabel }) => (
+                           <li key={href} className="nav-item">
                                <Link
-                                   aria-current={isCurrent ? 'page' : undefined}
+                                   aria-current={routeIdentity === getRouteIdentity(href) ? 'page' : undefined}
                                    className="app-nav-link"
                                    title={label}
                                    to={linkTo(href)}
@@ -144,8 +141,8 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                                    <img className="nav-icon" src={icon} alt="" />
                                    <span className={`app-nav-link__label${showLabel ? '' : ' visually-hidden'}`}>{label}</span>
                                </Link>
-                           </li>;
-                       })}
+                           </li>
+                       ))}
                    </ul>
                </div>
            </div>

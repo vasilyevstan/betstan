@@ -17,14 +17,14 @@ const claimGuestDraft = async (
   guestPrincipal: string,
   betKind: BetKind
 ) => {
-  // A bet in flight owns the user's board of this kind; the guest draft is
-  // left untouched and claimed on a later load.
-  if (await Slip.exists(buildSlipScope(SlipStatus.SUBMITTED, betKind, userId))) {
+  const foundDraft = await findDraftSlipForUser(guestPrincipal, betKind).lean();
+  if (!foundDraft) {
     return;
   }
 
-  const foundDraft = await findDraftSlipForUser(guestPrincipal, betKind).lean();
-  if (!foundDraft) {
+  // A bet in flight owns the user's board of this kind; the guest draft is
+  // left untouched and claimed on a later load.
+  if (await Slip.exists(buildSlipScope(SlipStatus.SUBMITTED, betKind, userId))) {
     return;
   }
 
@@ -37,17 +37,13 @@ const claimGuestDraft = async (
     return;
   }
 
-  let fullyMerged = true;
+  // The user's board wins: a row it refuses is dropped with the guest draft,
+  // never retried, so a pick the user removed cannot come back on a later load.
   for (const row of guestDraft.rows) {
-    const { accepted } = await upsertDraftSlipRow(userId, betKind, {
+    await upsertDraftSlipRow(userId, betKind, {
       ...row,
       betKind,
     });
-    fullyMerged = fullyMerged && accepted;
-  }
-
-  if (!fullyMerged) {
-    return;
   }
 
   // Scoped to the revision that was merged: a guest write that landed in the
@@ -62,14 +58,8 @@ const claimGuestDraft = async (
 export const claimGuestDrafts = async (
   userId: string,
   guestPrincipal: string
-): Promise<{ remaining: boolean }> => {
+): Promise<void> => {
   for (const betKind of [BetKind.PRE_MATCH, BetKind.LIVE]) {
     await claimGuestDraft(userId, guestPrincipal, betKind);
   }
-
-  return {
-    remaining: Boolean(
-      await Slip.exists({ userId: guestPrincipal, status: SlipStatus.DRAFT })
-    ),
-  };
 };

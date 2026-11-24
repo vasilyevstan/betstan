@@ -174,19 +174,29 @@ it('keeps Log out unchanged for signed-in users without any Log in or Create acc
   expect(container.querySelector('a[href^="/login"], a[href^="/signup"]')).toBeNull();
 });
 
-it('marks the single Log in icon current on both tabs of the auth page but not on the reset page', () => {
+it('marks the single Log in icon current on /login but not on the reset page', () => {
   const { unmount } = renderHeader(undefined, 'v2', '/login');
   expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('aria-current', 'page');
   unmount();
 
-  const signup = renderHeader(undefined, 'v2', '/signup');
-  expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('aria-current', 'page');
-  expect(screen.getByRole('link', { name: 'BetStan home' })).not.toHaveAttribute('aria-current');
-  signup.unmount();
-
   renderHeader(undefined, 'v2', '/forgot-password');
   expect(screen.getByRole('link', { name: 'Log in' })).not.toHaveAttribute('aria-current');
   expect(screen.getByRole('link', { name: 'BetStan home' })).not.toHaveAttribute('aria-current');
+});
+
+// /signup opens the Create account tab, which has no header entry of its own: nothing in the
+// header is the current page there, and the Log in icon stays the titled link to /login.
+it.each(['/signup', '/SIGNUP/', '/signup/'])('leaves the Log in icon and every other entry un-current on %s', (pathname) => {
+  renderHeader(undefined, 'v1', pathname);
+
+  const logIn = screen.getByRole('link', { name: 'Log in' });
+  expect(logIn).not.toHaveAttribute('aria-current');
+  expect(logIn).toHaveAttribute('title', 'Log in');
+  expect(logIn).toHaveAttribute('href', '/login?ui=v1&theme=light');
+  expect(screen.getAllByRole('link').filter((link) => link.getAttribute('aria-current') === 'page')).toEqual([]);
+  expect(screen.getByRole('link', { name: 'BetStan home' })).not.toHaveAttribute('aria-current');
+  expect(screen.getByRole('link', { name: 'Dark' }))
+    .toHaveAttribute('href', `${pathname}?ui=v1&theme=dark`);
 });
 
 it('links the saved private name to the profile and preserves route identity and query parameters', () => {
@@ -249,7 +259,6 @@ it('marks a trailing-slash Backoffice alias current without marking Telemetry', 
 });
 
 it.each([
-  ['/SIGNUP/', undefined, 'Log in'],
   ['/Login///', undefined, 'Log in'],
   ['/BETS/', { email: 'user@example.com' }, 'My bets'],
   ['/Logout/', { email: 'user@example.com' }, 'Log out'],

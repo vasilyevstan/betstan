@@ -198,10 +198,12 @@ sequenceDiagram
 ```
 
 Anonymous users can browse events and add picks. Event publishes them as a
-`guest:<id>` principal, identified by an HttpOnly `betstan_guest` cookie, and
-Slip stores them as capped, expiring guest drafts. Guests cannot place bets or
+`guest:<sha256 of the cookie>` principal derived from an HttpOnly
+`betstan_guest` cookie (the raw cookie is never published), and Slip stores
+them as capped, expiring guest drafts. Guests cannot place bets or
 add custom-market selections. On login the guest drafts merge into the user's
-boards; see [[Application Processes]]. A signed-in identity is required to
+boards, which win conflicts, and the merged guest draft is deleted; see
+[[Application Processes]]. A signed-in identity is required to
 submit a betting board.
 
 ## Wager placement and moderation
