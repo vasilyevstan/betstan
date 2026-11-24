@@ -51,12 +51,14 @@ it.each(['v1', 'v2', 'v3'])(
         .toBe(backofficeLink.closest('li'));
       for (const [label, pathname] of currentUser
         ? [['My bets', '/bets'], ['Log out', '/logout']]
-        : [['Create account', '/signup'], ['Log in', '/login']]) {
+        : [['Log in', '/login']]) {
         expect(screen.getByRole('link', { name: label })).toHaveAttribute(
           'href', `${pathname}?ui=${uiVariant}&theme=light`
         );
       }
-      for (const label of currentUser ? ['Create account', 'Log in'] : ['My bets', 'Log out']) {
+      for (const label of currentUser
+        ? ['Create account', 'Log in']
+        : ['Create account', 'My bets', 'Log out']) {
         expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument();
       }
 
@@ -88,7 +90,7 @@ it.each(['v1', 'v2', 'v3'])('keeps compact icons and labelled public routes with
   expect(screen.queryByRole('link', { name: 'Events' })).not.toBeInTheDocument();
   for (const [label, icon] of [
     ['Backoffice', 'backoffice'], ['Telemetry', 'telemetry'],
-    ['Create account', 'signup'], ['Log in', 'login'], ['Dark', 'theme-dark'], ['Light', 'theme-light'],
+    ['Log in', 'login'], ['Dark', 'theme-dark'], ['Light', 'theme-light'],
   ]) {
     const link = screen.getByRole('link', { name: label, exact: true });
     expect(link).toHaveAccessibleName(label);
@@ -121,7 +123,7 @@ it('preserves density and unrelated query keys on home, navigation and theme cha
   const dark = screen.getByRole('link', { name: 'Dark' });
   for (const [name, pathname] of [
     ['BetStan home', '/'], ['Backoffice', '/backoffice'], ['Telemetry', '/telemetry'],
-    ['Create account', '/signup'], ['Log in', '/login'],
+    ['Log in', '/login'],
   ]) {
     expect(screen.getByRole('link', { name })).toHaveAttribute(
       'href', `${pathname}?ui=v2&theme=light&acceptanceEventIds=event-1%2Cevent-2&review=retained`
@@ -145,6 +147,56 @@ it('retains authenticated display name and accessible bet/logout icon names', ()
     expect(link.querySelector('img')).toHaveAttribute('alt', '');
   }
   expect(screen.queryByRole('link', { name: 'Log in' })).not.toBeInTheDocument();
+});
+
+it.each(['v1', 'v2', 'v3'])('offers one Log in icon and no Create account icon to anonymous users in %s', (uiVariant) => {
+  const { container } = renderHeader(undefined, uiVariant);
+
+  // The release-gate browser specs address the icon with getByTitle('Log in'), which
+  // matches any title containing the text, so exactly one titled element may do so.
+  const titles = Array.from(container.querySelectorAll('[title]')).map((node) => node.getAttribute('title'));
+  expect(titles.filter((title) => /log in/i.test(title))).toEqual(['Log in']);
+  expect(titles).not.toContain('Create account');
+  expect(titles).not.toContain('Log out');
+  expect(screen.getByTitle('Log in')).toBe(screen.getByRole('link', { name: 'Log in' }));
+  expect(screen.getByTitle('Log in')).toHaveAttribute('href', `/login?ui=${uiVariant}&theme=light`);
+  expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
+  expect(container.querySelector('a[href^="/signup"]')).toBeNull();
+});
+
+it('keeps Log out unchanged for signed-in users without any Log in or Create account entry', () => {
+  const { container } = renderHeader({ email: 'user@example.com' });
+
+  expect(screen.getByTitle('Log out')).toBe(screen.getByRole('link', { name: 'Log out' }));
+  expect(screen.getByTitle('Log out')).toHaveAttribute('href', '/logout?ui=v2&theme=light');
+  expect(screen.queryByTitle('Log in')).not.toBeInTheDocument();
+  expect(screen.queryByTitle('Create account')).not.toBeInTheDocument();
+  expect(container.querySelector('a[href^="/login"], a[href^="/signup"]')).toBeNull();
+});
+
+it('marks the single Log in icon current on /login but not on the reset page', () => {
+  const { unmount } = renderHeader(undefined, 'v2', '/login');
+  expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('aria-current', 'page');
+  unmount();
+
+  renderHeader(undefined, 'v2', '/forgot-password');
+  expect(screen.getByRole('link', { name: 'Log in' })).not.toHaveAttribute('aria-current');
+  expect(screen.getByRole('link', { name: 'BetStan home' })).not.toHaveAttribute('aria-current');
+});
+
+// /signup opens the Create account tab, which has no header entry of its own: nothing in the
+// header is the current page there, and the Log in icon stays the titled link to /login.
+it.each(['/signup', '/SIGNUP/', '/signup/'])('leaves the Log in icon and every other entry un-current on %s', (pathname) => {
+  renderHeader(undefined, 'v1', pathname);
+
+  const logIn = screen.getByRole('link', { name: 'Log in' });
+  expect(logIn).not.toHaveAttribute('aria-current');
+  expect(logIn).toHaveAttribute('title', 'Log in');
+  expect(logIn).toHaveAttribute('href', '/login?ui=v1&theme=light');
+  expect(screen.getAllByRole('link').filter((link) => link.getAttribute('aria-current') === 'page')).toEqual([]);
+  expect(screen.getByRole('link', { name: 'BetStan home' })).not.toHaveAttribute('aria-current');
+  expect(screen.getByRole('link', { name: 'Dark' }))
+    .toHaveAttribute('href', `${pathname}?ui=v1&theme=dark`);
 });
 
 it('links the saved private name to the profile and preserves route identity and query parameters', () => {
@@ -207,7 +259,6 @@ it('marks a trailing-slash Backoffice alias current without marking Telemetry', 
 });
 
 it.each([
-  ['/SIGNUP/', undefined, 'Create account'],
   ['/Login///', undefined, 'Log in'],
   ['/BETS/', { email: 'user@example.com' }, 'My bets'],
   ['/Logout/', { email: 'user@example.com' }, 'Log out'],
@@ -248,7 +299,7 @@ it('owns the disclosure without a second Bootstrap controller and closes on Esca
 
 it.each([
   ['BetStan home', undefined], ['Backoffice', undefined], ['Telemetry', undefined],
-  ['Create account', undefined], ['Log in', undefined],
+  ['Log in', undefined],
   ['My bets', { email: 'user@example.com' }], ['Log out', { email: 'user@example.com' }],
 ])('closes the disclosure on %s activation, including the current route', (name, currentUser) => {
   renderHeader(currentUser);

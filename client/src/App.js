@@ -3,9 +3,9 @@ import axios from 'axios';
 import { Route, Routes, useLocation } from 'react-router-dom';
 import EventList from './pages/event/EventList';
 import Header from './Header';
-import NewUser from './pages/auth/NewUser';
+import AuthPage from './pages/auth/AuthPage';
 import LogOut from './pages/auth/LogOut';
-import LogIn from './pages/auth/LogIn';
+import ForgotPassword from './pages/auth/ForgotPassword';
 import Backoffice from './pages/account/Backoffice';
 import RiskCentre from './pages/account/RiskCentre';
 import MyBets from './pages/account/MyBets';
@@ -14,6 +14,7 @@ import Slip from './pages/Slip';
 import Statistics from './pages/account/Statistics';
 import Telemetry from './pages/Telemetry';
 import getRouteIdentity from './routeIdentity';
+import { BET_KIND } from './liveBettingUtils';
 import BackofficeMarkets, { BackofficeMarketDesigner } from './pages/account/BackofficeMarkets';
 import './styles/markets.css';
 
@@ -44,8 +45,13 @@ const App = () => {
 
   const [currentUser, setCurrentUser] = useState();
   const [isCurrentUserResolved, setIsCurrentUserResolved] = useState(false);
+  // A failed lookup still resolves (so account pages carry on as signed out), but it does not
+  // prove a guest: the slip must not load a guest's boards on its strength.
+  const [isCurrentUserLookupFailed, setIsCurrentUserLookupFailed] = useState(false);
   const [selectedSelectionKeys, setSelectedSelectionKeys] = useState(new Set());
   const [slipRefreshSignal, setSlipRefreshSignal] = useState(0);
+  // The kind of the pick just placed; the nonce lets the same kind twice in a row re-activate its tab.
+  const [slipTabRequest, setSlipTabRequest] = useState(null);
   const [statsRefreshToken, setStatsRefreshToken] = useState(0);
   const [backofficeRefreshToken, setBackofficeRefreshToken] = useState(0);
   const visibleOfflineEventIds = useMemo(() => {
@@ -63,20 +69,28 @@ const App = () => {
   const fetchData = useCallback(async () => {
     const requestSequence = ++authRequestSequence.current;
     setIsCurrentUserResolved(false);
+    setIsCurrentUserLookupFailed(false);
     try {
       const response = await axios.get('/api/auth/currentuser');
       if (requestSequence !== authRequestSequence.current) return undefined;
       setCurrentUser(response.data.currentUser);
       return response.data.currentUser;
     } catch {
-      if (requestSequence === authRequestSequence.current) setCurrentUser();
+      if (requestSequence === authRequestSequence.current) {
+        setCurrentUser();
+        setIsCurrentUserLookupFailed(true);
+      }
     } finally {
       if (requestSequence === authRequestSequence.current) setIsCurrentUserResolved(true);
     }
   }, []);
 
-  const requestSlipRefresh = useCallback(() => {
+  // Auth refreshes call this with no kind, so they reload the slip without changing its tab.
+  const requestSlipRefresh = useCallback((betKind) => {
     setSlipRefreshSignal((currentSignal) => currentSignal + 1);
+    if (betKind === BET_KIND.LIVE || betKind === BET_KIND.PRE_MATCH) {
+      setSlipTabRequest((currentRequest) => ({ betKind, nonce: (currentRequest?.nonce ?? 0) + 1 }));
+    }
   }, []);
 
   const refreshStats = useCallback(() => {
@@ -161,14 +175,15 @@ const App = () => {
                   isScopedAccessResolved={isCurrentUserResolved}
                 />}
               />
-              <Route path="/signup" element={<NewUser callback={handleAuthChange} />} />
+              <Route path="/signup" element={<AuthPage tab="signup" callback={handleAuthChange} />} />
               <Route path="/backoffice/markets" element={<BackofficeMarketDesigner />} />
               <Route path="/backoffice/risk-centre" element={<RiskCentre />} />
               <Route path="/backoffice/events/analysis" element={<RiskCentre key="open-event-analysis" eventAnalysis />} />
               <Route path="/backoffice/events/:eventId/analysis" element={<RiskCentre key="selected-event-analysis" eventAnalysis />} />
               <Route path="/backoffice/events/:eventId/markets" element={<BackofficeMarkets />} />
               <Route path="/logout" element={<LogOut callback={handleAuthChange} />} />
-              <Route path="/login" element={<LogIn callback={handleAuthChange} />} />
+              <Route path="/login" element={<AuthPage tab="login" callback={handleAuthChange} />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route
                 path="/backoffice"
                 element={<Backoffice
@@ -207,12 +222,15 @@ const App = () => {
         {!isTelemetryRoute ? (
           <aside className="app-desk__slips" aria-labelledby="slips-region-heading">
             <section className="section-panel app-shell__sidebar">
-              <h2 className="app-sidebar__title" id="slips-region-heading">Slips</h2>
+              <h2 className="app-sidebar__title" id="slips-region-heading">Slip</h2>
               <Slip
                 currentUser={currentUser}
+                isCurrentUserLookupFailed={isCurrentUserLookupFailed}
+                isCurrentUserResolved={isCurrentUserResolved}
                 onBoardSubmitted={refreshStats}
                 onSelectionKeysChange={setSelectedSelectionKeys}
                 refreshSignal={slipRefreshSignal}
+                tabRequest={slipTabRequest}
                 uiVariant={uiVariant}
               />
             </section>

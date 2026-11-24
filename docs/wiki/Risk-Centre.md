@@ -224,6 +224,10 @@ change returns a conflict. Stopping sign-in:
   administrator);
 - does not end existing sessions; they expire normally, within 12 hours.
 
+Stopping sign-in does not gate `POST /api/auth/forgot-password`: that
+unauthenticated endpoint still resets any account's password (see
+[[Security]]).
+
 These are separate Auth settings, not policy revisions.
 
 **Cash back** turns cash back off or on for every event. While it is off,

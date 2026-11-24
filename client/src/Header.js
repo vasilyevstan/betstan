@@ -10,14 +10,13 @@ const Header = ({ currentUser, uiVariant, theme }) => {
     const routeIdentity = getRouteIdentity(location.pathname);
     const themeOptions = ['dark', 'light'];
     const explicitRouteIdentities = new Set([
-       '/backoffice', '/bets', '/profile', '/login', '/logout', '/signup', '/telemetry',
+       '/backoffice', '/bets', '/profile', '/login', '/logout', '/signup', '/forgot-password', '/telemetry',
     ]);
     const isEventsRoute = routeIdentity === '/' || !explicitRouteIdentities.has(routeIdentity);
 
     const links = [
        { label: 'Backoffice', href: '/backoffice', icon: '/icons/backoffice.svg', showLabel: true },
        { label: 'Telemetry', href: '/telemetry', icon: '/icons/telemetry.svg', showLabel: true },
-       !currentUser && { label: 'Create account', href: '/signup', icon: '/icons/signup.svg' },
        !currentUser && { label: 'Log in', href: '/login', icon: '/icons/login.svg' },
        currentUser && { label: 'My bets', href: '/bets', icon: '/icons/bets.svg' },
        currentUser && { label: 'Log out', href: '/logout', icon: '/icons/logout.svg' }
@@ -130,11 +129,10 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                        </div>
                    </div>
                    <ul className="navbar-nav app-navbar__links">
-                       {links.map(({ label, href, icon, showLabel }) => {
-                           const isCurrent = routeIdentity === getRouteIdentity(href);
-                           return <li key={href} className="nav-item">
+                       {links.map(({ label, href, icon, showLabel }) => (
+                           <li key={href} className="nav-item">
                                <Link
-                                   aria-current={isCurrent ? 'page' : undefined}
+                                   aria-current={routeIdentity === getRouteIdentity(href) ? 'page' : undefined}
                                    className="app-nav-link"
                                    title={label}
                                    to={linkTo(href)}
@@ -143,8 +141,8 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                                    <img className="nav-icon" src={icon} alt="" />
                                    <span className={`app-nav-link__label${showLabel ? '' : ' visually-hidden'}`}>{label}</span>
                                </Link>
-                           </li>;
-                       })}
+                           </li>
+                       ))}
                    </ul>
                </div>
            </div>

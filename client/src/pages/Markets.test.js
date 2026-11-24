@@ -102,6 +102,8 @@ it('shows published markets on the match card and adds an outcome to the slip in
   expect(screen.getByRole('button', { name: outcome('Nominee B') })).toHaveAttribute('aria-pressed', 'true');
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: outcome('Nominee A') })); });
   await waitFor(() => expect(placed).toHaveBeenCalledTimes(1));
+  // A custom market is a pre-match pick, so the slip opens its Pre-match tab.
+  expect(placed).toHaveBeenCalledWith('PRE_MATCH');
   expect(axios.post.mock.calls).toEqual([
     ['/api/event/events/event-a/market-quotes', { requestId: expect.any(String), kind: 'SINGLE',
       selections: [{ origin: 'TEMPLATE', marketId: 'market-a', outcomeKey: 'a', quoteRevision: 2 }] }],
@@ -152,6 +154,8 @@ it('explains sign-in and board conflicts inline and refreshes the slip after a c
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: outcome('Nominee A') })); });
   await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Your board changed.'));
   expect(placed).toHaveBeenCalledTimes(1);
+  // A conflict only reloads the slip: it carries no bet kind, so the slip does not change tab.
+  expect(placed.mock.calls).toEqual([[]]);
 });
 
 it('shows nothing for resulted events or when custom markets are not open', async () => {

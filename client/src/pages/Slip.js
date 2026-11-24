@@ -1,4 +1,5 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import useSlipBoards from '../hook/useSlipBoards';
 import {
@@ -9,6 +10,7 @@ import {
 } from '../liveBettingUtils';
 import { BOARD_KINDS, getBoardId, getRowId } from '../hook/useSlipBoards';
 import MarketSelections from '../components/MarketSelections';
+import TabList from '../components/TabList';
 
 const formatTimestamp = (value, fallback = '—') => {
   const parsed = new Date(value ?? '');
@@ -19,23 +21,12 @@ const getBoardTitle = (betKind) => (
   betKind === BET_KIND.LIVE ? 'LIVE SLIP' : 'PRE-MATCH SLIP'
 );
 
-const getBoardPrompt = (betKind, currentUser) => {
-  if (!currentUser) {
-    return {
-      title: 'Login and bet!',
-      body: betKind === BET_KIND.LIVE
-        ? 'Sign in to track live selections and place in-play bets.'
-        : 'Sign in to track pre-match selections and place slips.',
-    };
-  }
-
-  return {
-    title: betKind === BET_KIND.LIVE ? 'Build your live slip' : 'Build your pre-match slip',
-    body: betKind === BET_KIND.LIVE
-      ? 'Choose an in-play market to keep live bets separate from pre-match picks.'
-      : 'Pick pre-match odds from the events page to compose your slip.',
-  };
-};
+const getBoardPrompt = (betKind) => ({
+  title: betKind === BET_KIND.LIVE ? 'Build your live slip' : 'Build your pre-match slip',
+  body: betKind === BET_KIND.LIVE
+    ? 'Choose an in-play market to keep live bets separate from pre-match picks.'
+    : 'Pick pre-match odds from the events page to compose your slip.',
+});
 
 const getBoardStatusMessage = (betKind, boardState) => {
   if (!boardState?.isAwaitingDecision) {
@@ -86,12 +77,27 @@ const BoardModeration = ({ row }) => {
   </div>;
 };
 
+// Guests can build, edit and clear a slip; only a signed-in user can place it.
+const LoginToBetButton = ({ uiVariant }) => {
+  const navigate = useNavigate();
+  const { search } = useLocation();
+
+  return <button
+    type="button"
+    className={`btn w-100 mb-2 slip-action-primary slip-action-primary--${uiVariant}`}
+    onClick={() => navigate({ pathname: '/login', search })}
+  >
+    Log in to bet
+  </button>;
+};
+
 const SlipBoardPanel = ({
   betKind,
   board,
   boardState,
-  currentUser,
   error,
+  hasLoadError,
+  isGuest,
   onDeleteRow,
   onCleanBoard,
   onSubmitBoard,
@@ -115,7 +121,7 @@ const SlipBoardPanel = ({
     : null;
 
   if (rows.length === 0) {
-    const prompt = getBoardPrompt(betKind, currentUser);
+    const prompt = getBoardPrompt(betKind);
 
     return <section
       className={`slip-board slip-board--${uiVariant} slip-board--kind-${betKind.toLowerCase()}`}
@@ -125,10 +131,11 @@ const SlipBoardPanel = ({
         <div id={`slip-board-title-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
         <span className={`bet-kind-badge bet-kind-badge--${betKind.toLowerCase()}`}>{getBetKindLabel(betKind)}</span>
       </div>
-      <div className="card card-body empty-state-card slip-board__empty-state">
+      {/* The prompt is for a board that loaded empty; a failed load says nothing about the board. */}
+      {hasLoadError ? null : <div className="card card-body empty-state-card slip-board__empty-state">
         <div className="slip-board__empty-main">{prompt.title}</div>
         <small className="text-secondary">{prompt.body}</small>
-      </div>
+      </div>}
       {error ? <div className="alert alert-danger slip-board__error" role="alert">{error}</div> : null}
     </section>;
   }
@@ -205,14 +212,14 @@ const SlipBoardPanel = ({
           onChange={(event) => onWagerChange(betKind, event.target.value)}
         />
       </div>
-      <button
+      {isGuest ? <LoginToBetButton uiVariant={uiVariant} /> : <button
         type="button"
         className={`btn w-100 mb-2 slip-action-primary slip-action-primary--${uiVariant}`}
         disabled={isBusy}
         onClick={() => onSubmitBoard(betKind)}
       >
         {boardState?.isSubmitting ? 'Submitting…' : boardState?.isAwaitingDecision ? 'Awaiting review…' : 'BET!'}
-      </button>
+      </button>}
       <button
         type="button"
         className={`btn w-100 slip-action-secondary slip-action-secondary--${uiVariant}`}
@@ -225,57 +232,138 @@ const SlipBoardPanel = ({
   </section>;
 };
 
-const HandleSlip = ({ currentUser, onBoardSubmitted, onSelectionKeysChange, refreshSignal, uiVariant }) => {
+const getRowCount = (board) => (Array.isArray(board?.rows) ? board.rows.length : 0);
+
+// A populated board is controls all the way down, but every one of them is disabled while it is
+// busy. A panel with nothing focusable in it is reachable only if it is itself focusable.
+const hasFocusableControls = (board, boardState) => (
+  getRowCount(board) > 0 && !boardState?.isSubmitting && !boardState?.isAwaitingDecision
+);
+
+const HandleSlip = ({
+  currentUser,
+  isCurrentUserLookupFailed,
+  isCurrentUserResolved,
+  onBoardSubmitted,
+  onSelectionKeysChange,
+  refreshSignal,
+  tabRequest,
+  uiVariant,
+}) => {
   const {
     boardStateByKind,
     boards,
     cleanBoard,
     deleteRow,
     errors,
+    isGuest,
     isLoading,
+    loadError,
     selectedSelectionKeys,
     submitBoard,
     updateWager,
     wagers,
-  } = useSlipBoards({ currentUser, refreshSignal, onBoardSubmitted });
+  } = useSlipBoards({
+    currentUser,
+    isCurrentUserLookupFailed,
+    isCurrentUserResolved,
+    refreshSignal,
+    onBoardSubmitted,
+  });
+  const [activeKind, setActiveKind] = useState(BET_KIND.PRE_MATCH);
+  // The first-load rule below must never override a tab the user (or a placed pick) already chose.
+  const tabChosenRef = useRef(false);
+  const initialTabResolvedRef = useRef(false);
+  // A request that predates this mount (the slip is unmounted on some routes) must not jump the tab.
+  const handledTabRequestRef = useRef(tabRequest?.nonce);
 
   useEffect(() => {
     onSelectionKeysChange?.(selectedSelectionKeys);
   }, [onSelectionKeysChange, selectedSelectionKeys]);
 
-  if (isLoading) {
-    return <div className={`slip-boards slip-boards--${uiVariant}`}>
-      {BOARD_KINDS.map((betKind) => (
-        <section
-          key={betKind}
-          className={`slip-board slip-board--${uiVariant} slip-board--kind-${betKind.toLowerCase()}`}
-          aria-busy="true"
-          aria-labelledby={`loading-slip-board-${betKind}`}
-        >
-          <div id={`loading-slip-board-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
-          <div className="card card-body empty-state-card">Loading {getBetKindLabel(betKind).toLowerCase()} slip…</div>
-        </section>
-      ))}
-    </div>;
-  }
+  useEffect(() => {
+    if (!tabRequest || tabRequest.nonce === handledTabRequestRef.current) {
+      return;
+    }
 
+    handledTabRequestRef.current = tabRequest.nonce;
+    if (BOARD_KINDS.includes(tabRequest.betKind)) {
+      tabChosenRef.current = true;
+      setActiveKind(tabRequest.betKind);
+    }
+  }, [tabRequest]);
+
+  useEffect(() => {
+    // A failed load has not shown the first boards yet, so the rule waits for one that did.
+    if (isLoading || loadError || initialTabResolvedRef.current) {
+      return;
+    }
+
+    initialTabResolvedRef.current = true;
+    if (
+      !tabChosenRef.current
+      && getRowCount(boards[BET_KIND.LIVE]) > 0
+      && getRowCount(boards[BET_KIND.PRE_MATCH]) === 0
+    ) {
+      setActiveKind(BET_KIND.LIVE);
+    }
+  }, [boards, isLoading, loadError]);
+
+  const selectTab = (betKind) => {
+    tabChosenRef.current = true;
+    setActiveKind(betKind);
+  };
+
+  const tabs = BOARD_KINDS.map((betKind) => ({
+    id: betKind,
+    label: getBetKindLabel(betKind),
+    count: getRowCount(boards[betKind]),
+  }));
+
+  // Both panels stay mounted (the inactive one is only hidden) so typed wagers and per-kind state survive tab switches.
   return <div className={`slip-boards slip-boards--${uiVariant}`}>
-    {BOARD_KINDS.map((betKind) => (
-      <SlipBoardPanel
+    {loadError ? <div className="alert alert-danger slip-board__error" role="alert">{loadError}</div> : null}
+    <TabList idPrefix="slip" label="Slip" tabs={tabs} activeId={activeKind} onChange={selectTab} />
+    {BOARD_KINDS.map((betKind) => {
+      const isActive = betKind === activeKind;
+      // WAI-ARIA tabs pattern: a shown panel with nothing focusable in it joins the tab sequence itself.
+      const hasFocusableContent = !isLoading && hasFocusableControls(boards[betKind], boardStateByKind[betKind]);
+
+      return <div
         key={betKind}
-        betKind={betKind}
-        board={boards[betKind]}
-        boardState={boardStateByKind[betKind]}
-        currentUser={currentUser}
-        error={errors[betKind]}
-        onCleanBoard={cleanBoard}
-        onDeleteRow={deleteRow}
-        onSubmitBoard={submitBoard}
-        onWagerChange={updateWager}
-        uiVariant={uiVariant}
-        wager={wagers[betKind]}
-      />
-    ))}
+        role="tabpanel"
+        id={`slip-panel-${betKind}`}
+        aria-labelledby={`slip-tab-${betKind}`}
+        hidden={!isActive}
+        tabIndex={isActive && !hasFocusableContent ? 0 : undefined}
+      >
+        {isLoading ? (
+          <section
+            className={`slip-board slip-board--${uiVariant} slip-board--kind-${betKind.toLowerCase()}`}
+            aria-busy="true"
+            aria-labelledby={`loading-slip-board-${betKind}`}
+          >
+            <div id={`loading-slip-board-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
+            <div className="card card-body empty-state-card">Loading {getBetKindLabel(betKind).toLowerCase()} slip…</div>
+          </section>
+        ) : (
+          <SlipBoardPanel
+            betKind={betKind}
+            board={boards[betKind]}
+            boardState={boardStateByKind[betKind]}
+            error={errors[betKind]}
+            hasLoadError={Boolean(loadError)}
+            isGuest={isGuest}
+            onCleanBoard={cleanBoard}
+            onDeleteRow={deleteRow}
+            onSubmitBoard={submitBoard}
+            onWagerChange={updateWager}
+            uiVariant={uiVariant}
+            wager={wagers[betKind]}
+          />
+        )}
+      </div>;
+    })}
   </div>;
 };
 

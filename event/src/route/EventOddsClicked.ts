@@ -12,6 +12,7 @@ import {
 import { LiveMarketType, TeamSide } from "../compat/LiveContract";
 import EventOddsSelectedPublisher from "../messaging/publisher/EventOddsSelectedPublisher";
 import { verifyAdminRequest } from "../service/VerifyAdminSession";
+import { refreshGuestCookie, resolveOddsPrincipal } from "../service/GuestIdentity";
 
 const router = express.Router();
 
@@ -250,10 +251,11 @@ router.post(
       }
 
       const publisher = await getPublisher();
+      const principal = resolveOddsPrincipal(req);
 
       publisher.publish({
         data: {
-          userId: req.currentUser ? req.currentUser.id : "",
+          userId: principal.userId,
           eventId: event.eventId,
           eventName: event.name,
           oddsId: `${selectedMarket.marketId}:${selectedSelection.selectionId}`,
@@ -278,6 +280,7 @@ router.post(
         },
       });
 
+      refreshGuestCookie(req, res, principal);
       res.sendStatus(200);
       return;
     }
@@ -307,10 +310,11 @@ router.post(
     }
 
     const publisher = await getPublisher();
+    const principal = resolveOddsPrincipal(req);
 
     const eventPayload = {
       data: {
-        userId: req.currentUser ? req.currentUser.id : "",
+        userId: principal.userId,
         eventId: event.eventId,
         eventName: event.name,
         oddsId: selectedOdds.id,
@@ -326,6 +330,7 @@ router.post(
 
     publisher.publish(eventPayload);
 
+    refreshGuestCookie(req, res, principal);
     res.sendStatus(200);
   }
 );

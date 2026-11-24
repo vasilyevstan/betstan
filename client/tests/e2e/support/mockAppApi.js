@@ -393,7 +393,7 @@ const fulfillJson = (route, body, status = 200) => route.fulfill({
   body: JSON.stringify(body),
 });
 
-const createShellMockState = ({ loginError = null, signupError = null } = {}) => {
+const createShellMockState = ({ loginError = null, signupError = null, forgotPasswordError = null } = {}) => {
   const state = {
     currentUser: null,
     events: [],
@@ -414,6 +414,7 @@ const createShellMockState = ({ loginError = null, signupError = null } = {}) =>
     auth: {
       loginError,
       signupError,
+      forgotPasswordError,
     },
     submissions: [],
     requestCounts: {},
@@ -933,6 +934,17 @@ const installAppApiMocks = async (page, state) => {
       }
 
       await fulfillJson(route, { currentUser: state.currentUser });
+      return;
+    }
+
+    if (key === 'POST /api/auth/forgot-password') {
+      if (state.auth.forgotPasswordError) {
+        await fulfillJson(route, { errors: [{ message: state.auth.forgotPasswordError }] }, 400);
+        return;
+      }
+
+      // The real endpoint answers every valid request alike, whether or not the account exists.
+      await fulfillJson(route, { status: 'ok' });
       return;
     }
 

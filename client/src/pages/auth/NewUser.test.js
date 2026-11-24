@@ -14,7 +14,7 @@ jest.mock('react-router-dom', () => ({
 jest.mock('../../hook/UseRequest', () => jest.fn());
 const UseRequest = require('../../hook/UseRequest');
 
-describe('NewUser page', () => {
+describe('NewUser form', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -32,7 +32,9 @@ describe('NewUser page', () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByRole('heading', { name: 'Create an account' })).toBeInTheDocument();
+    // The heading, tabs and cross-links belong to the single auth page (AuthPage.test.js).
+    expect(screen.queryByRole('heading')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
 
     const identifier = screen.getByLabelText('Username');
     const password = screen.getByLabelText('Password');
@@ -52,8 +54,6 @@ describe('NewUser page', () => {
         password: 'Password123!',
       },
     }));
-    expect(screen.getByRole('link', { name: 'Log in' }))
-      .toHaveAttribute('href', '/login?ui=v2&theme=light');
   });
 
   it('preserves the selected UI and triggers callback on successful signup', () => {

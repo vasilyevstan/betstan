@@ -10,6 +10,11 @@ import {
 const BOARD_KINDS = [BET_KIND.PRE_MATCH, BET_KIND.LIVE];
 const POLL_INTERVAL_MS = 2000;
 const REFRESH_DELAY_MS = 250;
+// A guest is identified by an HttpOnly cookie the client never sees, so this marker only
+// distinguishes the guest session from a signed-in user's id inside the hook.
+const GUEST_PRINCIPAL = 'guest';
+const SLIP_LOAD_ERROR = 'Unable to load your slip right now.';
+const LOGIN_UNCONFIRMED_ERROR = 'Unable to confirm your login right now. Reload the page to see your slip.';
 const SLIP_STATUS = Object.freeze({
   DRAFT: 'DRAFT',
   SUBMITTED: 'SUBMITTED',
@@ -41,6 +46,7 @@ const CHANGED_PLACEMENT_ERROR = 'This slip changed after a previous placement at
 const RELOAD_REQUIRED_PLACEMENT_ERROR = 'This slip changed before placement. Review the latest selections and try again.';
 const BOARD_CONFIRMATION_MISSING_ERROR = 'Slip is refreshing. Wait for the latest selections before placing it again.';
 
+const isUserPrincipal = (principal) => Boolean(principal) && principal !== GUEST_PRINCIPAL;
 const getBoardId = (board) => board?._id ?? board?.id ?? null;
 const getRowId = (row) => row?._id ?? row?.id ?? null;
 const isSubmittedBoard = (board) => board?.status === SLIP_STATUS.SUBMITTED;
@@ -336,11 +342,20 @@ const mergePendingBoards = (authoritativeBoards, bets, previousPendingBoards) =>
   };
 };
 
-const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
+const useSlipBoards = ({
+  currentUser,
+  isCurrentUserResolved,
+  isCurrentUserLookupFailed = false,
+  refreshSignal,
+  onBoardSubmitted,
+}) => {
   const [boards, setBoards] = useState(EMPTY_BOARDS);
   const [wagers, setWagers] = useState(EMPTY_WAGERS);
   const [errors, setErrors] = useState(EMPTY_ERRORS);
+  const [loadError, setLoadError] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  // The principal the stored boards, errors and pending state belong to.
+  const [dataPrincipal, setDataPrincipal] = useState('');
   const [pendingBoards, setPendingBoards] = useState({});
   const [submittingBoards, setSubmittingBoards] = useState({});
 
@@ -348,15 +363,28 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
   const mountedRef = useRef(false);
   const authContextRef = useRef({
-    userId: currentUserId,
+    principal: '',
     generation: 0,
   });
-  if (authContextRef.current.userId !== currentUserId) {
+  // The principal is the signed-in user's id, or the guest marker once auth has resolved with no
+  // user. It stays empty (unknown) until auth resolves, and again when the lookup failed: a failed
+  // lookup is not proof of a guest. While auth re-resolves with no user (for example during login)
+  // the previous principal is kept, so a guest's slip is not reloaded for nothing. Every change
+  // starts a new generation.
+  const nextPrincipal = isCurrentUserLookupFailed
+    ? ''
+    : currentUserId || (isCurrentUserResolved ? GUEST_PRINCIPAL : authContextRef.current.principal);
+  if (authContextRef.current.principal !== nextPrincipal) {
     authContextRef.current = {
-      userId: currentUserId,
+      principal: nextPrincipal,
       generation: authContextRef.current.generation + 1,
     };
   }
+  const principal = authContextRef.current.principal;
+  // After the principal changes, the previous principal's records are not exposed (not even for one
+  // commit) while the effect below resets them and the new principal's slip loads.
+  const isDataStale = dataPrincipal !== principal;
+  const previousPrincipalRef = useRef('');
   const pollTimerRef = useRef(null);
   const refreshTimerRef = useRef(null);
   const pendingBoardsRef = useRef({});
@@ -364,6 +392,12 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   const previousRefreshSignalRef = useRef(refreshSignal);
   const requestSequenceRef = useRef(0);
   const appliedRequestSequenceRef = useRef(0);
+  // Whether the current-user lookup has settled. Boards are only read while it has: until then the
+  // principal a read would be served for is unknown.
+  const authResolvedRef = useRef(isCurrentUserResolved);
+  // A read skipped or dropped because the lookup was running, to be repeated when it settles
+  // without the principal changing (a principal change loads the new principal's slip anyway).
+  const refreshWantedRef = useRef(false);
 
   useEffect(() => {
     pendingBoardsRef.current = pendingBoards;
@@ -387,7 +421,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
   const hasActiveAuthContext = useCallback((authContext) => (
     mountedRef.current
-    && authContextRef.current.userId === authContext.userId
+    && authContextRef.current.principal === authContext.principal
     && authContextRef.current.generation === authContext.generation
   ), []);
 
@@ -516,7 +550,14 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
   const loadBoards = useCallback(async ({ includeBets = true, authContext = getAuthContext() } = {}) => {
     const requestedAuthContext = authContext;
-    if (!requestedAuthContext.userId) {
+    if (!requestedAuthContext.principal) {
+      return;
+    }
+
+    // Until the current-user lookup settles nobody knows who the server would answer for (right
+    // after a login it already answers for the user), so the read waits for it.
+    if (!authResolvedRef.current) {
+      refreshWantedRef.current = true;
       return;
     }
 
@@ -539,10 +580,12 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
       pendingBoardsRef.current = merged.pendingBoards;
       setBoards(merged.boards);
       setPendingBoards(merged.pendingBoards);
+      setLoadError(null);
       setIsLoading(false);
 
       if (
         includeBets
+        && isUserPrincipal(requestedAuthContext.principal)
         && (hasTrackedPendingBoards(merged.pendingBoards) || hasAuthoritativeSubmittedBoards(authoritativeBoards))
       ) {
         void enrichBoardsWithHistory({ requestId, requestedAuthContext, authoritativeBoards });
@@ -550,6 +593,8 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     } catch (error) {
       if (canApplyRequest(requestId, requestedAuthContext)) {
         appliedRequestSequenceRef.current = requestId;
+        // A failed read must not look like an empty slip, for a guest or a signed-in user.
+        setLoadError(SLIP_LOAD_ERROR);
         setIsLoading(false);
       }
     }
@@ -578,27 +623,67 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   }, [clearScheduledRefresh, stopPolling]);
 
   useEffect(() => {
+    authResolvedRef.current = isCurrentUserResolved;
+    if (isCurrentUserResolved) {
+      return;
+    }
+
+    // A lookup under way is an auth boundary: the answer to a read made before it cannot be
+    // attributed to a principal, so it is dropped and read again once the lookup settles.
+    if (requestSequenceRef.current > appliedRequestSequenceRef.current) {
+      refreshWantedRef.current = true;
+    }
+    requestSequenceRef.current += 1;
+    appliedRequestSequenceRef.current = requestSequenceRef.current;
+  }, [isCurrentUserResolved]);
+
+  useEffect(() => {
+    const previousPrincipal = previousPrincipalRef.current;
+    previousPrincipalRef.current = principal;
+
     requestSequenceRef.current += 1;
     appliedRequestSequenceRef.current = requestSequenceRef.current;
     clearScheduledRefresh();
     stopPolling();
+    refreshWantedRef.current = false;
 
-    if (!currentUserId) {
-      pendingBoardsRef.current = {};
-      setPendingBoards({});
-      setBoards(EMPTY_BOARDS);
-      setErrors(EMPTY_ERRORS);
-      setWagers(EMPTY_WAGERS);
-      setSubmittingBoards({});
-      placementAttemptsRef.current = {};
-      setIsLoading(false);
+    // Auth has not resolved yet: nothing can be loaded, and the slip stays in its loading state.
+    if (!principal && !previousPrincipal) {
       return;
     }
 
+    pendingBoardsRef.current = {};
+    setPendingBoards({});
+    setBoards(EMPTY_BOARDS);
     setErrors(EMPTY_ERRORS);
+    setLoadError(null);
+    setSubmittingBoards({});
+    setDataPrincipal(principal);
+    placementAttemptsRef.current = {};
+    // Wagers typed as a guest carry over to the signed-in user's matching slip; ending or
+    // switching a user's session clears them.
+    if (isUserPrincipal(previousPrincipal)) {
+      setWagers(EMPTY_WAGERS);
+    }
+
+    // The login could not be confirmed after a session was known: nothing is loaded, and nothing
+    // of that session stays on screen.
+    if (!principal) {
+      return;
+    }
+
     setIsLoading(true);
     void loadBoards({ includeBets: true, authContext: getAuthContext() });
-  }, [clearScheduledRefresh, currentUserId, getAuthContext, loadBoards, stopPolling]);
+  }, [clearScheduledRefresh, getAuthContext, loadBoards, principal, stopPolling]);
+
+  useEffect(() => {
+    if (!isCurrentUserResolved || !principal || !refreshWantedRef.current) {
+      return;
+    }
+
+    refreshWantedRef.current = false;
+    void loadBoards({ includeBets: true, authContext: getAuthContext() });
+  }, [getAuthContext, isCurrentUserResolved, loadBoards, principal]);
 
   useEffect(() => {
     if (previousRefreshSignalRef.current === refreshSignal) {
@@ -610,7 +695,8 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   }, [refreshSignal, scheduleRefresh]);
 
   useEffect(() => {
-    if (!hasTrackedPendingBoards(pendingBoards)) {
+    // Only a signed-in user can have a submitted board to wait on; a guest slip is never polled.
+    if (!isUserPrincipal(principal) || !hasTrackedPendingBoards(pendingBoards)) {
       stopPolling();
       return undefined;
     }
@@ -629,9 +715,12 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     return () => {
       stopPolling();
     };
-  }, [getAuthContext, hasActiveAuthContext, loadBoards, pendingBoards, stopPolling]);
+  }, [getAuthContext, hasActiveAuthContext, loadBoards, pendingBoards, principal, stopPolling]);
 
-  const selectedSelectionKeys = useMemo(() => extractSelectionKeysFromBoards(boards), [boards]);
+  // With no principal the slip is waiting for auth, or auth could not be confirmed; either way
+  // there is nothing of any session to show.
+  const visibleBoards = isDataStale || !principal ? EMPTY_BOARDS : boards;
+  const selectedSelectionKeys = useMemo(() => extractSelectionKeysFromBoards(visibleBoards), [visibleBoards]);
 
   const updateWager = useCallback((betKind, value) => {
     setWagers((currentWagers) => ({
@@ -850,10 +939,15 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   }), [pendingBoards, submittingBoards]);
 
   return {
-    boards,
+    boards: visibleBoards,
     wagers,
-    errors,
-    isLoading,
+    errors: isDataStale ? EMPTY_ERRORS : errors,
+    isGuest: principal === GUEST_PRINCIPAL,
+    // Waiting for auth is loading; a lookup that failed is not.
+    isLoading: principal ? isLoading || isDataStale : !isCurrentUserLookupFailed,
+    loadError: principal
+      ? (isDataStale ? null : loadError)
+      : (isCurrentUserLookupFailed ? LOGIN_UNCONFIRMED_ERROR : null),
     boardStateByKind,
     selectedSelectionKeys,
     updateWager,
@@ -866,8 +960,10 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 export default useSlipBoards;
 export {
   BOARD_KINDS,
+  LOGIN_UNCONFIRMED_ERROR,
   POLL_INTERVAL_MS,
   REFRESH_DELAY_MS,
+  SLIP_LOAD_ERROR,
   SLIP_STATUS,
   EMPTY_BOARDS,
   getBoardId,

@@ -64,6 +64,11 @@ const board = (page, betKind) => page.locator(
   `section[aria-labelledby="slip-board-title-${betKind}"]`,
 );
 
+const openSlipTab = async (page, betKind) => {
+  await page.locator(`#slip-tab-${betKind}`).click();
+  await expect(board(page, betKind)).toBeVisible();
+};
+
 const betCard = (page, slipId) => page.locator(
   `.my-bets-card[data-slip-id="${slipId}"]`,
 );
@@ -525,6 +530,7 @@ const placeAdditionalAcceptanceBet = async (page, fixture, betKind) => {
         .getByRole('button', { name: /^Select 1X2 .* at / }).first().click();
       await expect(board(page, 'PRE_MATCH')).toContainText(fixture.name);
     }
+    await openSlipTab(page, betKind);
     await page.getByLabel(`Wager for ${betKind === 'LIVE' ? 'LIVE' : 'PRE-MATCH'} SLIP`).fill('10');
     const boards = await (await page.request.get('/api/slip/boards')).json();
     const slipId = boards[betKind]._id;
@@ -805,6 +811,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
 
   const preMatchBoard = board(page, 'PRE_MATCH');
   await expect(preMatchBoard).toContainText(futureFixture.name);
+  await openSlipTab(page, 'PRE_MATCH');
   await page.getByLabel('Wager for PRE-MATCH SLIP').fill('10');
 
   const liveBoard = board(page, 'LIVE');
@@ -851,6 +858,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     ),
   ).toBe(true);
 
+  await openSlipTab(page, 'LIVE');
   await page.getByLabel('Wager for LIVE SLIP').fill('5');
   const preKickoffPlacementResponsePromise = page.waitForResponse((response) => (
     new URL(response.url()).pathname === '/api/slip/bet'
@@ -947,6 +955,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   await expect(liveBoard).toContainText(fixtures[0].name);
   await expect(preMatchBoard).toContainText(futureFixture.name);
 
+  await openSlipTab(page, 'LIVE');
   await liveBoard.getByRole('button', { name: 'CLEAN' }).click();
   await expect(liveBoard.locator('.slip-row-card')).toHaveCount(0);
   const declinedLiveSlipIds = [];
@@ -971,6 +980,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       { timeout: 10000 },
     );
 
+    await openSlipTab(page, 'LIVE');
     await page.getByLabel('Wager for LIVE SLIP').fill('5');
     const boardsBeforeLiveSubmit = await (
       await page.request.get('/api/slip/boards')
@@ -1071,6 +1081,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     await cashBackPage.close();
   }
 
+  await openSlipTab(page, 'PRE_MATCH');
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toHaveValue('10');
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toBeEnabled();
   await expect(preMatchBoard.getByRole('button', { name: 'BET!' })).toBeEnabled();
@@ -1366,6 +1377,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     await page.request.get('/api/slip/boards')
   ).json();
   const preMatchSlipId = boardsBeforePreMatchSubmit.PRE_MATCH._id;
+  await openSlipTab(page, 'PRE_MATCH');
   await preMatchBoard.getByRole('button', { name: 'BET!' }).click();
   await expect.poll(async () => {
     const bets = await (await page.request.get('/api/bet')).json();

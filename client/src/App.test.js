@@ -12,10 +12,27 @@ jest.mock('axios', () => ({
 }));
 
 jest.mock('./Header', () => () => <div data-testid="header">Header</div>);
-jest.mock('./pages/event/EventList', () => () => (
-  <section data-testid="events"><h1>Events</h1></section>
+jest.mock('./pages/event/EventList', () => ({ onSelectionPlaced }) => (
+  <section data-testid="events">
+    <h1>Events</h1>
+    <button type="button" onClick={() => onSelectionPlaced('LIVE')}>Place live pick</button>
+    <button type="button" onClick={() => onSelectionPlaced('PRE_MATCH')}>Place pre-match pick</button>
+    <button type="button" onClick={() => onSelectionPlaced()}>Place pick without a kind</button>
+    <button type="button" onClick={onSelectionPlaced}>Place pick with a click event</button>
+  </section>
 ));
-jest.mock('./pages/Slip', () => () => <div data-testid="slip">Slip sidebar</div>);
+jest.mock('./pages/Slip', () => (props) => (
+  <div
+    data-testid="slip"
+    data-refresh-signal={props.refreshSignal}
+    data-resolved={String(props.isCurrentUserResolved)}
+    data-lookup-failed={String(props.isCurrentUserLookupFailed)}
+    data-tab-kind={props.tabRequest?.betKind ?? ''}
+    data-tab-nonce={props.tabRequest?.nonce ?? ''}
+  >
+    Slip sidebar
+  </div>
+));
 jest.mock('./pages/account/Statistics', () => () => (
   <div data-testid="leaderboard">Leaderboard sidebar</div>
 ));
@@ -26,8 +43,13 @@ jest.mock('./pages/account/BackofficeMarkets', () => ({
   BackofficeMarketDesigner: () => <div>Market designer</div>,
 }));
 jest.mock('./pages/account/MyBets', () => () => <div>My bets page</div>);
-jest.mock('./pages/auth/NewUser', () => () => <div>Signup page</div>);
-jest.mock('./pages/auth/LogIn', () => () => <div>Login page</div>);
+jest.mock('./pages/auth/AuthPage', () => ({ tab, callback }) => (
+  <div>
+    <p>{`Auth page, ${tab} tab`}</p>
+    <button type="button" onClick={callback}>Complete auth</button>
+  </div>
+));
+jest.mock('./pages/auth/ForgotPassword', () => () => <div>Forgot password page</div>);
 jest.mock('./pages/auth/LogOut', () => () => <div>Logout page</div>);
 jest.mock('./pages/Telemetry', () => () => (
   <section>
@@ -126,7 +148,7 @@ describe('App telemetry routing and page-view reporting', () => {
 
     const main = screen.getByRole('main');
     const statistics = screen.getByRole('complementary', { name: 'Statistics' });
-    const slips = screen.getByRole('complementary', { name: 'Slips' });
+    const slips = screen.getByRole('complementary', { name: 'Slip' });
 
     expect(main).toHaveAttribute('id', 'main-content');
     expect(main).toHaveAttribute('tabindex', '-1');
@@ -274,5 +296,218 @@ describe('App telemetry routing and page-view reporting', () => {
     expect(screen.getByTestId('leaderboard')).toBeInTheDocument();
     expect(screen.getByTestId('slip')).toBeInTheDocument();
     expect(axios.get.mock.calls.filter(([url]) => url === '/api/auth/currentuser')).toHaveLength(1);
+  });
+});
+
+describe('App slip window requests', () => {
+  const slip = () => screen.getByTestId('slip');
+  const refreshSignal = () => Number(slip().getAttribute('data-refresh-signal'));
+
+  const LoginLink = () => {
+    const navigate = useNavigate();
+    return <button type="button" onClick={() => navigate('/login')}>Go to login</button>;
+  };
+
+  beforeEach(() => {
+    axios.get.mockReset();
+    axios.post.mockReset();
+    axios.patch.mockReset();
+    axios.get.mockResolvedValue({ data: { currentUser: null } });
+    axios.post.mockResolvedValue({});
+  });
+
+  it('names the region Slip and keeps the heading id the release gate selects', async () => {
+    await act(async () => { renderApp('/'); });
+
+    expect(screen.getByRole('complementary', { name: 'Slip' })).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: 'Slips' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Slip' })).toHaveAttribute('id', 'slips-region-heading');
+  });
+
+  it('tells the slip when auth has resolved so a guest slip can load', async () => {
+    await act(async () => { renderApp('/'); });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
+    expect(slip()).toHaveAttribute('data-tab-nonce', '');
+  });
+
+  it('tells the slip that a failed login lookup is not a guest', async () => {
+    axios.get.mockRejectedValue(new Error('auth unavailable'));
+
+    await act(async () => { renderApp('/'); });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'true');
+  });
+
+  it('clears the failed-lookup flag when the next lookup starts, and keeps it clear once that succeeds', async () => {
+    axios.get.mockRejectedValueOnce(new Error('auth unavailable'));
+    await act(async () => { renderApp('/login?ui=v2&theme=dark'); });
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'true');
+
+    let finishLookup;
+    axios.get.mockImplementationOnce(() => new Promise((resolve) => { finishLookup = resolve; }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete auth' }));
+    });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'false');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
+
+    await act(async () => { finishLookup({ data: { currentUser: { id: 'user-1' } } }); });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
+  });
+
+  it('ignores the failure of a lookup that a newer lookup has replaced', async () => {
+    let failFirstLookup;
+    axios.get.mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirstLookup = reject; }));
+    await act(async () => { renderApp('/login?ui=v2&theme=dark'); });
+    expect(slip()).toHaveAttribute('data-resolved', 'false');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete auth' }));
+    });
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+
+    await act(async () => { failFirstLookup(new Error('auth unavailable')); });
+
+    expect(slip()).toHaveAttribute('data-resolved', 'true');
+    expect(slip()).toHaveAttribute('data-lookup-failed', 'false');
+  });
+
+  it.each([
+    ['LIVE', 'Place live pick'],
+    ['PRE_MATCH', 'Place pre-match pick'],
+  ])('asks the slip to open the %s tab and reload when a pick is placed', async (betKind, buttonName) => {
+    await act(async () => { renderApp('/'); });
+    const signalBefore = refreshSignal();
+
+    fireEvent.click(screen.getByRole('button', { name: buttonName }));
+
+    expect(slip()).toHaveAttribute('data-tab-kind', betKind);
+    expect(slip()).toHaveAttribute('data-tab-nonce', '1');
+    expect(refreshSignal()).toBe(signalBefore + 1);
+  });
+
+  it('issues a new request every time, including the same kind twice in a row', async () => {
+    await act(async () => { renderApp('/'); });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Place live pick' }));
+    expect([slip().dataset.tabKind, slip().dataset.tabNonce]).toEqual(['LIVE', '1']);
+    fireEvent.click(screen.getByRole('button', { name: 'Place live pick' }));
+    expect([slip().dataset.tabKind, slip().dataset.tabNonce]).toEqual(['LIVE', '2']);
+    fireEvent.click(screen.getByRole('button', { name: 'Place pre-match pick' }));
+    expect([slip().dataset.tabKind, slip().dataset.tabNonce]).toEqual(['PRE_MATCH', '3']);
+  });
+
+  it.each([
+    'Place pick without a kind',
+    'Place pick with a click event',
+  ])('reloads the slip but never requests a tab for "%s"', async (buttonName) => {
+    await act(async () => { renderApp('/'); });
+    const signalBefore = refreshSignal();
+
+    fireEvent.click(screen.getByRole('button', { name: buttonName }));
+
+    expect(refreshSignal()).toBe(signalBefore + 1);
+    expect(slip()).toHaveAttribute('data-tab-kind', '');
+    expect(slip()).toHaveAttribute('data-tab-nonce', '');
+  });
+
+  it('reloads the slip after login or signup without a tab request and keeps the last one', async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <LoginLink />
+          <App />
+        </MemoryRouter>
+      );
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Place live pick' }));
+    const signalBefore = refreshSignal();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to login' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete auth' }));
+    });
+
+    expect(refreshSignal()).toBe(signalBefore + 1);
+    expect([slip().dataset.tabKind, slip().dataset.tabNonce]).toEqual(['LIVE', '1']);
+  });
+
+  it('reloads the slip after a login without any tab request when none was placed', async () => {
+    await act(async () => { renderApp('/login?ui=v2&theme=dark'); });
+    const signalBefore = refreshSignal();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete auth' }));
+    });
+
+    expect(refreshSignal()).toBe(signalBefore + 1);
+    expect(slip()).toHaveAttribute('data-tab-kind', '');
+    expect(slip()).toHaveAttribute('data-tab-nonce', '');
+  });
+});
+
+describe('App auth routes', () => {
+  const currentUserRequests = () => axios.get.mock.calls
+    .filter(([url]) => url === '/api/auth/currentuser');
+
+  beforeEach(() => {
+    axios.get.mockReset();
+    axios.post.mockReset();
+    axios.patch.mockReset();
+    axios.get.mockResolvedValue({ data: { currentUser: null } });
+    axios.post.mockResolvedValue({});
+  });
+
+  it.each([
+    ['/login?ui=v2&theme=dark', 'login'],
+    ['/LOGIN/', 'login'],
+    ['/signup?ui=v3&theme=light', 'signup'],
+    ['/Signup/', 'signup'],
+  ])('renders the one auth page at %s on its %s tab', async (path, tab) => {
+    await act(async () => { renderApp(path); });
+
+    expect(screen.getByText(`Auth page, ${tab} tab`)).toBeInTheDocument();
+    expect(screen.getAllByText(/^Auth page, /)).toHaveLength(1);
+    expect(screen.queryByTestId('events')).not.toBeInTheDocument();
+    expect(axios.post).not.toHaveBeenCalled();
+  });
+
+  it.each(['/login?ui=v2&theme=dark', '/signup?ui=v2&theme=dark'])(
+    'hands %s the shared auth callback so a successful login or signup refreshes the session',
+    async (path) => {
+      await act(async () => { renderApp(path); });
+      expect(currentUserRequests()).toHaveLength(1);
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Complete auth' }));
+      });
+
+      expect(currentUserRequests()).toHaveLength(2);
+    },
+  );
+
+  it.each(['/forgot-password?ui=v2&theme=light', '/Forgot-Password/'])(
+    'renders the public forgot-password page at %s without an auth page or a page view',
+    async (path) => {
+      await act(async () => { renderApp(path); });
+
+      expect(screen.getByText('Forgot password page')).toBeInTheDocument();
+      expect(screen.queryByText(/^Auth page, /)).not.toBeInTheDocument();
+      expect(screen.queryByTestId('events')).not.toBeInTheDocument();
+      expect(axios.post).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a deeper forgot-password path on the wildcard Events layout', async () => {
+    await act(async () => { renderApp('/forgot-password/details'); });
+
+    expect(screen.getByTestId('events')).toBeInTheDocument();
+    expect(screen.queryByText('Forgot password page')).not.toBeInTheDocument();
   });
 });

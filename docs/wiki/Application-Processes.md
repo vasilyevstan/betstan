@@ -50,6 +50,9 @@ sequenceDiagram
 
 ### Creating an account
 
+The `/login` page carries **Log in** and **Create account** tabs; `/signup`
+opens the same page on the second tab.
+
 1. The signup form accepts either a username or an email address in the same
    identifier field and validates the password before sending the request.
 2. Auth trims and normalizes the identifier for case-insensitive uniqueness.
@@ -58,6 +61,16 @@ sequenceDiagram
 4. New accounts receive the ordinary `USER` role.
 5. Auth immediately issues the same session used by login, so a successful
    signup signs the user in.
+
+### Forgot password
+
+`/forgot-password` asks for a username or email and calls the unauthenticated
+`POST /api/auth/forgot-password` with `{email}`. Auth normalizes the
+identifier, resets the matching account's password to a fixed, public value
+and always answers `200` with the same body, whether or not an account
+matched. There is no email, token, rate limit or lockout, and existing
+sessions stay valid until their 12-hour expiry. This is a deliberate product
+decision with serious consequences; see [[Security]].
 
 ### Keeping a session active
 
@@ -372,7 +385,9 @@ expiry and adds it to the pre-match slip with the current board
 revision/fingerprint. Clicking the same outcome again refreshes its quote. If
 the slip already holds another selection from that match, the card asks
 **Replace with …** or **Keep current**; custom markets cannot be combined with
-other selections from the same match. Signed-out players, a slip under review,
+other selections from the same match. Signed-out visitors can add these
+standard picks as guest drafts (see below) but cannot add a custom-market
+selection, which requires login. A slip under review,
 a changed board and unavailable markets get an inline message; a conflict
 refreshes the slip. The player must still enter a wager and place the slip
 before quote expiry.
@@ -452,7 +467,7 @@ sequenceDiagram
     Event->>Event: Validate event, market, quote, selection
     Event->>Bus: event:odds:selected
     Bus-->>Slip: Selection with user and bet kind
-    Slip->>SlipDB: Upsert row into matching draft board
+    Slip->>SlipDB: Upsert row into matching draft (user or guest)
     Client->>Slip: Refresh current boards
     Slip-->>Client: PRE_MATCH and LIVE drafts
 ```
@@ -462,18 +477,46 @@ stored event, product, and odds identity. For live selections it additionally
 checks phase, market status, market and quote versions, quote expiry, and the
 selection inside the current market.
 
-Slip ignores selections without a signed-in user. For an authenticated user it
-upserts the selection into the draft whose kind matches the selection:
-`PRE_MATCH` or `LIVE`. The two boards are independent and may be open at the
-same time. A row keeps the original event, market/product, selection, quote,
+Event resolves the principal for each click. A signed-in user is published as
+their user ID. A visitor without a session is published as
+`guest:<sha256 of the cookie>`: Event reuses a valid `betstan_guest` cookie or
+generates a new 32-hex id, and sets the cookie only once the click is
+accepted. The raw cookie value is never published, logged or stored. The cookie is `HttpOnly`,
+`SameSite=Lax`, lasts 30 days and is `Secure` behind HTTPS.
+
+Slip upserts the selection into the draft whose kind matches the selection:
+`PRE_MATCH` or `LIVE`. The two kinds are independent drafts, shown as tabs of
+one Slip window. A row keeps the original event, market/product, selection, quote,
 price, and authority metadata needed for later validation.
 
 Repeated delivery updates the same logical row instead of appending duplicate
 selections. Removing a row or clearing a board changes only that draft.
 
+### Guest drafts
+
+Guest drafts live in the same Slip collection under the guest principal.
+
+- A guest draft holds at most 50 rows; further new rows are not added.
+- Each guest write refreshes a 30-day expiry, enforced by the TTL index
+  `slip_guest_expiry_ttl`.
+- Guest drafts do not emit `SLIP_CREATED`.
+- The cookie is a bearer credential held in an HttpOnly cookie. The guest
+  principal is a SHA-256 of it, and Slip never returns the principal or the
+  expiry to the browser.
+- Guests can add, remove and clear picks but cannot place bets or add
+  custom-market selections.
+
+When a signed-in user calls `GET /api/slip/boards` carrying the guest cookie,
+Slip merges each guest draft into the user's draft of the same kind and then
+always deletes the merged guest draft; for the same market the guest's newer
+live pick replaces the user's, and a row the user's board refuses is dropped. A kind where the user has a `SUBMITTED` slip is skipped and
+retried on a later load. The claim does not clear the cookie; the TTL removes
+any leftover guest drafts. A failed merge never blocks loading the boards.
+
 ## Submitting a slip
 
 1. The user enters the wager on one draft board and selects **Place bet**.
+   A guest sees **Log in to bet**, which opens `/login`.
 2. Client sends the board kind, slip identity, current revision, content
    fingerprint, wager, and placement-attempt identity.
 3. Slip verifies ownership, kind, supported wager, revision, and fingerprint.
@@ -485,7 +528,8 @@ selections. Removing a row or clearing a board changes only that draft.
 6. Bet creates the user-facing betting ledger entry, while Resulting registers
    the rows it may later settle.
 
-The board remains visibly live or pre-match throughout the process. Mixed-kind
+The board remains visibly live or pre-match throughout the process (its tab
+stays selected). Mixed-kind
 rows are not accepted merely because a client labels the request as one kind.
 
 ## Moderation
@@ -761,7 +805,7 @@ facts without changing their business consumers.
 | --- | --- |
 | `MAIN_PAGE_VISIT` | Client entry to `/`, not a unique visitor |
 | `ADMIN_PAGE_VISIT` | Client entry to public `/backoffice`; the historical metric name does not imply administrator access |
-| `SLIP_CREATED` | A new draft inserted while processing an authenticated odds selection, not every row added or draft read |
+| `SLIP_CREATED` | A new draft inserted while processing an authenticated odds selection, not every row added, draft read or guest draft |
 | `BET_PLACED` | A distinct submitted slip observed on `slip:bet`, not proof that Moderation accepted it |
 | `RESULTING_SETTLED` | A distinct complete-slip settlement observed on `resulting:slip:settle`, not each row, match result, win, or payout amount |
 | `GAMECENTER_EVENT_EMITTED` | A distinct Gamemaster live-update sequence, not one match or one football incident |

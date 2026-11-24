@@ -65,9 +65,9 @@ flowchart TB
 | Service | Interface | Responsibility | Owned data |
 |---|---|---|---|
 | `client` | HTTP | React UI, navigation, event cards, betting boards, My Bets, statistics, and Backoffice | Browser/session state only |
-| `auth` | HTTP | Signup, login, logout, current-user resolution, password verification, session issuance, and authoritative role verification | Users and login-attempt records |
+| `auth` | HTTP | Signup, login, logout, password reset (unauthenticated by product decision; see [[Security]]), current-user resolution, password verification, session issuance, and authoritative role verification | Users and login-attempt records |
 | `event` | HTTP, SSE, AMQP | Scheduled event catalog, public read model, odds selection, live projection, and live-stream fanout | Event catalog and live projection |
-| `slip` | HTTP, AMQP | Independent live/pre-match draft boards, placement concurrency, and reliable submission publication | Draft/submitted slips and publication state |
+| `slip` | HTTP, AMQP | Independent live/pre-match drafts (one tabbed window), guest drafts (hashed-cookie principal) merged into the user's board on login, placement concurrency, and reliable submission publication | Draft/submitted slips and publication state |
 | `bet` | HTTP, AMQP | User-visible bet ledger, moderation state, row/final result, payout data, and statistics | Bets, conflicts, and pending updates |
 | `backoffice` | HTTP, AMQP | Public event creation, visibility, manual result controls, and durable publication replay | Operational event records and publication markers |
 | `telemetry` | HTTP, inbound AMQP | Best-effort bounded operational summaries and application service health snapshots | Telemetry metric records |
