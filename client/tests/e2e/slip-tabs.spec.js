@@ -115,6 +115,49 @@ test('Slip tabs are touch-sized, fit narrow screens, show one board and a focus 
   }
 });
 
+test('the desktop Slip stays below the header and scrolls long drafts independently', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  const [event] = state.events;
+  const [product] = event.products;
+  for (let index = 0; index < 12; index++) {
+    const eventId = `scroll-event-${index}`;
+    const odds = { ...product.odds[0], id: `scroll-odds-${index}` };
+    state.events.push({ ...event, eventId, products: [{ ...product, odds: [odds] }] });
+    state.selectSelection({ eventId, productId: product.id, oddsId: odds.id });
+  }
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await openEvents(page, state, '/');
+  const panel = page.getByRole('complementary', { name: 'Slip' }).locator('.app-shell__sidebar');
+  await expect(slipTab(page, PRE_MATCH_TAB)).toHaveAccessibleName('Pre-match (12)');
+
+  await page.evaluate(() => window.scrollTo({ top: 300, behavior: 'instant' }));
+  const pinned = await panel.boundingBox();
+  const header = await page.locator('.app-navbar').boundingBox();
+  expect(pinned.y).toBeGreaterThanOrEqual(header.y + header.height);
+  expect(pinned.y + pinned.height).toBeLessThanOrEqual(720);
+  await page.evaluate(() => window.scrollTo({ top: 600, behavior: 'instant' }));
+  expect(await page.evaluate(() => window.scrollY)).toBe(600);
+  expect((await panel.boundingBox()).y).toBeCloseTo(pinned.y);
+
+  await panel.hover();
+  await page.mouse.wheel(0, 320);
+  await expect.poll(() => panel.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(600);
+  const wager = page.getByLabel('Wager for PRE-MATCH SLIP', { exact: true });
+  await wager.focus();
+  await expect(wager).toBeInViewport({ ratio: 1 });
+
+  await slipTab(page, LIVE_TAB).click();
+  const overflow = () => panel.evaluate((el) => el.scrollHeight - el.clientHeight);
+  expect(await overflow()).toBe(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await slipTab(page, PRE_MATCH_TAB).click();
+  expect(await overflow()).toBe(0);
+  await wager.scrollIntoViewIfNeeded();
+  await expect(wager).toBeInViewport({ ratio: 1 });
+});
+
 test('the Slip opens on the only kind that has rows and jumps to the kind of every new pick', async ({ page }) => {
   const state = createLiveBettingMockState();
   state.selectSelection(LIVE_CORNER_HOME);
