@@ -26,6 +26,9 @@ around the page. Keyboard focus indicators on interactive controls and the
 short blue/red card borders remain visible.
 
 Only the Statistics and slips regions are sticky in this three-region desk.
+The Slip stays below the navigation bar while you scroll through events. If
+the active tab has more picks than fit on screen, scroll inside the Slip to
+reach the remaining picks and wager controls.
 At 1399 pixels and below, the center task occupies the first full row and both
 supporting regions follow it without sticky positioning. The supporting
 regions may share the next row when space permits and stack at narrower

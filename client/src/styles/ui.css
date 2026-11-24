@@ -273,8 +273,18 @@ body {
   }
 
   .app-shell__sidebar {
+    --sidebar-top: 5.75rem;
     position: sticky;
-    top: 5.75rem;
+    top: var(--sidebar-top);
+  }
+
+  .app-desk__slips {
+    align-self: stretch;
+  }
+
+  .app-desk__slips > .app-shell__sidebar {
+    max-height: calc(100dvh - var(--sidebar-top) - var(--density-gap));
+    overflow-y: auto;
   }
 
   .app-shell__main {
