@@ -506,7 +506,8 @@ The Common package must:
 The client uses React tests plus Playwright browser coverage for:
 
 - event, live, countdown, and retained-finished states;
-- separate betting boards and bet history;
+- one Slip window with Pre-match/Live tabs, per-tab wagers and bet history,
+  guest picks, and the Log in to bet path;
 - responsive desktop/tablet/mobile behavior;
 - v1/v2/v3 layout variants and affected themes;
 - keyboard and accessible names;

@@ -11,7 +11,7 @@ sessions and odds calculation, see [[Application Processes]].
 
 | Domain fact | Topic | Main publisher | Main consumers |
 |---|---|---|---|
-| Odds selected | `event:odds:selected` | Event | Slip |
+| Odds selected | `event:odds:selected` | Event (user or `guest:<id>` principal) | Slip |
 | Slip submitted | `slip:bet` | Slip | Moderation, Resulting, Bet |
 | Moderation completed | `moderation:result` | Moderation | Slip, Resulting, Bet |
 | Event created | `event:new` | Event or Backoffice | Event, Gamemaster, Backoffice |
@@ -192,13 +192,19 @@ sequenceDiagram
     Event->>Event: Validate event, market, selection, phase, and quote
     Event->>MQ: Publish event:odds:selected
     MQ->>Slip: Deliver selected odds
-    Slip->>DB: Upsert the matching LIVE or PRE_MATCH draft
+    Slip->>DB: Upsert the matching LIVE or PRE_MATCH draft (user or guest)
     Player->>Slip: Read both boards
-    Slip-->>Player: PRE_MATCH board and LIVE board
+    Slip-->>Player: PRE_MATCH and LIVE boards (Pre-match and Live tabs)
 ```
 
-Anonymous users can browse events. A user identity is required to persist and
-submit a personal betting board.
+Anonymous users can browse events and add picks. Event publishes them as a
+`guest:<sha256 of the cookie>` principal derived from an HttpOnly
+`betstan_guest` cookie (the raw cookie is never published), and Slip stores
+them as capped, expiring guest drafts. Guests cannot place bets or
+add custom-market selections. On login the guest drafts merge into the user's
+boards, which win conflicts, and the merged guest draft is deleted; see
+[[Application Processes]]. A signed-in identity is required to
+submit a betting board.
 
 ## Wager placement and moderation
 

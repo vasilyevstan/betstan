@@ -3,6 +3,7 @@ import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import axios from 'axios';
 import Product1X2 from './Product1X2';
+import { BET_KIND } from '../../../liveBettingUtils';
 
 jest.mock('axios', () => ({
   post: jest.fn(),
@@ -99,6 +100,9 @@ describe('Product1X2', () => {
       productId: 'product-1',
       oddsId: 'home-odd',
     });
+    // The slip opens its Pre-match tab for a pre-match pick.
+    await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH));
+    expect(onSelectionPlaced).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to original labels and order when event identity is ambiguous', () => {
@@ -269,6 +273,7 @@ describe('Product1X2', () => {
       await latestRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('button', { name: /Select 1X2 X:/ })).toBe(latestSelection);
     expect(latestSelection).toHaveFocus();
@@ -313,6 +318,7 @@ describe('Product1X2', () => {
       await olderRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Selection could not be added to your slip. Please try again.'
     );

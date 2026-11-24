@@ -10,6 +10,14 @@ const {
 
 const getBoard = (page, betKind) => page.locator(`section[aria-labelledby="slip-board-title-${betKind}"]`);
 
+// The Slip shows one board at a time (the other panel stays mounted but hidden), and role queries
+// skip hidden panels: select a kind's tab before acting on or asserting about its board.
+const openSlipTab = async (page, betKind) => {
+  const tab = page.getByRole('tab', { name: betKind === BET_KIND.LIVE ? /^Live\b/ : /^Pre-match\b/ });
+  await tab.click();
+  await expect(tab).toHaveAttribute('aria-selected', 'true');
+};
+
 const trackClientIssues = (page) => {
   const pageErrors = [];
   const apiFailures = [];
@@ -909,14 +917,19 @@ test('live betting main page flow is deterministic without a backend', async ({ 
 
   await page.getByRole('button', { name: state.fixtures.preMatchSelectionLabel }).click();
   await expect(preMatchBoard.locator('.slip-row-card__selection')).toHaveText('Draw');
+  // Jump-on-add: the Slip opens the tab of the kind that was just picked.
+  await expect(page.getByRole('tab', { name: /^Pre-match\b/ })).toHaveAttribute('aria-selected', 'true');
   await page.getByRole('button', { name: state.fixtures.liveInitialSelectionLabel }).click();
   await expect(liveBoard.locator('.slip-row-card__selection')).toHaveText('Raptors');
+  await expect(page.getByRole('tab', { name: /^Live\b/ })).toHaveAttribute('aria-selected', 'true');
   await expect(preMatchBoard.locator('.bet-kind-badge')).toContainText('Pre-match');
   await expect(liveBoard.locator('.bet-kind-badge')).toContainText('Live');
   await expect(page.getByRole('button', { name: state.fixtures.preMatchSelectionLabel })).toHaveClass(/product-button--selected/);
   await expect(page.getByRole('button', { name: state.fixtures.liveInitialSelectionLabel })).toHaveClass(/product-button--selected/);
 
+  await openSlipTab(page, BET_KIND.PRE_MATCH);
   await page.getByLabel('Wager for PRE-MATCH SLIP').fill('14');
+  await openSlipTab(page, BET_KIND.LIVE);
   await page.getByLabel('Wager for LIVE SLIP').fill('9');
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toHaveValue('14');
   await expect(page.getByLabel('Wager for LIVE SLIP')).toHaveValue('9');
@@ -956,12 +969,16 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   expect(state.getLastSubmission().rows.map((row) => row.betKind)).toEqual([BET_KIND.LIVE]);
   await expect(liveBoard.getByRole('button', { name: 'Awaiting review…' })).toBeDisabled();
   await expect(page.getByLabel('Wager for LIVE SLIP')).toBeDisabled();
+  await openSlipTab(page, BET_KIND.PRE_MATCH);
   await expect(preMatchBoard.getByRole('button', { name: 'BET!' })).toBeEnabled();
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toBeEnabled();
 
   await page.reload({ waitUntil: 'domcontentloaded' });
   await liveFeed.waitForSource();
   await liveFeed.openAll();
+  // Both boards have rows after the reload, so the Slip starts on Pre-match.
+  await expect(page.getByRole('tab', { name: /^Pre-match\b/ })).toHaveAttribute('aria-selected', 'true');
+  await openSlipTab(page, BET_KIND.LIVE);
   await expect(liveBoard.getByRole('button', { name: 'Awaiting review…' })).toBeDisabled();
   await expect(page.getByLabel('Wager for LIVE SLIP')).toBeDisabled();
   await expect(preMatchBoard.locator('.slip-row-card__selection')).toHaveText('Draw');
@@ -979,7 +996,9 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(page.getByLabel('Wager for LIVE SLIP')).toBeEnabled();
   await expect(page.getByRole('button', { name: state.fixtures.liveReplacementSelectionLabel })).toBeVisible();
   await expect(preMatchBoard.locator('.slip-row-card__selection')).toHaveText('Draw');
+  await openSlipTab(page, BET_KIND.PRE_MATCH);
   await expect(preMatchBoard.getByRole('button', { name: 'BET!' })).toBeEnabled();
+  await openSlipTab(page, BET_KIND.LIVE);
 
   await page.getByLabel('Wager for LIVE SLIP').fill('13');
   await page.getByRole('button', { name: state.fixtures.liveReplacementSelectionLabel }).click();
@@ -1602,7 +1621,10 @@ for (const uiVariant of UI_VARIANTS) {
         expect(liveSlipState.railWidth).toBeGreaterThanOrEqual(3);
         expect(preMatchSlipState.railWidth).toBeGreaterThanOrEqual(3);
         expect(liveSlipState.railColor).not.toBe(preMatchSlipState.railColor);
+        // One board shows at a time: each kind's board badge is visible once its tab is open.
+        await openSlipTab(page, BET_KIND.LIVE);
         await expect(getBoard(page, BET_KIND.LIVE).getByText('Live', { exact: true })).toBeVisible();
+        await openSlipTab(page, BET_KIND.PRE_MATCH);
         await expect(getBoard(page, BET_KIND.PRE_MATCH).getByText('Pre-match', { exact: true })).toBeVisible();
 
         // Native button semantics remain intact after the layout-only correction.
@@ -2058,8 +2080,12 @@ test('live betting layout stays usable on a mobile v3 viewport', async ({ page }
 
   await expect(page.getByRole('article', { name: state.fixtures.liveEventName })).toBeVisible();
   await expect(page.getByRole('article', { name: state.fixtures.preMatchEventName })).toBeVisible();
-  await expect(getBoard(page, BET_KIND.LIVE)).toBeVisible();
+  // Both boards have rows, so the Slip starts on Pre-match and the Live board is one tab away.
   await expect(getBoard(page, BET_KIND.PRE_MATCH)).toBeVisible();
+  await expect(getBoard(page, BET_KIND.LIVE)).toBeHidden();
+  await openSlipTab(page, BET_KIND.LIVE);
+  await expect(getBoard(page, BET_KIND.LIVE)).toBeVisible();
+  await expect(getBoard(page, BET_KIND.PRE_MATCH)).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 

@@ -831,6 +831,10 @@ body {
   line-height: 1.55;
 }
 
+.auth-card .tab-list {
+  margin-bottom: 1.25rem;
+}
+
 .auth-form {
   display: grid;
   gap: 1rem;
@@ -870,6 +874,16 @@ body {
 
 .auth-errors:empty {
   display: none;
+}
+
+/* A live region stays rendered while empty so it can be announced when it fills. */
+.auth-status:not(:empty) {
+  margin-top: 1rem;
+}
+
+.auth-status .alert {
+  margin: 0;
+  font-size: 0.82rem;
 }
 
 .auth-errors .alert {
@@ -2078,6 +2092,72 @@ body {
 .slip-action-secondary--v3:hover {
   background: var(--surface-elevated);
   color: var(--text-main);
+}
+
+/* Shared tabs (components/TabList.js). Focus uses the global :focus-visible ring; the active tab
+   keeps the accent border + inset rail grammar used by selected buttons and nav links. */
+.tab-list {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.tab-list__tab {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-width: var(--control-target);
+  min-height: var(--control-target);
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text-subtle);
+  font-size: var(--font-size-action);
+  font-weight: 700;
+  line-height: var(--line-height-compact);
+  overflow-wrap: anywhere;
+  text-align: center;
+  white-space: normal;
+  transition:
+    color var(--transition-duration) ease,
+    background-color var(--transition-duration) ease,
+    border-color var(--transition-duration) ease,
+    box-shadow var(--transition-duration) ease;
+}
+
+.tab-list__tab:hover {
+  border-color: var(--border-control);
+  background: var(--surface-elevated);
+  color: var(--text-main);
+}
+
+.tab-list__tab.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-elevated));
+  box-shadow: inset 3px 0 var(--accent);
+  color: var(--text-main);
+}
+
+.tab-list__count {
+  min-width: 1.5rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text-main);
+  font-size: var(--font-size-meta);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--line-height-compact);
+  text-align: center;
+}
+
+.ui-variant-v2 .tab-list {
+  gap: 0.25rem;
+}
+
+.ui-variant-v2 .tab-list__tab {
+  padding-inline: 0.5rem;
 }
 
 .ui-variant-v1 {

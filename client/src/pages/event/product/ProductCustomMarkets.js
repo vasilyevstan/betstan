@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { getCustomMarketSelectionKey } from '../../../liveBettingUtils';
+import { BET_KIND, getCustomMarketSelectionKey } from '../../../liveBettingUtils';
 import { createMarketRequestId, formatMarketOdds, marketError, marketTitle } from '../../../marketUi';
 import MarketOutcomeGrid from '../../../components/MarketOutcomeGrid';
 import { layoutError } from '../../../marketLayout';
@@ -99,7 +99,7 @@ const ProductCustomMarkets = ({
         expectedBoardFingerprint: board?.boardFingerprint ?? null,
         replaceEventSelections: sameEvent.length > 0,
       });
-      onSelectionPlaced?.();
+      onSelectionPlaced?.(BET_KIND.PRE_MATCH);
     } catch (failure) {
       if (mounted.current) setError(failure.response?.status === 401 ? SIGN_IN_MESSAGE : marketError(failure));
       if (failure.response?.status === 409) onSelectionPlaced?.();

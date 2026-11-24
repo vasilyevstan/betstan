@@ -12,6 +12,7 @@ import axios from 'axios';
 import EventList, { RETAINED_FINISHED_EVENT_STORAGE_KEY } from './EventList';
 import useLiveEvents from './useLiveEvents';
 import {
+  BET_KIND,
   COUNTDOWN_LIVE_MARKET_TYPE,
   getLiveSelectionKey,
   getPreMatchSelectionKey,
@@ -224,6 +225,8 @@ describe('EventList', () => {
       selectionId: 'home',
     }));
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    // The slip opens its Live tab for a live pick.
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE);
   });
 
   it('keeps one Events H1 in loading and empty states', () => {
@@ -326,6 +329,7 @@ describe('EventList', () => {
       await latestRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE);
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('button', {
       name: 'Select Next Corner Kick: Team B at 2.2',
@@ -376,6 +380,7 @@ describe('EventList', () => {
       await olderRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE);
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Selection could not be added to your slip. Please try again.'
     );

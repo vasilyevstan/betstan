@@ -857,7 +857,8 @@ export const upsertDraftSlipRow = async (
     expectedBoardRevision: number | null;
     expectedBoardFingerprint: string | null;
     replaceEventSelections: boolean;
-  }
+  },
+  guest?: { maxRows: number; expiresAt: Date }
 ): Promise<{ wasInserted: boolean; accepted: boolean }> => {
   if (row.marketBet !== undefined) {
     const quote = parseMarketBet(row.marketBet);
@@ -876,6 +877,20 @@ export const upsertDraftSlipRow = async (
   const sameMarketCondition = confirmation?.replaceEventSelections
     ? { $eq: ["$$row.eventId", row.eventId] } : buildSameMarketCondition(row);
   const currentRows = buildCurrentRowsExpression(betKind);
+  // A guest board is capped inside the same atomic write: only appending a new
+  // row is refused, replacing an existing market never grows the board.
+  const guestHasRoom = guest
+    ? { $lt: [{ $size: "$$currentRows" }, guest.maxRows] }
+    : undefined;
+  const appendedRow = { $concatArrays: ["$$currentRows", { $literal: [row] }] };
+  const boardChanged = {
+    $or: [
+      "$$hasSameMarket",
+      guestHasRoom
+        ? { $and: [{ $not: ["$$hasDuplicateOdds"] }, guestHasRoom] }
+        : { $not: ["$$hasDuplicateOdds"] },
+    ],
+  };
   const updatePipeline = [
     {
       $set: {
@@ -898,6 +913,17 @@ export const upsertDraftSlipRow = async (
             { $ifNull: ["$timestamp", now] },
           ],
         },
+        ...(guest
+          ? {
+              guestExpiresAt: {
+                $cond: [
+                  { $eq: ["$status", SlipStatus.SUBMITTED] },
+                  "$guestExpiresAt",
+                  guest.expiresAt,
+                ],
+              },
+            }
+          : {}),
         rows: {
           $cond: [
             { $eq: ["$status", SlipStatus.SUBMITTED] },
@@ -950,7 +976,9 @@ export const upsertDraftSlipRow = async (
                       $cond: [
                         "$$hasDuplicateOdds",
                         "$$currentRows",
-                        { $concatArrays: ["$$currentRows", { $literal: [row] }] },
+                        guestHasRoom
+                          ? { $cond: [guestHasRoom, appendedRow, "$$currentRows"] }
+                          : appendedRow,
                       ],
                     },
                   ],
@@ -996,9 +1024,7 @@ export const upsertDraftSlipRow = async (
                     ],
                   },
                 },
-                in: buildBoardRevisionExpression({
-                  $or: ["$$hasSameMarket", { $not: ["$$hasDuplicateOdds"] }],
-                }),
+                in: buildBoardRevisionExpression(boardChanged),
               },
             },
           ],
@@ -1040,9 +1066,7 @@ export const upsertDraftSlipRow = async (
                     ],
                   },
                 },
-                in: buildBoardFingerprintExpression({
-                  $or: ["$$hasSameMarket", { $not: ["$$hasDuplicateOdds"] }],
-                }),
+                in: buildBoardFingerprintExpression(boardChanged),
               },
             },
           ],

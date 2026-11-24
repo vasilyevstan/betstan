@@ -19,7 +19,7 @@ regions:
 | --- | --- |
 | Left sidebar | Statistics and leaderboard |
 | Center stage | Events, authentication, My Bets, My profile, Backoffice, or Telemetry route |
-| Right sidebar | Independent live and pre-match slips |
+| Right sidebar | One Slip window with Pre-match and Live tabs |
 
 The main region receives skip-link focus without drawing a full-height frame
 around the page. Keyboard focus indicators on interactive controls and the
@@ -49,8 +49,9 @@ Primary routes are:
 | `/backoffice/events/analysis` | Backoffice open-event black-swan analysis and choice switches |
 | `/backoffice/events/:eventId/analysis` | Direct analysis for the selected Backoffice event |
 | `/telemetry` | Fourteen-day activity graphs and current service health |
-| `/signup` | Account creation |
-| `/login` | Login |
+| `/login` | One authentication page with **Log in** and **Create account** tabs |
+| `/signup` | Alias of the same page, opened on the **Create account** tab |
+| `/forgot-password` | Password reset form; see [[Security]] for its deliberate limits |
 | `/logout` | Session logout |
 
 The header restores the compact, pre-redesign icon composition across all
@@ -60,6 +61,10 @@ The release source revision and UTC source date and time (for example,
 wordmark; local builds are identified as development builds.
 **Backoffice** and **Telemetry** retain visible labels for anonymous and signed-in
 visitors; theme and authentication icons retain accessible names and tooltips.
+Signed-out visitors see one **Log in** icon that opens the authentication page;
+**Create account** is a tab on that page, not a separate header icon. The page
+links to **Forgot password?**, which opens `/forgot-password` and keeps the
+current query parameters.
 Signed-in users also receive **My bets** and a name chip linking to **My profile**.
 The chip displays the saved private name, visually shortened when needed,
 without changing the public leaderboard alias. Below 992 CSS pixels, **Toggle navigation**
@@ -401,7 +406,7 @@ and locked** and **Online** cues and unrelated domain-state rails remain.
 ## Preserving presentation choices
 
 Header links rebuild their query strings from the current location. Moving
-between Events, My Bets, Backoffice, Telemetry, login, signup, and logout
+between Events, My Bets, Backoffice, Telemetry, login (including its signup tab), and logout
 therefore preserves valid `ui` and `theme` values. Theme choices update `theme`
 without discarding the URL-selected density or unrelated accepted query state;
 density profiles remain selectable through `ui` URLs. Successful logout
@@ -626,11 +631,18 @@ selections use a balanced two-column grid inside that card.
 
 ### Betting slips
 
-Live and pre-match drafts can both be open. They use separate labelled slips,
-the same `var(--surface-soft)` background, independent wagers, and independent
-pending/error state. Semantic rails and borders distinguish them: warm for
-live and accent for pre-match. The UI never merges them into one combined
+One **Slip** window holds **Pre-match** and **Live** tabs; a tab shows a count
+badge only when it holds at least one pick. Each tab keeps its own wager,
+errors, **BET!** (signed-in) and **CLEAN** controls,
+and pending state; both panels stay mounted, so a typed wager survives a tab
+switch. Adding a pick jumps the window to the tab for that pick's kind. Bets are
+still placed per kind: the UI never merges the tabs into one combined
 placement.
+
+Signed-out visitors can add, remove and clear picks. Their bet control
+reads **Log in to bet** and opens `/login`; placing a bet and adding a
+custom-market selection both require login. After login the visitor's picks
+appear in the account's slip (see [[Application Processes]]).
 
 ## Live movement and timeline presentation
 

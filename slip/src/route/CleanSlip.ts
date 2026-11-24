@@ -11,6 +11,7 @@ import {
   parseRequestedBetKind,
   persistSlipBoardIdentityIfNeeded,
 } from "../model/slipSupport";
+import { resolveSlipOwner } from "../service/guestIdentity";
 
 const router = express.Router();
 const BOARD_CHANGED_MESSAGE =
@@ -21,8 +22,9 @@ const sendBoardConflict = (res: Response) =>
 
 router.post("/api/slip/row/clean", async (req: Request, res: Response) => {
   const { slipId, betKind: requestedBetKind } = req.body;
+  const owner = resolveSlipOwner(req);
 
-  if (!req.currentUser) {
+  if (!owner) {
     return res.status(400).send({ message: "must login first" });
   }
 
@@ -38,7 +40,7 @@ router.post("/api/slip/row/clean", async (req: Request, res: Response) => {
 
   const slip = await findDraftSlipByIdForUser(
     slipId,
-    req.currentUser.id,
+    owner.id,
     betKind
   );
 
@@ -62,7 +64,7 @@ router.post("/api/slip/row/clean", async (req: Request, res: Response) => {
     ...buildSlipScope(
       SlipStatus.DRAFT,
       betKind,
-      req.currentUser.id,
+      owner.id,
       slipId
     ),
     boardRevision: boardRevisionOf(authoritativeSlip),
