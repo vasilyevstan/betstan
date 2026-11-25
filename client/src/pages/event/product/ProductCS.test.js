@@ -60,7 +60,7 @@ describe('ProductCS', () => {
       });
       expect(onSelectionPlaced).toHaveBeenCalledTimes(1);
       // The slip opens its Pre-match tab for a pre-match pick.
-      expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
+      expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH, 'PRE_MATCH:event-1:product-cs:home');
     });
   });
 
@@ -169,7 +169,7 @@ describe('ProductCS', () => {
       await latestRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
-    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH, 'PRE_MATCH:event-1:product-cs:draw');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('button', {
       name: 'Select Correct score 1-1 at 6',
@@ -224,7 +224,7 @@ describe('ProductCS', () => {
       await olderRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
-    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH, 'PRE_MATCH:event-1:product-cs:home');
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Selection could not be added to your slip. Please try again.'
     );

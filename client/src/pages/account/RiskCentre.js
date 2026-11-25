@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { riskRuleNames } from '../../riskRuleLabels';
+import TabList from '../../components/TabList';
 import RiskEvents from './RiskEvents';
 import '../../styles/risk-centre.css';
 
@@ -73,6 +74,7 @@ const accountingReadyFor = (accounting, type, window) => {
   return accounting.ready;
 };
 const validRules = rules => Array.isArray(rules) && rules.length <= 128
+  && new Set(rules.map(rule => rule?.id)).size === rules.length
   && rules.every(rule => plain(rule) && typeof rule.id === 'string' && idPattern.test(rule.id) && typeof rule.type === 'string'
     && typeof rule.enabled === 'boolean' && plain(rule.scope) && plain(rule.parameters));
 const validRevision = data => plain(data) && Number.isSafeInteger(data.revision) && data.revision > 0
@@ -132,6 +134,12 @@ const CASH_BACK_API = '/api/backoffice/cash-back-setting';
 const TEMPLATES_API = '/api/backoffice/market-templates';
 const ACCESS_API = '/api/backoffice/access-controls';
 const BETTING_RULE_ID = 'betting:all';
+const workspaces = [
+  { id: 'rules', label: 'Rules' }, { id: 'markets', label: 'Markets' },
+  { id: 'accounts', label: 'Accounts & cash back' }, { id: 'history', label: 'History' },
+];
+const Workspace = ({ id, active, children }) => <div role="tabpanel" id={`risk-panel-${id}`}
+  aria-labelledby={`risk-tab-${id}`} hidden={active !== id} tabIndex={0}>{children}</div>;
 const accessSwitches = [
   { name: 'registration', field: 'registrationEnabled', label: 'New registrations',
     stopped: 'New registrations are stopped. Existing customers can still sign in.',
@@ -196,8 +204,8 @@ export const describeChanges = (before, after, catalogue, templateNames) => {
   });
   const current = new Set(after.rules.map(rule => rule.id));
   before.rules.filter(rule => !current.has(rule.id)).forEach(rule => changes.push(
-    rule.id === BETTING_RULE_ID && closesBetting(rule) ? 'Betting opened for all events'
-      : marketSwitch(rule) && rule.enabled ? `Market ${marketNames(rule, templateNames)} turned on for all events`
+    rule.id === BETTING_RULE_ID && closesBetting(rule) ? 'All-events betting block removed'
+      : marketSwitch(rule) && rule.enabled ? `Market block removed: ${marketNames(rule, templateNames)}`
         : `Removed ${ruleTitle(rule, catalogue, templateNames)}`));
   return changes;
 };
@@ -207,9 +215,124 @@ const formatTime = value => {
 };
 const templateName = template => template.versions?.[template.versions.length - 1]?.definition?.name || template.templateId;
 const marketRuleId = id => `market:${id}`;
-const blocksMarket = (rule, market) => marketSwitch(rule) && rule.enabled && rule.scope[market.field]?.includes(market.id);
-const ownsMarket = (rule, market) => marketSwitch(rule) && !Object.keys(rule.parameters).length
-  && rule.scope[market.field]?.length === 1 && rule.scope[market.field][0] === market.id;
+// Each switch owns one canonical DENY, never a list of catalogue entries.
+const globalTarget = {
+  id: BETTING_RULE_ID, scope: {}, name: 'All bets',
+  close: 'Close betting', open: 'Open betting', qualifier: ' for all events',
+  closed: 'Betting is closed for all events. New pre-match and live bets are declined.',
+  removed: 'All-events betting block removed.',
+};
+const kindTarget = (betKind, title) => ({
+  id: `betting:${betKind}`, scope: { betKind }, betKind, name: `${title} betting`,
+  close: `Pause ${title.toLowerCase()} betting`, open: `Reopen ${title.toLowerCase()} betting`,
+  closed: `${title} betting paused for new bets.`, removed: `${title} betting block removed.`,
+});
+const marketTarget = (market, label) => ({
+  id: marketRuleId(market.id), scope: { [market.field]: [market.id] }, betKind: market.betKind,
+  field: market.field, name: market.name, detail: market.detail, label,
+  close: 'Turn off', open: 'Turn on', qualifier: ` ${label} for all events`,
+  closed: `${label} is off for all events. New bets on it are declined.`, removed: `${label} market block removed.`,
+});
+const ownsSwitch = (rule, target) => rule.type === 'DENY' && !Object.keys(rule.parameters).length
+  && Object.keys(rule.scope).length === Object.keys(target.scope).length
+  && Object.entries(target.scope).every(([key, value]) => Array.isArray(value)
+    ? Array.isArray(rule.scope[key]) && rule.scope[key].length === 1 && rule.scope[key][0] === value[0]
+    : rule.scope[key] === value);
+
+// Only claim a closure when the other rule covers the *whole* target.
+// Event, structure and choice restrictions are still enforced at admission.
+const coveringBlock = (rule, target) => {
+  if (rule.type !== 'DENY' || !rule.enabled) return '';
+  if (closesBetting(rule)) return target === globalTarget ? 'Closed by a Block bets rule' : 'All betting is closed';
+  const { betKind, ...rest } = rule.scope;
+  if (betKind && betKind !== target.betKind) return '';
+  if (betKind && !Object.keys(rest).length) return `${kindTitle(betKind)} betting is paused`;
+  return target.field && Object.keys(rest).length === 1 && Array.isArray(rest[target.field])
+    && rest[target.field].includes(target.scope[target.field][0]) ? 'Off by a Block bets rule' : '';
+};
+const switchState = (rules, target) => {
+  const existing = rules.find(rule => rule.id === target.id);
+  const conflict = Boolean(existing && !ownsSwitch(existing, target));
+  const owned = existing && !conflict ? existing : null;
+  const other = rules.filter(rule => rule !== owned).map(rule => coveringBlock(rule, target)).find(Boolean);
+  return { owned, conflict, other };
+};
+const affectsKind = (scope, kind) => {
+  if (!kind) return true;
+  if (scope.betKind && scope.betKind !== kind) return false;
+  if (scope.templateIds && kind !== 'PRE_MATCH') return false;
+  return !Array.isArray(scope.marketTypes) || scope.marketTypes.some(id => typeof id === 'string' && id.startsWith(`${kind}:`));
+};
+function PolicySwitch({ rules, target, unavailable, onSwitch }) {
+  const { owned, conflict, other } = switchState(rules, target);
+  const remove = Boolean(owned?.enabled);
+  const narrower = !target.field && !other && !remove && rules.some(rule =>
+    rule.type === 'DENY' && rule.enabled && affectsKind(rule.scope, target.betKind));
+  const verb = remove && other ? 'Remove own block' : remove ? target.open : target.close;
+  const label = remove && other ? `Remove own block: ${target.label || target.name}` : verb + (target.qualifier || '');
+  const statusNote = unavailable || (conflict && !other ? 'Review rule' : '')
+    || (narrower ? (target.betKind ? 'No group pause' : 'No global pause') : '');
+  return <li>
+    <span className="risk-switch-list__name">{target.name}{target.detail && <small>{target.detail}</small>}
+      {!unavailable && other && <small>{other}</small>}
+      {!unavailable && narrower && <small>Narrower blocks still apply</small>}
+      {conflict && <small>Switch rule changed; manage it in Rules</small>}
+    </span>
+    {statusNote ? <small>{statusNote}</small> : <RuleStatus enabled={!remove && !other} />}
+    {!conflict && (remove || !other) ? <button type="button" className={action}
+      disabled={Boolean(unavailable) || !idPattern.test(target.id)} aria-label={label}
+      onClick={() => onSwitch(target)}>{verb}</button> : null}
+  </li>;
+}
+function MarketsWorkspace({ snapshot, templates, switchesLoaded, unavailable, onSwitch, search }) {
+  const markets = [
+    ...(snapshot.builtinMarkets || []).map(market => ({
+      ...market, field: 'marketTypes', detail: `Built-in / ${kindTitle(market.betKind)}`,
+    })),
+    ...(templates?.templates || []).map(template => ({
+      id: template.templateId, name: templateName(template), field: 'templateIds', betKind: 'PRE_MATCH',
+      detail: template.archived ? 'Template / Archived' : 'Template',
+    })),
+  ];
+  const nameCounts = new Map();
+  const detailCounts = new Map();
+  for (const { name, detail } of markets) {
+    nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+    const key = `${detail}:${name}`;
+    detailCounts.set(key, (detailCounts.get(key) || 0) + 1);
+  }
+  const switchProps = { rules: snapshot.rules, unavailable, onSwitch };
+  return <section className="risk-switches risk-markets" aria-labelledby="risk-markets-title">
+    <h2 className="h5" id="risk-markets-title">Markets</h2>
+    <section className="risk-switch risk-switch--global" aria-labelledby="risk-betting-title">
+      <h3 className="h6" id="risk-betting-title">Betting</h3>
+      <p className="market-help">Closing betting declines every new bet, pre-match and live. Bets received before closing finish normally.</p>
+      <ul className="risk-switch-list"><PolicySwitch {...switchProps} target={globalTarget} /></ul>
+    </section>
+    <p className="market-help risk-markets__help">A group pause includes new markets, Builders and accumulators. ON describes the policy switch, not event availability. Other rules still apply. Removing a block never unarchives a template.</p>
+    {!snapshot.builtinMarkets ? <p className="market-help risk-markets__help">Built-in market switches are unavailable in this deployment.</p> : null}
+    {betKindSections.filter(section => section.key).map(({ key, title }) => <section className="risk-switch"
+      key={key} aria-labelledby={`risk-market-group-${key}`}>
+      <h3 className="h6" id={`risk-market-group-${key}`}>{title}</h3>
+      <ul className="risk-switch-list risk-switch-list--group">
+        <PolicySwitch {...switchProps} target={kindTarget(key, title)} />
+      </ul>
+      {snapshot.builtinMarkets && !snapshot.builtinMarkets.some(market => market.betKind === key)
+        ? <p className="market-help">No built-in {title.toLowerCase()} markets listed.</p> : null}
+      {key === 'PRE_MATCH' && <>
+        {templates && !templates.enabled ? <p className="market-help">Custom markets are turned off in this deployment.</p> : null}
+        {!templates ? <p className="market-help">{switchesLoaded ? 'Custom market templates are unavailable. Try refreshing.' : 'Loading custom market templates…'}</p> : null}
+        {templates && !templates.templates.length ? <p className="market-help">No custom markets yet. Create one in <Link to={`/backoffice/markets${search}`}>Market designer</Link>.</p> : null}
+      </>}
+      <ul className="risk-switch-list">{markets.filter(market => market.betKind === key).map(market => {
+        const detail = detailCounts.get(`${market.detail}:${market.name}`) > 1
+          ? `${market.detail}: ${market.id}` : market.detail;
+        const label = nameCounts.get(market.name) > 1 ? `${market.name} (${detail})` : market.name;
+        return <PolicySwitch key={`${market.field}:${market.id}`} {...switchProps} target={marketTarget({ ...market, detail }, label)} />;
+      })}</ul>
+    </section>)}
+  </section>;
+}
 const validAccess = data => plain(data) && typeof data.registrationEnabled === 'boolean' && typeof data.loginEnabled === 'boolean';
 const validCashBack = data => plain(data) && typeof data.enabled === 'boolean' && Number.isSafeInteger(data.revision);
 const validTemplates = data => plain(data) && Array.isArray(data.templates) && data.templates.every(template => (
@@ -253,6 +376,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
   const { search } = useLocation();
   const { eventId } = useParams();
   const pageTitle = eventAnalysis ? 'Black swan analysis' : 'Risk Centre';
+  const [workspace, setWorkspace] = useState('rules');
   const [snapshot, setSnapshot] = useState(null);
   const snapshotRef = useRef(null);
   const [loading, setLoading] = useState(true);
@@ -264,6 +388,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
   const [baseRevision, setBaseRevision] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [stale, setStale] = useState(false);
+  const [rejectedRevision, setRejectedRevision] = useState(null);
   const [pendingSelection, setPendingSelection] = useState(null);
   const [confirmation, setConfirmation] = useState(null);
   const [confirmationRevision, setConfirmationRevision] = useState(null);
@@ -284,6 +409,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
   const mounted = useRef(false);
   const readSequence = useRef(0);
   const feedback = useRef(null);
+  const loadFeedback = useRef(null);
   const editorHeading = useRef(null);
   const confirmationHeading = useRef(null);
   const focusEditor = useRef(false);
@@ -299,6 +425,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
     const sequence = ++readSequence.current;
     setLoading(true);
     setLoadError('');
+    setMessage('');
     try {
       const response = await axios.get(API, requestOptions);
       if (!mounted.current || sequence !== readSequence.current) return;
@@ -333,6 +460,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
   useEffect(() => {
     if (error || message) feedback.current?.focus();
   }, [error, message]);
+  useEffect(() => { if (loadError) loadFeedback.current?.focus(); }, [loadError]);
   useEffect(() => {
     if (focusEditor.current) {
       editorHeading.current?.focus();
@@ -396,9 +524,10 @@ export default function RiskCentre({ eventAnalysis = false }) {
       : !accounting.ready
         ? 'Accounting unavailable: complete authoritative history is required before exposure or customer-loss controls can be turned on. Missing history is not a zero balance.'
         : null;
-  const readOnly = !snapshot || loading || snapshot.readiness.transactions !== 'READY' || Boolean(loadError);
+  const readOnly = !snapshot || loading || snapshot.readiness.transactions !== 'READY' || Boolean(loadError)
+    || snapshot.revision === rejectedRevision;
   const conflict = draft && (stale || baseRevision !== snapshot?.revision);
-  const frozen = busy || Boolean(operation);
+  const frozen = busy || Boolean(operation) || cashBackBusy || accessBusy;
   const actionsLocked = readOnly || frozen || conflict;
   const activationBlocked = Boolean(accountingUnavailable || activityUnavailable);
   const savedOn = Boolean(currentRule?.enabled);
@@ -409,21 +538,30 @@ export default function RiskCentre({ eventAnalysis = false }) {
       || result.revision !== pending.body.expectedRevision + 1) {
       throw new Error('Save response could not be verified.');
     }
+    if (pending.target) {
+      const saved = result.rules.find(item => item.id === pending.ruleId);
+      if (pending.method === 'DELETE' ? saved : !saved?.enabled || !ownsSwitch(saved, pending.target)) {
+        throw new Error('Switch result could not be verified.');
+      }
+    }
     readSequence.current += 1;
     setLoading(false);
     const previous = snapshotRef.current;
     const accepted = result.revision >= previous.revision ? { ...previous, ...result } : previous;
     acceptSnapshot(accepted);
-    if (pending.kind === 'market' || pending.kind === 'betting' || pending.kind === 'choice') {
+    if (pending.target || pending.kind === 'choice') {
       // A market or betting switch is a separate rule: keep the editor's selection and unsaved input.
       if (!dirty && draft) {
         const kept = accepted.rules.find(item => item.id === draft.id);
         setDraft(kept ? draftFor(kept, accepted.catalogue.find(item => item.type === kept.type)) : null);
         if (!kept) setSelected(null);
         setBaseRevision(accepted.revision);
+        setStale(false);
       }
       setError('');
-      setMessage(pending.kind === 'choice' ? '' : `${pending.label} Revision ${result.revision} saved.`);
+      setMessage(pending.kind === 'choice' ? '' : accepted.revision > result.revision
+        ? `Revision ${result.revision} saved, but revision ${accepted.revision} is now active. Review the current switches.`
+        : `${pending.label} Revision ${result.revision} saved.`);
       operationRef.current = null;
       setOperation(null);
       setHistory(null);
@@ -474,10 +612,14 @@ export default function RiskCentre({ eventAnalysis = false }) {
       if (status >= 400 && status < 500 && status !== 408 && code !== 'OPERATION_CONFLICT') {
         operationRef.current = null;
         setOperation(null);
-        if (code === 'REVISION_CONFLICT') setStale(true);
-        if (code === 'REVISION_CONFLICT' && pending.kind === 'choice') reload();
+        const switching = pending.target || pending.kind === 'choice';
+        if (code === 'REVISION_CONFLICT') {
+          setStale(true);
+          setRejectedRevision(pending.body.expectedRevision);
+          if (switching) reload();
+        }
         setError(code === 'REVISION_CONFLICT'
-          ? pending.kind === 'choice' ? 'The policy changed before the switch. Current rules are reloading; review them before trying again. Your rule input is preserved.'
+          ? switching ? 'The policy changed before the switch. Current rules are reloading; review them before trying again. Your rule input is preserved.'
             : 'This policy changed before Save. Refresh, review the active values, then explicitly use the refreshed revision. Your input is preserved.'
           : failure.response?.data?.message || 'The change was rejected. Review your input and try again.');
       } else {
@@ -537,36 +679,17 @@ export default function RiskCentre({ eventAnalysis = false }) {
         : 'The save result could not be verified. Keep this page open and retry the same operation.');
     } finally { if (mounted.current) setBusy(false); }
   };
-  const switchMarket = (market, off) => {
-    if (readOnly || frozen) return;
-    const id = marketRuleId(market.id);
-    const own = snapshot.rules.find(rule => rule.id === id);
-    if (own && !ownsMarket(own, market)) {
-      setError('This market switch rule was changed. Review it in Rules before switching this market.');
-      return;
-    }
-    const name = market.label || market.name;
+  const switchPolicy = target => {
+    if (readOnly || frozen || operationRef.current || snapshot !== snapshotRef.current || !idPattern.test(target.id)) return;
+    const { owned, conflict, other } = switchState(snapshot.rules, target);
+    if (conflict || (other && !owned?.enabled)) return;
     const body = { expectedRevision: snapshot.revision, requestId: newId('save') };
-    const rule = { id, type: 'DENY', enabled: true, scope: { [market.field]: [market.id] }, parameters: {} };
-    execute(off ? {
-      method: own ? 'PUT' : 'POST', url: own ? `${API}/rules/${id}` : `${API}/rules`, ruleId: id, kind: 'market',
-      label: `${name} is off for all events. New bets on it are declined.`, body: { ...body, rule },
-    } : {
-      method: 'DELETE', url: `${API}/rules/${id}`, ruleId: id, kind: 'market',
-      label: `${name} is on for all events.`, body,
-    });
-  };
-  const switchBetting = close => {
-    if (readOnly || frozen) return;
-    const own = snapshot.rules.find(rule => rule.id === BETTING_RULE_ID);
-    const body = { expectedRevision: snapshot.revision, requestId: newId('save') };
-    const rule = { id: BETTING_RULE_ID, type: 'DENY', enabled: true, scope: {}, parameters: {} };
-    execute(close ? {
-      method: own ? 'PUT' : 'POST', url: own ? `${API}/rules/${BETTING_RULE_ID}` : `${API}/rules`, ruleId: BETTING_RULE_ID, kind: 'betting',
-      label: 'Betting is closed for all events. New pre-match and live bets are declined.', body: { ...body, rule },
-    } : {
-      method: 'DELETE', url: `${API}/rules/${BETTING_RULE_ID}`, ruleId: BETTING_RULE_ID, kind: 'betting',
-      label: 'Betting is open for all events.', body,
+    const rule = { id: target.id, type: 'DENY', enabled: true, scope: target.scope, parameters: {} };
+    execute({
+      target, ruleId: target.id, method: owned?.enabled ? 'DELETE' : owned ? 'PUT' : 'POST',
+      url: owned ? `${API}/rules/${target.id}` : `${API}/rules`,
+      label: owned?.enabled ? `${target.removed} Other restrictions still apply.` : target.closed,
+      body: owned?.enabled ? body : { ...body, rule },
     });
   };
   const switchChoice = (choice, event, revision) => {
@@ -587,7 +710,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
     });
   };
   const switchAccess = async item => {
-    if (!access || accessBusy) return;
+    if (!access || frozen) return;
     const current = access[item.field];
     setAccessBusy(true);
     setError('');
@@ -610,7 +733,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
     } finally { if (mounted.current) setAccessBusy(false); }
   };
   const switchCashBack = async () => {
-    if (!cashBack || cashBackBusy) return;
+    if (!cashBack || frozen) return;
     setCashBackBusy(true);
     setError('');
     setMessage('');
@@ -655,17 +778,8 @@ export default function RiskCentre({ eventAnalysis = false }) {
   if (templates) items.filter(rule => marketSwitch(rule) && rule.scope.templateIds).forEach(rule => rule.scope.templateIds
     .filter(id => rule.id === marketRuleId(id) && !templateNames.has(id))
     .forEach(id => templateNames.set(id, DELETED_MARKET)));
-  const markets = [
-    ...(snapshot?.builtinMarkets || []).map(market => ({
-      ...market, field: 'marketTypes', detail: `Built-in / ${market.betKind === 'LIVE' ? 'Live' : 'Pre-match'}`,
-    })),
-    ...(templates?.templates || []).map(template => ({
-      id: template.templateId, name: templateName(template), field: 'templateIds',
-      detail: template.archived ? 'Template / Archived' : 'Template',
-    })),
-  ];
-  const ownBetting = snapshot?.rules.find(rule => rule.id === BETTING_RULE_ID && closesBetting(rule));
-  const bettingClosed = Boolean(snapshot?.rules.some(closesBetting));
+  const switchUnavailable = operation ? 'Awaiting save result' : frozen ? 'Change in progress'
+    : loading ? 'Refreshing' : readOnly ? 'Unavailable' : '';
   const overlapping = draft && entry && !entry.locked ? snapshot.rules.filter(rule => rule.id !== draft.id
     && rule.type === draft.type && rule.enabled
     && (!draft.scope.betKind || !rule.scope.betKind || rule.scope.betKind === draft.scope.betKind)) : [];
@@ -680,19 +794,19 @@ export default function RiskCentre({ eventAnalysis = false }) {
     <header className="market-page-heading">
       <h1 className="h3" id="risk-title">{pageTitle}</h1>
       <p>{eventAnalysis ? 'Review event exposure, stress the current odds, and switch individual choices for new bets.'
-        : 'Choose a rule, set its value, then turn it on. Changes apply to new bets, not bets already waiting.'}</p>
+        : 'Manage betting rules and availability. Policy changes apply to new bets, not bets already waiting.'}</p>
       {eventAnalysis && eventId ? <p className="market-help">Conservative loss bounds, not a probability forecast.</p> : null}
       <p className="market-help">This simulation's rules are public: anyone can edit them. When rules overlap, the stricter limit applies.</p>
       <div className="market-form-actions">
-        <button type="button" className={action} disabled={loading || busy} onClick={() => { reload(); if (!eventAnalysis) loadSwitches(); }}>
+        <button type="button" className={action} disabled={loading || busy || accessBusy || cashBackBusy} onClick={() => { reload(); if (!eventAnalysis) loadSwitches(); }}>
           {eventAnalysis ? 'Refresh policy' : 'Refresh rules'}
         </button>
         {eventAnalysis ? <Link className={action} to={`/backoffice/risk-centre${search}`}>Risk Centre rules</Link> : null}
-        {snapshot ? <span>{snapshot.readiness.transactions === 'READY' ? 'Active' : 'Read-only policy'} revision {snapshot.revision} · Defaults version {snapshot.defaultsVersion}</span> : null}
+        {snapshot ? <span>{loading || loadError || snapshot.revision === rejectedRevision || operation ? 'Last read' : snapshot.readiness.transactions === 'READY' ? 'Active' : 'Read-only policy'} revision {snapshot.revision} · Defaults version {snapshot.defaultsVersion}</span> : null}
       </div>
     </header>
     {loading ? <p role="status">{eventAnalysis ? 'Loading active policy...' : 'Loading rules…'}</p> : null}
-    {loadError ? <p className="market-notice market-notice--danger" role="alert">{loadError}</p> : null}
+    {loadError ? <p ref={loadFeedback} tabIndex="-1" className="market-notice market-notice--danger" role="alert">{loadError}</p> : null}
     {error || message ? <div ref={feedback} id="risk-input-error" tabIndex="-1" role={error ? 'alert' : 'status'}
       className={`market-notice market-notice--${error ? 'danger' : 'positive'}`}>
       <p>{error || message}</p>
@@ -707,27 +821,23 @@ export default function RiskCentre({ eventAnalysis = false }) {
       {eventAnalysis ? <RiskEvents eventId={eventId} revision={snapshot.revision} disabled={readOnly || frozen}
           canSwitch={snapshot.readiness.transactions === 'READY' && snapshot.readiness.capabilities.selectionBlocking === true}
           onSwitch={switchChoice} onRefreshRules={reload} search={search} /> : <>
+      <TabList idPrefix="risk" label="Risk Centre workspaces" tabs={workspaces} activeId={workspace} onChange={id => {
+        setWorkspace(id); setConfirmation(null); setPendingSelection(null);
+      }} />
+      <Workspace id="markets" active={workspace}>
+        {workspace === 'markets' && <MarketsWorkspace snapshot={snapshot} templates={templates} switchesLoaded={switchesLoaded}
+          unavailable={switchUnavailable} onSwitch={switchPolicy} search={search} />}
+      </Workspace>
+      <Workspace id="accounts" active={workspace}>
       <section className="risk-switches" aria-labelledby="risk-switches-title">
-        <h2 className="h5" id="risk-switches-title">All-events switches</h2>
-        <section className="risk-switch" aria-labelledby="risk-betting-title">
-          <h3 className="h6" id="risk-betting-title">Betting</h3>
-          <p className="market-help">Closing betting declines every new bet, pre-match and live. Bets received before closing finish normally.</p>
-          {snapshot.readiness.transactions === 'READY' ? <ul className="risk-switch-list"><li>
-            <span className="risk-switch-list__name">All bets</span>
-            <RuleStatus enabled={!bettingClosed} />
-            {ownBetting || !bettingClosed ? <button type="button" className={action} disabled={readOnly || frozen}
-              aria-label={`${ownBetting ? 'Open' : 'Close'} betting for all events`} onClick={() => switchBetting(!ownBetting)}>
-              {ownBetting ? 'Open betting' : 'Close betting'}
-            </button> : <small>Closed by a Block bets rule</small>}
-          </li></ul> : <p className="market-help">Betting can't be switched in this deployment.</p>}
-        </section>
+        <h2 className="h5" id="risk-switches-title">Accounts &amp; cash back</h2>
         <section className="risk-switch" aria-labelledby="risk-accounts-title">
           <h3 className="h6" id="risk-accounts-title">Accounts</h3>
           <p className="market-help">Stopping sign-in also stops registration, because new accounts are signed in straight away. Administrators can still sign in, and people already signed in stay signed in until their session ends.</p>
           {access ? <ul className="risk-switch-list">{accessSwitches.map(item => <li key={item.name}>
             <span className="risk-switch-list__name">{item.label}</span>
             <RuleStatus enabled={access[item.field]} />
-            <button type="button" className={action} disabled={accessBusy} onClick={() => switchAccess(item)}
+            <button type="button" className={action} disabled={frozen} onClick={() => switchAccess(item)}
               aria-label={`${access[item.field] ? 'Stop' : 'Allow'} ${item.label.toLowerCase()}`}>
               {access[item.field] ? 'Stop' : 'Allow'}
             </button>
@@ -742,38 +852,16 @@ export default function RiskCentre({ eventAnalysis = false }) {
           {cashBack ? <ul className="risk-switch-list"><li>
             <span className="risk-switch-list__name">All events</span>
             <RuleStatus enabled={cashBack.enabled} />
-            <button type="button" className={action} disabled={cashBackBusy} onClick={switchCashBack}
+            <button type="button" className={action} disabled={frozen} onClick={switchCashBack}
               aria-label={`${cashBack.enabled ? 'Turn off' : 'Turn on'} cash back for all events`}>
               {cashBack.enabled ? 'Turn off' : 'Turn on'}
             </button>
           </li></ul> : null}
           {!cashBack && switchesLoaded ? <p className="market-help">Cash-back setting is unavailable. Try refreshing.</p> : null}
         </section>
-        <section className="risk-switch" aria-labelledby="risk-markets-title">
-          <h3 className="h6" id="risk-markets-title">Markets</h3>
-          <p className="market-help">All built-in market types and saved templates. Turning one off blocks new bets on it in every event, including Bet Builder. Other rules and event availability still apply; turning on does not unarchive a template.</p>
-          {!snapshot.builtinMarkets ? <p className="market-help">Built-in market switches are unavailable in this deployment.</p> : null}
-          {templates && !templates.enabled ? <p className="market-help">Custom markets are turned off in this deployment.</p> : null}
-          {!templates && switchesLoaded ? <p className="market-help">Custom market templates are unavailable. Try refreshing.</p> : null}
-          {templates && !templates.templates.length ? <p className="market-help">No custom markets yet. Create one in <Link to={`/backoffice/markets${search}`}>Market designer</Link>.</p> : null}
-          {markets.length ? <ul className="risk-switch-list">{markets.map(market => {
-            const { name } = market;
-            const label = markets.some(other => other !== market && other.name === name) ? `${name} (${market.detail})` : name;
-            const existing = snapshot.rules.find(rule => rule.id === marketRuleId(market.id));
-            const conflict = Boolean(existing && !ownsMarket(existing, market));
-            const own = existing?.enabled && !conflict;
-            const blocked = snapshot.rules.some(rule => blocksMarket(rule, market));
-            return <li key={`${market.field}:${market.id}`}>
-              <span className="risk-switch-list__name">{name}<small>{market.detail}</small></span>
-              <RuleStatus enabled={!blocked} />
-              {conflict ? <small>Switch rule changed; manage it in Rules</small> : own || !blocked ? <button type="button" className={action} disabled={readOnly || frozen || !idPattern.test(marketRuleId(market.id))}
-                aria-label={`${own ? 'Turn on' : 'Turn off'} ${label} for all events`} onClick={() => switchMarket({ ...market, label }, !own)}>
-                {own ? 'Turn on' : 'Turn off'}
-              </button> : <small>Off by a Block bets rule</small>}
-            </li>;
-          })}</ul> : null}
-        </section>
       </section>
+      </Workspace>
+      <Workspace id="rules" active={workspace}>
       <div className="risk-layout">
         <section className="market-library" aria-labelledby="risk-list-title">
           <h2 className="h5" id="risk-list-title">Rules</h2>
@@ -963,6 +1051,8 @@ export default function RiskCentre({ eventAnalysis = false }) {
           </div> : null}
         </section>
       </div>
+      </Workspace>
+      <Workspace id="history" active={workspace}>
       <section className="risk-support" aria-labelledby="risk-history-title">
         <h2 className="h5" id="risk-history-title">Revision history</h2>
         <p className="market-help">Anonymous changes are unattributed. No customer records or exposure details are shown.</p>
@@ -985,6 +1075,7 @@ export default function RiskCentre({ eventAnalysis = false }) {
           </details></li>;
         })}</ol> : null}
       </section>
+      </Workspace>
       </>}
     </> : null}
   </section>;

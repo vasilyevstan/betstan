@@ -82,7 +82,9 @@ its own **Black swan analysis** action at
 `/backoffice/events/:eventId/analysis`; it opens that event directly, without
 loading another event catalogue. The page links back to event markets and the
 global Risk Centre rule editor. Theme and layout query parameters are retained.
-Risk Centre contains global rules and switches, with no Events tab.
+Risk Centre opens on **Rules**. Use **Markets** for betting switches,
+**Accounts & cash back** for access and cash-back controls, and **History**
+to inspect saved revisions. Switching tabs does not save or discard rule edits.
 
 The open-event analysis catalogue lists all online,
 unresulted upcoming and in-play events, without the public event page's time
@@ -197,9 +199,9 @@ revision shows what it changed compared with the previous one: rules added or
 removed, turned on or off, changed values (`old → new`) and changed scope. The
 complete rule set of that revision stays available under a nested disclosure.
 
-## All-events switches
+## Markets and account switches
 
-**Betting** closes or opens all betting. Closing it saves an enabled **Block
+In **Markets**, **Betting** closes or opens all betting. Closing it saves an enabled **Block
 bets** rule with no scope (`betting:all`), so every new pre-match and live bet
 is declined as **Declined: Block bets** at moderation, after its normal delay.
 Bets received before closing keep the policy they were received under and
@@ -208,7 +210,13 @@ rule is on, the switch shows **Closed by a Block bets rule** and that rule must
 be changed in the list instead. The switch needs rule editing to be available
 in the deployment.
 
-**Accounts** stops or allows **New registrations** and **Customer sign-in**.
+The **Pre-match** and **Live** groups each have a pause switch above their
+individual markets. A group pause is one **Block bets** rule scoped to that
+kind, not a bulk edit. It covers new markets of that kind too. Reopening the
+group removes only its own pause: markets you turned off individually stay
+off, and a global or overlapping block still applies.
+
+In **Accounts & cash back**, **Accounts** stops or allows **New registrations** and **Customer sign-in**.
 Auth owns both settings and enforces them on `POST /api/auth/new` and
 `POST /api/auth/login`; Backoffice forwards `GET
 /api/backoffice/access-controls` and `PUT
@@ -236,9 +244,9 @@ being processed can finish, and per-event switches still apply when it is on.
 The switch is a separate Backoffice setting, not a policy revision. A stale
 change returns a conflict and shows the current value.
 
-**Markets** lists built-in 1X2, Correct Score and every registered live market
-type alongside **all saved templates**, including clearly marked archived
-templates. Same-name templates remain distinct from built-ins. Registered
+In **Markets**, **Pre-match** lists built-in 1X2, Correct Score and all
+saved templates, including archived templates. **Live** lists registered
+live market types. Same-name templates remain distinct from built-ins. Registered
 types are not a promise that every simulation engine or event offers them.
 Turning a market off saves an enabled **Block bets** rule, so new bets on it
 are declined as **Declined: Block bets** while the market stays visible.

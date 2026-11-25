@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import useSlipBoards from '../hook/useSlipBoards';
@@ -7,6 +7,7 @@ import {
   formatDeclineReason,
   formatMarketStatus,
   getBetKindLabel,
+  selectionKeysForRow,
 } from '../liveBettingUtils';
 import { BOARD_KINDS, getBoardId, getRowId } from '../hook/useSlipBoards';
 import MarketSelections from '../components/MarketSelections';
@@ -102,6 +103,8 @@ const SlipBoardPanel = ({
   onCleanBoard,
   onSubmitBoard,
   onWagerChange,
+  revealKey,
+  revealRowRef,
   uiVariant,
   wager,
 }) => {
@@ -161,38 +164,33 @@ const SlipBoardPanel = ({
     {statusMessage ? <div className="slip-board__pending" aria-live="polite">{statusMessage}</div> : null}
     {error ? <div className="alert alert-danger slip-board__error" role="alert">{error}</div> : null}
 
-    {rows.map((row) => {
+    <div className="slip-board__picks">{rows.map((row) => {
       const rowId = getRowId(row);
-      return <div className="card slip-row-card" key={rowId ?? `${row.eventId}-${row.oddsId}`}>
-        <div className="card-body">
-          <div className="card-subtitle text-muted d-flex justify-content-between align-items-start gap-2 mb-2">
-            <div>
-              <div>{row.eventName}</div>
-              <div className="slip-row-card__meta">Kickoff {formatTimestamp(row.eventTime ?? row.timestamp)}</div>
-            </div>
-            <button
-              aria-label={`Remove ${row.oddsName} from ${getBetKindLabel(betKind)} slip`}
-              className="btn-close slip-row-close"
-              disabled={isBusy}
-              type="button"
-              onClick={() => onDeleteRow(betKind, boardId, rowId)}
-            ></button>
-          </div>
-          <div className="card-text d-flex justify-content-between align-items-start gap-2">
-            <div>
-              <div>{row.productName}</div>
-              {row.marketBet ? <MarketSelections marketBet={row.marketBet} />
-                : <div className="slip-row-card__selection">{row.oddsName}</div>}
-            </div>
-            <div className="slip-row-card__odds">{row.oddsValue}</div>
-          </div>
-          {row.marketBet ? <p className="market-help">
-            Quote expires {formatTimestamp(row.marketBet.expiresAt)}. To refresh it, select the outcome again on the match card.
-          </p> : null}
-          {wholeSlipDecline ? null : <BoardModeration row={row} />}
+      const reveal = revealKey && selectionKeysForRow(row, betKind).includes(revealKey);
+      return <div className="slip-row-card" key={rowId ?? `${row.eventId}-${row.oddsId}`} ref={reveal ? revealRowRef : null}>
+        <div>
+          <div>{row.eventName}</div>
+          <div className="slip-row-card__meta">Kickoff {formatTimestamp(row.eventTime ?? row.timestamp)}</div>
         </div>
+        <button
+          aria-label={`Remove ${row.oddsName} from ${getBetKindLabel(betKind)} slip`}
+          className="btn-close slip-row-close"
+          disabled={isBusy}
+          type="button"
+          onClick={() => onDeleteRow(betKind, boardId, rowId)}
+        />
+        <div className="slip-row-card__pick">
+          <span>{row.productName}</span>
+          {!row.marketBet && <span className="slip-row-card__selection">{row.oddsName}</span>}
+        </div>
+        <strong className="slip-row-card__odds">{row.oddsValue}</strong>
+        {row.marketBet && <div className="slip-row-card__manifest">
+          <MarketSelections marketBet={row.marketBet} />
+          <p className="market-help">Quote expires {formatTimestamp(row.marketBet.expiresAt)}. To refresh it, select the outcome again on the match card.</p>
+        </div>}
+        {wholeSlipDecline ? null : <BoardModeration row={row} />}
       </div>;
-    })}
+    })}</div>
 
     <div className="d-flex justify-content-between mt-2 px-1 slip-board__summary">
       <small>Odds: {totalOdds.toFixed(2)}</small>
@@ -271,6 +269,8 @@ const HandleSlip = ({
     onBoardSubmitted,
   });
   const [activeKind, setActiveKind] = useState(BET_KIND.PRE_MATCH);
+  const [revealRequest, setRevealRequest] = useState(null);
+  const revealRowRef = useRef(null);
   // The first-load rule below must never override a tab the user (or a placed pick) already chose.
   const tabChosenRef = useRef(false);
   const initialTabResolvedRef = useRef(false);
@@ -282,6 +282,10 @@ const HandleSlip = ({
   }, [onSelectionKeysChange, selectedSelectionKeys]);
 
   useEffect(() => {
+    setRevealRequest(null);
+  }, [currentUser?.id, isCurrentUserResolved]);
+
+  useEffect(() => {
     if (!tabRequest || tabRequest.nonce === handledTabRequestRef.current) {
       return;
     }
@@ -290,8 +294,21 @@ const HandleSlip = ({
     if (BOARD_KINDS.includes(tabRequest.betKind)) {
       tabChosenRef.current = true;
       setActiveKind(tabRequest.betKind);
+      setRevealRequest(tabRequest.selectionKey ? tabRequest : null);
     }
   }, [tabRequest]);
+
+  useLayoutEffect(() => {
+    const row = revealRowRef.current;
+    if (!revealRequest || !row) return;
+    // Scroll only the picks, never the event page. The row may arrive after the tab changes.
+    const list = row.parentElement;
+    const bounds = list.getBoundingClientRect();
+    const pick = row.getBoundingClientRect();
+    if (pick.top < bounds.top || pick.height > list.clientHeight) list.scrollTop += pick.top - bounds.top;
+    else if (pick.bottom > bounds.bottom) list.scrollTop += pick.bottom - bounds.bottom;
+    setRevealRequest(null);
+  }, [boards, revealRequest]);
 
   useEffect(() => {
     // A failed load has not shown the first boards yet, so the rule waits for one that did.
@@ -311,6 +328,7 @@ const HandleSlip = ({
 
   const selectTab = (betKind) => {
     tabChosenRef.current = true;
+    setRevealRequest(null);
     setActiveKind(betKind);
   };
 
@@ -354,6 +372,8 @@ const HandleSlip = ({
             error={errors[betKind]}
             hasLoadError={Boolean(loadError)}
             isGuest={isGuest}
+            revealKey={isActive && revealRequest?.betKind === betKind ? revealRequest.selectionKey : null}
+            revealRowRef={revealRowRef}
             onCleanBoard={cleanBoard}
             onDeleteRow={deleteRow}
             onSubmitBoard={submitBoard}
