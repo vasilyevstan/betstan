@@ -24,6 +24,32 @@ const expectSingleLogInEntry = async (page) => {
   await expect(header.getByTitle('Create account')).toHaveCount(0);
 };
 
+test('Event mode opens a themed option list and keeps native selection and dismissal', async ({ page }) => {
+  await prepareShell(page);
+  for (const [theme, width] of [['dark', 1440], ['light', 390]]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`/backoffice?theme=${theme}`);
+    const field = page.getByLabel('Event mode', { exact: true });
+    await field.click();
+    await expect(field).toHaveJSProperty('value', 'live');
+    await expect.poll(() => field.evaluate(el => el.matches(':open'))).toBe(true);
+    const picker = await field.evaluate(el => {
+      const style = getComputedStyle(el, '::picker(select)');
+      return { appearance: style.appearance, background: style.backgroundColor, field: getComputedStyle(el).backgroundColor };
+    });
+    expect(picker.appearance).toBe('base-select');
+    expect(picker.background).toBe(picker.field);
+    const option = field.getByRole('option', { name: 'Pre-match only — no live game' });
+    await expect(option).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press('Escape');
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue('live');
+    await field.click();
+    await option.click();
+    await expect(field).toHaveValue('pre-match');
+  }
+});
+
 test('approved blue header and compact Backoffice controls retain representative geometry and contrast', async ({ page }, testInfo) => {
   const state = await prepareShell(page);
   state.backofficeEvents = createBackofficeEvents();

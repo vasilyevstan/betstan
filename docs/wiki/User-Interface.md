@@ -5,6 +5,12 @@ with three density layouts and two color themes. Layout and theme changes alter
 presentation, not betting identity, service authority, route behavior, or
 accessibility expectations.
 
+Dropdowns use the active theme on every screen. In browsers with customizable
+select menus, the open list uses the same surface as the field and marks the
+current option with a check and the theme accent. Browsers that require a
+system picker keep their native menu. Labels, keyboard selection and form
+submission continue to use standard select controls.
+
 See [[Application Processes]] for the workflows behind the screens and
 [[UI UX Consistency]] for the complete review and acceptance contract.
 
