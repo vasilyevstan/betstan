@@ -762,7 +762,9 @@ describe('sections, history and all-events switches', () => {
     expect(screen.queryByRole('button', { name: 'Save and turn on' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Pause live betting' }));
     await screen.findByText(/Live betting paused.*Revision 2 saved/);
+    await waitFor(() => expect(screen.getByText(/Live betting paused.*Revision 2 saved/).closest('[role="status"]')).toHaveFocus());
     tabs[1].focus();
+    expect(tabs[1]).toHaveFocus();
     fireEvent.keyDown(tabs[1], { key: 'End' });
     expect(tabs[3]).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Load recent revisions' })).toBeVisible();
