@@ -299,6 +299,7 @@ body {
   .app-desk__slips .slip-board__picks {
     overflow-y: auto;
     overscroll-behavior-y: contain;
+    padding-block: 2px;
     min-height: 4rem;
   }
 

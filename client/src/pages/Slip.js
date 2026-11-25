@@ -305,8 +305,8 @@ const HandleSlip = ({
     const list = row.parentElement;
     const bounds = list.getBoundingClientRect();
     const pick = row.getBoundingClientRect();
-    if (pick.top < bounds.top || pick.height > list.clientHeight) list.scrollTop += pick.top - bounds.top;
-    else if (pick.bottom > bounds.bottom) list.scrollTop += pick.bottom - bounds.bottom;
+    if (pick.top < bounds.top || pick.height > list.clientHeight) list.scrollTop += Math.floor(pick.top - bounds.top);
+    else if (pick.bottom > bounds.bottom) list.scrollTop += Math.ceil(pick.bottom - bounds.bottom);
     setRevealRequest(null);
   }, [boards, revealRequest]);
 
