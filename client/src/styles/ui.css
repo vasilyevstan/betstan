@@ -141,6 +141,96 @@ body {
   box-shadow: none;
 }
 
+.app-shell select:not([multiple]):not([size]) {
+  appearance: auto;
+  background-image: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+
+.app-shell select:not([multiple]):not([size]):disabled {
+  cursor: not-allowed;
+}
+
+.app-shell select option {
+  color: var(--text-main);
+  background-color: var(--surface-elevated);
+}
+
+@supports (appearance: base-select) {
+  .app-shell select:not([multiple]):not([size]),
+  .app-shell select:not([multiple]):not([size])::picker(select) {
+    appearance: base-select;
+  }
+
+  .app-shell select:not([multiple]):not([size]) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.625rem;
+    padding-inline: 0.75rem;
+    text-align: start;
+  }
+
+  .app-shell select::picker-icon {
+    content: '';
+    flex: none;
+    inline-size: 0.5rem;
+    block-size: 0.5rem;
+    border: solid currentColor;
+    border-width: 0 1.5px 1.5px 0;
+    rotate: 45deg;
+    align-self: center;
+  }
+
+  .app-shell select:open::picker-icon {
+    rotate: 225deg;
+  }
+
+  .app-shell select::picker(select) {
+    margin-block: 0.25rem;
+    padding: 0.25rem;
+    max-inline-size: calc(100vw - 1rem);
+    max-block-size: min(22rem, 50dvh);
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-control);
+    background: var(--surface-elevated);
+    color: var(--text-main);
+    font: inherit;
+  }
+
+  .app-shell select option {
+    min-block-size: var(--control-target);
+    padding: 0.5rem 0.75rem;
+    align-items: center;
+    border-radius: calc(var(--radius-control) - 3px);
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .app-shell select option:checked {
+    background: var(--accent);
+    color: var(--accent-contrast);
+  }
+
+  .app-shell select option:not(:checked):not(:disabled):hover,
+  .app-shell select option:not(:checked):focus-visible {
+    background: color-mix(in srgb, var(--accent) 18%, var(--surface-elevated));
+  }
+
+  .app-shell select option:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: -3px;
+  }
+
+  .app-shell select option:disabled {
+    color: var(--text-subtle);
+    cursor: not-allowed;
+  }
+}
+
 .btn-shell {
   min-height: var(--control-target);
   border-color: var(--border-control);
