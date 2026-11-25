@@ -27,8 +27,9 @@ short blue/red card borders remain visible.
 
 Only the Statistics and slips regions are sticky in this three-region desk.
 The Slip stays below the navigation bar while you scroll through events. If
-the active tab has more picks than fit on screen, scroll inside the Slip to
-reach the remaining picks and wager controls.
+the active tab has more picks than fit on screen, its picks list scrolls
+while the wager and bet controls stay in place. Adding odds brings that
+pick into view without scrolling the event list.
 At 1399 pixels and below, the center task occupies the first full row and both
 supporting regions follow it without sticky positioning. The supporting
 regions may share the next row when space permits and stack at narrower
@@ -115,13 +116,13 @@ public-write limitations.
 The rule editor has **All events**, **Pre-match** and **Live** sections, each with
 its own **+ Add rule** list and indented category groups, with left-aligned
 names and settings. Green **ON** and red **OFF** tags identify saved status
-without relying on color alone. All-events switches close or open all
-betting, stop or allow new registrations and customer sign-in, and turn cash
-back, or a market, off or on for every event. Markets includes built-in 1X2,
-Correct Score, registered live types and all saved templates, with archived
-templates marked. Same-name templates stay distinct from built-ins; turning
-on never unarchives a template or overrides another block. Expanding a revision in
-history shows what it changed. Slip and My Bets name recognized rule types
+without relying on color alone. In **Markets**, close all betting or pause
+only **Pre-match** or **Live**. Reopening a group keeps its individual market
+settings. Pre-match includes 1X2, Correct Score and all saved templates;
+Live lists registered live types. Turning on a market never unarchives a
+template or overrides another block. **Accounts & cash back** controls new
+registrations, customer sign-in and cash back. In **History**, expand a
+revision to see what changed. Slip and My Bets name recognized rule types
 recorded on a declined bet; older records keep their generic reason. A
 whole-ticket decline is shown once on the slip; a selection-specific reason
 stays on its row.
@@ -640,7 +641,9 @@ errors, **BET!** (signed-in) and **CLEAN** controls,
 and pending state; both panels stay mounted, so a typed wager survives a tab
 switch. Adding a pick jumps the window to the tab for that pick's kind. Bets are
 still placed per kind: the UI never merges the tabs into one combined
-placement.
+placement. Each pick groups the fixture and kickoff above the market, selection
+and odds. Longer names wrap; Bet Builder details and decline reasons remain
+available on the corresponding row.
 
 Signed-out visitors can add, remove and clear picks. Their bet control
 reads **Log in to bet** and opens `/login`; placing a bet and adding a

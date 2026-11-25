@@ -101,7 +101,7 @@ describe('Product1X2', () => {
       oddsId: 'home-odd',
     });
     // The slip opens its Pre-match tab for a pre-match pick.
-    await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH));
+    await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH, 'PRE_MATCH:event-1:product-1:home-odd'));
     expect(onSelectionPlaced).toHaveBeenCalledTimes(1);
   });
 
@@ -273,7 +273,7 @@ describe('Product1X2', () => {
       await latestRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
-    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH, 'PRE_MATCH:event-1:product-1:draw-odd');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('button', { name: /Select 1X2 X:/ })).toBe(latestSelection);
     expect(latestSelection).toHaveFocus();
@@ -318,7 +318,7 @@ describe('Product1X2', () => {
       await olderRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
-    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH);
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.PRE_MATCH, 'PRE_MATCH:event-1:product-1:home-odd');
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Selection could not be added to your slip. Please try again.'
     );

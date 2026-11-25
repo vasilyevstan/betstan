@@ -103,7 +103,7 @@ it('shows published markets on the match card and adds an outcome to the slip in
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: outcome('Nominee A') })); });
   await waitFor(() => expect(placed).toHaveBeenCalledTimes(1));
   // A custom market is a pre-match pick, so the slip opens its Pre-match tab.
-  expect(placed).toHaveBeenCalledWith('PRE_MATCH');
+  expect(placed).toHaveBeenCalledWith('PRE_MATCH', 'PRE_MATCH:custom:event-a:market-a:a');
   expect(axios.post.mock.calls).toEqual([
     ['/api/event/events/event-a/market-quotes', { requestId: expect.any(String), kind: 'SINGLE',
       selections: [{ origin: 'TEMPLATE', marketId: 'market-a', outcomeKey: 'a', quoteRevision: 2 }] }],

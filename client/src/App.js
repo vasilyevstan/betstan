@@ -86,10 +86,10 @@ const App = () => {
   }, []);
 
   // Auth refreshes call this with no kind, so they reload the slip without changing its tab.
-  const requestSlipRefresh = useCallback((betKind) => {
+  const requestSlipRefresh = useCallback((betKind, selectionKey) => {
     setSlipRefreshSignal((currentSignal) => currentSignal + 1);
     if (betKind === BET_KIND.LIVE || betKind === BET_KIND.PRE_MATCH) {
-      setSlipTabRequest((currentRequest) => ({ betKind, nonce: (currentRequest?.nonce ?? 0) + 1 }));
+      setSlipTabRequest((currentRequest) => ({ betKind, selectionKey, nonce: (currentRequest?.nonce ?? 0) + 1 }));
     }
   }, []);
 

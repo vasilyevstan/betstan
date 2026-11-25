@@ -151,7 +151,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
   const [placementError, setPlacementError] = useState('');
   const placementAttemptSequence = useRef(0);
 
-  const handleSelection = async (selectionId) => {
+  const handleSelection = async (selectionId, selectionKey) => {
     const attemptSequence = ++placementAttemptSequence.current;
     setPlacementError('');
     try {
@@ -165,7 +165,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError('');
       }
-      onSelectionPlaced?.(BET_KIND.LIVE);
+      onSelectionPlaced?.(BET_KIND.LIVE, selectionKey);
     } catch {
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError(PLACEMENT_ERROR);
@@ -207,7 +207,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
             disabled={!isSelectable}
             key={selection.selectionId}
             type="button"
-            onClick={() => handleSelection(selection.selectionId)}
+            onClick={() => handleSelection(selection.selectionId, selectionKey)}
           >
             {isSelected ? <span className="state-mark" aria-hidden="true" /> : null}
             <span>{getMarketSelectionLabel(market, selection, event)}</span>

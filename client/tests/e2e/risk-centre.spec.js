@@ -253,12 +253,14 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByText('Factory policy preview')).toBeVisible();
       await page.getByRole('button', { name: 'Confirm restore' }).click();
       await expect(page.getByText(/Revision \d+ saved/)).toBeVisible();
+      await page.getByRole('tab', { name: 'Accounts & cash back' }).click();
       const cashBack = page.getByRole('region', { name: 'Cash back', exact: true });
       await cashBack.getByRole('button', { name: 'Turn off cash back for all events' }).click();
       await expect(page.getByText(/Cash back is off for all events/)).toBeVisible();
       await expect(cashBack.locator('.market-pill--danger')).toHaveText('OFF');
       await cashBack.getByRole('button', { name: 'Turn on cash back for all events' }).click();
       await expect(cashBack.locator('.market-pill--positive')).toHaveText('ON');
+      await page.getByRole('tab', { name: 'Markets', exact: true }).click();
       const betting = page.getByRole('region', { name: 'Betting', exact: true });
       await betting.getByRole('button', { name: 'Close betting for all events' }).click();
       await expect(page.getByText(/Betting is closed for all events\. New pre-match and live bets are declined\. Revision \d+ saved/)).toBeVisible();
@@ -266,13 +268,29 @@ for (const theme of ['light', 'dark']) {
       await expect(betting.locator('.market-pill--danger')).toHaveText('OFF');
       await betting.getByRole('button', { name: 'Open betting for all events' }).click();
       await expect(betting.locator('.market-pill--positive')).toHaveText('ON');
+      await page.getByRole('tab', { name: 'Accounts & cash back' }).click();
       const accounts = page.getByRole('region', { name: 'Accounts', exact: true });
       await accounts.getByRole('button', { name: 'Stop customer sign-in' }).click();
       await expect(page.getByText(/Customer sign-in is stopped\./)).toBeVisible();
       await expect(accounts).toContainText('Paused while sign-in is stopped');
       await accounts.getByRole('button', { name: 'Allow customer sign-in' }).click();
       await expect(page.getByText('Customer sign-in is allowed.')).toBeVisible();
+      await page.getByRole('tab', { name: 'Markets', exact: true }).click();
       const markets = page.getByRole('region', { name: 'Markets', exact: true });
+      const pre = markets.getByRole('region', { name: 'Pre-match', exact: true });
+      const live = markets.getByRole('region', { name: 'Live', exact: true });
+      const groupBox = await pre.boundingBox();
+      const liveBox = await live.boundingBox();
+      const gap = viewport.width < 760 ? liveBox.y - (groupBox.y + groupBox.height)
+        : liveBox.x - (groupBox.x + groupBox.width);
+      expect(gap).toBeGreaterThanOrEqual(0);
+      const bounds = await markets.locator('button').evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return box.width >= 43.5 && box.height >= 43.5 && box.right <= window.innerWidth + 1;
+      }));
+      expect(bounds.every(Boolean)).toBe(true);
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1);
+      await page.screenshot({ path: testInfo.outputPath(`risk-markets-${theme}-${viewport.width}.png`), fullPage: true });
       await expect(markets.getByRole('button', { name: 'Turn off Correct Score for all events' })).toBeVisible();
       await expect(markets.getByRole('button', { name: 'Turn off Second half time result (live) for all events' })).toBeVisible();
       await expect(markets.getByRole('button', { name: 'Turn off Archived template for all events' }).locator('..')).toContainText('Template / Archived');
@@ -290,10 +308,13 @@ for (const theme of ['light', 'dark']) {
       expect(mutations.at(-1).body.rule).toMatchObject({
         id: `market:${TEMPLATE_ID}`, type: 'DENY', enabled: true, scope: { templateIds: [TEMPLATE_ID] },
       });
+      await page.getByRole('tab', { name: 'Rules', exact: true }).click();
       await expect(page.getByRole('button', { name: /Block bets ON Market: Total goals/ })).toBeVisible();
+      await page.getByRole('tab', { name: 'Markets', exact: true }).click();
       await markets.getByRole('button', { name: 'Turn on Total goals for all events' }).click();
-      await expect(page.getByText(/Total goals is on for all events\. Revision \d+ saved/)).toBeVisible();
+      await expect(page.getByText(/Total goals market block removed\. Other restrictions still apply\. Revision \d+ saved/)).toBeVisible();
       expect(mutations.at(-1)).toMatchObject({ method: 'DELETE', path: `${API}/rules/market:${TEMPLATE_ID}` });
+      await page.getByRole('tab', { name: 'Rules', exact: true }).click();
       await page.getByRole('button', { name: /Operator exposure limit OFF/ }).click();
       await expect(page.getByRole('button', { name: 'Turn on', exact: true })).toBeDisabled();
       await expect(page.getByText(/Can't turn on yet/)).toBeVisible();

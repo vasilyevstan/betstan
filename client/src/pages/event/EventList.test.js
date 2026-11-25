@@ -226,7 +226,7 @@ describe('EventList', () => {
     }));
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
     // The slip opens its Live tab for a live pick.
-    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE);
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE, 'LIVE:live-1:market-1:1:home');
   });
 
   it('keeps one Events H1 in loading and empty states', () => {
@@ -329,7 +329,7 @@ describe('EventList', () => {
       await latestRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
-    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE);
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE, 'LIVE:live-1:placement-race:4:away-race');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('button', {
       name: 'Select Next Corner Kick: Team B at 2.2',
@@ -380,7 +380,7 @@ describe('EventList', () => {
       await olderRequest.promise;
     });
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
-    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE);
+    expect(onSelectionPlaced).toHaveBeenCalledWith(BET_KIND.LIVE, 'LIVE:live-1:placement-race:4:home-race');
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Selection could not be added to your slip. Please try again.'
     );

@@ -8,7 +8,7 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
   const [placementError, setPlacementError] = useState('');
   const placementAttemptSequence = useRef(0);
 
-  const handleClick = async (productId, oddsId) => {
+  const handleClick = async (productId, oddsId, selectionKey) => {
     const attemptSequence = ++placementAttemptSequence.current;
     setPlacementError('');
     try {
@@ -16,7 +16,7 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError('');
       }
-      onSelectionPlaced?.(BET_KIND.PRE_MATCH);
+      onSelectionPlaced?.(BET_KIND.PRE_MATCH, selectionKey);
     } catch {
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError(PLACEMENT_ERROR);
@@ -39,7 +39,7 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
           className={`btn product-button product-button--${uiVariant ?? 'v1'} product-button--labelled${selectedClass}${resulted ? ' disabled' : ''}`}
           disabled={resulted}
           type="button"
-          onClick={() => handleClick(product.id, option.id)}
+          onClick={() => handleClick(product.id, option.id, selectionKey)}
         >
           {isSelected ? <span className="state-mark" aria-hidden="true" /> : null}
           <span className="product-button__label">{option.name}</span>

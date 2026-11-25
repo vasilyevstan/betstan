@@ -287,6 +287,22 @@ body {
     overflow-y: auto;
   }
 
+  .app-desk__slips > .app-shell__sidebar,
+  .app-desk__slips .slip-boards,
+  .app-desk__slips [role='tabpanel']:not([hidden]),
+  .app-desk__slips .slip-board {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .app-desk__slips .slip-board__picks {
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    padding-block: 2px;
+    min-height: 4rem;
+  }
+
   .app-shell__main {
     scroll-margin-top: 6rem;
   }
@@ -2031,16 +2047,41 @@ body {
   color: var(--text-subtle);
 }
 
+.slip-board__picks {
+  min-width: 0;
+}
+
 .slip-row-card {
-  margin-top: 0;
-  border-color: color-mix(in srgb, var(--border-subtle) 85%, var(--accent) 15%);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 0.5rem;
+  padding: 0.375rem 0.25rem;
+  border-block-start: 1px solid var(--border-subtle);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.slip-row-card__pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.5rem;
+}
+
+.slip-row-card__manifest,
+.slip-row-card__moderation {
+  grid-column: 1 / -1;
 }
 
 .slip-row-card__odds {
+  justify-self: end;
   font-weight: 700;
 }
 
 .slip-row-close {
+  justify-self: end;
+  box-sizing: border-box;
   min-width: var(--control-target);
   min-height: var(--control-target);
   opacity: 0.85;
@@ -3496,15 +3537,16 @@ body {
 .slip-row-card__meta,
 .slip-row-card__selection {
   font-size: 0.78rem;
-}
-
-.slip-row-card__selection {
   color: var(--text-subtle);
 }
 
+.slip-row-card__manifest > p {
+  margin-block: 0.25rem 0;
+}
+
 .slip-row-card__moderation {
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
+  margin-top: 0.375rem;
+  padding-top: 0.375rem;
   border-top: 1px solid var(--border-subtle);
   font-size: 0.78rem;
 }

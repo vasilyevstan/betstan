@@ -1,19 +1,11 @@
-.risk-tabs {
-  display: flex;
-  gap: 0.5rem;
+.risk-centre > .tab-list {
   margin-block: 1rem 1.5rem;
-  border-block-end: 1px solid var(--border-subtle);
 }
-.risk-centre .risk-tabs [role='tab'] {
-  border: 0;
-  border-block-end: 2px solid transparent;
-  border-radius: 0;
-  padding-inline: 1rem;
-}
-.risk-centre .risk-tabs [aria-selected='true'] {
-  border-block-end-color: var(--accent);
-  color: var(--text-main);
-  font-weight: 700;
+@media (max-width: 36rem) {
+  .risk-centre > .tab-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .risk-events__heading,
 .risk-event-market__heading,
@@ -240,6 +232,21 @@
 .risk-switch-list__name {
   overflow-wrap: anywhere;
 }
+.risk-switch-list--group {
+  padding-block-end: 0.75rem;
+  border-block-end: 1px solid var(--border-subtle);
+}
+.risk-markets__help {
+  margin: 0;
+}
+@media (max-width: 36rem) {
+  .risk-switch-list--group li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .risk-switch-list--group button {
+    grid-column: 1 / -1;
+  }
+}
 .risk-switch-list__name small {
   display: block;
   margin-block-start: 0.25rem;
@@ -332,10 +339,12 @@
     grid-template-columns: minmax(15rem, 0.8fr) minmax(0, 1.2fr);
   }
   .risk-switches {
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     align-items: start;
   }
-  .risk-switches > h2 {
+  .risk-switches > h2,
+  .risk-switch--global,
+  .risk-markets__help {
     grid-column: 1 / -1;
   }
 }
