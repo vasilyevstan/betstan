@@ -99,7 +99,7 @@ const ProductCustomMarkets = ({
         expectedBoardFingerprint: board?.boardFingerprint ?? null,
         replaceEventSelections: sameEvent.length > 0,
       });
-      onSelectionPlaced?.(BET_KIND.PRE_MATCH);
+      onSelectionPlaced?.(BET_KIND.PRE_MATCH, getCustomMarketSelectionKey({ eventId, marketId: configuration.marketId, outcomeKey: outcome.key }));
     } catch (failure) {
       if (mounted.current) setError(failure.response?.status === 401 ? SIGN_IN_MESSAGE : marketError(failure));
       if (failure.response?.status === 409) onSelectionPlaced?.();

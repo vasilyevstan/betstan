@@ -126,9 +126,15 @@ test('the desktop Slip stays below the header and scrolls long drafts independen
     state.selectSelection({ eventId, productId: product.id, oddsId: odds.id });
   }
   await page.setViewportSize({ width: 1440, height: 720 });
-  await openEvents(page, state, '/');
+  await openEvents(page, state, '/?ui=v3&theme=dark');
   const panel = page.getByRole('complementary', { name: 'Slip' }).locator('.app-shell__sidebar');
+  const picks = slipBoard(page, BET_KIND.PRE_MATCH).locator('.slip-board__picks');
+  const bet = slipBoard(page, BET_KIND.PRE_MATCH).getByRole('button', { name: 'BET!' });
   await expect(slipTab(page, PRE_MATCH_TAB)).toHaveAccessibleName('Pre-match (12)');
+  const row = picks.locator('.slip-row-card').first();
+  expect((await row.boundingBox()).height).toBeLessThan(90);
+  const remove = await row.getByRole('button', { name: /^Remove/ }).boundingBox();
+  expect(Math.min(remove.width, remove.height)).toBeGreaterThanOrEqual(44);
 
   await page.evaluate(() => window.scrollTo({ top: 300, behavior: 'instant' }));
   const pinned = await panel.boundingBox();
@@ -139,13 +145,26 @@ test('the desktop Slip stays below the header and scrolls long drafts independen
   expect(await page.evaluate(() => window.scrollY)).toBe(600);
   expect((await panel.boundingBox()).y).toBeCloseTo(pinned.y);
 
-  await panel.hover();
+  const listBounds = await picks.boundingBox();
+  await page.mouse.move(listBounds.x + listBounds.width / 2, listBounds.y + listBounds.height / 2);
   await page.mouse.wheel(0, 320);
-  await expect.poll(() => panel.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  await expect.poll(() => picks.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.scrollY)).toBe(600);
   const wager = page.getByLabel('Wager for PRE-MATCH SLIP', { exact: true });
-  await wager.focus();
+  await expect(bet).toBeInViewport({ ratio: 1 });
   await expect(wager).toBeInViewport({ ratio: 1 });
+
+  await picks.evaluate(el => { el.scrollTop = 0; });
+  const oddsButton = page.getByRole('button', { name: state.fixtures.preMatchSelectionLabel });
+  await oddsButton.scrollIntoViewIfNeeded();
+  const eventScroll = await page.evaluate(() => window.scrollY);
+  await oddsButton.click();
+  await expect(slipTab(page, PRE_MATCH_TAB)).toHaveAccessibleName('Pre-match (13)');
+  await expect(picks.locator('.slip-row-card').filter({ has: page.locator('.slip-row-card__selection', { hasText: 'Draw' }) }))
+    .toBeInViewport({ ratio: 1 });
+  await expect(bet).toBeInViewport({ ratio: 1 });
+  await expect(oddsButton).toBeFocused();
+  expect(await page.evaluate(() => window.scrollY)).toBe(eventScroll);
 
   await slipTab(page, LIVE_TAB).click();
   const overflow = () => panel.evaluate((el) => el.scrollHeight - el.clientHeight);

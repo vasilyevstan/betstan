@@ -58,7 +58,7 @@ const Handle1X2 = ({
   const [placementError, setPlacementError] = useState('');
   const placementAttemptSequence = useRef(0);
 
-  const handleClick = async (productId, oddsId) => {
+  const handleClick = async (productId, oddsId, selectionKey) => {
     const attemptSequence = ++placementAttemptSequence.current;
     setPlacementError('');
     try {
@@ -66,7 +66,7 @@ const Handle1X2 = ({
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError('');
       }
-      onSelectionPlaced?.(BET_KIND.PRE_MATCH);
+      onSelectionPlaced?.(BET_KIND.PRE_MATCH, selectionKey);
     } catch {
       if (attemptSequence === placementAttemptSequence.current) {
         setPlacementError(PLACEMENT_ERROR);
@@ -109,7 +109,7 @@ const Handle1X2 = ({
       className={`${oddButtonBaseClass}${selectedClass}${resulted ? ' disabled' : ''}`}
       disabled={resulted}
       type="button"
-      onClick={() => handleClick(product.id, odd.id)}
+      onClick={() => handleClick(product.id, odd.id, selectionKey)}
     >
       {isSelected ? <span className="state-mark" aria-hidden="true" /> : null}
       <span className="product-button__label">{token}</span>

@@ -453,32 +453,16 @@ export const getSelectionKeyFromSlipRow = (row, fallbackBetKind) => {
   });
 };
 
-export const extractSelectionKeysFromBoards = (boards) => {
-  const keys = new Set();
-
-  Object.values(boards ?? {}).forEach((board) => {
-    (board?.rows ?? []).forEach((row) => {
-      if (row?.marketBet) {
-        (row.marketBet.selections ?? []).forEach((selection) => {
-          const customKey = selection?.origin === 'TEMPLATE' ? getCustomMarketSelectionKey({
-            eventId: row.eventId, marketId: selection.marketId, outcomeKey: selection.outcomeKey,
-          }) : null;
-          if (customKey) {
-            keys.add(customKey);
-          }
-        });
-        return;
-      }
-
-      const selectionKey = getSelectionKeyFromSlipRow(row, board?.betKind);
-      if (selectionKey) {
-        keys.add(selectionKey);
-      }
-    });
-  });
-
-  return keys;
+export const selectionKeysForRow = (row, betKind) => {
+  if (!row?.marketBet) return [getSelectionKeyFromSlipRow(row, betKind)].filter(Boolean);
+  return (row.marketBet.selections ?? []).filter(selection => selection?.origin === 'TEMPLATE')
+    .map(selection => getCustomMarketSelectionKey({
+      eventId: row.eventId, marketId: selection.marketId, outcomeKey: selection.outcomeKey,
+    })).filter(Boolean);
 };
+
+export const extractSelectionKeysFromBoards = boards => new Set(Object.values(boards ?? {})
+  .flatMap(board => (board?.rows ?? []).flatMap(row => selectionKeysForRow(row, board.betKind))));
 
 export const getPhaseLabel = (phase) => (
   EVENT_PHASE_LABELS[phase] ?? normalizeText(phase).replace(/_/g, ' ').toLowerCase()
