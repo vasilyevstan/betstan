@@ -762,14 +762,14 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     );
   }
 
-  // Exercise ordinary admission; administrator preview is not permission to bet offline.
-  for (const fixture of fixtures) publishedFixtureIds.add(fixture.eventId);
-  await setAcceptanceVisibility(publicContext.request, [...publishedFixtureIds], 'ONLINE');
-
+  // Navigate before publication so the previous document cannot start and abort fixture catalog reads.
   await page.goto(
     `/?ui=v2&theme=dark&acceptanceEventIds=${acceptanceEventIds}`,
     { waitUntil: 'domcontentloaded' },
   );
+  // Exercise ordinary admission; administrator preview is not permission to bet offline.
+  for (const fixture of fixtures) publishedFixtureIds.add(fixture.eventId);
+  await setAcceptanceVisibility(publicContext.request, [...publishedFixtureIds], 'ONLINE');
   await page.evaluate((eventIds) => {
     const snapshots = [];
     const source = new EventSource(
