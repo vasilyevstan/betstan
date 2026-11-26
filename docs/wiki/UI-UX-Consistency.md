@@ -112,9 +112,10 @@ The shared shell adds durable review rules:
 - **One visual world:** Standard, Compact, and Spacious change density and
   composition only. They share one brand, semantic role system, and state
   grammar across routes and themes, with a blue operational/action accent.
-  The pre-redesign compact header wordmark and route-icon composition remain
-  shared, with visible Backoffice/Telemetry labels and accessible icon-only
-  theme/authentication controls. Below 992 CSS pixels, navigation is collapsed
+  The compact header retains its wordmark, visible release line and route icons.
+  Use title-case Backoffice/Telemetry labels, a short blue current-page underline
+  and a separate focus ring. Theme and authentication icons retain accessible
+  names. Below 992 CSS pixels, navigation is collapsed
   behind its keyboard-operable toggle; verify both sides of that breakpoint.
   All three `ui` URLs remain supported without rendering a Layout label or
   density selector in the DOM.
