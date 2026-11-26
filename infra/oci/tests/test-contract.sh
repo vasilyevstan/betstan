@@ -601,6 +601,14 @@ grep -Fq "new URL(response.url()).pathname === '/api/auth/login'" \
   fail "OCI live acceptance does not bind login to the exact API response"
 grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
   fail "OCI live acceptance does not pass scoped event IDs into the browser context"
+awk '
+  /await page\.goto\(/ { navigating = 1; scoped = 0 }
+  navigating && index($0, "theme=dark&acceptanceEventIds=${acceptanceEventIds}") { scoped = 1 }
+  navigating && /\);$/ { board = scoped; navigating = 0 }
+  /await setAcceptanceVisibility\(publicContext.request, / { if (board) ready = 1; exit }
+  END { exit !ready }
+' "$acceptance_spec" ||
+  fail "OCI live acceptance must navigate to the scoped board before publishing fixtures"
 grep -Fq "await setAcceptanceVisibility(publicContext.request, [...publishedFixtureIds], 'ONLINE')" "$acceptance_spec" &&
   grep -Fq 'test.afterEach(async ({ request }) => {' "$acceptance_spec" &&
   grep -Fq "await setAcceptanceVisibility(request, eventIds, 'OFFLINE')" "$acceptance_spec" &&

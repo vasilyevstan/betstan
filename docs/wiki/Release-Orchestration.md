@@ -1674,9 +1674,11 @@ unchanged.
 
 This separates "the code is deployed" from "the feature is safe to expose."
 
-The synthetic journey first verifies that offline fixtures are hidden, then
-publishes its own fixtures and waits for Event's authoritative catalogue before
-placing bets. Administrator preview does not bypass Risk Centre's offline-event
+The synthetic journey verifies that offline fixtures are hidden, then opens
+the scoped event board before publishing them. This prevents the previous
+page from starting market requests that navigation would cancel. The journey
+waits for Event's authoritative catalogue before placing bets; an unexpected
+failed API request still blocks activation. Administrator preview does not bypass Risk Centre's offline-event
 restriction. Test teardown returns every published fixture to offline and
 verifies propagation, including after a failed placement; failure blocks
 activation. A fixture Event has already resulted stays visible as a public
