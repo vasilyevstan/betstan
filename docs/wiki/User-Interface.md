@@ -64,12 +64,14 @@ Primary routes are:
 | `/forgot-password` | Password reset form; see [[Security]] for its deliberate limits |
 | `/logout` | Session logout |
 
-The header restores the compact, pre-redesign icon composition across all
-density profiles. The theme-appropriate wordmark returns to Events.
+The compact header uses an ink surface in dark mode and a white surface in
+light mode. The theme-appropriate wordmark returns to Events. A short blue
+underline marks the current destination; it is distinct from the keyboard
+focus ring and the selection in the paired theme control.
 The release source revision and UTC source date and time (for example,
 `Release 17861a8 · 17 Nov 2026, 22:14 UTC`) appear directly beneath the
 wordmark; local builds are identified as development builds.
-**Backoffice** and **Telemetry** retain visible labels for anonymous and signed-in
+**Backoffice** and **Telemetry** use title-case labels without outlined buttons for anonymous and signed-in
 visitors; theme and authentication icons retain accessible names and tooltips.
 Signed-out visitors see one **Log in** icon that opens the authentication page;
 **Create account** is a tab on that page, not a separate header icon. The page

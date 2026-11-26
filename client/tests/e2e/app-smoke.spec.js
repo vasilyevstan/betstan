@@ -118,9 +118,10 @@ test('approved blue header and compact Backoffice controls retain representative
         const overlaps = controls.flatMap((a, i) => controls.slice(i + 1).filter((b) => (
           a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
         )));
-        const text = [...navigation.querySelectorAll('.app-nav-link__label:not(.visually-hidden), .user-chip__name, .user-chip__avatar')].filter(visible);
+        const text = [...navigation.querySelectorAll('.brand-release, .app-nav-link__label:not(.visually-hidden), .user-chip__name, .user-chip__avatar')].filter(visible);
         const accent = parse(getComputedStyle(document.documentElement).getPropertyValue('--accent'));
         const current = navigation.querySelector('[aria-current="page"]');
+        const indicator = getComputedStyle(current, '::after');
         const theme = navigation.querySelector('.presentation-option--active');
         const focused = navigation.querySelector(':focus-visible');
         return {
@@ -129,7 +130,10 @@ test('approved blue header and compact Backoffice controls retain representative
           overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
           textContrast: Math.min(...text.map((element) => contrast(parse(getComputedStyle(element).color), background(element)))),
           accentContrast: contrast(accent, background(navigation)),
-          currentContrast: contrast(parse(getComputedStyle(current).borderColor), background(current)),
+          currentUnderline: indicator.content !== 'none' && indicator.borderBottomStyle === 'solid'
+            && parseFloat(indicator.borderBottomWidth) >= 2 && parseFloat(indicator.width) > 0
+            && parseFloat(indicator.width) < box(current).width,
+          currentContrast: contrast(parse(indicator.borderBottomColor), background(current)),
           selectedContrast: contrast(parse(getComputedStyle(theme).color), background(theme)),
           focusContrast: focused ? contrast(parse(getComputedStyle(focused).outlineColor), background(focused.parentElement)) : null,
           focusWidth: focused ? getComputedStyle(focused).outlineWidth : null,
@@ -157,6 +161,7 @@ test('approved blue header and compact Backoffice controls retain representative
       expect(normal.contained).toBe(true);
       expect(normal.overflow).toBeLessThanOrEqual(1);
       expect(normal.controls.every((box) => box.width >= 44 && box.height >= 44)).toBe(true);
+      expect(normal.currentUnderline).toBe(true);
       expect(normal.textContrast).toBeGreaterThanOrEqual(4.5);
       for (const key of ['accentContrast', 'currentContrast', 'selectedContrast', 'focusContrast']) {
         expect(normal[key], key).toBeGreaterThanOrEqual(3);

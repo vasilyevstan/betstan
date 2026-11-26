@@ -401,8 +401,12 @@ body {
 .app-navbar {
   padding-block: 0.375rem;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-soft);
+  background: var(--surface-base);
   box-shadow: none;
+}
+
+.app-navbar.navbar-light {
+  background: var(--surface-soft);
 }
 
 .app-navbar > .container-fluid {
@@ -418,8 +422,13 @@ body {
 .app-navbar .navbar-toggler {
   min-width: var(--control-target);
   min-height: var(--control-target);
-  border-color: var(--border-control);
+  border: 0;
   color: var(--text-main);
+}
+
+.app-navbar .navbar-toggler:hover,
+.app-navbar .navbar-toggler[aria-expanded='true'] {
+  background: var(--surface-elevated);
 }
 
 .app-navbar .navbar-toggler:focus {
@@ -447,7 +456,8 @@ body {
 .brand-release {
   padding-left: 1px;
   color: var(--text-subtle);
-  font-size: 0.65rem;
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
   line-height: 1.2;
   white-space: nowrap;
 }
@@ -464,14 +474,6 @@ body {
 }
 
 .navbar-dark .nav-icon {
-  filter: brightness(0) invert(1);
-}
-
-.navbar-dark .presentation-option--active .nav-icon {
-  filter: none;
-}
-
-.navbar-light .presentation-option--active .nav-icon {
   filter: brightness(0) invert(1);
 }
 
@@ -503,6 +505,8 @@ body {
 .presentation-control__options {
   display: flex;
   min-width: 0;
+  background: var(--surface-elevated);
+  border-radius: var(--radius-control);
 }
 
 .presentation-option {
@@ -513,7 +517,7 @@ body {
   min-width: var(--control-target);
   min-height: var(--control-target);
   padding: 0.45rem;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid transparent;
   border-radius: var(--radius-control);
   color: var(--text-main);
   font-size: var(--font-size-action);
@@ -528,14 +532,14 @@ body {
 }
 
 .presentation-option:hover {
-  background: var(--surface-elevated);
+  background: var(--surface-soft);
   color: var(--text-main);
 }
 
 .presentation-option--active {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-contrast);
+  border-color: var(--border-control);
+  background: var(--surface-soft);
+  color: var(--text-main);
 }
 
 .app-navbar__links {
@@ -555,9 +559,7 @@ body {
   min-width: var(--control-target);
   min-height: var(--control-target);
   padding: 0.45rem 0.7rem;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
-  background: var(--surface-soft);
+  border-radius: var(--radius-control);
   color: var(--text-main);
   font-size: 0.82rem;
   font-weight: 680;
@@ -571,22 +573,29 @@ body {
 }
 
 .app-nav-link__label {
-  font-size: var(--font-size-meta);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 0.875rem;
+  font-weight: 600;
   white-space: nowrap;
 }
 
 .app-nav-link:hover {
-  border-color: var(--border-control);
   background: var(--surface-elevated);
   color: var(--text-main);
 }
 
-.app-nav-link[aria-current='page'] {
-  border-color: var(--accent);
-  box-shadow: inset 3px 0 var(--accent);
+.app-navbar a[aria-current='page'] {
+  position: relative;
+}
+
+.app-navbar a[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  bottom: 2px;
+  width: 1.25rem;
+  margin-inline: auto;
+  border-bottom: 3px solid var(--accent);
+  pointer-events: none;
 }
 
 .navbar-meta:empty {
@@ -2377,16 +2386,13 @@ body {
   min-height: var(--control-target);
   min-width: var(--control-target);
   padding: 0.2rem 0.55rem 0.2rem 0.2rem;
-  border-radius: 999px;
-  border: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: var(--radius-control);
   color: var(--text-main);
   text-decoration: none;
 }
 
-.user-chip:hover,
-.user-chip[aria-current='page'] {
-  border-color: var(--accent);
+.user-chip:hover {
+  background: var(--surface-elevated);
   color: var(--text-main);
 }
 
