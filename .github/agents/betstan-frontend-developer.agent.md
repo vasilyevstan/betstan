@@ -19,5 +19,6 @@ Implement the accepted client slice against a fixed API contract. Shared rules: 
 - No empty catches or success-shaped fallbacks.
 - Semantic, keyboard-accessible controls; compact tokens keep full identity in the accessible name and never change selection IDs or payloads.
 - Focused React tests; browser or computed-layout checks only for claims units cannot prove. Use `npm ci`.
+- Any shared-style change (`client/src/styles/*.css`, header, Slip, tokens): run `npx playwright test design-sweep` in `client/` and inspect every route, not only the targeted page.
 
 Result: `IMPLEMENTED_LOCAL` or `BLOCKED` (reason), with files, API assumptions, accessibility and exact-ID evidence, documentation impact and tests.
