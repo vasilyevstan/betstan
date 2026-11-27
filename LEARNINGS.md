@@ -31,6 +31,7 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Claim complete history only with valid cumulative producer evidence; partial inputs stay partial.
 - Navigation is not access. Activation ends with a real-backend smoke; mocks cannot see a disabled flag.
 - Revalidate persisted roles server-side; isolate synthetic fixtures. Do not add retries to disguise stale authority.
+- Shared-style changes (header, Slip, tokens, `ui.css`) break pages they were not aimed at: a header redesign tested only on `/backoffice` left an underline under the Events wordmark. Run `npx playwright test design-sweep` (all routes, both themes, desktop and phone) before merging any client style change.
 
 ## Release and infrastructure
 
