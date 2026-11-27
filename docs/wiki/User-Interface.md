@@ -66,8 +66,10 @@ Primary routes are:
 
 The compact header uses an ink surface in dark mode and a white surface in
 light mode. The theme-appropriate wordmark returns to Events. A short blue
-underline marks the current destination; it is distinct from the keyboard
-focus ring and the selection in the paired theme control.
+underline marks the current navigation link or profile chip; the wordmark
+carries no underline because it would collide with the release line. The
+underline is distinct from the keyboard focus ring and the selection in the
+paired theme control.
 The release source revision and UTC source date and time (for example,
 `Release 17861a8 · 17 Nov 2026, 22:14 UTC`) appear directly beneath the
 wordmark; local builds are identified as development builds.

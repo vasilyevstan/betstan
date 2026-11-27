@@ -206,6 +206,16 @@ existing browser, accessibility, interaction, or computed-layout check that
 resolves the claim. Supporting measurements need no prior specialist verdict
 or later duplicate test round.
 
+Any change to shared client styles (`client/src/styles/*.css`, the header, the
+Slip, or design tokens) must also pass the cross-route design sweep,
+`client/tests/e2e/design-sweep.spec.js`. It renders Events, Log in, My bets,
+Backoffice and Telemetry (with an hourly day open) in both themes at desktop
+and phone widths, and fails on horizontal overflow, overlapping header
+controls, an active-page underline under the wordmark, a stretched Slip kind
+badge, or hourly Telemetry chips that mix stacked and inline layouts. Review the
+same routes' screenshots holistically; a change verified only on the page it
+targeted is not verified.
+
 A user-facing change does not automatically require a new screenshot baseline,
 image-diff dependency, or full responsive Playwright matrix. Reuse existing
 evidence when it proves the contract.
