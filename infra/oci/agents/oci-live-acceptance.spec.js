@@ -110,6 +110,19 @@ const findBySlipId = (bets, slipId) => (
 
 const handledLiveSelectionFailures = new WeakMap();
 
+const shouldReportApiRequestFailure = (request) => {
+  const pathname = new URL(request.url()).pathname;
+  const expectedStreamDisconnect = (
+    request.method() === 'GET' && pathname === '/api/event/stream'
+  );
+  const expectedAbortedRead = (
+    request.method() === 'GET' && request.failure() === 'net::ERR_ABORTED'
+  );
+  return pathname.startsWith('/api/')
+    && !expectedStreamDisconnect
+    && !expectedAbortedRead;
+};
+
 const createBrowserErrorAudit = async (page) => {
   const sampleLimit = 128;
   const fieldLimit = 96;
@@ -187,6 +200,10 @@ const createBrowserErrorAudit = async (page) => {
   });
   session.on('Log.entryAdded', ({ entry }) => {
     if (!capturing || entry.level !== 'error') return;
+    if (
+      entry.source === 'network'
+      && entry.text === 'Failed to load resource: net::ERR_ABORTED'
+    ) return;
     const resource = /^Failed to load resource: the server responded with a status of (\d{3}) \(.*\)$/
       .exec(entry.text);
     recordBrowserError({
@@ -616,10 +633,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   page.on('pageerror', (error) => pageErrors.push(error.message));
   page.on('requestfailed', (request) => {
     const pathname = new URL(request.url()).pathname;
-    const expectedStreamDisconnect = (
-      request.method() === 'GET' && pathname === '/api/event/stream'
-    );
-    if (pathname.startsWith('/api/') && !expectedStreamDisconnect) {
+    if (shouldReportApiRequestFailure(request)) {
       apiFailures.push(`${request.method()} ${pathname}`);
     }
   });
