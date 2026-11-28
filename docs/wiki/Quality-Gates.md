@@ -242,10 +242,12 @@ for opening, reopening and synchronization, not title/body edits. Master pushes
 retain the full outer validation path; nested heavy suites still select their
 actual inputs. Image publication follows successful required validation.
 
-`production-build` is the sole package-test owner for PRs into `dev` and
-`master`. The read-only `service-tests` workflow gives per-service and shared
-package feedback only for PRs into other bases; it has no status, environment
-or publication authority and is not a required check.
+`production-build` is the sole package-test owner for supported PRs into `dev`
+and `master`. Its affected-package coverage matrix selects the eight backend
+services, Telemetry and Client, including shared-package changes. The separate
+`service-tests` workflow was retired because its distinct coverage applied only
+to unsupported scratch-base PRs and it was skipped for the supported branch
+flow.
 
 Selection and parallelism are not timing acceptance by themselves. Measure the
 complete required check set, including OCI validation, rather than only its

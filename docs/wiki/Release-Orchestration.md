@@ -35,6 +35,9 @@ request from the previous run ID. This keeps the deploy inside the handoff
 lease. The runner adds no authority and stops at the first failure. It runs
 every full-release stage, including GHCR validation, whose workflow stays
 active by policy and is never enabled or disabled.
+The activation browser journey treats only an explicitly reported
+`net::ERR_ABORTED` API GET as an expected navigation cancellation; failed API
+writes and other request failures remain release blockers.
 Usage and exit codes are in the
 [agents README](https://github.com/vasilyevstan/betstan/blob/master/infra/azure/agents/README.md).
 

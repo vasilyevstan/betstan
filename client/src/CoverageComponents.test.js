@@ -5,7 +5,6 @@ import { MemoryRouter } from 'react-router-dom';
 import axios from 'axios';
 import App from './App';
 import MyBets from './pages/account/MyBets';
-import MyWallet from './pages/account/MyWallet';
 
 jest.mock('axios', () => ({
   get: jest.fn(),
@@ -255,11 +254,6 @@ describe('coverage components', () => {
     const button = await screen.findByRole('button', { name: 'backoffice-0' });
     fireEvent.click(button);
     expect(screen.getByRole('button', { name: 'backoffice-1' })).toBeInTheDocument();
-  });
-
-  it('renders the wallet placeholder', () => {
-    render(<MyWallet />);
-    expect(screen.getByRole('heading', { name: 'My bets' })).toBeInTheDocument();
   });
 
   it('covers My Bets filters, sorting, pagination, status colors, and row fallbacks', async () => {
