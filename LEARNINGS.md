@@ -7,7 +7,7 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Report source, deploy, activation and health separately; a merged fix or green build is not restored production.
 - Wait with bounded `wait-required-checks-stan.sh`, never `gh pr checks --watch`: the `trusted-quality-transition/*` ledger stays pending by design.
 - Re-read eventually consistent inventories (`total_count` vs rows) a bounded number of times before failing closed; never burn a one-use run on a transient read.
-- Every PR-routed suite must be suite-gate classified, or all heavy master suites run. `cancel-in-progress: false` keeps one pending run; the policy publisher uses `queue: max`.
+- Route PR suites via `suite-gate`; keep `cancel-in-progress: false` and policy `queue: max`.
 - Fix a flaky test on first failure: a red `master` build leaves its SHA without OCI images.
 
 ## Contracts, messaging and data
@@ -31,7 +31,7 @@ Working guide, not policy: [CONTRIBUTING.md](CONTRIBUTING.md) owns rules, [agent
 - Claim complete history only with valid cumulative producer evidence; partial inputs stay partial.
 - Navigation is not access. Activation ends with a real-backend smoke; mocks cannot see a disabled flag.
 - Revalidate persisted roles server-side; isolate synthetic fixtures. Do not add retries to disguise stale authority.
-- Shared-style changes (header, Slip, tokens, `ui.css`) break pages they were not aimed at: a header redesign tested only on `/backoffice` left an underline under the Events wordmark. Run `npx playwright test design-sweep` (all routes, both themes, desktop and phone) before merging any client style change.
+- Shared CSS changes require the [cross-route design sweep](docs/wiki/UI-UX-Consistency.md).
 
 ## Release and infrastructure
 
