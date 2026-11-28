@@ -14,7 +14,7 @@ const end = source.indexOf('const readOwnedBet =', start);
 assert.ok(start >= 0 && end > start);
 const load = (expect) => vm.runInNewContext(
   `${source.slice(start, end)}
-({ createBrowserErrorAudit, handledLiveSelectionFailures, selectLiveMarket });`,
+({ createBrowserErrorAudit, handledLiveSelectionFailures, selectLiveMarket, shouldReportApiRequestFailure });`,
   { URL, createHash, expect },
 );
 const origin = 'https://fixture.invalid';
@@ -108,6 +108,29 @@ async function check(configure, consoleCount, httpCount, overflow = false) {
 }
 
 async function unitCases() {
+  const apiRequestFailure = (pathname, method, failure) => ({
+    url: () => `${origin}${pathname}`,
+    method: () => method,
+    failure: () => failure,
+  });
+  const failureCases = [
+    ['/api/event/catalog', 'GET', 'net::ERR_ABORTED', false],
+    ['/api/event/catalog', 'POST', 'net::ERR_ABORTED', true],
+    ['/api/event/catalog', 'GET', 'net::ERR_CONNECTION_RESET', true],
+    ['/api/event/stream', 'GET', 'net::ERR_ABORTED', false],
+    ['/static/app.js', 'GET', 'net::ERR_ABORTED', false],
+  ];
+  for (const [pathname, method, failure, expected] of failureCases) {
+    assert.equal(
+      load().shouldReportApiRequestFailure(
+        apiRequestFailure(pathname, method, failure),
+      ),
+      expected,
+      `${method} ${pathname} ${failure}`,
+    );
+    cases += 1;
+  }
+
   await check(() => {}, 0, 0);
   await check(({ response }) => response(), 0, 0);
   await check(({ response }) => response({ logFirst: true }), 0, 0);
@@ -144,6 +167,13 @@ async function unitCases() {
       url: `${origin}/api/bet/${'a'.repeat(24)}?private-marker`,
     },
   }), 1, 0);
+  await check(({ session }) => session.emit('Log.entryAdded', {
+    entry: {
+      level: 'error', source: 'network',
+      text: 'Failed to load resource: net::ERR_ABORTED',
+      url: `${origin}/api/event/catalog`,
+    },
+  }), 0, 0);
   await check(({ session }) => {
     session.emit('Runtime.consoleAPICalled', { type: 'warning' });
     session.emit('Log.entryAdded', { entry: { level: 'warning' } });
